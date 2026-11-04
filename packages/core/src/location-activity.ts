@@ -10,6 +10,7 @@ import { LocationServiceMap } from "./location-service-map.js"
 import { SessionEvent } from "./session/event.js"
 import { SessionExecution } from "./session/execution.js"
 import { SessionStore } from "./session/store.js"
+import { ShellRunner } from "./shell/runner.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 
 const isSessionEvent = Schema.is(SessionEvent.Durable)
@@ -26,6 +27,7 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
       const execution = yield* SessionExecution.Service
       const jobs = yield* Job.Service
       const sessions = yield* SessionStore.Service
+      const shells = yield* ShellRunner.Service
       const timeToLive = Duration.fromInputUnsafe(options.timeToLive ?? "60 minutes")
       const entries = new Map<string, { readonly ref: Location.Ref; touchedAt: number }>()
       const key = (ref: Location.Ref) => `${LocationServiceMap.canonical(ref).directory}\0${ref.workspaceID ?? ""}`
@@ -80,11 +82,13 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
             recovery.kind === "subagent" ? [recovery.childSessionID, recovery.parentSessionID] : [recovery.sessionID],
           ),
         ]
-        const occupied = new Set(
-          (yield* Effect.forEach(owners, (sessionID) => sessions.get(sessionID))).flatMap((session) =>
+        const occupied = new Set([
+          ...(yield* Effect.forEach(owners, (sessionID) => sessions.get(sessionID))).flatMap((session) =>
             session ? [key(session.location)] : [],
           ),
-        )
+          // A shell command running in the tool runner, a user's `!` command included.
+          ...(yield* shells.running).map(key),
+        ])
         yield* Effect.forEach(
           expired,
           (entry) => {
@@ -107,5 +111,5 @@ export function layer(options: { readonly timeToLive?: Duration.Input; readonly 
 export const node = makeGlobalNode({
   service: Service,
   layer: layer(),
-  deps: [Bus.node, Job.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node],
+  deps: [Bus.node, Job.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node, ShellRunner.node],
 })

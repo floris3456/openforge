@@ -237,6 +237,7 @@ const layer = () =>
                 status: state.reason ?? "exited",
                 ...(status.code !== undefined ? { code: status.code } : {}),
                 ...(status.signal !== undefined ? { signal: status.signal } : {}),
+                pid: started.pid,
                 started: info.time.started,
                 ended: Date.now(),
                 size: writer.size,

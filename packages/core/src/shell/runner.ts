@@ -263,6 +263,7 @@ const layer = (options: Options) =>
           id: entry.info.id,
           status: "failed",
           error: STOPPED,
+          pid: entry.info.pid ?? 0,
           started: entry.info.time.started,
           ended: now,
           size: printed.size,
@@ -399,7 +400,7 @@ const layer = (options: Options) =>
           if (!exit) continue
           const decoded = decodeMeta(exit.meta)
           if (decoded._tag === "None") return undefined
-          return yield* register({ info: describe(id, decoded.value), location: decoded.value.location, exit })
+          return yield* register({ info: describe(id, decoded.value, exit.pid), location: decoded.value.location, exit })
         }
         return undefined
       })

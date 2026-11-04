@@ -251,6 +251,56 @@ test("a screen told the switch finished restarts only once its waiting writes we
   expect(relaunches).toEqual([fake.sessionID])
 }, 15_000)
 
+test("a screen told the switch finished does not restart while a write is still on its way", async () => {
+  takeDraft(undefined)
+  const fake = chat()
+  // The new release has just started: it takes the composer's model selection, then answers the command slowly.
+  let answer: (() => void) | undefined
+  const fetch = async (url: URL, request: Request) => {
+    if (fake.state.up && request.method === "POST" && url.pathname === `/api/session/${fake.sessionID}/command`)
+      await new Promise<void>((resolve) => (answer = resolve))
+    return fake.fetch(url, request)
+  }
+  const listeners = new Set<(state: UpdateState) => void>()
+  const relaunches: Array<string | undefined> = []
+  await using setup = await createAppFixture({
+    fetch,
+    args: { sessionID: fake.sessionID },
+    updater: {
+      remote: false,
+      subscribe: (notify) => {
+        listeners.add(notify)
+        return () => listeners.delete(notify)
+      },
+      upgrade: async () => ({ type: "current", version: "0.1.1" }),
+      relaunch: (sessionID) => void relaunches.push(sessionID),
+    },
+  })
+  await setup.ready
+  await shows(setup, (frame) => frame.includes("Demo Model"))
+  await setup.mockInput.typeText("/review the diff")
+  await shows(setup, (frame) => frame.includes("/review the diff"))
+  setup.mockInput.pressEnter()
+  // The selection goes first and waits to be resent; the command is sent once the selection is taken.
+  await until(() => fake.state.refused.some((path) => path.endsWith("/model")))
+  listeners.forEach((notify) => notify({ type: "switched", version: "0.1.1" }))
+  fake.state.up = true
+  setup.events.emit(resumed)
+  await until(() => answer !== undefined)
+  expect(fake.taken("/model")).toHaveLength(1)
+  // Restarting now would cut the command off on its way; nothing would bring it back.
+  try {
+    await Bun.sleep(800)
+    expect(relaunches).toEqual([])
+  } finally {
+    // Also when the check fails, so the fixture's server can stop.
+    answer!()
+  }
+  await until(() => relaunches.length > 0)
+  expect(fake.taken("/command")).toHaveLength(1)
+  expect(relaunches).toEqual([fake.sessionID])
+}, 15_000)
+
 test("the switch notice leaves the first lines of a chat visible", async () => {
   const fake = chat({ transcript: true })
   fake.state.up = true

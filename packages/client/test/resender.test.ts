@@ -93,6 +93,40 @@ test("a write the paused new release refuses is resent until it takes it, at onc
   ])
 })
 
+test("a write is unanswered from its first attempt until the service answers it, also while it waits", async () => {
+  const fake = await service()
+  const resender = createResender()
+  // The service holds its answer to the command until the test lets it go.
+  let answer: (() => void) | undefined
+  const held = (input: string | URL | Request, init?: RequestInit) =>
+    new URL(String(input)).pathname.endsWith("/command")
+      ? new Promise<void>((resolve) => (answer = resolve)).then(() => globalThis.fetch(input, init))
+      : globalThis.fetch(input, init)
+  const api = OpenCode.make({ baseUrl: fake.url, fetch: resender.fetch(held as typeof globalThis.fetch) })
+  const counts: number[] = []
+  resender.watchUnanswered((unanswered) => counts.push(unanswered))
+  const command = api.session.command({ sessionID: "ses_a", id: "msg_command", name: "review" })
+  await until(() => answer !== undefined)
+  // On its way, not waiting to be resent; a read is neither.
+  expect(resender.unanswered()).toBe(1)
+  expect(resender.pending()).toBe(0)
+  await resender.fetch(globalThis.fetch)(new URL("/api/session/ses_a", fake.url))
+  expect(resender.unanswered()).toBe(1)
+  answer!()
+  await command
+  expect(resender.unanswered()).toBe(0)
+
+  await fake.set("paused")
+  const agent = api.session.switchAgent({ sessionID: "ses_a", agent: "plan" })
+  await until(() => resender.pending() === 1)
+  expect(resender.unanswered()).toBe(1)
+  await fake.set("running")
+  resender.wake()
+  await agent
+  expect(resender.unanswered()).toBe(0)
+  expect(counts).toEqual([1, 0, 1, 0])
+})
+
 test("every kind of write is resent while the service cannot be reached", async () => {
   const fake = await service()
   const { resender, api } = client(fake.url)

@@ -36,8 +36,8 @@ export const {
     let headers = props.headers
     let persistentPty = url ? createPersistentPtyClient(api, { url }) : undefined
     const media = createMediaCache(() => api)
-    const [resending, setResending] = createSignal(resender?.pending() ?? 0)
-    if (resender) onCleanup(resender.subscribe(setResending))
+    const [unanswered, setUnanswered] = createSignal(resender?.unanswered() ?? 0)
+    if (resender) onCleanup(resender.watchUnanswered(setUnanswered))
 
     const connection = createClientConnection(api, {
       reconnect: service
@@ -84,8 +84,8 @@ export const {
       connection,
       media,
       restart: service?.restart,
-      /** Writes waiting to be resent, for example while openforge switches releases. */
-      resending,
+      /** Writes the service has not answered yet: on their way, or waiting to be resent while openforge switches. */
+      unanswered,
     }
   },
 })

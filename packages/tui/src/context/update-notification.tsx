@@ -98,11 +98,12 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     }
 
     // Restart only while no other dialog is open, as it would be lost; the upgrade dialog is not. Half-typed prompts
-    // are carried over to the new release (see default.ts in the CLI); a write still waiting to be resent is not, so
-    // the restart waits until the new release has taken it (or it was given up after 2 minutes).
+    // are carried over to the new release (see default.ts in the CLI); a write the service has not answered yet is
+    // not, whether it is still on its way or waiting to be resent, so the restart waits until the service has
+    // answered it (or it was given up after 2 minutes).
     const settled = () =>
       (dialog.stack.length === 0 || dialog.key === updateDialog) &&
-      client.resending() === 0 &&
+      client.unanswered() === 0 &&
       data.session.resending() === 0
 
     const restart = () => {

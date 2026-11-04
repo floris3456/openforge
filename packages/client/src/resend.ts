@@ -113,16 +113,24 @@ export type Resender = ReturnType<typeof createResender>
 /**
  * Resends every write sent through the `fetch` it wraps, as described above, so a client needs no resend of its own
  * per call. `wake` makes waiting writes try again at once: call it when the event stream reaches a service again and
- * when the service resumes. `pending` counts the writes waiting to be resent.
+ * when the service resumes. `pending` counts the writes waiting to be resent; `unanswered` counts every write the
+ * service has not answered yet, from its first attempt on, so a client that is about to go away (a TUI restarting on
+ * a new release) can wait for a write that is still on its way.
  */
 export function createResender(options: { readonly limit?: number } = {}) {
   const wakers = new Set<() => void>()
   const listeners = new Set<(pending: number) => void>()
+  const watchers = new Set<(unanswered: number) => void>()
   const closed = new AbortController()
   let pending = 0
+  let unanswered = 0
   const count = (change: number) => {
     pending += change
     listeners.forEach((listener) => listener(pending))
+  }
+  const track = (change: number) => {
+    unanswered += change
+    watchers.forEach((watcher) => watcher(unanswered))
   }
 
   function wait(milliseconds: number, signal: AbortSignal | null | undefined) {
@@ -145,6 +153,7 @@ export function createResender(options: { readonly limit?: number } = {}) {
     const path = new URL(input).pathname
     const deadline = Date.now() + (options.limit ?? limit)
     let counted = false
+    track(1)
     try {
       while (true) {
         const attempt = await fetch(input, init).then<Attempt, Attempt>(
@@ -178,6 +187,7 @@ export function createResender(options: { readonly limit?: number } = {}) {
       }
     } finally {
       if (counted) count(-1)
+      track(-1)
     }
   }
 
@@ -204,6 +214,14 @@ export function createResender(options: { readonly limit?: number } = {}) {
       listeners.add(listener)
       return () => {
         listeners.delete(listener)
+      }
+    },
+    unanswered: () => unanswered,
+    /** Calls `watcher` with `unanswered()` whenever it changes. */
+    watchUnanswered(watcher: (unanswered: number) => void) {
+      watchers.add(watcher)
+      return () => {
+        watchers.delete(watcher)
       }
     },
     /** Gives up every write still waiting, as the client closes. */

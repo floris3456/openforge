@@ -343,6 +343,8 @@ export type ArtifactID = string
 
 export type ArtifactTime = { created: number; updated: number }
 
+export type ContinuityState = "running" | "pausing" | "paused"
+
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
 export type VcsBranch = { current?: string; default?: string }
@@ -406,6 +408,8 @@ export type ConfigModelVariantSettings = { compaction?: ProviderCompaction; enco
 export type PermissionRule = { action: string; resource: string; effect: PermissionEffect }
 
 export type PluginInfo = { id?: PluginID; source: PluginSource; features: PluginFeatures; state: PluginState }
+
+export type ContinuityWork = { sessionID?: SessionID; kind: "step" | "tool" | "model"; name: string }
 
 export type SessionForkBoundary =
   | { type: "before"; messageID: SessionMessageID }
@@ -1045,6 +1049,19 @@ export type ModelVariant = {
 }
 
 export type PermissionRuleset = Array<PermissionRule>
+
+export type ContinuityStatus = {
+  state: ContinuityState
+  startedPaused: boolean
+  deadline?: number
+  waiting: Array<ContinuityWork>
+  rested: Array<SessionID>
+  active: Array<SessionID>
+}
+
+export type ContinuityPauseResult =
+  | { paused: true; rested: Array<SessionID> }
+  | { paused: false; waiting: Array<ContinuityWork> }
 
 export type UsageLimitsBudget = {
   id: string
@@ -2034,6 +2051,42 @@ export type InstallationUpdateAvailable = {
   data: { version: string }
 }
 
+export type ServicePausing = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "service.pausing"
+  location?: LocationRef
+  data: { deadline: number; waiting: Array<ContinuityWork> }
+}
+
+export type ServicePaused = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "service.paused"
+  location?: LocationRef
+  data: { rested: Array<SessionID> }
+}
+
+export type ServicePauseExpired = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "service.pause.expired"
+  location?: LocationRef
+  data: { waiting: Array<ContinuityWork> }
+}
+
+export type ServiceResumed = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "service.resumed"
+  location?: LocationRef
+  data: {}
+}
+
 export type VcsBranchUpdated = {
   id: EventID
   created: number
@@ -2886,6 +2939,10 @@ export type V2Event =
   | TuiSessionSelect
   | InstallationUpdated
   | InstallationUpdateAvailable
+  | ServicePausing
+  | ServicePaused
+  | ServicePauseExpired
+  | ServiceResumed
   | VcsBranchUpdated
   | McpStatusChanged
   | McpResourcesChanged
@@ -4376,6 +4433,10 @@ export type EventSubscribeInput = {
         | "tui.session.select"
         | "installation.updated"
         | "installation.update-available"
+        | "service.pausing"
+        | "service.paused"
+        | "service.pause.expired"
+        | "service.resumed"
         | "vcs.branch.updated"
         | "mcp.status.changed"
         | "mcp.resources.changed"
@@ -4642,6 +4703,14 @@ export type ExperimentalArtifactsViewInput = {
 }
 
 export type ExperimentalArtifactsViewOutput = globalThis.Uint8Array
+
+export type ExperimentalServiceStatusOutput = { data: ContinuityStatus }["data"]
+
+export type ExperimentalServicePauseInput = { readonly timeout?: number | undefined }
+
+export type ExperimentalServicePauseOutput = { data: ContinuityPauseResult }["data"]
+
+export type ExperimentalServiceResumeOutput = { data: ContinuityStatus }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

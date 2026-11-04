@@ -269,6 +269,10 @@ import type {
   ExperimentalArtifactsDeleteOutput,
   ExperimentalArtifactsViewInput,
   ExperimentalArtifactsViewOutput,
+  ExperimentalServiceStatusOutput,
+  ExperimentalServicePauseInput,
+  ExperimentalServicePauseOutput,
+  ExperimentalServiceResumeOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1680,6 +1684,42 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ),
+      },
+      service: {
+        status: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalServiceStatusOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/service/status`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        pause: (input?: ExperimentalServicePauseInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalServicePauseOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/service/pause`,
+              body: { timeout: input?.["timeout"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        resume: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalServiceResumeOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/service/resume`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
       },
       migration: {
         v1: {

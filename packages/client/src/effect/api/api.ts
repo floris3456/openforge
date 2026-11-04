@@ -2140,6 +2140,10 @@ export type EventSubscribeInput = {
         | "tui.session.select"
         | "installation.updated"
         | "installation.update-available"
+        | "service.pausing"
+        | "service.paused"
+        | "service.pause.expired"
+        | "service.resumed"
         | "vcs.branch.updated"
         | "mcp.status.changed"
         | "mcp.resources.changed"
@@ -2492,6 +2496,49 @@ export type ExperimentalArtifactsDeleteOperation<E = never> = (
   input: ExperimentalArtifactsDeleteInput,
 ) => Effect.Effect<ExperimentalArtifactsDeleteOutput, E>
 
+export type ExperimentalServiceStatusOutput = {
+  readonly state: "running" | "pausing" | "paused"
+  readonly startedPaused: boolean
+  readonly deadline?: number | undefined
+  readonly waiting: ReadonlyArray<{
+    readonly sessionID?: Session.ID | undefined
+    readonly kind: "step" | "tool" | "model"
+    readonly name: string
+  }>
+  readonly rested: ReadonlyArray<Session.ID>
+  readonly active: ReadonlyArray<Session.ID>
+}
+export type ExperimentalServiceStatusOperation<E = never> = () => Effect.Effect<ExperimentalServiceStatusOutput, E>
+
+export type ExperimentalServicePauseInput = { readonly timeout?: number | undefined }
+export type ExperimentalServicePauseOutput =
+  | { readonly paused: true; readonly rested: ReadonlyArray<Session.ID> }
+  | {
+      readonly paused: false
+      readonly waiting: ReadonlyArray<{
+        readonly sessionID?: Session.ID | undefined
+        readonly kind: "step" | "tool" | "model"
+        readonly name: string
+      }>
+    }
+export type ExperimentalServicePauseOperation<E = never> = (
+  input?: ExperimentalServicePauseInput,
+) => Effect.Effect<ExperimentalServicePauseOutput, E>
+
+export type ExperimentalServiceResumeOutput = {
+  readonly state: "running" | "pausing" | "paused"
+  readonly startedPaused: boolean
+  readonly deadline?: number | undefined
+  readonly waiting: ReadonlyArray<{
+    readonly sessionID?: Session.ID | undefined
+    readonly kind: "step" | "tool" | "model"
+    readonly name: string
+  }>
+  readonly rested: ReadonlyArray<Session.ID>
+  readonly active: ReadonlyArray<Session.ID>
+}
+export type ExperimentalServiceResumeOperation<E = never> = () => Effect.Effect<ExperimentalServiceResumeOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2520,6 +2567,11 @@ export interface ExperimentalApi<E = never> {
     readonly get: ExperimentalArtifactsGetOperation<E>
     readonly update: ExperimentalArtifactsUpdateOperation<E>
     readonly delete: ExperimentalArtifactsDeleteOperation<E>
+  }
+  readonly service: {
+    readonly status: ExperimentalServiceStatusOperation<E>
+    readonly pause: ExperimentalServicePauseOperation<E>
+    readonly resume: ExperimentalServiceResumeOperation<E>
   }
 }
 

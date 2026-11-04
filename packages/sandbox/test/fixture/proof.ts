@@ -31,7 +31,9 @@ async function run(root: string, self: string[]) {
   fs.mkdirSync(root, { recursive: true })
   const fixture = await setup(fs.realpathSync(root))
   console.log(`platform ${process.platform} ${process.arch}, available ${JSON.stringify(Sandbox.available())}`)
-  console.log(`sandbox-exec: ${process.platform === "darwin" ? "/usr/bin/sandbox-exec -p <profile>" : launch(self).self.join(" ")}`)
+  console.log(
+    `sandbox-exec: ${process.platform === "darwin" ? "/usr/bin/sandbox-exec -p <profile>" : launch(self).self.join(" ")}`,
+  )
   const policy = Sandbox.resolve({ deny_read: ["~/secret/key"] }, fixture.context)
   const wrapped = Sandbox.wrap(policy, ["/bin/sh", "-c", "make"], launch(self).self)
   console.log(`the chat folder's policy, with deny_read ["~/secret/key"]:\n${JSON.stringify(policy, null, 2)}`)

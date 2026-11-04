@@ -49,7 +49,9 @@ export interface Policy {
   readonly home: string
 }
 
-export type Availability = { readonly ok: true; readonly landlock?: number } | { readonly ok: false; readonly reason: string }
+export type Availability =
+  | { readonly ok: true; readonly landlock?: number }
+  | { readonly ok: false; readonly reason: string }
 
 export type Wrapped =
   | {
@@ -136,7 +138,8 @@ export function wrap(
   if (policy.mode === "off") return { type: "run", argv: [...argv], sandboxed: false }
   if (!machine.ok) {
     const reason = `This machine can't sandbox commands: ${machine.reason}.`
-    if (policy.required) return { type: "refuse", reason: `${reason} The command was not run, as sandbox.required is set.` }
+    if (policy.required)
+      return { type: "refuse", reason: `${reason} The command was not run, as sandbox.required is set.` }
     const first = !warned
     warned = true
     return {
@@ -219,7 +222,9 @@ function caches(platform: NodeJS.Platform, home: string, env: Context["env"] & {
       ? [
           ...macCaches.map((item) => path.join(home, item)),
           // The per-user cache folder next to the per-user temp folder (/private/var/folders/xx/yyyy/T).
-          ...temp.flatMap((item) => (/^\/private\/var\/folders\/[^/]+\/[^/]+\/T$/.test(item) ? [path.join(item, "../C")] : [])),
+          ...temp.flatMap((item) =>
+            /^\/private\/var\/folders\/[^/]+\/[^/]+\/T$/.test(item) ? [path.join(item, "../C")] : [],
+          ),
         ]
       : []
   return [...homeCaches.map((item) => path.join(home, item)), ...darwin, ...named]
@@ -307,7 +312,9 @@ function shorten(file: string, home: string) {
 }
 
 function matching(directory: string, pattern: RegExp) {
-  return (attempt(() => fs.readdirSync(directory)) ?? []).filter((name) => pattern.test(name)).map((name) => path.join(directory, name))
+  return (attempt(() => fs.readdirSync(directory)) ?? [])
+    .filter((name) => pattern.test(name))
+    .map((name) => path.join(directory, name))
 }
 
 function folders(directory: string) {

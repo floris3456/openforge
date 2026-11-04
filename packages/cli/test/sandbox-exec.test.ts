@@ -16,7 +16,9 @@ describe("sandbox-exec", () => {
       "packages/cli/src/sandbox-exec.ts",
     ])
     // The compiled binary's entry runs it before it imports the CLI.
-    expect(await Bun.file(path.join(cli, "src/main.ts")).text()).toMatch(/^(\/\/.*\n)*import "\.\/sandbox-exec"\n\nawait import\("\.\/index"\)\n$/)
+    expect(await Bun.file(path.join(cli, "src/main.ts")).text()).toMatch(
+      /^(\/\/.*\n)*import "\.\/sandbox-exec"\n\nawait import\("\.\/index"\)\n$/,
+    )
   })
 
   // Confining needs Landlock; the sandbox package's tests cover the rules themselves.

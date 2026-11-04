@@ -85,7 +85,13 @@ async function git(env: Record<string, string>, cwd: string, ...args: string[]) 
 }
 
 export async function spawn(argv: readonly string[], options: { cwd: string; env: Record<string, string> }) {
-  const child = Bun.spawn([...argv], { cwd: options.cwd, env: options.env, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const child = Bun.spawn([...argv], {
+    cwd: options.cwd,
+    env: options.env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
   const [code, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -95,7 +101,13 @@ export async function spawn(argv: readonly string[], options: { cwd: string; env
 }
 
 /** Runs each check (a shell command) in one sandboxed shell; each comes back "ok" or "refused". */
-export async function probe(policy: Sandbox.Policy, fixture: Fixture, launch: Launch, checks: Record<string, string>, cwd = fixture.project) {
+export async function probe(
+  policy: Sandbox.Policy,
+  fixture: Fixture,
+  launch: Launch,
+  checks: Record<string, string>,
+  cwd = fixture.project,
+) {
   const script = Object.entries(checks)
     .map(([name, command]) => `( ${command} ) >/dev/null 2>&1 && echo "${name}=ok" || echo "${name}=refused"`)
     .join("\n")
@@ -157,7 +169,9 @@ export const scenarios: Scenario[] = [
         ...["made", "other/made", "other/dir", "other/out"]
           .filter((item) => fs.existsSync(path.join(home, item)))
           .map((item) => `~/${item} was written`),
-        ...(fs.readFileSync(path.join(fixture.other, "existing"), "utf8") === "x\n" ? [] : ["~/other/existing changed"]),
+        ...(fs.readFileSync(path.join(fixture.other, "existing"), "utf8") === "x\n"
+          ? []
+          : ["~/other/existing changed"]),
       ]
     },
   },
@@ -341,7 +355,9 @@ export const scenarios: Scenario[] = [
           ? []
           : [`ignored signals passed on: ${result.stdout}`]),
         // Apple's sandbox-exec exits 71 for a program it can't find; ours exits 127, as a shell does.
-        ...(missing.code === (process.platform === "darwin" ? 71 : 127) ? [] : [`a missing command exited ${missing.code}`]),
+        ...(missing.code === (process.platform === "darwin" ? 71 : 127)
+          ? []
+          : [`a missing command exited ${missing.code}`]),
       ]
     },
   },
@@ -353,13 +369,18 @@ export const scenarios: Scenario[] = [
       const marker = path.join(fixture.home, "unconfined")
       const wrapped = Sandbox.wrap(policy, ["/bin/sh", "-c", `echo x > ${q(marker)}`], launch.self, { ok: true })
       if (wrapped.type !== "run") return [wrapped.reason]
-      const result = await spawn([...launch.tool, "no-landlock", ...wrapped.argv], { cwd: fixture.project, env: fixture.env })
+      const result = await spawn([...launch.tool, "no-landlock", ...wrapped.argv], {
+        cwd: fixture.project,
+        env: fixture.env,
+      })
       const detected = await spawn([...launch.tool, "no-landlock", ...launch.tool, "detect"], {
         cwd: fixture.project,
         env: fixture.env,
       })
       return [
-        ...(result.code === 125 && result.stderr.includes("no Landlock") ? [] : [`exit ${result.code}: ${result.stderr}`]),
+        ...(result.code === 125 && result.stderr.includes("no Landlock")
+          ? []
+          : [`exit ${result.code}: ${result.stderr}`]),
         ...(fs.existsSync(marker) ? ["the command ran unconfined"] : []),
         ...(detected.stdout.includes('"ok":false') && detected.stdout.includes("no Landlock")
           ? []

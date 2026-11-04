@@ -455,7 +455,9 @@ permissions:
             }),
             new Document({
               type: "document",
-              info: decode({ agents: { reviewer: { sandbox: { network: false, write: ["~/b"], deny_read: ["~/c"] } } } }),
+              info: decode({
+                agents: { reviewer: { sandbox: { network: false, write: ["~/b"], deny_read: ["~/c"] } } },
+              }),
             }),
             directoryEntry(tmp.path),
           ]

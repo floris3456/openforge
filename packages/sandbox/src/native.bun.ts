@@ -60,7 +60,9 @@ const address = (view: NodeJS.TypedArray) => BigInt(ptr(view))
 
 /** The Landlock ABI version, or 0 when the kernel has no usable Landlock. */
 export function landlock() {
-  const abi = attempt(() => Number(libc().syscall(SYS_landlock_create_ruleset, 0n, 0n, LANDLOCK_CREATE_RULESET_VERSION, 0n)))
+  const abi = attempt(() =>
+    Number(libc().syscall(SYS_landlock_create_ruleset, 0n, 0n, LANDLOCK_CREATE_RULESET_VERSION, 0n)),
+  )
   return abi !== undefined && abi > 0 ? abi : 0
 }
 
@@ -97,7 +99,9 @@ export function addPathRule(ruleset: number, file: string, access: bigint) {
   const view = new DataView(attr.buffer)
   view.setBigUint64(0, access, true)
   view.setInt32(8, fd, true)
-  const result = Number(c.syscall(SYS_landlock_add_rule, BigInt(ruleset), LANDLOCK_RULE_PATH_BENEATH, address(attr), 0n))
+  const result = Number(
+    c.syscall(SYS_landlock_add_rule, BigInt(ruleset), LANDLOCK_RULE_PATH_BENEATH, address(attr), 0n),
+  )
   const error = result < 0 ? failure(`landlock_add_rule ${file}`) : undefined
   c.close(fd)
   if (error) throw error

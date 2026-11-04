@@ -32,7 +32,13 @@ const architectures = {
   },
 } as const
 
-type Line = { readonly code: number; readonly k: number; readonly jt?: string; readonly jf?: string; readonly label?: string }
+type Line = {
+  readonly code: number
+  readonly k: number
+  readonly jt?: string
+  readonly jf?: string
+  readonly label?: string
+}
 
 /** The filter for `arch` (this machine's by default), 8 bytes per instruction. */
 export function network(arch: string = process.arch) {

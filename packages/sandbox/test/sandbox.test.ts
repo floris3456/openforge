@@ -198,7 +198,11 @@ describe("wrap", () => {
       argv: [
         "/usr/bin/sandbox-exec",
         "-p",
-        Seatbelt.profile({ write: ["/work/chat", "/tmp", "/dev"], deny: ["/home/u/.local/share/openforge/opencode.db"], network: true }),
+        Seatbelt.profile({
+          write: ["/work/chat", "/tmp", "/dev"],
+          deny: ["/home/u/.local/share/openforge/opencode.db"],
+          network: true,
+        }),
         "/bin/zsh",
         "-c",
         "make",
@@ -282,7 +286,8 @@ describe("Landlock", () => {
     const access = (file: string) => rules.filter((rule) => rule.path === file).map((rule) => rule.access)
     const read = Landlock.Access.execute | Landlock.Access.readFile | Landlock.Access.readDir
     // The way from / to the denied file may only be listed.
-    for (const ancestor of ["/", ...parents(path.join(base, "secret"))]) expect(access(ancestor)).toEqual([Landlock.Access.readDir])
+    for (const ancestor of ["/", ...parents(path.join(base, "secret"))])
+      expect(access(ancestor)).toEqual([Landlock.Access.readDir])
     expect(access(key)).toEqual([])
     expect(access(path.join(base, "secret/link"))).toEqual([])
     expect(access(sibling)).toEqual([Landlock.Access.execute | Landlock.Access.readFile])
@@ -352,7 +357,9 @@ describe("Seccomp", () => {
 
 describe("Seatbelt", () => {
   test("allows by default and denies writes outside the write list and reads of the deny list", () => {
-    expect(Seatbelt.profile({ write: ["/work/chat", "/private/tmp", "/dev"], deny: ["/Users/u/secret"], network: true })).toBe(
+    expect(
+      Seatbelt.profile({ write: ["/work/chat", "/private/tmp", "/dev"], deny: ["/Users/u/secret"], network: true }),
+    ).toBe(
       [
         "(version 1)",
         "(allow default)",
@@ -371,9 +378,7 @@ describe("Seatbelt", () => {
   })
 
   test("quotes paths, and denies every write when nothing is writable", () => {
-    expect(Seatbelt.profile({ write: ['/a "b"\\c'], deny: [], network: true })).toContain(
-      '(subpath "/a \\"b\\"\\\\c")',
-    )
+    expect(Seatbelt.profile({ write: ['/a "b"\\c'], deny: [], network: true })).toContain('(subpath "/a \\"b\\"\\\\c")')
     expect(Seatbelt.profile({ write: [], deny: [], network: true }).split("\n")).toContain("(deny file-write*)")
   })
 })

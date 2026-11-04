@@ -19,7 +19,8 @@ export const Info = Schema.Struct({
       "More paths sandboxed commands may write to in write mode; ~ is the home folder, relative paths start at the chat's folder",
   }),
   deny_read: Schema.String.pipe(Schema.Array, optional).annotate({
-    description: "More paths sandboxed commands may not read; ~ is the home folder, relative paths start at the chat's folder",
+    description:
+      "More paths sandboxed commands may not read; ~ is the home folder, relative paths start at the chat's folder",
   }),
   required: Schema.Boolean.pipe(optional).annotate({
     description: "Refuse commands when this machine cannot sandbox them, instead of running them unsandboxed",

@@ -184,6 +184,8 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
         return undefined
       },
       open: props.updater ? open : undefined,
+      /** The upgrade dialog is on top; it shows every step of the switch itself. */
+      dialogOpen: () => dialog.key === updateDialog,
       restart,
     }
   },

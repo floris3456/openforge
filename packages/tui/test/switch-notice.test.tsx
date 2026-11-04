@@ -76,6 +76,38 @@ test("without a switch, losing the service still shows the full-screen reconnect
   expect(setup.captureCharFrame()).not.toContain("Switching to")
 }, 15_000)
 
+test("the upgrade dialog shows the switch's steps, so the notice stays away while it is open", async () => {
+  const listeners = new Set<(state: UpdateState) => void>()
+  const switched = Promise.withResolvers<void>()
+  const updater = {
+    remote: false,
+    subscribe: (notify: (state: UpdateState) => void) => {
+      listeners.add(notify)
+      return () => listeners.delete(notify)
+    },
+    upgrade: async () => {
+      listeners.forEach((notify) => notify({ type: "switching", version: "0.1.1", waiting: work }))
+      await switched.promise
+      return { type: "current" as const, version: "0.1.1" }
+    },
+  }
+  await using setup = await createAppFixture({ updater })
+  await setup.ready
+  await setup.waitForFrame((frame) => frame.includes("commands"))
+  await setup.mockInput.typeText("/update")
+  await setup.waitForFrame((frame) => frame.includes("Upgrade openforge"))
+  setup.mockInput.pressKey("RETURN")
+  const message = "Switching to openforge 0.1.1; waiting for webfetch in ses_busy…"
+  await shows(setup, (frame) => frame.includes(message))
+  await Bun.sleep(100)
+  expect(words(setup.captureCharFrame()).split(message).length - 1).toBe(1)
+
+  // Closed, the dialog leaves the notice to say it.
+  setup.mockInput.pressEscape()
+  await shows(setup, (frame) => !frame.includes("Upgrade openforge") && frame.includes(message))
+  switched.resolve()
+}, 15_000)
+
 test("the screen that runs the switch names the release it switches to", async () => {
   const listeners = new Set<(state: UpdateState) => void>()
   const updater = {

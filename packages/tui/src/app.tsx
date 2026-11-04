@@ -1506,7 +1506,9 @@ function App() {
       <Show when={showReconnecting() && (!inSwitch() || switchOverdue())}>
         <Reconnecting managed={client.restart !== undefined} />
       </Show>
-      <Show when={!switchOverdue() && switching()}>{(message) => <SwitchNotice message={message()} />}</Show>
+      <Show when={!switchOverdue() && !updater.dialogOpen() && switching()}>
+        {(message) => <SwitchNotice message={message()} />}
+      </Show>
       <MigrationOverlay />
       <Toast />
     </box>

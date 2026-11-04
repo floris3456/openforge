@@ -341,6 +341,28 @@ describe("switch", () => {
     }),
   )
 
+  it.live("rolls back when the new service can't reach a tool runner that holds commands", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "runner-lost" })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toMatchObject({ type: "rolled-back", restored: true })
+      if (result.type !== "rolled-back") return
+      expect(result.reason).toContain(
+        "failed its check: it can't reach the tool runner of openforge 0.1.0 (it speaks no protocol this release knows)",
+      )
+      expect(yield* test.happened).toEqual([
+        "0.1.0 paused",
+        "0.1.0 stopped",
+        "0.1.1 started paused",
+        "0.1.1 stopped",
+        "0.1.0 started paused",
+        "0.1.0 resumed",
+      ])
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(Object.keys(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))).toEqual(["0.1.1"])
+    }),
+  )
+
   it.live("rolls back when the new service cannot read its database", () =>
     Effect.gen(function* () {
       const test = yield* installed("0.1.0", { version: "0.1.1", serve: "unreadable" })

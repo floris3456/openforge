@@ -5,6 +5,7 @@
 //   FAKE_SERVE=crash          records its migration, then exits 3
 //   FAKE_SERVE=wrong-version  answers with version 9.9.9
 //   FAKE_SERVE=unreadable     answers with its version but cannot read its database
+//   FAKE_SERVE=runner-lost    answers with its version but can't reach the tool runner of 0.1.0
 //   FAKE_PRINT                what --version prints instead of the version
 // The service records `m-<version>` in the database's migration journal, as a release migrating it would, and appends
 // what happens to it to FAKE_LOG: `<version> started [paused]`, `paused`, `resumed`, `stopped`, `prompt <id>`.
@@ -69,7 +70,11 @@ const publish = (type: string, data: unknown) =>
       streams.delete(controller)
     }
   })
-const status = () => ({ state, startedPaused, waiting: work, rested: [], active: [] })
+const runners =
+  process.env.FAKE_SERVE === "runner-lost"
+    ? [{ version: "0.1.0", reachable: false, reason: "it speaks no protocol this release knows" }]
+    : []
+const status = () => ({ state, startedPaused, waiting: work, rested: [], active: [], runners })
 
 const pause = async (timeout: number) => {
   if (work.length === 0) {

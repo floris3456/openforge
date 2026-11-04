@@ -18504,6 +18504,22 @@
           }
         ]
       },
+      "Continuity.Runner": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": ["version", "reachable"],
+        "additionalProperties": false
+      },
       "Continuity.State": {
         "type": "string",
         "enum": ["running", "pausing", "paused"]
@@ -18536,6 +18552,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Session.ID"
+            }
+          },
+          "runners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Continuity.Runner"
             }
           }
         },

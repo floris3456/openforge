@@ -2507,6 +2507,9 @@ export type ExperimentalServiceStatusOutput = {
   }>
   readonly rested: ReadonlyArray<Session.ID>
   readonly active: ReadonlyArray<Session.ID>
+  readonly runners?:
+    | ReadonlyArray<{ readonly version: string; readonly reachable: boolean; readonly reason?: string | undefined }>
+    | undefined
 }
 export type ExperimentalServiceStatusOperation<E = never> = () => Effect.Effect<ExperimentalServiceStatusOutput, E>
 
@@ -2536,6 +2539,9 @@ export type ExperimentalServiceResumeOutput = {
   }>
   readonly rested: ReadonlyArray<Session.ID>
   readonly active: ReadonlyArray<Session.ID>
+  readonly runners?:
+    | ReadonlyArray<{ readonly version: string; readonly reachable: boolean; readonly reason?: string | undefined }>
+    | undefined
 }
 export type ExperimentalServiceResumeOperation<E = never> = () => Effect.Effect<ExperimentalServiceResumeOutput, E>
 

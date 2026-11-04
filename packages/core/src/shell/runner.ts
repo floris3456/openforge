@@ -7,6 +7,7 @@ import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { RunnerProtocol } from "@opencode/runner/protocol"
 import { RunnerServer } from "@opencode/runner/server"
+import { Continuity } from "@opencode/schema/continuity"
 import { Location } from "@opencode/schema/location"
 import { Shell } from "@opencode/schema/shell"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -90,6 +91,11 @@ export interface Interface {
   readonly lines: (id: Shell.ID) => Effect.Effect<number, NotFoundError>
   /** Locations with a running command. */
   readonly running: Effect.Effect<ReadonlyArray<Location.Ref>>
+  /**
+   * The runners found at start that hold commands, once each has been tried (at most 5 s): a release switch rolls
+   * back when one can't be reached, since its commands would not reach their tool calls.
+   */
+  readonly runners: Effect.Effect<ReadonlyArray<Continuity.Runner>>
   /**
    * The service is shutting down: from now on a remove leaves its command running in the runner and its files in
    * place, so the next service picks it up. Other interruptions (a cancelled job, a user stopping a turn) still end
@@ -389,12 +395,26 @@ const layer = (options: Options) =>
         }),
       )
 
-      // Commands still running in a runner of this or an earlier release, from before this service started.
+      // Commands still running in a runner of this or an earlier release, from before this service started. A folder
+      // with no runner, or one closing because nothing runs in it, holds no commands; any other failure is reported.
+      const found = new Map<string, Continuity.Runner>()
       yield* Effect.promise(() => readdir(RunnerPaths.root(global.state)).catch(() => [] as string[])).pipe(
         Effect.flatMap((names) =>
           Effect.forEach(
             names,
-            (name) => connectTo(path.join(RunnerPaths.root(global.state), name)).pipe(Effect.ignore),
+            (name) => {
+              const directory = path.join(RunnerPaths.root(global.state), name)
+              found.set(directory, { version: name, reachable: false, reason: "it did not answer" })
+              return connectTo(directory).pipe(
+                Effect.match({
+                  onSuccess: (remote) => found.set(directory, { version: remote.connection.version, reachable: true }),
+                  onFailure: (error) =>
+                    error.reason === "unavailable" || error.reason === "closing"
+                      ? found.delete(directory)
+                      : found.set(directory, { version: name, reachable: false, reason: error.message }),
+                }),
+              )
+            },
             { concurrency: 8, discard: true },
           ),
         ),
@@ -608,6 +628,10 @@ const layer = (options: Options) =>
         }),
         running: Effect.sync(() =>
           [...entries.values()].flatMap((entry) => (!entry.exit && !entry.removed ? [entry.location] : [])),
+        ),
+        runners: Deferred.await(adopted).pipe(
+          Effect.timeoutOption("5 seconds"),
+          Effect.map(() => [...found.values()]),
         ),
         detach: Effect.sync(() => {
           state.detached = true

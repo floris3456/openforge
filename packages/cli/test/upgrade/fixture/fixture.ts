@@ -13,7 +13,7 @@ import { ReleaseLayout } from "../../../src/upgrade/layout"
 import type { Release } from "../../../src/upgrade/release"
 import type { ReleaseSwitch } from "../../../src/upgrade/switch"
 
-export type Serve = "ok" | "crash" | "wrong-version" | "unreadable"
+export type Serve = "ok" | "crash" | "wrong-version" | "unreadable" | "runner-lost"
 
 const program = path.join(import.meta.dir, "fake-openforge.ts")
 

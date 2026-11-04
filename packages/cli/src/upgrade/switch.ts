@@ -280,7 +280,7 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
   )
   const checked = ready.pipe(
     Effect.flatMap((endpoint) =>
-      check(endpoint).pipe(
+      check(endpoint, paused).pipe(
         Effect.as({ type: "ready" as const, endpoint, paused }),
         Effect.catch((error: Error) => Effect.succeed({ type: "failed" as const, reason: error.message })),
       ),
@@ -310,22 +310,36 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
 })
 
 /** Step 5, once the service answers with the expected version. A failure rolls the switch back. */
-const check = Effect.fnUntraced(function* (endpoint: Endpoint) {
+const check = Effect.fnUntraced(function* (endpoint: Endpoint, paused: boolean) {
   // The service opens and migrates its database before it answers at all; this read proves it can use it.
   yield* Effect.tryPromise({
     try: (signal) => client(endpoint).session.list({ limit: 1 }, { signal }),
     catch: (cause) => new Error(`it could not read its database: ${errorText(cause)}`),
   })
-  yield* runnerReachable(endpoint)
+  // The tool runner came with the pause, in 0.1.0; an earlier release has neither.
+  if (paused) yield* runnerReachable(endpoint)
 })
 
 /**
- * Step 5's last check: the tool runner answers the new service, so the commands running in it reach the same tool
- * calls after the resume. Runs while the service is still paused, within the 10 s of the check; a failure (an Error
- * saying what is wrong) rolls the switch back. The tool runner is not part of this build yet, so there is nothing to
- * reach.
+ * Step 5's last check: every tool runner holding commands answers the new service, so those commands reach the same
+ * tool calls after the resume. Runs while the service is still paused, within the 10 s of the check; a failure rolls
+ * the switch back.
  */
-export const runnerReachable = Effect.fnUntraced(function* (_endpoint: Endpoint): Effect.fn.Return<void, Error> {})
+export const runnerReachable = Effect.fnUntraced(function* (endpoint: Endpoint): Effect.fn.Return<void, Error> {
+  const status = yield* Effect.tryPromise({
+    try: (signal) => client(endpoint).experimental.service.status({ signal }),
+    catch: (cause) => new Error(`it did not say whether it reaches the tool runners: ${errorText(cause)}`),
+  })
+  const lost = (status.runners ?? []).filter((runner) => !runner.reachable)
+  if (lost.length === 0) return
+  return yield* Effect.fail(
+    new Error(
+      `it can't reach the tool runner of ${lost
+        .map((runner) => `openforge ${runner.version}${runner.reason ? ` (${runner.reason})` : ""}`)
+        .join(", ")}`,
+    ),
+  )
+})
 
 /** Step 6: every chat continues where it rested. A release that cannot pause was started running. */
 const resume = Effect.fnUntraced(function* (started: { readonly endpoint: Endpoint; readonly paused: boolean }) {

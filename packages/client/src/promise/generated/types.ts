@@ -347,6 +347,8 @@ export type ArtifactTime = { created: number; updated: number }
 
 export type ContinuityState = "running" | "pausing" | "paused"
 
+export type ContinuityRunner = { version: string; reachable: boolean; reason?: string }
+
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
 export type VcsBranch = { current?: string; default?: string }
@@ -1067,6 +1069,7 @@ export type ContinuityStatus = {
   waiting: Array<ContinuityWork>
   rested: Array<SessionID>
   active: Array<SessionID>
+  runners?: Array<ContinuityRunner>
 }
 
 export type ContinuityPauseResult =

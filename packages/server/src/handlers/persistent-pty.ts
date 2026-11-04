@@ -1,4 +1,5 @@
 import { SessionContinuity } from "@opencode/core/continuity"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { PersistentPty } from "@opencode/core/persistent-pty"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import {
@@ -33,6 +34,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
     const continuity = yield* SessionContinuity.Service
+    const shells = yield* ShellRunner.Service
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -49,7 +51,11 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("schedule.pause", (ctx) => schedule.pause(ctx.params.scheduleID))
       .handle("schedule.resume", (ctx) => schedule.resume(ctx.params.scheduleID))
       .handle("schedule.delete", (ctx) => schedule.remove(ctx.params.scheduleID))
-      .handle("service.status", () => Effect.map(continuity.status, (data) => ({ data })))
+      .handle("service.status", () =>
+        Effect.map(Effect.all([continuity.status, shells.runners]), ([status, runners]) => ({
+          data: { ...status, runners },
+        })),
+      )
       .handle("service.pause", (ctx) =>
         Effect.map(continuity.pause({ timeout: ctx.payload.timeout }), (data) => ({ data })),
       )

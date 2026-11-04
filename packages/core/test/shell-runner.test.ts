@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import fs from "fs"
+import net from "net"
 import path from "path"
 import { Effect, Fiber, Queue, Schedule, Stream } from "effect"
 import { RunnerPaths } from "@opencode/runner/paths"
@@ -67,6 +68,41 @@ describe("Shell through the tool runner", () => {
           }).pipe(Effect.scoped, Effect.provide(host.service({ location })))
         }),
     )
+
+  it.live("reports a runner it can't reach, and neither a folder with no runner nor one it reaches", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      const release = path.join(host.tmp, "release")
+      // A runner that holds a command, which the next service reaches.
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        yield* shell.create({ shell: "/bin/sh", command: gated(release, "a", "b"), timeout: 0 })
+        yield* (yield* ShellRunner.Service).detach
+      }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.0" })))
+      // A folder left behind, with no runner in it.
+      fs.mkdirSync(RunnerPaths.directory(host.state, "0.0.9"), { recursive: true })
+      // Something answering in a runner's place that doesn't speak its protocol.
+      const foreign = RunnerPaths.directory(host.state, "9.0.0")
+      fs.mkdirSync(foreign, { recursive: true })
+      fs.writeFileSync(RunnerPaths.token(foreign), "token")
+      const server = net.createServer((socket) => socket.end("not a runner\n"))
+      yield* Effect.acquireRelease(
+        Effect.callback<void>((resume) => {
+          server.listen(RunnerPaths.socket(foreign), () => resume(Effect.void))
+        }),
+        () => Effect.sync(() => server.close()),
+      )
+
+      const runners = yield* Effect.gen(function* () {
+        return yield* (yield* ShellRunner.Service).runners
+      }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.1" })))
+      expect(runners.toSorted((a, b) => a.version.localeCompare(b.version))).toEqual([
+        { version: "0.1.0", reachable: true },
+        { version: "9.0.0", reachable: false, reason: "the runner did not greet" },
+      ])
+      fs.writeFileSync(release, "")
+    }),
+  )
 
   it.live("a service shutdown leaves its commands running, and the next service picks them up", () =>
     Effect.gen(function* () {

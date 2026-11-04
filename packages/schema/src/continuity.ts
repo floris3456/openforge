@@ -16,6 +16,16 @@ export type Work = typeof Work.Type
 export const State = Schema.Literals(["running", "pausing", "paused"]).annotate({ identifier: "Continuity.State" })
 export type State = typeof State.Type
 
+/** A tool runner of this or an earlier release that held commands when the service started. */
+export const Runner = Schema.Struct({
+  version: Schema.String,
+  /** The service talks to it, so its commands reach their tool calls. */
+  reachable: Schema.Boolean,
+  /** Why the service can't reach it. */
+  reason: Schema.String.pipe(optional),
+}).annotate({ identifier: "Continuity.Runner" })
+export type Runner = typeof Runner.Type
+
 export const Status = Schema.Struct({
   state: State,
   /** The service started paused; writes are refused until it is resumed. */
@@ -28,6 +38,8 @@ export const Status = Schema.Struct({
   rested: Schema.Array(SessionID),
   /** Sessions with an execution in this process. */
   active: Schema.Array(SessionID),
+  /** Tool runners found at start, once the service has tried each; only `status` reports them. */
+  runners: Schema.Array(Runner).pipe(optional),
 }).annotate({ identifier: "Continuity.Status" })
 export type Status = typeof Status.Type
 

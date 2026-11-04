@@ -33,7 +33,8 @@ test("managed service ports are stable per installation channel", () => {
 
 test("managed service ports stay clear of opencode, OpenCodePlus and the ranges Windows and WSL reserve", () => {
   const ports = ["latest", "dev", "local", ...Array.from({ length: 200 }, (_, index) => `preview-${index}`)].flatMap(
-    (channel) => (["linux", "darwin", "win32"] as const).map((platform) => ServiceConfig.defaultPort(channel, platform)),
+    (channel) =>
+      (["linux", "darwin", "win32"] as const).map((platform) => ServiceConfig.defaultPort(channel, platform)),
   )
   // opencode uses 49374 and 49375 and hashes its other channels into 10000-59999; OpenCodePlus uses 40375.
   expect(ports.filter((port) => port >= 10_000)).toEqual([])

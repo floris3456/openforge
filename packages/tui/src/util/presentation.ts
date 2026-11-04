@@ -34,7 +34,10 @@ export function epilogue(input: { readonly session?: SessionEpilogue; readonly u
     ...wordmark("  "),
     "",
     ...(input.updatedVersion
-      ? [`  ${dim}Run ${reset}${bold}${Product.binary}${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`, ""]
+      ? [
+          `  ${dim}Run ${reset}${bold}${Product.binary}${reset}${dim} to use ${reset}${bold}${input.updatedVersion}${reset}`,
+          "",
+        ]
       : []),
     ...(input.session
       ? [row("Session", input.session.title), row("Continue", `${Product.binary} -s ${input.session.sessionID}`), ""]

@@ -43,6 +43,8 @@ test("restarts on the new release at once when nothing is typed", async () => {
 })
 
 test("restarts with a half-typed prompt, which the restarted screen puts back in the composer", async () => {
+  // The stash lives as long as the process: drop what other tests in it left there.
+  for (const draft of stashedDrafts()) takeDraft(draft.sessionID)
   try {
     const fake = source()
     {

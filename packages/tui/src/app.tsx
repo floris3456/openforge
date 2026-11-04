@@ -1063,9 +1063,9 @@ function App() {
         ? [
             {
               name: "opencode.update",
-              title: "Update OpenCode",
-              slash: { name: "update" },
-              run: () => updater.open?.("manual"),
+              title: "Upgrade openforge",
+              slash: { name: "update", aliases: ["upgrade"] },
+              run: () => updater.open?.(),
               category: "System",
             },
           ]

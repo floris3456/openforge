@@ -1,158 +1,140 @@
-import { createSignal, onCleanup, onMount } from "solid-js"
+// openforge's upgrade in the TUI: the CLI process installs a release and switches the background service to it
+// once no chat is running (see packages/cli/src/upgrade). This screen shows how far that got and, once the
+// service runs the new release, restarts itself on it when the user is not in the middle of something.
+import { useKeyboard } from "@opentui/solid"
+import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
-import { useLog } from "./log"
-import { useStorage } from "./storage"
-import { useEvent } from "./event"
-import { errorMessage } from "../util/error"
 import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
+import { usePromptRef } from "./prompt"
+import { useRoute } from "./route"
 import { useDialog } from "../ui/dialog"
+import { useToast } from "../ui/toast"
 import { DialogUpdate } from "../component/dialog-update"
 
-type ClientNotice = { readonly type: "available" | "installed"; readonly version: string }
-type Notice = ClientNotice & ({ readonly source: "client" } | { readonly source: "server"; readonly remote: boolean })
 export type UpdateState =
-  | ClientNotice
+  | { readonly type: "available"; readonly version: string }
   | { readonly type: "installing"; readonly version: string }
-  | { readonly type: "failed"; readonly message: string }
+  | { readonly type: "ready"; readonly version: string }
+  | { readonly type: "switching"; readonly version: string }
+  | { readonly type: "switched"; readonly version: string }
+  | { readonly type: "failed"; readonly version?: string; readonly message: string }
+
+export type UpdateOutcome =
+  | { readonly type: "current"; readonly version: string }
+  | { readonly type: "unavailable"; readonly message: string }
+  | { readonly type: "switched"; readonly from: string; readonly to: string }
 
 export type UpdateSource = {
   readonly remote: boolean
-  readonly subscribe: (notify: (notice: ClientNotice) => void) => () => void
-  readonly check: (
-    signal: AbortSignal,
-    onInstall: (version: string) => void,
-  ) => Promise<ClientNotice | { readonly type: "unavailable"; readonly message: string } | undefined>
-  readonly apply: (version: string) => Promise<void>
+  readonly subscribe: (notify: (state: UpdateState) => void) => () => void
+  /** Installs the latest release and switches to it once no chat is running. */
+  readonly upgrade: () => Promise<UpdateOutcome>
+  /** Restarts this TUI on the release in use, back on `sessionID`. Absent when this TUI cannot restart itself. */
+  readonly relaunch?: (sessionID?: string) => void
+}
+
+export function readyMessage(version: string) {
+  return `openforge ${version} is ready; switches when no chat is running`
 }
 
 export const { use: useUpdateNotification, provider: UpdateNotificationProvider } = createSimpleContext({
   name: "UpdateNotification",
   init: (props: { updater?: UpdateSource }) => {
-    const event = useEvent()
     const exit = useExit()
     const epilogue = useEpilogue()
     const dialog = useDialog()
-    const log = useLog({ component: "update-notification" })
+    const toast = useToast()
+    const route = useRoute()
+    const promptRef = usePromptRef()
     const [state, setState] = createSignal<UpdateState>()
-    const [notification, setNotification] = createSignal<Notice>()
-    const [notifications, markNotification] = useStorage().store<{ versions: string[] }>("update-notifications", {
-      initial: { versions: [] },
-    })
+    const [pending, setPending] = createSignal(false)
 
-    const notify = (notice: Notice) => {
-      if (!props.updater) return
-      // Every way out of the TUI after a local install tells the user to start the new version.
-      if (notice.type === "installed" && !(notice.source === "server" && notice.remote))
-        epilogue.updatedVersion(notice.version)
-      if (
-        notifications.versions.includes(`${notice.source}:${notice.version}`) ||
-        (notice.source === "client" && notifications.versions.includes(notice.version))
-      )
-        return
-      setNotification((current) => {
-        if (notice.source === "server" && current?.source === "client") return current
-        return notice
-      })
-    }
-
-    const dismiss = () => {
-      const current = notification()
-      if (!current) return
-      setNotification(undefined)
-      // Only interactions with the automatic notification update its history.
-      void markNotification((draft) => {
-        draft.versions = [...draft.versions, `${current.source}:${current.version}`].slice(-100)
-      }).catch((error) => log.error("failed to persist update notification", { error }))
-    }
-
-    const install = async () => {
-      const updater = props.updater
-      const current = state()
-      if (!updater || !current || current.type !== "available") return
-      setState({ type: "installing", version: current.version })
-      await updater.apply(current.version).then(
-        () => {
-          epilogue.updatedVersion(current.version)
-          setState({ type: "installed", version: current.version })
-        },
-        (error) => setState({ type: "failed", message: errorMessage(error) }),
-      )
-    }
-
-    const check = async (signal: AbortSignal) => {
-      const updater = props.updater
-      if (!updater || state()?.type === "installing") return
-      const result = await updater
-        .check(signal, (version) => {
-          if (!signal.aborted) setState({ type: "installing", version })
+    const receive = (next: UpdateState) => {
+      const previous = state()
+      if (previous?.type === next.type && "version" in next && previous.version === next.version) return
+      setState(next)
+      // The dialog shows every step itself; without it, the steps that need attention become toasts.
+      if (dialog.stack.length > 0) return
+      if (next.type === "ready") toast.show({ variant: "info", message: readyMessage(next.version), duration: 60_000 })
+      if (next.type === "switching")
+        toast.show({ variant: "info", message: `Switching to openforge ${next.version}…`, duration: 30_000 })
+      if (next.type === "failed") toast.show({ variant: "error", message: next.message, duration: 60_000 })
+      if (next.type === "switched" && !props.updater?.relaunch)
+        toast.show({
+          variant: "success",
+          message: `openforge ${next.version} is running; restart to get the new screens`,
+          duration: 60_000,
         })
-        .finally(() => {
-          if (state()?.type === "installing") setState(undefined)
-        })
-      if (signal.aborted) return
-      if (result?.type === "unavailable") return result.message
-      if (result?.type === "installed") epilogue.updatedVersion(result.version)
-      setState(result)
+    }
+
+    // Restart only between tasks: a typed prompt or an open dialog would be lost.
+    const settled = () => {
+      const prompt = promptRef.current?.current
+      return (
+        dialog.stack.length === 0 &&
+        (!prompt || (prompt.text.trim() === "" && !prompt.files?.length && prompt.pasted.length === 0))
+      )
     }
 
     const restart = () => {
-      const current = state()
-      if (current?.type !== "installed") return
+      const relaunch = props.updater?.relaunch
+      if (!relaunch) return exit()
+      const current = route.data
+      epilogue.session()
+      relaunch(current.type === "session" ? current.sessionID : undefined)
       exit()
     }
 
-    const open = (origin: "manual" | "notification") => {
+    const attempt = () => {
+      if (!pending() || !settled()) return
+      setPending(false)
+      restart()
+    }
+
+    createEffect(() => {
+      const current = state()
+      if (current?.type !== "switched" || !props.updater?.relaunch) return
+      setPending(true)
+    })
+    createEffect(() => {
+      // Tracks the dialog stack, so closing the last dialog retries.
+      if (pending() && dialog.stack.length === 0) attempt()
+    })
+    // Clearing or sending the prompt happens through keys, and a sent prompt leaves the composer a moment later.
+    useKeyboard(() => {
+      if (pending()) setTimeout(attempt, 300)
+    })
+
+    onMount(() => {
       if (!props.updater) return
-      const current = notification()
-      const known = current && (current.source === "client" || !current.remote) ? current : undefined
-      if (origin === "notification" && !known) return
-      const active = state()
-      // The notification can predate an installation through /update.
-      if (known && active?.type !== "installing" && !(active?.type === "installed" && active.version === known.version))
-        setState({ type: known.type, version: known.version })
-      const status = state()?.type
+      onCleanup(props.updater.subscribe(receive))
+    })
+
+    const open = () => {
+      const updater = props.updater
+      if (!updater) return
+      const active = state()?.type
+      const running = active === "installing" || active === "ready" || active === "switching"
       dialog.replace(() => (
         <DialogUpdate
-          check={status === undefined || status === "failed" ? check : undefined}
+          start={running || active === "switched" ? undefined : () => updater.upgrade()}
           state={state}
-          skip={dismiss}
-          install={install}
           restart={restart}
         />
       ))
     }
 
-    onMount(() => {
-      if (!props.updater) return
-      onCleanup(props.updater.subscribe((notice) => notify({ ...notice, source: "client" })))
-    })
-
-    onCleanup(
-      event.on("installation.update-available", (event) =>
-        notify({
-          source: "server",
-          remote: props.updater?.remote ?? false,
-          type: "available",
-          version: event.data.version,
-        }),
-      ),
-    )
-    onCleanup(
-      event.on("installation.updated", (event) =>
-        notify({
-          source: "server",
-          remote: props.updater?.remote ?? false,
-          type: "installed",
-          version: event.data.version,
-        }),
-      ),
-    )
-
     return {
-      notification,
-      dismiss,
+      state,
+      notification: () => {
+        const current = state()
+        if (current?.type === "available" || current?.type === "ready") return current
+        if (current?.type === "switched" && !props.updater?.relaunch) return current
+        return undefined
+      },
       open: props.updater ? open : undefined,
+      restart,
     }
   },
 })

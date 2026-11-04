@@ -3,7 +3,7 @@ import { Command } from "effect/cli"
 import { PrintLogs } from "../commands/commands"
 import { Spec } from "./spec"
 import { Global } from "@opencode/util/global"
-import { Updater } from "../services/updater"
+import { Updater } from "../upgrade/updater"
 import { Config } from "../config"
 import { Npm } from "@opencode/util/npm"
 

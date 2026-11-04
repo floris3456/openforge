@@ -3,6 +3,7 @@ export * as ServerProcess from "./server-process"
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
 import { AppProcess } from "@opencode/util/process"
@@ -19,6 +20,7 @@ import { ServiceRegistration } from "./services/service-registration"
 import { RemoteTunnel } from "./services/remote-tunnel"
 import { WebUi } from "./services/web-ui"
 import { databasePath } from "./database-path"
+import { SwitchLock } from "./upgrade/switch-lock"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -33,7 +35,7 @@ export type Options = {
 export const run = Effect.fnUntraced(function* (options: Options) {
   return yield* processEffect(options).pipe(
     Effect.provide(
-      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node]), {
+      LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, EffectFlock.node]), {
         replacements: [
           Global.node.replace(
             Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
@@ -67,6 +69,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const foreground = options.mode === "default"
+      if (options.mode === "service") yield* SwitchLock.wait()
       const serviceOptions = options.mode === "service" ? yield* ServiceConfig.options() : undefined
       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"

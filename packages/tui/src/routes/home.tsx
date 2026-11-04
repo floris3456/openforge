@@ -12,8 +12,7 @@ import { FormPrompt } from "./session/form"
 import { Slot } from "../plugin/render"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
-import { useUpdateNotification } from "../context/update-notification"
-import { useExit } from "../context/exit"
+import { readyMessage, useUpdateNotification } from "../context/update-notification"
 import { FadeInText } from "../component/fade-in-text"
 
 let once = false
@@ -124,7 +123,6 @@ export function Home() {
 
 function UpdateNotification(props: { width: number }) {
   const update = useUpdateNotification()
-  const exit = useExit()
   const theme = useTheme()
   const [hovered, setHovered] = createSignal(false)
   const backdrop = () => (hovered() ? theme.background.action.primary.hovered : theme.background.base)
@@ -135,42 +133,33 @@ function UpdateNotification(props: { width: number }) {
 
   return (
     <Show when={update.notification()} keyed>
-      {(state) => {
-        const remote = state.source === "server" && state.remote
-        return (
-          <Show when={!remote || state.type === "available"}>
-            <box
-              flexShrink={0}
-              flexDirection="row"
-              justifyContent="center"
-              width={props.width}
-              maxWidth="100%"
-              gap={1}
-              backgroundColor={hovered() ? theme.background.action.primary.hovered : undefined}
-              onMouseOver={() => setHovered(true)}
-              onMouseOut={() => setHovered(false)}
-              onMouseUp={() => {
-                if (remote) return update.dismiss()
-                if (state.type === "installed") return exit()
-                update.open?.("notification")
-              }}
-            >
-              <FadeInText fg={theme.text.muted} backdrop={backdrop()}>
-                <Show when={!remote}>
-                  <span style={{ fg: theme.text.action.primary.selected }}>
-                    {state.type === "installed" ? "/exit" : "/update"}
-                  </span>
-                </Show>
-                {remote
-                  ? "remote server update available"
-                  : state.type === "installed"
-                    ? ` restart to use v${state.version}`
-                    : ` to install v${state.version}`}
-              </FadeInText>
-            </box>
-          </Show>
-        )
-      }}
+      {(state) => (
+        <box
+          flexShrink={0}
+          flexDirection="row"
+          justifyContent="center"
+          width={props.width}
+          maxWidth="100%"
+          gap={1}
+          backgroundColor={hovered() ? theme.background.action.primary.hovered : undefined}
+          onMouseOver={() => setHovered(true)}
+          onMouseOut={() => setHovered(false)}
+          onMouseUp={() => (state.type === "switched" ? update.restart() : update.open?.())}
+        >
+          <FadeInText fg={theme.text.muted} backdrop={backdrop()}>
+            <Show when={state.type !== "ready"}>
+              <span style={{ fg: theme.text.action.primary.selected }}>
+                {state.type === "switched" ? "/exit" : "/update"}
+              </span>
+            </Show>
+            {state.type === "ready"
+              ? readyMessage(state.version)
+              : state.type === "switched"
+                ? ` restart to get the new screens of v${state.version}`
+                : ` to install v${state.version}`}
+          </FadeInText>
+        </box>
+      )}
     </Show>
   )
 }

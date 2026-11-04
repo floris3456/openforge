@@ -2,80 +2,49 @@ import { intro, log, outro, spinner } from "@clack/prompts"
 import { Effect, Option } from "effect"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
-import { Updater } from "../../services/updater"
+import { Updater } from "../../upgrade/updater"
 import { handlePromptErrors } from "../../ui/prompt"
-import { OPENCODE_VERSION } from "../../version"
-import { stripVTControlCharacters } from "node:util"
 
 export default Runtime.handler(
   Commands.commands.upgrade,
-  Effect.fn("cli.upgrade")(
-    function* (input) {
-      intro("Upgrade")
-      const updater = yield* Updater.Service
-      const method = Option.getOrUndefined(input.method) ?? (yield* updater.method())
-      if (!method)
-        return yield* Effect.fail(
-          new Error("Could not detect the installation method. Pass --method to choose how to upgrade OpenCode."),
-        )
-
-      log.info(`Using method: ${method}`)
-      const target = Option.getOrUndefined(input.target) ?? (yield* updater.latest(method))
-      const version = target.trim().replace(/^v/, "")
-      if (version === OPENCODE_VERSION) {
-        log.warn(`OpenCode upgrade skipped: ${version} is already installed`)
-        outro("Done")
-        return
-      }
-
-      log.info(`From ${OPENCODE_VERSION} → ${version}`)
-      const progress = spinner()
-      progress.start("Upgrading...")
-      yield* updater.upgrade(method, target).pipe(
-        Effect.tap(() => Effect.sync(() => progress.stop("Upgrade complete"))),
-        Effect.tapCause(() => Effect.sync(() => progress.stop("Upgrade failed", 1))),
+  Effect.fn("cli.upgrade")(function* (input) {
+    intro("Upgrade")
+    const updater = yield* Updater.Service
+    const progress = spinner()
+    let spinning = false
+    const stop = (message: string, code?: number) => {
+      if (!spinning) return
+      spinning = false
+      progress.stop(message, code)
+    }
+    const step = (message: string) => {
+      stop("Done")
+      spinning = true
+      progress.start(message)
+    }
+    const outcome = yield* updater
+      .upgrade({
+        target: Option.getOrUndefined(input.target),
+        restoreDatabase: input.restoreDatabase,
+        notify: (state) => {
+          if (state.type === "installing") return step(`Installing openforge ${state.version}`)
+          if (state.type === "ready") {
+            stop(`openforge ${state.version} installed`)
+            return log.info(`openforge ${state.version} is ready; switches when no chat is running`)
+          }
+          if (state.type === "switching") return step(`Switching to openforge ${state.version}`)
+          if (state.type === "switched") return stop(`openforge ${state.version} is running`)
+          if (state.type === "failed") return stop("Failed", 1)
+        },
+      })
+      .pipe(Effect.ensuring(Effect.sync(() => stop("Stopped", 1))))
+    if (outcome.type === "unavailable") return yield* Effect.fail(new Error(outcome.message))
+    if (outcome.type === "current")
+      log.info(
+        Option.isSome(input.target)
+          ? `openforge ${outcome.version} is already in use`
+          : `openforge ${outcome.version} is up to date`,
       )
-      outro("Done")
-    },
-    (effect) =>
-      handlePromptErrors(
-        effect.pipe(
-          Effect.mapError((error) =>
-            error instanceof Updater.UpgradeError ? new Error(formatUpgradeError(error), { cause: error }) : error,
-          ),
-        ),
-      ),
-  ),
+    outro("Done")
+  }, handlePromptErrors),
 )
-
-function formatUpgradeError(error: Updater.UpgradeError) {
-  const clean = (value: string) => stripVTControlCharacters(value).replaceAll("\r", "").trim()
-  const line = (value: string) => clean(value).replace(/\s+/g, " ")
-  const detail = wrap(clean(error.detail), Math.max(24, (process.stdout.columns ?? 80) - 7)).join("\n")
-  return [
-    line(error.title),
-    "",
-    detail,
-    ...(error.command ? ["", field("Command", line(error.command))] : []),
-    field("Retry", line(error.retry)),
-  ].join("\n")
-}
-
-function field(label: string, value: string) {
-  const prefix = label.padEnd(9)
-  const width = Math.max(24, Math.min(61, (process.stdout.columns ?? 80) - prefix.length - 10))
-  const lines = wrap(value, width)
-  return lines.map((line, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`).join("\n")
-}
-
-function wrap(value: string, width: number) {
-  return value.split("\n").flatMap((source) => {
-    if (source.length <= width) return [source]
-    return source.split(/\s+/).reduce<string[]>((result, word) => {
-      const index = result.length - 1
-      if (index < 0 || result[index].length + word.length + 1 > width) result.push(word)
-      else result[index] += ` ${word}`
-      return result
-    }, [])
-  })
-}

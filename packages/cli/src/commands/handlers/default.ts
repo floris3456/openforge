@@ -4,14 +4,17 @@ import { run } from "@opencode/tui"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Config } from "../../config"
-import { Context, Effect, FileSystem, Option, Queue, Schedule, Semaphore } from "effect"
+import { Context, Effect, FileSystem, Option, Queue } from "effect"
+import path from "node:path"
 import { ServerConnection } from "../../services/server-connection"
-import { Updater } from "../../services/updater"
+import { ReleaseLayout } from "../../upgrade/layout"
+import { Release } from "../../upgrade/release"
+import { Updater } from "../../upgrade/updater"
 import { UpdatePreflight } from "../../services/update-preflight"
 import { Npm } from "@opencode/util/npm"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_HIGHLIGHTS, OPENCODE_VERSION } from "../../version"
 import { Env } from "../../env"
-import { Service } from "@opencode/client/effect/service"
+import { Service, type Endpoint } from "@opencode/client/effect/service"
 import { OpenCode } from "@opencode/client/promise"
 import { findSession } from "../../session-target"
 import { errorMessage } from "../../util/error"
@@ -56,34 +59,30 @@ export default Runtime.handler(Commands, (input) =>
       session !== undefined &&
       (yield* Effect.tryPromise({
         try: () =>
-          findSession(OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) }), session),
+          findSession(
+            OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) }),
+            session,
+          ),
         catch: (cause) => new Error(errorMessage(cause)),
       })) !== undefined
     const updater = yield* Updater.Service
-    let installing: string | undefined
-    let latest: Updater.RunResult | undefined
-    const installListeners = new Set<(version: string) => void>()
-    const resultListeners = new Set<(result: Updater.RunResult) => void>()
-    // Background checks, `/update` lookups, and manual installs take turns so two installs never overlap.
-    const checking = yield* Semaphore.make(1)
-    yield* updater
-      .run((version) => {
-        installing = version
-        installListeners.forEach((notify) => notify(version))
-      })
-      .pipe(
-        Effect.ensuring(Effect.sync(() => (installing = undefined))),
-        Effect.tap((result) =>
-          Effect.sync(() => {
-            if (!result || (result.type === latest?.type && result.version === latest.version)) return
-            latest = result
-            resultListeners.forEach((notify) => notify(result))
-          }),
-        ),
-        checking.withPermits(1),
-        Effect.repeat(Schedule.spaced("10 minutes")),
-        Effect.forkScoped({ startImmediately: true }),
-      )
+    let latest: Updater.State | undefined
+    const listeners = new Set<(state: Updater.State) => void>()
+    const publish = (state: Updater.State) => {
+      latest = state
+      listeners.forEach((notify) => notify(state))
+    }
+    // Once per start, never on a timer. A standalone server shares the database, so it must not switch it.
+    if (!input.standalone) yield* updater.startup(publish).pipe(Effect.forkScoped({ startImmediately: true }))
+    const global = yield* Global.Service
+    const releaseBinary = path.join(ReleaseLayout.at(global.data).current, Release.binary)
+    const relaunch: { to?: { readonly sessionID?: string } } = {}
+    const relaunchable =
+      typeof process.execve === "function" &&
+      process.platform !== "win32" &&
+      requestedServer === undefined &&
+      server.service !== undefined &&
+      (yield* updater.current()) !== undefined
     preflight.loading()
     const config = yield* Config.Service
     const npm = yield* Npm.Service
@@ -93,6 +92,16 @@ export default Runtime.handler(Commands, (input) =>
     const runFork = Effect.runForkWith(context)
     const runPromise = Effect.runPromiseWith(context)
     const service = server.service
+    // Another process may have switched the release while this TUI was connected; the service then comes back
+    // on the release `current` points at.
+    const noticeSwitch = async (endpoint: Endpoint) => {
+      const info = await OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
+        .server.info()
+        .catch(() => undefined)
+      if (!info || info.version === OPENCODE_VERSION) return
+      if ((await runPromise(updater.current())) !== info.version) return
+      publish({ type: "switched", version: info.version })
+    }
     yield* run({
       app: {
         name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
@@ -106,7 +115,11 @@ export default Runtime.handler(Commands, (input) =>
         local: requestedServer === undefined,
         service: service
           ? {
-              reconnect: (signal) => runServicePromise(service.reconnect(), { signal }),
+              reconnect: (signal) =>
+                runServicePromise(service.reconnect(), { signal }).then((endpoint) => {
+                  void noticeSwitch(endpoint)
+                  return endpoint
+                }),
               restart: () => runServicePromise(service.restart()),
             }
           : undefined,
@@ -127,17 +140,17 @@ export default Runtime.handler(Commands, (input) =>
         remote: requestedServer !== undefined,
         subscribe: (notify) => {
           if (latest) notify(latest)
-          resultListeners.add(notify)
-          return () => resultListeners.delete(notify)
+          listeners.add(notify)
+          return () => listeners.delete(notify)
         },
-        check: (signal, notify) => {
-          if (installing) notify(installing)
-          installListeners.add(notify)
-          return runPromise(checking.withPermits(1)(updater.check()), { signal }).finally(() =>
-            installListeners.delete(notify),
-          )
-        },
-        apply: (version) => runPromise(checking.withPermits(1)(updater.apply(version))),
+        upgrade: () =>
+          input.standalone
+            ? Promise.resolve({
+                type: "unavailable" as const,
+                message: "A --standalone server shares the database; upgrade from openforge without --standalone.",
+              })
+            : runPromise(updater.upgrade({ notify: publish })),
+        relaunch: relaunchable ? (sessionID) => (relaunch.to = { sessionID }) : undefined,
       },
       packages: {
         prepare: (spec, install = true) => runPromise(install ? npm.add(spec) : npm.resolve(spec)),
@@ -156,5 +169,21 @@ export default Runtime.handler(Commands, (input) =>
         runFork(effect)
       },
     }).pipe(Effect.provide(LayerNode.compile(Global.node)))
+    if (!relaunch.to) return
+    // Same process, same terminal: the TUI restored the terminal when it closed, and the new release sets it up again.
+    const args = [
+      ...(relaunch.to.sessionID ? ["--session", relaunch.to.sessionID] : []),
+      ...(input.auto || input.yolo || input.dangerouslySkipPermissions ? ["--auto"] : []),
+    ]
+    yield* Effect.logInfo("restarting the TUI on the release in use", { binary: releaseBinary, args })
+    yield* Effect.try(() => process.execve?.(releaseBinary, [releaseBinary, ...args], process.env)).pipe(
+      Effect.catch((error) =>
+        Effect.sync(() =>
+          process.stderr.write(
+            `Could not restart on the new openforge (${errorMessage(error)}); run openforge again to get the new screens.\n`,
+          ),
+        ),
+      ),
+    )
   }),
 )

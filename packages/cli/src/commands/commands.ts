@@ -1,7 +1,6 @@
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
 import { Spec } from "../framework/spec"
-import { Updater } from "../services/updater"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
   flag: Flag.Boolean("print-logs").pipe(
@@ -68,17 +67,16 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
   },
   commands: [
     Spec.make("upgrade", {
-      description: "Upgrade OpenCode to the latest or a specific version",
+      description: "Switch openforge to the latest release, or to a given version (kept or downloaded)",
       aliases: ["update"],
       params: {
         target: Argument.String("target").pipe(
-          Argument.withDescription("Version to upgrade to (with or without a leading v)"),
+          Argument.withDescription("Version to switch to (with or without a leading v)"),
           Argument.optional,
         ),
-        method: Flag.Literals("method", Updater.methods).pipe(
-          Flag.withAlias("m"),
-          Flag.withDescription("Installation method to use"),
-          Flag.optional,
+        restoreDatabase: Flag.Boolean("restore-database").pipe(
+          Flag.withDescription("Use the database copy made when that version was left instead of the current database"),
+          Flag.withDefault(false),
         ),
       },
     }),

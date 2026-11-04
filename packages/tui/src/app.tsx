@@ -4,7 +4,7 @@ import { render, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import "./component/spinner-renderable"
 import { Effect, Latch } from "effect"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { OpenCode, type SessionInfo } from "@opencode/client"
+import { createResender, OpenCode, type SessionInfo } from "@opencode/client"
 import { Global } from "@opencode/util/global"
 import { Product } from "@opencode/schema/product"
 import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
@@ -227,10 +227,13 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     terminalSuspend: process.platform !== "win32",
   })
   const headers = Service.headers(input.server.endpoint)
+  // Every write this screen sends outlasts a release switch: it is resent until the service takes it (see the client).
+  const resender = createResender({ limit: input.resendLimit })
+  const fetch = resender.fetch(noTimeoutFetch)
   const options = {
     baseUrl: input.server.endpoint.url,
     headers,
-    fetch: noTimeoutFetch,
+    fetch,
   }
   const api = OpenCode.make(options)
   const location = yield* Effect.tryPromise(() => api.file.list({ location: { directory: process.cwd() } })).pipe(
@@ -245,7 +248,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     ? {
         reconnect: async (signal: AbortSignal) => {
           const endpoint = await managed.reconnect(signal)
-          const next = { baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch: noTimeoutFetch }
+          const next = { baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch }
           return { api: OpenCode.make(next), url: endpoint.url, headers: next.headers }
         },
         restart: managed.restart,
@@ -417,6 +420,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               url={input.server.endpoint.url}
                                               headers={headers}
                                               service={service}
+                                              resender={resender}
                                             >
                                               <PermissionProvider>
                                                 <DataProvider directory={directory} resendLimit={input.resendLimit}>

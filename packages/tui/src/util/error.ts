@@ -1,3 +1,4 @@
+import { isResendTimeoutError, ResendTimeoutError } from "@opencode/client/promise"
 import { isRecord } from "./record"
 
 type ConfigIssue = { message: string; path: string[] }
@@ -119,6 +120,8 @@ export function errorFormat(error: unknown): string {
 }
 
 export function errorMessage(error: unknown): string {
+  // A write the client resent while openforge switched releases, until it gave up: say that, not the transport's word.
+  if (isResendTimeoutError(error)) return new ResendTimeoutError().message
   if (error instanceof Error) {
     if (error.message) return error.message
     if (error.name) return error.name

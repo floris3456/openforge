@@ -33,6 +33,7 @@ import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
 import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
 import { isResendTimeoutError } from "@opencode/client/promise"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
@@ -1201,22 +1202,26 @@ export function Prompt(props: PromptProps) {
       input.cursorOffset = measure(entry.text)
       return true
     }
-    const fail = (title: string, error: unknown) => {
-      toast.show({ title, message: errorMessage(error), variant: "error" })
-      restoreEntry()
-    }
     // Resent for 2 minutes while openforge switched releases or could not be reached. The text goes back in the
-    // composer; when something new was typed meanwhile, it stays in the prompt history.
+    // composer; when something new was typed meanwhile, it stays in the prompt history. A prompt, a `!` command and a
+    // slash command are reported alike, also when a write that goes before them (the agent, a revert, editor context)
+    // was the one not taken.
+    const sent = currentMode === "shell" ? "shell command" : slashHead && isCommand ? "command" : "prompt"
     const unsent = () => {
       const restored = restoreEntry()
       toast.show({
-        title: "Prompt not sent",
+        title: `${sent[0].toUpperCase()}${sent.slice(1)} not sent`,
         message: restored
           ? "openforge did not take it within 2 minutes, so it is back in the composer. Send it again once openforge answers."
-          : "openforge did not take it within 2 minutes. What you typed since stays in the composer; the prompt is in the prompt history (↑).",
+          : `openforge did not take it within 2 minutes. What you typed since stays in the composer; the ${sent} is in the prompt history (↑).`,
         variant: "error",
         duration: 60_000,
       })
+    }
+    const fail = (title: string, error: unknown) => {
+      if (isResendTimeoutError(error)) return unsent()
+      toast.show({ title, message: errorMessage(error), variant: "error" })
+      restoreEntry()
     }
     const attempt = async (title: string, run: () => Promise<unknown>) => {
       return run().then(
@@ -1326,20 +1331,24 @@ export function Prompt(props: PromptProps) {
       return true
     }
     history.append(entry)
+    // Each write below carries an id, so the service runs it once even when it is resent after a dropped connection.
     if (currentMode === "shell") {
       move.startSubmit()
-      const send = () => client.api.session.shell({ sessionID: target, command: inputText })
+      const id = SessionMessage.ID.create()
+      const send = () => client.api.session.shell({ sessionID: target, id, command: inputText })
       void (newSession ? newSession.gate.then(send) : send()).catch((error) =>
         newSession ? newSession.recover(error) : fail("Failed to run shell command", error),
       )
       setStore("mode", "normal")
     } else if (slashHead && isCommand) {
+      const id = SessionMessage.ID.create()
       const send = async () => {
         // Commands inherit the composer selection; command-specific overrides
         // remain server-owned and run after this preparation.
         await commitSelection()
         return client.api.session.command({
           sessionID: target,
+          id,
           name: slashHead.name,
           text: slashHead.arguments,
           files: promptFilesForServer(entry.files, terminalEnvironment.localServer === true),
@@ -1365,9 +1374,11 @@ export function Prompt(props: PromptProps) {
         return false
       if (pendingEditorSelection) {
         // Keep editor context hidden while admitting it before the corresponding user prompt.
+        const id = SessionMessage.ID.create()
         const send = () =>
           client.api.session.synthetic({
             sessionID: target,
+            id,
             text: formatEditorContext(pendingEditorSelection),
             resume: false,
           })
@@ -1396,7 +1407,6 @@ export function Prompt(props: PromptProps) {
         })
         .catch((error) => {
           if (newSession) return newSession.recover(error)
-          if (isResendTimeoutError(error)) return unsent()
           fail("Failed to send prompt", error)
         })
       if (pendingEditorSelection) editor.markSelectionSent()

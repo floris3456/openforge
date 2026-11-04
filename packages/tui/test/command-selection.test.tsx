@@ -106,7 +106,15 @@ test("custom commands commit the captured agent, model and variant before execut
     await setup.waitFor(() => mutations.length === 3)
     expect(mutations[2]).toEqual({
       type: "command",
-      body: { name: "review", text: "selected input", files: [], agents: [], delivery: "steer" },
+      // The id lets the service run it once when it is resent after a dropped connection.
+      body: {
+        id: expect.stringMatching(/^msg_/),
+        name: "review",
+        text: "selected input",
+        files: [],
+        agents: [],
+        delivery: "steer",
+      },
     })
   } finally {
     agent.resolve(new Response(null, { status: 204 }))

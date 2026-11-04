@@ -1,5 +1,5 @@
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { ClientError, OpenCode, type OpenCodeClient } from "@opencode/client/promise"
+import { ClientError, createResender, OpenCode, type OpenCodeClient } from "@opencode/client/promise"
 import type { MiniFrontendInput } from "@opencode/tui/mini"
 import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
 import { setTimeout } from "node:timers/promises"
@@ -109,24 +109,27 @@ export async function runMini(input: MiniCommandInput) {
           resume: false,
         }))
       const frontend = await frontendTask
-      return frontend.runMiniFrontend({
-        host: createMiniHost({ terminal, directory, paths: input.paths }),
-        sdk,
-        directory,
-        target: resolveTarget,
-        reconnect: connection.reconnect,
-        createSession: create,
-        agent: input.agent,
-        model,
-        variant: requested?.variant,
-        files: [],
-        initialInput,
-        replay: input.replay ?? true,
-        replayLimit: input.replayLimit,
-        demo: input.demo,
-        tuiConfig: input.tuiConfig,
-        config: input.config,
-      })
+      return await frontend
+        .runMiniFrontend({
+          host: createMiniHost({ terminal, directory, paths: input.paths }),
+          sdk,
+          directory,
+          target: resolveTarget,
+          reconnect: connection.reconnect,
+          createSession: create,
+          agent: input.agent,
+          model,
+          variant: requested?.variant,
+          files: [],
+          initialInput,
+          replay: input.replay ?? true,
+          replayLimit: input.replayLimit,
+          demo: input.demo,
+          tuiConfig: input.tuiConfig,
+          config: input.config,
+        })
+        // Writes still waiting are given up as the screen closes.
+        .finally(() => connection.resender.close())
     })
   } catch (error) {
     if (error instanceof MiniInputError || (error instanceof Error && error.message === INTERACTIVE_INPUT_ERROR))
@@ -137,15 +140,15 @@ export async function runMini(input: MiniCommandInput) {
 
 /** @internal Exported for CLI boundary tests. */
 export function createMiniConnection(input: MiniCommandInput["server"]) {
+  // Every write is resent while openforge switches releases, until the service takes it (see the client).
+  const resender = createResender()
+  // Session waits can remain idle until background work finishes.
+  const fetch = resender.fetch(noTimeoutFetch)
   const make = (endpoint: Endpoint) =>
-    OpenCode.make({
-      baseUrl: endpoint.url,
-      headers: Service.headers(endpoint),
-      // Session waits can remain idle until background work finishes.
-      fetch: noTimeoutFetch,
-    })
+    OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch })
   const reconnect = input.reconnect
   return {
+    resender,
     sdk: make(input.endpoint),
     reconnect: reconnect
       ? async (signal: AbortSignal) => {

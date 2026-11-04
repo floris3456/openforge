@@ -5,6 +5,7 @@ import type { ContinuityWork } from "@opencode/client/promise"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
+import { useClient } from "./client"
 import { useData } from "./data"
 import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
@@ -86,6 +87,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     const toast = useToast()
     const route = useRoute()
     const data = useData()
+    const client = useClient()
     const title: TitleOf = (sessionID) => data.session.get(sessionID)?.title || undefined
     const [state, setState] = createSignal<UpdateState>()
     const [pending, setPending] = createSignal(false)
@@ -111,8 +113,12 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     }
 
     // Restart only while no other dialog is open, as it would be lost; the upgrade dialog is not. Half-typed prompts
-    // are carried over to the new release (see default.ts in the CLI).
-    const settled = () => dialog.stack.length === 0 || dialog.key === updateDialog
+    // are carried over to the new release (see default.ts in the CLI); a write still waiting to be resent is not, so
+    // the restart waits until the new release has taken it (or it was given up after 2 minutes).
+    const settled = () =>
+      (dialog.stack.length === 0 || dialog.key === updateDialog) &&
+      client.resending() === 0 &&
+      data.session.resending() === 0
 
     const restart = () => {
       const relaunch = props.updater?.relaunch

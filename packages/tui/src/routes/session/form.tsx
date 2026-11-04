@@ -11,7 +11,7 @@ import {
 } from "@opentui/core"
 import { openUrl } from "@opencode/util/open"
 import { useTheme } from "../../context/theme"
-import type { FormAnswer, FormField, FormValue } from "@opencode/client"
+import { isResendTimeoutError, type FormAnswer, type FormField, type FormValue } from "@opencode/client"
 import { useData, type FormWithLocation } from "../../context/data"
 import { useClipboard } from "../../context/clipboard"
 import { SplitBorder } from "../../ui/border"
@@ -269,7 +269,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
   function reply(answer: FormAnswer) {
     void data.session.form
       .reply({ sessionID: props.form.sessionID, formID: props.form.id, answer }, props.form.location)
-      .catch(showError)
+      .catch((error: unknown) => showError(error, "Answer not sent"))
   }
 
   function replySingle(field: FormAnswerField, value: FormValue) {
@@ -467,11 +467,14 @@ export function FormPrompt(props: { form: FormWithLocation }) {
   function cancel() {
     void data.session.form
       .cancel({ sessionID: props.form.sessionID, formID: props.form.id }, props.form.location)
-      .catch(showError)
+      .catch((error: unknown) => showError(error, "Question not dismissed"))
   }
 
-  function showError(error: unknown) {
+  // Resent for 2 minutes while openforge switched releases: reported as a prompt not sent is, and the question stays.
+  function showError(error: unknown, unsent: string) {
     setStore("error", errorMessage(error))
+    if (isResendTimeoutError(error))
+      toast.show({ title: unsent, message: errorMessage(error), variant: "error", duration: 60_000 })
   }
 
   function openExternal() {

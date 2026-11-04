@@ -54,6 +54,8 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       const previous = state()
       if (previous?.type === next.type && "version" in next && previous.version === next.version) return
       setState(next)
+      // Leaving a screen that cannot restart itself tells the user to start the new release.
+      if (next.type === "switched" && !props.updater?.relaunch) epilogue.updatedVersion(next.version)
       // The dialog shows every step itself; without it, the steps that need attention become toasts.
       if (dialog.stack.length > 0) return
       if (next.type === "ready") toast.show({ variant: "info", message: readyMessage(next.version), duration: 60_000 })
@@ -91,19 +93,25 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       setPending(false)
       restart()
     }
+    // Restart after a pause: emptying the prompt or closing a dialog happens through keys still being handled.
+    let quiet: ReturnType<typeof setTimeout> | undefined
+    const schedule = () => {
+      clearTimeout(quiet)
+      quiet = setTimeout(attempt, 300)
+    }
+    onCleanup(() => clearTimeout(quiet))
 
     createEffect(() => {
       const current = state()
       if (current?.type !== "switched" || !props.updater?.relaunch) return
       setPending(true)
     })
+    // Tracks the dialog stack and the prompt's contents, so emptying either schedules the restart.
     createEffect(() => {
-      // Tracks the dialog stack, so closing the last dialog retries.
-      if (pending() && dialog.stack.length === 0) attempt()
+      if (pending() && settled()) schedule()
     })
-    // Clearing or sending the prompt happens through keys, and a sent prompt leaves the composer a moment later.
     useKeyboard(() => {
-      if (pending()) setTimeout(attempt, 300)
+      if (pending()) schedule()
     })
 
     onMount(() => {

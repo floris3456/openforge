@@ -21,6 +21,7 @@ import { RemoteTunnel } from "./services/remote-tunnel"
 import { WebUi } from "./services/web-ui"
 import { databasePath } from "./database-path"
 import { SwitchLock } from "./upgrade/switch-lock"
+import { selfCommand } from "./util/process"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -145,6 +146,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
                 ? process.platform !== "win32"
                 : !truthy(process.env.OPENCODE_DISABLE_FFF),
           },
+          runner: { command: [...selfCommand(), "runner"] },
         },
         serviceOptions === undefined
           ? undefined

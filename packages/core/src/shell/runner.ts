@@ -143,7 +143,10 @@ const layer = (options: Options) =>
       const bus = yield* Bus.Service
       const app = yield* App.Metadata
       const scope = yield* Scope.Scope
-      const current = RunnerPaths.directory(global.state, app.version)
+      // A runner hosted in this process gets a folder of its own, so no other service starts commands in it.
+      const current = options.launch
+        ? RunnerPaths.directory(global.state, app.version)
+        : path.join(global.tmp, "runner", `${app.version}-${process.pid}`)
       const shells = path.join(global.data, DIRECTORY)
       const entries = new Map<Shell.ID, Entry>()
       const exited = new Map<string, Shell.ID[]>()
@@ -167,7 +170,9 @@ const layer = (options: Options) =>
       yield* Effect.addFinalizer(() =>
         Effect.promise(async () => {
           // A runner hosted here ends with this service, as its commands would have without one.
-          await state.hosted?.shutdown()
+          if (!state.hosted) return
+          await state.hosted.shutdown()
+          await rm(current, { recursive: true, force: true })
         }),
       )
 

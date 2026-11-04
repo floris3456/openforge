@@ -19,6 +19,7 @@ import { Session } from "@opencode/core/session"
 import { Instance } from "@opencode/core/instance/service"
 import { SessionTransfer } from "@opencode/core/session/transfer"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { ShellSelect } from "@opencode/core/shell/select"
 import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
@@ -79,6 +80,7 @@ const applicationServiceNodes = [
   ServerPairing.node,
   LocationServiceMap.node,
   LocationActivity.node,
+  ShellRunner.node,
   SessionRestart.node,
   Schedule.node,
   Workspace.node,
@@ -141,6 +143,11 @@ function makeRoutes<AuthError, AuthServices>(
     ),
     InstructionDiscovery.node.replace(InstructionDiscovery.configured({ project: options.config?.project })),
     ShellSelect.node.replace(ShellSelect.configured({ gitbash: options.windows?.gitbash })),
+    ShellRunner.node.replace(
+      ShellRunner.configured(
+        options.runner?.command?.length ? { launch: ShellRunner.detached(options.runner.command) } : {},
+      ),
+    ),
     Mcp.node.replace(
       Mcp.configured({
         clientInfo: {

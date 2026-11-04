@@ -1,4 +1,6 @@
 import { NodeServices } from "@effect/platform-node"
+import { RunnerPaths } from "@opencode/runner/paths"
+import { RunnerServer } from "@opencode/runner/server"
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
 import fs from "node:fs/promises"
@@ -178,6 +180,43 @@ describe("kept releases", () => {
         "0.0.3",
         "0.0.1",
       ])
+    }),
+  )
+
+  it.live("never removes a release whose tool runner still runs", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const state = path.join(directory, "state")
+      const layout = ReleaseLayout.at(paths(directory).data, RunnerPaths.root(state))
+      yield* Effect.promise(() =>
+        Promise.all(
+          ["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5", "0.0.6"].map((version) =>
+            fakeBinary(ReleaseLayout.binary(layout, version), version),
+          ),
+        ),
+      )
+      const runner = yield* Effect.acquireRelease(
+        Effect.promise(() => RunnerServer.serve({ directory: RunnerPaths.directory(state, "0.0.2"), version: "0.0.2" })),
+        (runner) => Effect.promise(() => runner.shutdown()),
+      )
+      // A runner that has exited leaves its folder behind; that release goes as usual.
+      const exited = yield* Effect.promise(() =>
+        RunnerServer.serve({ directory: RunnerPaths.directory(state, "0.0.3"), version: "0.0.3", grace: 0 }),
+      )
+      yield* Effect.promise(() => exited.closed)
+
+      expect(yield* ReleaseLayout.running(layout).pipe(Effect.provide(layer(directory)))).toEqual(["0.0.2"])
+      const removed = yield* ReleaseLayout.prune(layout, ["0.0.1"]).pipe(Effect.provide(layer(directory)))
+      expect(removed).toEqual(["0.0.3"])
+      expect(yield* ReleaseLayout.installed(layout).pipe(Effect.provide(layer(directory)))).toEqual([
+        "0.0.6",
+        "0.0.5",
+        "0.0.4",
+        "0.0.2",
+        "0.0.1",
+      ])
+      yield* Effect.promise(() => runner.shutdown())
+      expect(yield* ReleaseLayout.prune(layout, ["0.0.1"]).pipe(Effect.provide(layer(directory)))).toEqual(["0.0.2"])
     }),
   )
 

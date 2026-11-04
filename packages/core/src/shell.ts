@@ -148,9 +148,9 @@ const layer = () =>
         return { info, capture }
       })
 
-      // A workspace-backed Location runs its commands in the workspace's own environment, not in the local runner,
-      // so they do not outlive this service.
-      const workspace = Effect.fnUntraced(function* (info: Shell.Info, command: ShellWrap.Command, deadline?: number) {
+      // A workspace-backed Location runs its commands in the workspace's own environment, and Windows has no tool
+      // runner: these commands run from this service, and do not outlive it.
+      const inProcess = Effect.fnUntraced(function* (info: Shell.Info, command: ShellWrap.Command, deadline?: number) {
         const ready = Deferred.makeUnsafe<Shell.Info, AppProcess.AppProcessError>()
         runFork(
           Effect.scoped(
@@ -314,7 +314,8 @@ const layer = () =>
           { metadata: info.metadata },
         )
         const deadline = invocation.timeout > 0 ? started + invocation.timeout : undefined
-        if (location.workspaceID !== undefined) return yield* workspace(info, command, deadline)
+        if (location.workspaceID !== undefined || process.platform === "win32")
+          return yield* inProcess(info, command, deadline)
         return yield* runner.start({ info, location: ref, argv: command.argv, cwd: command.cwd, env: command.env, deadline })
       })
 

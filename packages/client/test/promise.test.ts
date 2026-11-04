@@ -63,6 +63,7 @@ test("exposes every standard HTTP API group", () => {
     "media",
     "schedule",
     "artifacts",
+    "shell",
     "migration",
     "usage",
     "config",
@@ -83,6 +84,7 @@ test("exposes every standard HTTP API group", () => {
   expect(Object.keys(client.experimental.file)).toEqual(["write", "watch", "unwatch"])
   expect(Object.keys(client.experimental.media)).toEqual(["get"])
   expect(Object.keys(client.experimental.schedule)).toEqual(["create", "list", "get", "pause", "resume", "delete"])
+  expect(Object.keys(client.experimental.shell)).toEqual(["watch"])
   expect(client.experimental.persistentPty.read).toBeFunction()
 })
 
@@ -163,11 +165,12 @@ test("nests a method under client.experimental exactly when its route is experim
     "session.skill",
     "session.stats",
     "session.wait",
+    "shell.watch",
     "usage.limits",
     "voice.models",
     "voice.session",
   ])
-  expect(Object.keys(client.shell)).toEqual(["list", "create", "get", "output", "remove"])
+  expect(Object.keys(client.shell)).toEqual(["list", "create", "get", "output", "remove", "watch"])
   expect(Object.keys(client.project)).toEqual(["list", "update"])
   expect(Object.keys(client.worktree)).toEqual(["list", "create", "remove", "refresh"])
 })

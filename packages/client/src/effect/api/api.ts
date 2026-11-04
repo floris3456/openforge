@@ -2574,6 +2574,23 @@ export interface ShellApi<E = never> {
   readonly get: ShellGetOperation<E>
   readonly output: ShellOutputOperation<E>
   readonly remove: ShellRemoveOperation<E>
+
+  /** @deprecated Use `client.experimental.shell.watch`. Removed in the next minor. */
+  readonly watch: ExperimentalShellWatchOperation<E>
+}
+
+export type ExperimentalShellWatchInput = {
+  readonly id: Shell.ID
+  readonly location?: { readonly directory?: string | undefined } | undefined
+  readonly cursor?: number | undefined
+}
+export type ExperimentalShellWatchOutput = Shell.WatchEvent
+export type ExperimentalShellWatchOperation<E = never> = (
+  input: ExperimentalShellWatchInput,
+) => Stream.Stream<ExperimentalShellWatchOutput, E>
+
+export interface ExperimentalShellApi<E = never> {
+  readonly watch: ExperimentalShellWatchOperation<E>
 }
 
 export type ReferenceListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
@@ -2977,6 +2994,15 @@ export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
 /** @deprecated Use `ExperimentalFileUnwatchOperation`. Removed in the next minor. */
 export type FileUnwatchOperation<E = never> = ExperimentalFileUnwatchOperation<E>
 
+/** @deprecated Use `ExperimentalShellWatchInput`. Removed in the next minor. */
+export type ShellWatchInput = ExperimentalShellWatchInput
+
+/** @deprecated Use `ExperimentalShellWatchOutput`. Removed in the next minor. */
+export type ShellWatchOutput = ExperimentalShellWatchOutput
+
+/** @deprecated Use `ExperimentalShellWatchOperation`. Removed in the next minor. */
+export type ShellWatchOperation<E = never> = ExperimentalShellWatchOperation<E>
+
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput
 
@@ -3026,6 +3052,7 @@ export interface AppApi<E = never> {
     readonly integration: ExperimentalIntegrationApi<E>
     readonly mcp: ExperimentalMcpApi<E>
     readonly file: ExperimentalFileApi<E>
+    readonly shell: ExperimentalShellApi<E>
     readonly migration: ExperimentalMigrationApi<E>
     readonly usage: ExperimentalUsageApi<E>
     readonly config: ExperimentalConfigApi<E>

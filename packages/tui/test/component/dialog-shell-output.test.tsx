@@ -16,7 +16,7 @@ import { Composer } from "../../src/routes/session/composer"
 import { DialogProvider } from "../../src/ui/dialog"
 import { ToastProvider } from "../../src/ui/toast"
 import { emptyThemeSource, tmpdir } from "../fixture/fixture"
-import { createApi, createEventStream, createFetch, json } from "../fixture/tui-client"
+import { createApi, createEventStream, createFetch, createSseResponse, json } from "../fixture/tui-client"
 import { TestTuiContexts } from "../fixture/tui-environment"
 import { createTuiResolvedConfig } from "../fixture/tui-runtime"
 
@@ -37,15 +37,43 @@ async function setup(width: number, output = "") {
   const requests: { url: URL; method: string }[] = []
   const events = createEventStream()
   const envelope = (data: unknown) => json({ location, data })
+  type Watch = { stream: ReturnType<typeof createSseResponse>; cursor: number }
+  const watches = new Set<Watch>()
+  const watching = () => [...watches].filter((watch) => watch.stream.open)
+  // What the server does: output from the watch's cursor as it arrives, then the end.
+  const pump = (watch: Watch) => {
+    const bytes = Buffer.from(state.output)
+    if (watch.cursor < bytes.length)
+      watch.stream.send({
+        type: "output",
+        output: bytes.subarray(watch.cursor).toString(),
+        cursor: bytes.length,
+        size: bytes.length,
+        truncated: false,
+      })
+    watch.cursor = Math.max(watch.cursor, bytes.length)
+    if (shell.status === "running") return
+    watch.stream.send({ type: "exited", info: shell })
+    watch.stream.close()
+  }
+  const watch = (cursor: number, signal: AbortSignal) => {
+    const entry = { stream: createSseResponse(signal), cursor }
+    watches.add(entry)
+    pump(entry)
+    return entry.stream.response
+  }
   const api = createApi(
     createFetch((url, request) => {
-      if (!url.pathname.startsWith("/api/shell")) return undefined
+      if (!url.pathname.startsWith("/api/shell") && !url.pathname.startsWith("/api/experimental/shell"))
+        return undefined
       requests.push({ url, method: request.method })
       if (url.pathname === "/api/shell") return envelope([shell])
       if (state.missing)
         return json({ _tag: "ShellNotFoundError", id: shell.id, message: "Shell not found" }, { status: 404 })
       if (state.failure) return new Response("Unavailable", { status: 503 })
       if (url.pathname === `/api/shell/${shell.id}`) return envelope(shell)
+      if (url.pathname === `/api/experimental/shell/${shell.id}/watch`)
+        return watch(Number(url.searchParams.get("cursor") ?? 0), request.signal)
       const bytes = Buffer.from(state.output)
       const cursor = Math.min(Number(url.searchParams.get("cursor") ?? 0), bytes.length)
       const end = Math.min(cursor + Number(url.searchParams.get("limit") ?? 65536), bytes.length)
@@ -102,6 +130,26 @@ async function setup(width: number, output = "") {
     location,
     requests,
     events,
+    watching: () => watching().length,
+    write(text: string) {
+      state.output += text
+      watching().forEach(pump)
+    },
+    exit(code: number) {
+      shell.status = "exited"
+      shell.exit = code
+      watching().forEach(pump)
+    },
+    // The connection drops, and the server answers errors until it recovers.
+    fail() {
+      state.failure = true
+      watching().forEach((watch) => watch.stream.fail(new Error("connection reset")))
+    },
+    // Removed while watched: the server ends the stream.
+    remove() {
+      state.missing = true
+      watching().forEach((watch) => watch.stream.close())
+    },
     async [Symbol.asyncDispose]() {
       app.renderer.destroy()
       await temporary[Symbol.asyncDispose]()
@@ -121,19 +169,15 @@ test.each([40, 100])("shell output opens, follows, scrolls, and survives exit at
   app.mockInput.pressKey("HOME")
   await app.waitForFrame((frame) => frame.includes("Frame 1\n") || /Frame 1\s/.test(frame))
   expect(scroll.scrollTop).toBe(0)
-  app.state.output += "Frame 51\n"
-  await app.waitFor(
-    () =>
-      app.requests.some(
-        (request) => request.url.searchParams.get("cursor") === String(Buffer.byteLength(app.state.output)),
-      ),
-    { maxPasses: 150 },
-  )
+  const height = scroll.scrollHeight
+  app.write("Frame 51\n")
+  await app.waitFor(() => scroll.scrollHeight > height, { maxPasses: 150 })
   expect(scroll.scrollTop).toBe(0)
   app.mockInput.pressKey("END")
   await app.waitForFrame((frame) => frame.includes("Frame 51"))
-  app.shell.status = "exited"
-  app.shell.exit = 0
+  // The command's last output comes before its end, on the same stream.
+  app.write("\u001b[32mRender complete\u001b[0m\r\n")
+  app.exit(0)
   app.events.emit({
     id: "evt_exit",
     created: 0,
@@ -141,17 +185,17 @@ test.each([40, 100])("shell output opens, follows, scrolls, and survives exit at
     location: app.location,
     data: { id: app.shell.id, exit: 0, status: "exited" },
   })
-  await app.waitForFrame((frame) => frame.includes("code 0"), { maxPasses: 100 })
-  const metadataReads = app.requests.filter((request) => request.url.pathname === `/api/shell/${app.shell.id}`).length
-  // Terminal metadata can arrive before the capture's final flush.
-  app.state.output += "\u001b[32mRender complete\u001b[0m\r\n"
   await app.waitForFrame((frame) => frame.includes("Render complete") && frame.includes("code 0"), { maxPasses: 100 })
-  expect(app.requests.filter((request) => request.url.pathname === `/api/shell/${app.shell.id}`)).toHaveLength(
-    metadataReads,
-  )
   expect(app.captureCharFrame()).not.toContain("[32m")
+  expect(app.watching()).toBe(0)
+  // Pushed, never polled: one size read and one watch, and no reconnect once the command ended.
+  await Bun.sleep(1100)
   expect(app.requests.every((request) => request.method === "GET")).toBe(true)
   const reads = app.requests.filter((request) => request.url.pathname !== "/api/shell")
+  expect(reads.map((request) => request.url.pathname)).toEqual([
+    `/api/shell/${app.shell.id}/output`,
+    `/api/experimental/shell/${app.shell.id}/watch`,
+  ])
   expect(reads.every((request) => request.url.searchParams.get("location[directory]") === app.location.directory)).toBe(
     true,
   )
@@ -159,24 +203,23 @@ test.each([40, 100])("shell output opens, follows, scrolls, and survives exit at
 
   app.mockInput.pressEscape()
   await app.waitForFrame((frame) => !frame.includes("Shell output") && frame.includes("No shell commands"))
-  const count = app.requests.length
-  await Bun.sleep(1100)
-  expect(app.requests).toHaveLength(count)
 })
 
-test("empty output explains redirection, retries errors, and preserves output after removal", async () => {
+test("empty output explains redirection, reconnects after errors, and preserves output after removal", async () => {
   await using app = await setup(100)
   app.mockInput.pressEnter()
   await app.waitForFrame((frame) => frame.includes("No captured output") && frame.includes("redirected"))
-  app.state.failure = true
+  await app.waitFor(() => app.watching() === 1)
+  app.fail()
   await app.waitForFrame((frame) => frame.includes("Retrying"), { maxPasses: 100 })
   app.state.failure = false
-  app.state.output = "Recovered output\n"
-  await app.waitForFrame((frame) => frame.includes("Recovered output") && !frame.includes("Retrying"), {
-    maxPasses: 100,
-  })
-  app.state.missing = true
-  await app.waitForFrame((frame) => frame.includes("no longer available"), { maxPasses: 100 })
+  // Back before any new output: reconnecting alone clears the error.
+  await app.waitForFrame((frame) => !frame.includes("Retrying"), { maxPasses: 150 })
+  await app.waitFor(() => app.watching() === 1)
+  app.write("Recovered output\n")
+  await app.waitForFrame((frame) => frame.includes("Recovered output"))
+  app.remove()
+  await app.waitForFrame((frame) => frame.includes("no longer available"), { maxPasses: 150 })
   expect(app.captureCharFrame()).toContain("Recovered output")
   const count = app.requests.length
   await Bun.sleep(1100)
@@ -195,7 +238,7 @@ test.each([40, 100])("mouse-wheel scrolling pauses and resumes output following 
   const paused = scroll.scrollTop
   const height = scroll.scrollHeight
 
-  app.state.output += "Frame 51\n"
+  app.write("Frame 51\n")
   await app.waitFor(() => scroll.scrollHeight > height, { maxPasses: 100 })
   expect(scroll.scrollTop).toBe(paused)
   expect(app.captureCharFrame()).toContain("Shell output")
@@ -204,10 +247,15 @@ test.each([40, 100])("mouse-wheel scrolling pauses and resumes output following 
   await app.mockMouse.scroll(scroll.viewport.x + 2, scroll.viewport.y + 2, "down")
   await app.waitFor(() => scroll.scrollTop === scroll.scrollHeight - scroll.viewport.height)
   const followed = scroll.scrollTop
-  app.state.output += "Frame 52\n"
+  app.write("Frame 52\n")
   await app.waitForFrame((frame) => frame.includes("Frame 52"), { maxPasses: 100 })
   expect(scroll.scrollTop).toBeGreaterThan(followed)
   expect(scroll.scrollTop).toBe(scroll.scrollHeight - scroll.viewport.height)
+
+  // Closing the viewer of a running command stops watching it.
+  expect(app.watching()).toBe(1)
+  app.mockInput.pressEscape()
+  await app.waitFor(() => app.watching() === 0)
 })
 
 test("large captures open at a bounded tail and clicking a shell opens the viewer", async () => {
@@ -218,8 +266,9 @@ test("large captures open at a bounded tail and clicking a shell opens the viewe
     .findIndex((line) => line.includes(app.shell.command))
   await app.mockMouse.click(6, row)
   await app.waitForFrame((frame) => frame.includes("Latest frame") && frame.includes("Earlier output omitted"))
-  const reads = app.requests.filter((request) => request.url.pathname.endsWith("/output"))
+  const reads = app.requests.filter((request) => request.url.pathname !== "/api/shell")
+  expect(reads[0]?.url.pathname).toBe(`/api/shell/${app.shell.id}/output`)
   expect(reads[0]?.url.searchParams.get("cursor")).toBe(String(Number.MAX_SAFE_INTEGER))
+  expect(reads[1]?.url.pathname).toBe(`/api/experimental/shell/${app.shell.id}/watch`)
   expect(reads[1]?.url.searchParams.get("cursor")).toBe(String(Buffer.byteLength(app.state.output) - 65536))
-  expect(reads[1]?.url.searchParams.get("limit")).toBe("65536")
 })

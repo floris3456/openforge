@@ -1,12 +1,13 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
-import { isShellNotFoundError, type LocationRef, type ShellInfo } from "@opencode/client"
-import { createEffect, createMemo, createSignal, onCleanup, Show, untrack } from "solid-js"
+import { type LocationRef, type ShellInfo } from "@opencode/client"
+import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
 import stripAnsi from "strip-ansi"
 import { useClient } from "../context/client"
 import { Keymap } from "../context/keymap"
 import { useTheme } from "../context/theme"
 import { DialogFooter, DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
+import { followShellOutput } from "../util/shell-output"
 
 const PAGE_BYTES = 64 * 1024
 
@@ -29,55 +30,28 @@ export function DialogShellOutput(props: { shell: ShellInfo; location: LocationR
   createEffect(() => {
     // The running-shell inventory drops exited commands. Keep this view tied to
     // the opened ID and its original Location, not the list's current selection.
-    const id = props.shell.id
     const location = { directory: props.location.directory }
-    let cursor: number | undefined
-    let disposed = false
-    let missing = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-
-    const load = async () => {
-      if (untrack(info).status === "running") {
-        const current = await client.api.shell.get({ id, location })
-        if (disposed) return false
-        setInfo(current.data)
-      }
-      if (cursor === undefined) {
-        const head = await client.api.shell.output({ id, location, cursor: Number.MAX_SAFE_INTEGER })
-        if (disposed) return false
-        cursor = Math.max(0, head.data.size - PAGE_BYTES)
-        setOmitted(cursor > 0)
-      }
-      const page = await client.api.shell.output({ id, location, cursor, limit: PAGE_BYTES })
-      if (disposed) return false
-      cursor = page.data.cursor
-      setOutput((previous) => {
-        const next = (previous ?? "") + page.data.output
-        if (next.length > PAGE_BYTES) setOmitted(true)
-        return next.slice(-PAGE_BYTES)
-      })
-      setError("")
-      return cursor < page.data.size
-    }
-
-    const poll = () => {
-      void load()
-        .catch((cause: unknown) => {
-          if (disposed) return
-          missing = isShellNotFoundError(cause)
-          setError(missing ? "Shell output is no longer available." : "Unable to read shell output. Retrying…")
-        })
-        .then((more) => {
-          // Poll only while the viewer is open, including after exit so the final
-          // file flush is observed. Never overlap reads or reload earlier pages.
-          if (!disposed && !missing) timer = setTimeout(poll, more ? 0 : 1_000)
-        })
-    }
-    poll()
-    onCleanup(() => {
-      disposed = true
-      clearTimeout(timer)
-    })
+    const stop = followShellOutput(
+      () => client.api,
+      { id: props.shell.id, location, limit: PAGE_BYTES },
+      {
+        connected: () => setError(""),
+        reset: (earlier) => {
+          setOutput("")
+          setOmitted(earlier)
+        },
+        output: (text) =>
+          setOutput((previous) => {
+            const next = (previous ?? "") + text
+            if (next.length > PAGE_BYTES) setOmitted(true)
+            return next.slice(-PAGE_BYTES)
+          }),
+        exited: (shell) => setInfo(shell),
+        failed: (missing) =>
+          setError(missing ? "Shell output is no longer available." : "Unable to read shell output. Retrying…"),
+      },
+    )
+    onCleanup(stop)
   })
 
   const status = () => {

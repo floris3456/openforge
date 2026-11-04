@@ -32,7 +32,10 @@ export const machine = Effect.gen(function* () {
   )
   const hosted = (directory: string) =>
     Effect.tryPromise({
-      try: () => RunnerServer.serve({ directory, version: path.basename(directory) }).then((runner) => void runners.push(runner)),
+      try: () =>
+        RunnerServer.serve({ directory, version: path.basename(directory) }).then(
+          (runner) => void runners.push(runner),
+        ),
       catch: (cause) => new RunnerClient.RunnerError({ reason: "spawn", message: String(cause) }),
     })
   // The runner as its own process, so it can die on its own.
@@ -49,9 +52,11 @@ export const machine = Effect.gen(function* () {
     repos: root("repos"),
   })
   const ref = Location.Ref.make({ directory: AbsolutePath.make(project) })
-  const service = (options: { readonly version?: string; readonly separate?: boolean } = {}) =>
+  const service = (
+    options: { readonly version?: string; readonly separate?: boolean; readonly location?: Location.Ref } = {},
+  ) =>
     AppNodeBuilder.build(LayerNode.group([Shell.node, ShellRunner.node, Global.node]), [
-      Location.node.replace(Layer.succeed(Location.Service, Location.Service.of(location(ref)))),
+      Location.node.replace(Layer.succeed(Location.Service, Location.Service.of(location(options.location ?? ref)))),
       Global.node.replace(global),
       Config.node.replace(Config.testLayer()),
       Environment.node.replace(hostEnvironmentLayer),

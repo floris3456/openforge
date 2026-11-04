@@ -2,8 +2,9 @@ export * as Shell from "./shell.js"
 
 import { mkdir, rm } from "fs/promises"
 import path from "path"
-import { Context, Deferred, Duration, Effect, Fiber, Layer, Schedule, Schema, Stream } from "effect"
+import { Context, Deferred, Duration, Effect, Fiber, Layer, Queue, Schedule, Schema, Stream } from "effect"
 import { ChildProcess } from "effect/process"
+import type { RunnerClient } from "@opencode/runner/client"
 import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
 import type { RunnerProtocol } from "@opencode/runner/protocol"
@@ -28,6 +29,8 @@ import { ShellRunner } from "./shell/runner.js"
 import { ShellWrap } from "./shell/wrap.js"
 
 export { NotFoundError, RunnerStoppedError } from "./shell/runner.js"
+export const ID = Shell.ID
+export type ID = Shell.ID
 
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = ShellRunner.DIRECTORY
@@ -124,7 +127,11 @@ const layer = () =>
       const result = Effect.fn("Shell.result")(function* (started: Shell.Info) {
         const info = yield* runner.wait(started.id).pipe(
           Effect.catchTag("Shell.NotFoundError", () =>
-            Effect.succeed({ ...started, status: "killed" as const, time: { ...started.time, completed: Date.now() } }),
+            Effect.succeed({
+              ...started,
+              status: "killed" as const,
+              time: { ...started.time, completed: Date.now() },
+            }),
           ),
         )
         const capture = yield* Effect.gen(function* () {
@@ -167,9 +174,52 @@ const layer = () =>
                 )
                 .pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: info.command, cause })))
               const writer = new RunnerOutput.Writer(info.file)
-              const state: { reason?: "timeout" | "killed"; remove: boolean; timer?: Fiber.Fiber<void> } = {
-                remove: false,
+              const state: {
+                reason?: "timeout" | "killed"
+                remove: boolean
+                timer?: Fiber.Fiber<void>
+                ended: boolean
+                // Bumped by every append and by the end, so a watch never misses one between its read and its wait.
+                version: number
+              } = { remove: false, ended: false, version: 0 }
+              const wakes = new Set<() => void>()
+              const wake = () => {
+                state.version++
+                // Taken out first: a resumed watch may wait again at once, and must not be resumed again here.
+                const waiting = [...wakes]
+                wakes.clear()
+                waiting.forEach((resume) => resume())
               }
+              const changed = (seen: number) =>
+                Effect.callback<void>((resume) => {
+                  if (state.version !== seen) return resume(Effect.void)
+                  const done = () => resume(Effect.void)
+                  wakes.add(done)
+                  return Effect.sync(() => wakes.delete(done))
+                })
+              // Live output until the command ends; ShellRunner reads what is left from the finished file.
+              const follow = (offset: number) =>
+                Stream.callback<RunnerClient.WatchEvent>((queue) =>
+                  Effect.gen(function* () {
+                    let cursor = offset
+                    while (!state.ended) {
+                      const seen = state.version
+                      const chunk = writer.read(cursor)
+                      if (chunk && chunk.data.length > 0) {
+                        cursor = chunk.offset + chunk.data.length
+                        yield* Queue.offer(queue, {
+                          type: "output",
+                          offset: chunk.offset,
+                          data: chunk.data,
+                          size: writer.size,
+                        })
+                        continue
+                      }
+                      yield* changed(seen)
+                    }
+                    yield* Queue.end(queue)
+                  }),
+                )
               const kill = () => runFork(handle.kill({ forceKillAfter: Duration.seconds(3) }).pipe(Effect.ignore))
               const arm = (at: number | null) =>
                 Effect.gen(function* () {
@@ -206,7 +256,7 @@ const layer = () =>
                         ? { offset: chunk.offset, data: chunk.data, size: writer.size }
                         : { offset: Math.min(offset, writer.size), data: Buffer.alloc(0), size: writer.size }
                     }),
-                  watch: () => Stream.empty,
+                  watch: follow,
                 },
               })
               yield* arm(deadline ?? null)
@@ -223,13 +273,20 @@ const layer = () =>
                     ),
                   ),
                   handle.all.pipe(
-                    Stream.runForEach((chunk: Uint8Array) => Effect.sync(() => writer.append(chunk))),
+                    Stream.runForEach((chunk: Uint8Array) =>
+                      Effect.sync(() => {
+                        writer.append(chunk)
+                        wake()
+                      }),
+                    ),
                     Effect.ignore,
                   ),
                 ],
                 { concurrency: 2 },
               )
               if (state.timer) yield* Fiber.interrupt(state.timer)
+              state.ended = true
+              wake()
               const layout = writer.finish()
               writer.close()
               const exit: RunnerProtocol.Exit = {
@@ -255,9 +312,10 @@ const layer = () =>
               }
               yield* Effect.promise(() =>
                 state.remove
-                  ? Promise.all([rm(info.file, { force: true }), rm(RunnerPaths.exit(info.file), { force: true })]).then(
-                      () => undefined,
-                    )
+                  ? Promise.all([
+                      rm(info.file, { force: true }),
+                      rm(RunnerPaths.exit(info.file), { force: true }),
+                    ]).then(() => undefined)
                   : RunnerOutput.writeAtomic(RunnerPaths.exit(info.file), JSON.stringify(exit)),
               )
               yield* finish(exit)
@@ -316,7 +374,14 @@ const layer = () =>
         const deadline = invocation.timeout > 0 ? started + invocation.timeout : undefined
         if (location.workspaceID !== undefined || process.platform === "win32")
           return yield* inProcess(info, command, deadline)
-        return yield* runner.start({ info, location: ref, argv: command.argv, cwd: command.cwd, env: command.env, deadline })
+        return yield* runner.start({
+          info,
+          location: ref,
+          argv: command.argv,
+          cwd: command.cwd,
+          env: command.env,
+          deadline,
+        })
       })
 
       return Service.of({

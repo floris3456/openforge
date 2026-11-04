@@ -1,10 +1,13 @@
 import { describe, expect } from "bun:test"
 import fs from "fs"
 import path from "path"
-import { Effect, Fiber, Schedule } from "effect"
+import { Effect, Fiber, Queue, Schedule, Stream } from "effect"
 import { RunnerPaths } from "@opencode/runner/paths"
+import { Location } from "@opencode/core/location"
 import { Shell } from "@opencode/core/shell"
 import { ShellRunner } from "@opencode/core/shell/runner"
+import { Workspace } from "@opencode/core/workspace"
+import type { Shell as ShellSchema } from "@opencode/schema/shell"
 import { alive, machine } from "./fixture/runner"
 import { it } from "./lib/effect"
 
@@ -17,7 +20,54 @@ const until = (condition: () => boolean) =>
     Effect.timeout("10 seconds"),
   )
 
+// Takes watch events until the output so far reads `text` (or the command has exited); returns that output.
+const read = (events: Queue.Queue<ShellSchema.WatchEvent>, text: string) =>
+  Effect.gen(function* () {
+    let output = ""
+    while (output !== text) {
+      const event = yield* Queue.take(events)
+      if (event.type === "exited") break
+      output += event.output
+    }
+    return output
+  }).pipe(Effect.timeout("10 seconds"))
+
 describe("Shell through the tool runner", () => {
+  for (const workspace of [false, true])
+    it.live(
+      `watch pushes output as it arrives, then the exit${workspace ? ", also in a workspace's own environment" : ""}`,
+      () =>
+        Effect.gen(function* () {
+          const host = yield* machine
+          const release = path.join(host.tmp, "release")
+          const location = workspace
+            ? Location.Ref.make({ directory: host.ref.directory, workspaceID: Workspace.ID.make("wrk_watch") })
+            : undefined
+          yield* Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            const info = yield* shell.create({ shell: "/bin/sh", command: gated(release, "one", "two"), timeout: 0 })
+            const events = yield* Queue.unbounded<ShellSchema.WatchEvent>()
+            yield* shell.watch(info.id).pipe(
+              Stream.runForEach((event) => Queue.offer(events, event)),
+              Effect.forkScoped({ startImmediately: true }),
+            )
+            // Pushed while the command still waits for its release.
+            expect(yield* read(events, "one")).toBe("one")
+            expect((yield* shell.get(info.id)).status).toBe("running")
+            fs.writeFileSync(release, "")
+            expect(yield* read(events, "two")).toBe("two")
+            expect(yield* Queue.take(events)).toMatchObject({ type: "exited", info: { status: "exited", exit: 0 } })
+
+            // A later watch of the finished command gets all of it from its file, from a cursor on.
+            const again = yield* shell.watch(info.id, { cursor: 1 }).pipe(Stream.runCollect)
+            expect(again.map((event) => (event.type === "output" ? event.output : event.type))).toEqual([
+              "netwo",
+              "exited",
+            ])
+          }).pipe(Effect.scoped, Effect.provide(host.service({ location })))
+        }),
+    )
+
   it.live("a service shutdown leaves its commands running, and the next service picks them up", () =>
     Effect.gen(function* () {
       const host = yield* machine
@@ -25,7 +75,11 @@ describe("Shell through the tool runner", () => {
       const started = yield* Effect.gen(function* () {
         const shell = yield* Shell.Service
         const runner = yield* ShellRunner.Service
-        const info = yield* shell.create({ shell: "/bin/sh", command: gated(release, "before", "after"), timeout: 60_000 })
+        const info = yield* shell.create({
+          shell: "/bin/sh",
+          command: gated(release, "before", "after"),
+          timeout: 60_000,
+        })
         // Waiting as the shell tool does: an interrupted wait removes the command, unless the service is stopping.
         yield* shell.result(info).pipe(
           Effect.onInterrupt(() => shell.remove(info.id).pipe(Effect.ignore)),
@@ -65,12 +119,10 @@ describe("Shell through the tool runner", () => {
       const info = yield* Effect.gen(function* () {
         const shell = yield* Shell.Service
         const info = yield* shell.create({ shell: "/bin/sh", command: "sleep 30", timeout: 0 })
-        const waiting = yield* shell
-          .result(info)
-          .pipe(
-            Effect.onInterrupt(() => shell.remove(info.id).pipe(Effect.ignore)),
-            Effect.forkScoped({ startImmediately: true }),
-          )
+        const waiting = yield* shell.result(info).pipe(
+          Effect.onInterrupt(() => shell.remove(info.id).pipe(Effect.ignore)),
+          Effect.forkScoped({ startImmediately: true }),
+        )
         yield* Fiber.interrupt(waiting)
         return info
       }).pipe(Effect.scoped, Effect.provide(host.service()))
@@ -146,7 +198,9 @@ describe("Shell through the tool runner", () => {
           yield* until(() => fs.existsSync(ready))
           const child = Number(fs.readFileSync(path.join(host.tmp, "child"), "utf8"))
           const waiting = yield* shell.wait(info.id).pipe(Effect.flip, Effect.forkScoped)
-          const runner = JSON.parse(fs.readFileSync(RunnerPaths.info(RunnerPaths.directory(host.state, "test")), "utf8"))
+          const runner = JSON.parse(
+            fs.readFileSync(RunnerPaths.info(RunnerPaths.directory(host.state, "test")), "utf8"),
+          )
           expect(runner.pid).not.toBe(process.pid)
           process.kill(runner.pid, "SIGKILL")
 

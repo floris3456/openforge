@@ -16,7 +16,7 @@ import { Composer } from "../../../src/routes/session/composer"
 import { DialogProvider } from "../../../src/ui/dialog"
 import { ToastProvider } from "../../../src/ui/toast"
 import { tmpdir } from "../../fixture/fixture"
-import { createApi, createEventStream, createFetch, directory, json } from "../../fixture/tui-client"
+import { createApi, createEventStream, createFetch, createSseResponse, directory, json } from "../../fixture/tui-client"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 
@@ -63,13 +63,15 @@ async function renderComposer(
       })
     }
     const shellID = url.pathname.match(/^\/api\/shell\/([^/]+)$/)?.[1]
-    if (shellID && request.method === "GET") {
-      viewed.push(shellID)
+    if (shellID && request.method === "GET")
       return json({ location: { directory }, data: shells.find((shell) => shell.id === shellID) })
-    }
-    if (url.pathname.endsWith("/output")) {
+    const outputID = url.pathname.match(/^\/api\/shell\/([^/]+)\/output$/)?.[1]
+    if (outputID) {
+      viewed.push(outputID)
       return json({ location: { directory }, data: { output: "", cursor: 0, size: 0, truncated: false } })
     }
+    if (/^\/api\/experimental\/shell\/[^/]+\/watch$/.test(url.pathname))
+      return createSseResponse(request.signal).response
     if (shellID && request.method === "DELETE") {
       removed.push(shellID)
       return new Response(null, { status: 204 })

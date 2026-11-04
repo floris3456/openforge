@@ -64,6 +64,41 @@ export function createEventStream() {
   }
 }
 
+// One event stream the test writes to. Like a real fetch, it fails once the request is aborted.
+export function createSseResponse(signal: AbortSignal) {
+  const encoder = new TextEncoder()
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  let open = true
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value
+      },
+      cancel() {
+        open = false
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+  const end = (finish: () => void) => {
+    if (!open) return
+    open = false
+    finish()
+  }
+  signal.addEventListener("abort", () => end(() => controller.error(signal.reason)), { once: true })
+  return {
+    response,
+    get open() {
+      return open
+    },
+    send(event: unknown) {
+      if (open) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+    },
+    close: () => end(() => controller.close()),
+    fail: (cause: unknown) => end(() => controller.error(cause)),
+  }
+}
+
 export type FetchHandler = (url: URL, request: Request) => Response | undefined | Promise<Response | undefined>
 
 export function createFetch(override?: FetchHandler, events?: ReturnType<typeof createEventStream>) {

@@ -1,10 +1,12 @@
 import { Shell } from "@opencode/core/shell"
 import { Location } from "@opencode/core/location"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { ShellNotFoundError } from "@opencode/protocol/errors"
 import { Api } from "../api"
 import { response } from "../location"
+
+const missing = (id: string) => new ShellNotFoundError({ id, message: `Shell command not found: ${id}` })
 
 export const ShellHandler = HttpApiBuilder.group(Api, "server.shell", (handlers) =>
   Effect.gen(function* () {
@@ -31,15 +33,7 @@ export const ShellHandler = HttpApiBuilder.group(Api, "server.shell", (handlers)
         Effect.fn(function* (ctx) {
           const shell = yield* Shell.Service
           return yield* response(
-            shell
-              .get(ctx.params.id)
-              .pipe(
-                Effect.catchTag(
-                  "Shell.NotFoundError",
-                  () =>
-                    new ShellNotFoundError({ id: ctx.params.id, message: `Shell command not found: ${ctx.params.id}` }),
-                ),
-              ),
+            shell.get(ctx.params.id).pipe(Effect.catchTag("Shell.NotFoundError", () => missing(ctx.params.id))),
           )
         }),
       )
@@ -50,14 +44,17 @@ export const ShellHandler = HttpApiBuilder.group(Api, "server.shell", (handlers)
           return yield* response(
             shell
               .output(ctx.params.id, { cursor: ctx.query.cursor, limit: ctx.query.limit })
-              .pipe(
-                Effect.catchTag(
-                  "Shell.NotFoundError",
-                  () =>
-                    new ShellNotFoundError({ id: ctx.params.id, message: `Shell command not found: ${ctx.params.id}` }),
-                ),
-              ),
+              .pipe(Effect.catchTag("Shell.NotFoundError", () => missing(ctx.params.id))),
           )
+        }),
+      )
+      .handle(
+        "shell.watch",
+        Effect.fn(function* (ctx) {
+          const shell = yield* Shell.Service
+          yield* shell.get(ctx.params.id).pipe(Effect.catchTag("Shell.NotFoundError", () => missing(ctx.params.id)))
+          // Removed while watched: the stream just ends.
+          return shell.watch(ctx.params.id, { cursor: ctx.query.cursor }).pipe(Stream.catch(() => Stream.empty))
         }),
       )
       .handle(

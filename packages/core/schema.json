@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "4f6e16c6-f070-4545-b9d0-19fcb6e5210c",
-  "prevIds": ["0ac88673-a402-45a0-b931-e694d59ccefa"],
+  "id": "5f1c0791-8f10-432c-9d83-c7a8c1e9319c",
+  "prevIds": ["4f6e16c6-f070-4545-b9d0-19fcb6e5210c"],
   "ddl": [
     {
       "name": "account_state",
@@ -14,6 +14,14 @@
     },
     {
       "name": "control_account",
+      "entityType": "tables"
+    },
+    {
+      "name": "pending_request",
+      "entityType": "tables"
+    },
+    {
+      "name": "session_rest",
       "entityType": "tables"
     },
     {
@@ -285,6 +293,166 @@
       "name": "time_updated",
       "entityType": "columns",
       "table": "control_account"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message_id",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "call_id",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "request",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "agent",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "reply",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_updated",
+      "entityType": "columns",
+      "table": "pending_request"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "session_rest"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "call_id",
+      "entityType": "columns",
+      "table": "session_rest"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message_id",
+      "entityType": "columns",
+      "table": "session_rest"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "data",
+      "entityType": "columns",
+      "table": "session_rest"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "session_rest"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_updated",
+      "entityType": "columns",
+      "table": "session_rest"
     },
     {
       "type": "text",
@@ -2018,6 +2186,28 @@
       "table": "account_state"
     },
     {
+      "columns": ["session_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_pending_request_session_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "pending_request"
+    },
+    {
+      "columns": ["session_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_session_rest_session_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "session_rest"
+    },
+    {
       "columns": ["aggregate_id"],
       "tableTo": "event_sequence",
       "columnsTo": ["aggregate_id"],
@@ -2179,6 +2369,13 @@
       "table": "control_account"
     },
     {
+      "columns": ["session_id", "call_id"],
+      "nameExplicit": false,
+      "name": "session_rest_pk",
+      "entityType": "pks",
+      "table": "session_rest"
+    },
+    {
       "columns": ["project_id", "directory"],
       "nameExplicit": false,
       "name": "project_directory_pk",
@@ -2225,6 +2422,13 @@
       "nameExplicit": false,
       "name": "account_pk",
       "table": "account",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "pending_request_pk",
+      "table": "pending_request",
       "entityType": "pks"
     },
     {
@@ -2331,6 +2535,20 @@
       "name": "workspace_pk",
       "table": "workspace",
       "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "session_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "pending_request_session_idx",
+      "entityType": "indexes",
+      "table": "pending_request"
     },
     {
       "columns": [

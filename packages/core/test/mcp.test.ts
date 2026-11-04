@@ -16,6 +16,7 @@ import { McpEvent } from "@opencode/schema/mcp-event"
 import { ConfigPolicy } from "@opencode/schema/config/policy"
 import { Config } from "@opencode/core/config"
 import { ConfigMcpPlugin } from "@opencode/core/config/plugin/mcp"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { Credential } from "@opencode/core/credential"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -346,6 +347,7 @@ function resourceMcpLayer(
               }),
             ]),
         Layer.succeed(Location.Service, Location.Service.of(location({ directory }))),
+        SessionContinuity.noopLayer,
         Layer.mock(Bus.Service, {
           subscribe: overrides?.subscribe ?? (() => Stream.never),
           publish: (definition, data) => {
@@ -2098,6 +2100,7 @@ const shutdownIt = testEffect(
       Location.node,
     ]),
     [
+      SessionContinuity.node.replace(SessionContinuity.noopLayer),
       Location.node.replace(
         Layer.succeed(
           Location.Service,

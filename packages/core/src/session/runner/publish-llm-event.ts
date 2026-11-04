@@ -26,6 +26,16 @@ type Input = {
   readonly pendingSnapshot?: Effect.Effect<Snapshot.ID | undefined>
   readonly started: number
   readonly assistantMessageID: SessionMessage.ID
+  /** Continues a step whose reply streamed in an earlier process: its unsettled tool calls and the provider's finish. */
+  readonly resume?: {
+    readonly tools: ReadonlyArray<{
+      readonly id: string
+      readonly name: string
+      readonly called: boolean
+      readonly providerExecuted: boolean
+    }>
+    readonly finish: StepRecord["finish"]
+  }
 }
 
 const asRecord = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : { value })
@@ -105,18 +115,23 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     input?: InputExcerpt
     malformed?: boolean
   }
-  const tools = new Map<string, ToolState>()
+  const tools = new Map<string, ToolState>(
+    input.resume?.tools.map((tool) => [
+      tool.id,
+      { name: tool.name, called: tool.called, settled: false, providerExecuted: tool.providerExecuted },
+    ]),
+  )
   const failureSnapshot = (tool: { readonly progress?: Tool.Metadata }, metadata?: Tool.Metadata) => {
     if (tool.progress === undefined) return metadata === undefined ? {} : { metadata }
     if (metadata === undefined) return { metadata: tool.progress }
     return { metadata: { ...tool.progress, ...metadata } }
   }
   const assistantMessageID = input.assistantMessageID
-  let stepStarted = false
+  let stepStarted = input.resume !== undefined
   let providerFailed = false
-  let outputStarted = false
+  let outputStarted = input.resume !== undefined
   let stepFailure: SessionError.Error | undefined
-  let stepSettlement: StepRecord["finish"]
+  let stepSettlement: StepRecord["finish"] = input.resume?.finish
 
   const startAssistant = Effect.fnUntraced(function* () {
     if (stepStarted) return assistantMessageID
@@ -136,11 +151,15 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   })
   const currentAssistantMessageID = () =>
     stepStarted ? Effect.succeed(assistantMessageID) : Effect.die(new Error("Tool event before assistant step start"))
-  const streamed = Effect.fnUntraced(function* () {
-    yield* bus.publish(SessionEvent.Step.Streamed, {
-      sessionID: input.sessionID,
-      assistantMessageID: yield* startAssistant(),
-    })
+  const streamed = Effect.fnUntraced(function* (options?: Bus.PublishOptions) {
+    yield* bus.publish(
+      SessionEvent.Step.Streamed,
+      {
+        sessionID: input.sessionID,
+        assistantMessageID: yield* startAssistant(),
+      },
+      options,
+    )
   })
   const native = (metadata: ProviderMetadata | undefined) => metadata?.[input.providerMetadataKey]
   const fragments = (
@@ -385,10 +404,19 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     return true
   })
 
-  const failTools = Effect.fnUntraced(function* (error: SessionError.Error, mode: "all" | "hosted" | "uncalled") {
+  const failTools = Effect.fnUntraced(function* (
+    error: SessionError.Error,
+    mode: "all" | "hosted" | "uncalled",
+    except?: ReadonlySet<string>,
+  ) {
     let failed = false
     for (const [id, tool] of tools) {
-      if (tool.settled || (mode === "hosted" && !tool.providerExecuted) || (mode === "uncalled" && tool.called))
+      if (
+        tool.settled ||
+        except?.has(id) ||
+        (mode === "hosted" && !tool.providerExecuted) ||
+        (mode === "uncalled" && tool.called)
+      )
         continue
       if (yield* failTool(id, error)) failed = true
     }
@@ -409,27 +437,35 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     if (stepFailure === undefined) stepFailure = error
   })
 
-  const publishStepFailure = Effect.fnUntraced(function* (details?: {
-    readonly cost?: Money.USD
-    readonly tokens?: TokenUsage.Info
-    readonly snapshot?: Snapshot.ID
-    readonly files?: readonly RelativePath[]
-  }) {
+  const publishStepFailure = Effect.fnUntraced(function* (
+    details?: {
+      readonly cost?: Money.USD
+      readonly tokens?: TokenUsage.Info
+      readonly snapshot?: Snapshot.ID
+      readonly files?: readonly RelativePath[]
+    },
+    options?: Bus.PublishOptions,
+  ) {
     if (stepFailure === undefined) return
     const assistantMessageID = yield* startAssistant()
-    yield* bus.publish(SessionEvent.Step.Failed, {
-      sessionID: input.sessionID,
-      assistantMessageID,
-      error: stepFailure,
-      finish: stepSettlement?.finish === "content-filter" ? stepSettlement.finish : undefined,
-      rawFinish: stepSettlement?.rawFinish,
-      native: stepSettlement?.native,
-      ...details,
-    })
+    yield* bus.publish(
+      SessionEvent.Step.Failed,
+      {
+        sessionID: input.sessionID,
+        assistantMessageID,
+        error: stepFailure,
+        finish: stepSettlement?.finish === "content-filter" ? stepSettlement.finish : undefined,
+        rawFinish: stepSettlement?.rawFinish,
+        native: stepSettlement?.native,
+        ...details,
+      },
+      options,
+    )
   })
 
   const failUnsettledTools = Effect.fn("SessionRunner.failUnsettledTools")(
-    (error: SessionError.Error, scope: "hosted" | "all" | "uncalled" = "all") => failTools(error, scope),
+    (error: SessionError.Error, scope: "hosted" | "all" | "uncalled" = "all", except?: ReadonlySet<string>) =>
+      failTools(error, scope, except),
   )
 
   const publish = Effect.fnUntraced(function* (event: LLMEvent) {

@@ -1,9 +1,11 @@
 export * as Form from "./form.js"
 
 import { Form } from "@opencode/schema/form"
-import { Cache, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schema } from "effect"
+import { Cache, Cause, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schema, Semaphore } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "./bus.js"
+import { SessionContinuity } from "./continuity.js"
+import { SessionSchema } from "./session/schema.js"
 
 const RETENTION = Duration.minutes(10)
 
@@ -99,12 +101,25 @@ interface Entry {
   readonly form: Info
   readonly state: State
   readonly deferred: Deferred.Deferred<TerminalState>
+  /** Stored, so the rerun of the asking tool after a restart finds it, and its answer. */
+  readonly durable?: boolean
 }
+
+/** The tool call a question belongs to, as the question tool records it. */
+const ToolSource = Schema.Struct({ tool: Schema.Struct({ messageID: Schema.String, id: Schema.String }) })
+const toolSource = (metadata: unknown) => Option.getOrUndefined(Schema.decodeUnknownOption(ToolSource)(metadata))?.tool
+const decodeInfo = Schema.decodeUnknownOption(Info)
+const decodeAnswer = Schema.decodeUnknownOption(Answer)
+const sameForm = (left: Info, right: Omit<Info, "id">) =>
+  left.title === right.title && SessionContinuity.same(left.fields, right.fields)
 
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    const continuity = yield* SessionContinuity.Service
+    // Serializes a rerun taking its stored question with an answer to that stored question.
+    const restoring = Semaphore.makeUnsafe(1)
     let closed = false
     const forms = yield* Cache.makeWith<ID, Entry>(
       () => Effect.die(new Error("Form cache must be used via set/getSuccess, never get")),
@@ -115,47 +130,84 @@ export const layer = Layer.effect(
       },
     )
 
+    /** What the asking tool call asked before a restart, when this call is its rerun. */
+    const stored = (input: CreateInput) =>
+      Effect.gen(function* () {
+        const source = toolSource(input.metadata)
+        if (source === undefined || !(yield* continuity.rerun(source.id))) return undefined
+        return yield* continuity.requests.find("form", {
+          sessionID: SessionSchema.ID.make(input.sessionID),
+          messageID: source.messageID,
+          callID: source.id,
+        })
+      })
+
     const requireEntry = Effect.fn("Form.requireEntry")((id: ID) =>
       Cache.getSuccess(forms, id).pipe(
         Effect.flatMap((entry) => Effect.fromOption(entry, () => new NotFoundError({ id }))),
       ),
     )
 
-    const create = Effect.fn("Form.create")((input: CreateInput) =>
-      Effect.uninterruptible(
-        Effect.gen(function* () {
-          const id = input.id ?? ID.create()
-          const existing = yield* Cache.getSuccess(forms, id)
-          if (Option.isSome(existing)) return yield* new AlreadyExistsError({ id })
-          const invalid = validateFields(input.fields)
-          if (invalid) return yield* new InvalidFormError({ message: invalid })
-          const form: Info = {
-            id,
-            sessionID: input.sessionID,
-            title: input.title,
-            ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-            fields: input.fields,
-          }
-          const entry: Entry = {
-            form,
-            state: { status: "pending" },
-            deferred: yield* Deferred.make<TerminalState>(),
-          }
-          yield* Cache.set(forms, id, entry)
-          yield* bus.publish(Form.Event.Created, { form }).pipe(Effect.onError(() => Cache.invalidate(forms, id)))
-          if (closed) yield* cancel(id).pipe(Effect.orDie)
-          return form
-        }),
-      ),
-    )
+    const createEntry = (input: CreateInput, durable: boolean) =>
+      restoring.withPermit(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const before = durable ? yield* stored(input) : undefined
+            const previous = before && Option.getOrUndefined(decodeInfo(before.request))
+            // The rerun asks what it asked before: the same question, shown with the same id, and any answer applies.
+            const same = before && previous && sameForm(previous, input)
+            if (before && !same) yield* continuity.requests.remove(before.id)
+            const answered = same ? Option.getOrUndefined(decodeAnswer(before.reply)) : undefined
+            const id = same ? previous.id : (input.id ?? ID.create())
+            const existing = yield* Cache.getSuccess(forms, id)
+            if (Option.isSome(existing)) return yield* new AlreadyExistsError({ id })
+            const invalid = validateFields(input.fields)
+            if (invalid) return yield* new InvalidFormError({ message: invalid })
+            const form: Info = {
+              id,
+              sessionID: input.sessionID,
+              title: input.title,
+              ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+              fields: input.fields,
+            }
+            const state: State = answered ? { status: "answered", answer: answered } : { status: "pending" }
+            const deferred = yield* Deferred.make<TerminalState>()
+            if (state.status === "answered") yield* Deferred.succeed(deferred, state)
+            yield* Cache.set(forms, id, { form, state, deferred, durable })
+            if (answered) return form
+            const source = durable && !same ? toolSource(input.metadata) : undefined
+            if (source)
+              yield* continuity.requests.add({
+                id,
+                sessionID: SessionSchema.ID.make(input.sessionID),
+                kind: "form",
+                messageID: source.messageID,
+                callID: source.id,
+                request: form,
+              })
+            yield* bus.publish(Form.Event.Created, { form }).pipe(Effect.onError(() => Cache.invalidate(forms, id)))
+            if (closed) yield* cancel(id).pipe(Effect.orDie)
+            return form
+          }),
+        ),
+      )
+
+    const create = Effect.fn("Form.create")((input: CreateInput) => createEntry(input, false))
 
     const ask = Effect.fn("Form.ask")((input: CreateInput) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const form = yield* create(input)
+          // A question its tool can rerun after a stop is stored; the rerun finds it and its answer.
+          const callID = toolSource(input.metadata)?.id
+          const form = yield* createEntry(input, yield* continuity.survives(callID))
           const entry = yield* requireEntry(form.id).pipe(Effect.orDie)
-          return yield* restore(Deferred.await(entry.deferred)).pipe(
-            Effect.onInterrupt(() => Effect.ignore(cancel(form.id))),
+          return yield* restore(continuity.wait(callID, Deferred.await(entry.deferred))).pipe(
+            Effect.onExit((exit) => {
+              // A stop keeps the question, and any answer, for the next process.
+              if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && continuity.stopping()) return Effect.void
+              if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)) return Effect.ignore(cancel(form.id))
+              return entry.durable ? continuity.requests.remove(form.id) : Effect.void
+            }),
           )
         }),
       ),
@@ -177,14 +229,36 @@ export const layer = Layer.effect(
       return (yield* requireEntry(id)).state
     })
 
+    // A question asked before a restart whose tool has not run again yet: the answer waits for the rerun.
+    const replyStored = (input: ReplyInput) =>
+      Effect.gen(function* () {
+        const row = yield* continuity.requests.get(input.id)
+        const form = row?.kind === "form" ? Option.getOrUndefined(decodeInfo(row.request)) : undefined
+        if (!row || !form) return yield* new NotFoundError({ id: input.id })
+        if (row.reply !== undefined && row.reply !== null) {
+          if (SessionContinuity.same(row.reply, input.answer)) return
+          return yield* new AlreadySettledError({ id: input.id })
+        }
+        const invalid = validateAnswer(form.fields, input.answer)
+        if (invalid) return yield* new InvalidAnswerError({ id: input.id, message: invalid })
+        yield* continuity.requests.reply(input.id, input.answer)
+        yield* bus.publish(Form.Event.Replied, { id: input.id, sessionID: form.sessionID, answer: input.answer })
+      })
+
     const reply = Effect.fn("Form.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const entry = yield* requireEntry(input.id)
+          const cached = yield* Cache.getSuccess(forms, input.id)
+          if (Option.isNone(cached)) return yield* restoring.withPermit(replyStored(input))
+          const entry = cached.value
+          // A client that resends the answer it already gave gets the same success.
+          if (entry.state.status === "answered" && SessionContinuity.same(entry.state.answer, input.answer)) return
           if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id: input.id })
           const invalid = validateAnswer(entry.form.fields, input.answer)
           if (invalid) return yield* new InvalidAnswerError({ id: input.id, message: invalid })
           const next: TerminalState = { status: "answered", answer: input.answer }
+          // Stored before it reaches the tool, so a stop in between still delivers it to the rerun.
+          if (entry.durable) yield* continuity.requests.reply(input.id, input.answer)
           yield* bus.publish(Form.Event.Replied, {
             id: input.id,
             sessionID: entry.form.sessionID,
@@ -206,6 +280,7 @@ export const layer = Layer.effect(
             ...(options?.message === undefined ? {} : { message: options.message }),
           }
           yield* bus.publish(Form.Event.Cancelled, { id, sessionID: entry.form.sessionID })
+          if (entry.durable) yield* continuity.requests.remove(id)
           yield* Cache.set(forms, id, { ...entry, state: next })
           yield* Deferred.succeed(entry.deferred, next)
         }),
@@ -218,7 +293,10 @@ export const layer = Layer.effect(
       Effect.andThen(Cache.values(forms)),
       Effect.flatMap((entries) =>
         Effect.forEach(
-          Array.from(entries).filter((entry) => entry.state.status === "pending"),
+          // A stopping process keeps its stored questions for the rerun of their tools in the next one.
+          Array.from(entries).filter(
+            (entry) => entry.state.status === "pending" && !(entry.durable && continuity.stopping()),
+          ),
           (entry) => cancel(entry.form.id).pipe(Effect.ignore),
           { discard: true },
         ),
@@ -230,7 +308,11 @@ export const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [Bus.node] })
+export const node = makeLocationNode({
+  service: Service,
+  layer,
+  deps: [Bus.node, SessionContinuity.node],
+})
 
 export function validateAnswer(form: ReadonlyArray<Form.Field>, answer: Answer) {
   const fields = new Map(form.map((field) => [field.key, field] as const))

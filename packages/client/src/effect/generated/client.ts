@@ -267,6 +267,10 @@ import type {
   ExperimentalArtifactsUpdateOutput,
   ExperimentalArtifactsDeleteInput,
   ExperimentalArtifactsDeleteOutput,
+  ExperimentalServiceStatusOutput,
+  ExperimentalServicePauseInput,
+  ExperimentalServicePauseOutput,
+  ExperimentalServiceResumeOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1700,6 +1704,31 @@ const EndpointExperimentalArtifactsDelete =
       }).pipe(Effect.mapError(mapClientError)),
     )
 
+const EndpointExperimentalServiceStatus = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalServiceStatusOutput>()(
+    raw["service.status"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalServicePause =
+  (raw: RawClient["server.experimental"]) => (input?: ExperimentalServicePauseInput) =>
+    preserveEffect<ExperimentalServicePauseOutput>()(
+      raw["service.pause"]({ payload: { timeout: input?.["timeout"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalServiceResume = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalServiceResumeOutput>()(
+    raw["service.resume"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1728,6 +1757,11 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     get: EndpointExperimentalArtifactsGet(raw),
     update: EndpointExperimentalArtifactsUpdate(raw),
     delete: EndpointExperimentalArtifactsDelete(raw),
+  },
+  service: {
+    status: EndpointExperimentalServiceStatus(raw),
+    pause: EndpointExperimentalServicePause(raw),
+    resume: EndpointExperimentalServiceResume(raw),
   },
 })
 

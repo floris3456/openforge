@@ -12,6 +12,7 @@ import { Integration } from "./integration.js"
 import { ModelResolver } from "./model-resolver.js"
 import { Model } from "./model.js"
 import { ModelRetry } from "./model-retry.js"
+import { SessionContinuity } from "./continuity.js"
 
 export interface TextInput {
   readonly prompt: string
@@ -82,7 +83,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Ge
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const llm = yield* LLMClient.Service
+    const continuity = yield* SessionContinuity.Service
+    const client = yield* LLMClient.Service
+    const llm = continuity.client(client)
     const resolver = yield* ModelResolver.Service
     const models = yield* Model.Service
     const executor = yield* RequestExecutor.Service
@@ -277,5 +280,5 @@ function failureReason(tag: AIError["reason"]["_tag"], status: number | undefine
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [ModelResolver.node, Model.node, llmClient, requestExecutor],
+  deps: [ModelResolver.node, Model.node, llmClient, requestExecutor, SessionContinuity.node],
 })

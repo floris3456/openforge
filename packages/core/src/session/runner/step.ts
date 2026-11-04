@@ -13,6 +13,7 @@ import type { Agent } from "@opencode/schema/agent"
 import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
+import { SessionContinuity } from "../../continuity.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
 import { Tool } from "../../tool.js"
@@ -57,7 +58,28 @@ interface Input {
   readonly recoverContinuation: boolean
   /** The runner owns compaction policy; the attempt invokes it only before durable output. */
   readonly recoverOverflow: Effect.Effect<boolean>
+  /** The logical step, recorded with the step's checkpoint so a restart continues the turn's count. */
+  readonly step?: number
+  /** Finishes a step whose reply streamed before a restart, instead of calling the model. */
+  readonly resume?: Resume
 }
+
+export interface Resume {
+  readonly rest: SessionContinuity.ToolsRest
+  /** The step's tool calls that had not settled. */
+  readonly calls: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly input: Record<string, unknown>
+    readonly called: boolean
+    readonly executed: boolean
+    /** Present when the call waited in a way that survives a stop; others failed with the process. */
+    readonly checkpoint?: SessionContinuity.Checkpoint
+  }>
+}
+
+// Code Mode runs other tools, so a wait inside it cannot rerun the call from its beginning.
+const RUNS_TOOLS = "execute"
 
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
@@ -66,14 +88,21 @@ const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not
 /** Captures Location-scoped dependencies without introducing another service or execution loop. */
 export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
-  const llm = yield* LLMClient.Service
+  const continuity = yield* SessionContinuity.Service
+  const client = yield* LLMClient.Service
+  const llm = continuity.client(client)
   const snapshots = yield* Snapshot.Service
   const toolOutput = yield* ToolOutput.Service
 
   const attempt = Effect.fn("SessionStep.attempt")(function* (input: Input) {
+    const resume = input.resume
+    const activity = yield* SessionContinuity.Current
+    activity?.attempt()
     // The start snapshot only has to exist before local tools run, which cannot happen before Step.Started,
     // so it is captured while the provider request is in flight instead of delaying it.
-    const pendingStartSnapshot = yield* snapshots.capture().pipe(Effect.forkScoped)
+    const pendingStartSnapshot = yield* (resume ? Effect.succeed(resume.rest.snapshot) : snapshots.capture()).pipe(
+      Effect.forkScoped,
+    )
     const publisher = createLLMEventPublisher(bus, {
       sessionID: input.sessionID,
       assistantMessageID: input.assistantMessageID,
@@ -82,6 +111,19 @@ export const make = Effect.gen(function* () {
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
       pendingSnapshot: Fiber.join(pendingStartSnapshot),
       started: yield* Clock.currentTimeMillis,
+      ...(resume
+        ? {
+            resume: {
+              tools: resume.calls.map((call) => ({
+                id: call.id,
+                name: call.name,
+                called: call.called,
+                providerExecuted: call.executed,
+              })),
+              finish: { ...resume.rest.finish, usage: resume.rest.finish.usage },
+            },
+          }
+        : {}),
     })
     const toolRuns: Array<{
       readonly call: ToolCall
@@ -99,6 +141,30 @@ export const make = Effect.gen(function* () {
         progress: (update) => publisher.progress(call.id, update),
       })
     }
+    // Registered before the fiber forks, so a pause never sees the step resting while a call is about to start.
+    const startTool = (call: ToolCall, checkpoint?: SessionContinuity.Checkpoint) =>
+      Effect.gen(function* () {
+        const entry = activity?.register({
+          id: call.id,
+          name: call.name,
+          messageID: input.assistantMessageID,
+          survives: call.name !== RUNS_TOOLS,
+          ...(checkpoint ? { rerun: true, resume: checkpoint.data } : {}),
+        })
+        const execute = executeTool(call)
+        toolRuns.push({
+          call,
+          fiber: yield* Effect.uninterruptibleMask((restore) =>
+            restore(activity && entry ? continuity.tool(activity, entry, execute) : execute).pipe(
+              Effect.flatMap(toolOutput.truncate),
+              Effect.flatMap((outcome) => publisher.toolExecution(call.id, call.name, outcome)),
+              Effect.catchTag("Tool.Error", (error) =>
+                publisher.failTool(call.id, toSessionError(error), error.metadata).pipe(Effect.asVoid),
+              ),
+            ),
+          ).pipe(Effect.forkScoped),
+        })
+      })
 
     // Provider and tool fibers retain per-source order without a shared writer queue.
     // A local execution starts only after its Tool.Called publication completes.
@@ -120,35 +186,66 @@ export const make = Effect.gen(function* () {
           }
           yield* publisher.publish(event)
           if (event.type !== "tool-call" || event.providerExecuted) return
-          toolRuns.push({
-            call: event,
-            fiber: yield* Effect.uninterruptibleMask((restore) =>
-              restore(executeTool(event)).pipe(
-                Effect.flatMap(toolOutput.truncate),
-                Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
-                Effect.catchTag("Tool.Error", (error) =>
-                  publisher.failTool(event.id, toSessionError(error), error.metadata).pipe(Effect.asVoid),
-                ),
-              ),
-            ).pipe(Effect.forkScoped),
-          })
+          yield* startTool(event)
         }),
       ),
       Effect.ensuring(publisher.flush()),
     )
+    // Calls without a checkpoint were running when the process ended and cannot be continued.
+    const resumeTools = (calls: Resume["calls"]) =>
+      Effect.forEach(
+        calls.filter((call) => call.called && !call.executed),
+        (call) =>
+          call.checkpoint
+            ? startTool(LLMEvent.toolCall({ id: call.id, name: call.name, input: call.input }), call.checkpoint)
+            : publisher.failTool(call.id, TOOLS_INTERRUPTED),
+        { discard: true },
+      )
+    let checkpointed = resume !== undefined
+    const settled = (): Bus.PublishOptions | undefined =>
+      checkpointed ? { commit: () => continuity.clearStep(input.sessionID, input.assistantMessageID) } : undefined
 
     // Keep the final tool and Step events uninterruptible, even when the work itself is cancelled.
     return yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
-        const stream = yield* restore(providerStream).pipe(Effect.exit)
+        const stream = yield* restore(resume ? resumeTools(resume.calls) : providerStream).pipe(Effect.exit)
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
         // Cancelled before the start snapshot existed: record nothing, as when the capture preceded the request.
         if (streamInterrupted && !publisher.hasStarted() && !pendingStartSnapshot.pollUnsafe())
           return yield* Effect.failCause(stream.cause)
-        if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
+        if (!resume && !overflowFailure && publisher.hasStarted()) {
+          const streamed = publisher.record()
+          const finish = streamed.finish
+          // A reply with local tool calls records how to finish its step, so a restart continues the calls.
+          checkpointed = !streamInterrupted && streamed.needsContinuation && finish !== undefined
+          const snapshot = yield* Fiber.join(pendingStartSnapshot)
+          yield* publisher.streamed(
+            checkpointed && finish
+              ? {
+                  commit: () =>
+                    continuity.save(input.sessionID, {
+                      kind: "tools",
+                      step: input.step ?? 1,
+                      assistantMessageID: input.assistantMessageID,
+                      ...(snapshot === undefined ? {} : { snapshot }),
+                      finish,
+                    }),
+                }
+              : undefined,
+          )
+        }
+        activity?.endStream()
         if (streamInterrupted) yield* interruptTools
         const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
+        if (Exit.isFailure(joined) && checkpointed && continuity.stopping()) {
+          // The process is stopping: calls waiting or not yet started stay open for the next process, which
+          // finishes this step. Calls cut off mid-run fail as before.
+          const kept = activity?.kept() ?? new Set<string>()
+          yield* interruptTools
+          yield* publisher.failUnsettledTools(TOOLS_INTERRUPTED, "all", kept)
+          return yield* Effect.failCause(joined.cause)
+        }
         if (Exit.isFailure(joined)) yield* interruptTools
         const tools = classifyToolExits(joined, toolRuns)
 
@@ -244,18 +341,22 @@ export const make = Effect.gen(function* () {
                     .pipe(Effect.orElseSucceed(() => undefined))
               : undefined
           const usage = record.finish ? SessionUsage.record(record.finish.usage, input.model.cost) : undefined
-          if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
+          if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files }, settled())
           if (record.finish && usage && !record.failure)
-            yield* bus.publish(SessionEvent.Step.Ended, {
-              sessionID: input.sessionID,
-              assistantMessageID: yield* publisher.startAssistant(),
-              finish: record.finish.finish,
-              rawFinish: record.finish.rawFinish,
-              native: record.finish.native,
-              ...usage,
-              snapshot,
-              files,
-            })
+            yield* bus.publish(
+              SessionEvent.Step.Ended,
+              {
+                sessionID: input.sessionID,
+                assistantMessageID: yield* publisher.startAssistant(),
+                finish: record.finish.finish,
+                rawFinish: record.finish.rawFinish,
+                native: record.finish.native,
+                ...usage,
+                snapshot,
+                files,
+              },
+              settled(),
+            )
         }
 
         if (

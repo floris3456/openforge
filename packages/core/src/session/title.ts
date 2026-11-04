@@ -16,6 +16,7 @@ import type { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionUsage } from "./usage.js"
 import { SessionStore } from "./store.js"
+import { SessionContinuity } from "../continuity.js"
 
 const MAX_LENGTH = 100
 const MAX_CONTEXT_LENGTH = 8_000
@@ -45,7 +46,9 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
-    const llm = yield* LLMClient.Service
+    const continuity = yield* SessionContinuity.Service
+    const client = yield* LLMClient.Service
+    const llm = continuity.client(client)
     const context = yield* SessionContext.Service
     const store = yield* SessionStore.Service
     const db = (yield* Database.Service).db
@@ -159,5 +162,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, llmClient, SessionContext.node, SessionStore.node, Database.node],
+  deps: [Bus.node, llmClient, SessionContext.node, SessionStore.node, Database.node, SessionContinuity.node],
 })

@@ -72,6 +72,15 @@ export function permissionPresentation(
     }
   }
 
+  if (action === "unsandboxed") {
+    const command = text(input.command)
+    return {
+      icon: "#",
+      title: "Run outside the sandbox",
+      lines: command ? [`$ ${command}`] : resources.map((item) => `- ${item}`),
+    }
+  }
+
   if (action === "subagent") {
     const agent = text(input.agent) || "general"
     const description = text(input.description)

@@ -264,6 +264,10 @@ export const make = Effect.gen(function* () {
         if (!job) return [{}, jobs]
         if (job.scope !== scope) return [{}, jobs]
         if (job.info.status !== "running") return [{ info: snapshot(job) }, jobs]
+        // Cancelling marks a job before interrupting it, so a running job interrupted here is the process stopping.
+        // Recoverable work continues in the next process: waiters see it still running, never cancelled.
+        if (job.recovery && Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause))
+          return [{ info: snapshot(job), done: job.done }, jobs]
         const status: Exclude<Status, "running"> = Exit.isSuccess(exit)
           ? "completed"
           : Cause.hasInterruptsOnly(exit.cause)

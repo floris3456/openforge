@@ -17,6 +17,7 @@ import { ConfigPlugin } from "./config/plugin.js"
 import { ConfigPolicy } from "./config/policy.js"
 import { ConfigProvider } from "./config/provider.js"
 import { ConfigReference } from "./config/reference.js"
+import { ConfigSandbox } from "./config/sandbox.js"
 import { ConfigWebSearch } from "./config/websearch.js"
 import { ConfigToolOutput } from "./config/tool-output.js"
 import { ConfigWatcher } from "./config/watcher.js"
@@ -57,6 +58,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   permissions: Permission.Ruleset.pipe(optional).annotate({
     description: "Ordered tool permission rules applied to agent tool use",
+  }),
+  sandbox: ConfigSandbox.Info.pipe(optional).annotate({
+    description: "Sandbox for shell commands: where they may write and read, and whether they may use the network",
   }),
   policies: ConfigPolicy.Info.pipe(Schema.Array, optional).annotate({
     description: "Ordered policies controlling access to providers, tools, and integrations",

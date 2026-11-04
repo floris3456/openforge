@@ -5,6 +5,7 @@ import { Agent } from "./agent.js"
 import { Artifact } from "./artifact.js"
 import { Command } from "./command.js"
 import { Config } from "./config.js"
+import { Continuity } from "./continuity.js"
 import { Credential } from "./credential.js"
 import { Durable } from "./durable-event-manifest.js"
 import { Event } from "./event.js"
@@ -76,6 +77,7 @@ export const ServerDefinitions = Event.inventory(
   ...SessionStatusEvent.Definitions,
   ...TuiEvent.Definitions,
   ...InstallationEvent.Definitions,
+  ...Continuity.Event.Definitions,
   ...VcsEvent.Definitions,
   McpEvent.StatusChanged,
   McpEvent.ResourcesChanged,
@@ -87,6 +89,7 @@ export const isServer = (event: { readonly type: string }): event is ServerEvent
 export const Definitions = Event.inventory(
   ...foundationDefinitions,
   ...InstallationEvent.Definitions,
+  ...Continuity.Event.Definitions,
   ...featureDefinitions,
   ...LspEvent.Definitions,
   ...TuiEvent.Definitions,

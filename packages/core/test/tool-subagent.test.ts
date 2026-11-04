@@ -12,6 +12,7 @@ import { Global } from "@opencode/util/global"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { Database } from "@opencode/core/database/database"
 import { Bus } from "@opencode/core/bus"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { Config } from "@opencode/core/config"
 import { Location } from "@opencode/core/location"
 import { Model } from "@opencode/core/model"
@@ -131,6 +132,7 @@ const subagentPluginSupervisor = makeLocationNode({
     SubagentJob.node,
     Tool.node,
     PluginHooks.node,
+    SessionContinuity.node,
   ],
 })
 

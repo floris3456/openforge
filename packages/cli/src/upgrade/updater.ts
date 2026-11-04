@@ -226,13 +226,12 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         return yield* Effect.logInfo("upgrade check skipped a release that failed before", { version: latest.version })
       yield* Effect.logInfo("openforge release available", { current: status.from, latest: latest.version, policy })
       if (policy === "notify") return notify({ type: "available", version: latest.version })
-      yield* upgrade({ notify })
+      // A check that could not run only goes to the log; an automatic upgrade that failed is shown.
+      yield* upgrade({ notify }).pipe(
+        Effect.tapError((error) => Effect.sync(() => notify({ type: "failed", message: error.message }))),
+      )
     }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("upgrade check failed", { error }).pipe(
-          Effect.andThen(Effect.sync(() => notify({ type: "failed", message: error.message }))),
-        ),
-      ),
+      Effect.catch((error) => Effect.logWarning("upgrade check failed", { error })),
       Effect.withSpan("upgrade.updater.startup"),
     )
 

@@ -111,6 +111,15 @@ describe("policy", () => {
     }),
   )
 
+  it.live("a startup check that cannot reach the releases only logs", () =>
+    Effect.gen(function* () {
+      const test = yield* install()
+      yield* (yield* test.make()).startup(test.notify)
+      expect(test.server.requests).toEqual(["/releases/latest/download/release.json"])
+      expect(test.states).toEqual([])
+    }),
+  )
+
   it.live("false never checks on its own", () =>
     Effect.gen(function* () {
       const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": false }' })
@@ -192,7 +201,10 @@ describe("upgrade", () => {
       const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": true }' })
       yield* test.publish("0.0.2", "crash")
       const updater = yield* test.make()
-      const error = yield* updater.upgrade({ notify: test.notify }).pipe(Effect.flip)
+      yield* updater.startup(test.notify)
+      const error = test.states.at(-1)
+      expect(error?.type).toBe("failed")
+      if (error?.type !== "failed") return
       expect(error.message).toStartWith("upgrade to 0.0.2 failed, back on 0.0.1: ")
       expect(error.message).toEndWith(`. Log: ${test.switching.log}`)
       expect(yield* test.current).toBe("0.0.1")

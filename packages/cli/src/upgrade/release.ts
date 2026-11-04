@@ -96,7 +96,8 @@ export const asset = Effect.fn("upgrade.release.asset")(function* (
 export const download = Effect.fn("upgrade.release.download")(function* (source: string, file: string) {
   return yield* Effect.tryPromise({
     try: async (signal) => {
-      const response = await fetch(source, { signal })
+      // Generous for a ~40 MB archive on a slow line, but a stalled download still ends.
+      const response = await fetch(source, { signal: AbortSignal.any([signal, AbortSignal.timeout(15 * 60_000)]) })
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
       const hasher = new Bun.CryptoHasher("sha256")
       const writer = Bun.file(file).writer()

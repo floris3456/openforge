@@ -286,9 +286,10 @@ export function entrySplashLayout(input: { width: number; version: string; detai
     .map((_, index) => ellipsis + slash + segments.slice(index + 1).join(slash))
     .reverse()
     .filter((path) => stringWidth(path) < stringWidth(detail))
-  let layout = { label: Locale.takeWidth("oc mini", input.width), version: "", path: "", metadata: "" }
+  const name = `${Product.name} mini`
+  let layout = { label: Locale.takeWidth(name, input.width), version: "", path: "", metadata: "" }
   const stages = [
-    { label: `${input.mono ? "[O]" : "▪"} oc mini` },
+    { label: `${input.mono ? "[O]" : "▪"} ${name}` },
     ...(leaf ? [{ path: leaf }] : []),
     ...(input.version ? [{ version: input.version }] : []),
     ...paths.concat(detail ? [detail] : []).map((path) => ({ path })),

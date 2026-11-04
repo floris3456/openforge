@@ -1,5 +1,6 @@
 import { EmbeddedTerminalRenderable, type RGBA } from "@opentui/core"
 import { decodePersistentPtyMessage, persistentPtyFrame } from "@opencode/client/solid"
+import { Product } from "@opencode/schema/product"
 import { rgbToOklch, type ResolvedThemeTokens } from "@opencode/theme/tui"
 import { extend, useRenderer } from "@opentui/solid"
 import { Option } from "effect"
@@ -235,7 +236,7 @@ export function TerminalPane(props: {
       }
       if (message.type !== "attached") return
       if (message.inputProtocol !== 1) {
-        setFailure("Persistent terminal server is out of date; restart OpenCode")
+        setFailure(`Persistent terminal server is out of date; restart ${Product.name}`)
         next.close()
         return
       }

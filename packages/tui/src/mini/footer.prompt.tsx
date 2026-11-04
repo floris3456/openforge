@@ -16,6 +16,7 @@ import {
   type PasteEvent,
   type TextareaRenderable,
 } from "@opentui/core"
+import { Product } from "@opencode/schema/product"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { normalizePromptContent } from "../prompt/content"
 import { deduplicatePromptImages, promptAttachmentLabel } from "../prompt/attachment"
@@ -528,7 +529,8 @@ export function createPromptState(input: PromptInput): PromptState {
         description: "compact older session context to free space",
       } satisfies SlashOption,
       ...EXIT_COMMANDS.map(
-        (name) => ({ kind: "slash", name, display: `/${name}`, description: "close OpenCode" }) satisfies SlashOption,
+        (name) =>
+          ({ kind: "slash", name, display: `/${name}`, description: `close ${Product.name}` }) satisfies SlashOption,
       ),
     ]
     const hidden = new Set(builtins.map((item) => item.name))

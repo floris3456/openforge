@@ -20,6 +20,7 @@ const exit = {
   id: "sh_0123456789abFIXTURE00000",
   status: "exited",
   code: 0,
+  pid: 4242,
   started: 1_700_000_000_000,
   ended: 1_700_000_001_000,
   size: 11,

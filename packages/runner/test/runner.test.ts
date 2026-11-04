@@ -8,7 +8,7 @@ import { RunnerOutput } from "../src/output.js"
 import { RunnerPaths } from "../src/paths.js"
 import { RunnerProtocol } from "../src/protocol.js"
 import { RunnerServer } from "../src/server.js"
-import { alive, command, folder, run, until } from "./fixture/runner.js"
+import { alive, command, folder, run, serve, until } from "./fixture/runner.js"
 
 const collect = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   connection.watch(id, { offset, output }).pipe(Stream.runCollect)
@@ -35,7 +35,7 @@ const readExit = (output: string) =>
 describe("runner", () => {
   test("starts a command, pushes its output from an offset and then its exit, and writes the exit file", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -75,7 +75,7 @@ describe("runner", () => {
 
   test("starting the same id twice gives the same command", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -98,7 +98,7 @@ describe("runner", () => {
 
   test("a SIGTERM to a command reaches its whole group and turns into SIGKILL when ignored", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({
+    await using runner = await serve({
       directory: path.join(directory.path, "runner"),
       version: "test",
       killAfter: 200,
@@ -126,7 +126,7 @@ describe("runner", () => {
 
   test("ends a command at its deadline, which the client can move or clear", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -153,7 +153,7 @@ describe("runner", () => {
   test("exits once no command runs: stops listening first, says bye, and frees the folder", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    const runner = await RunnerServer.serve({ directory: folderPath, version: "test" })
+    await using runner = await serve({ directory: folderPath, version: "test" })
     const closed = await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(folderPath)
@@ -169,13 +169,13 @@ describe("runner", () => {
     expect(fs.existsSync(RunnerPaths.token(folderPath))).toBe(false)
     expect(await run(RunnerClient.connect(folderPath).pipe(Effect.flip))).toMatchObject({ reason: "unavailable" })
     // The folder is free for the next runner.
-    const next = await RunnerServer.serve({ directory: folderPath, version: "test", grace: 50 })
+    await using next = await serve({ directory: folderPath, version: "test", grace: 50 })
     await next.closed
   })
 
   test("a fresh runner that never gets a command exits after its grace period", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await runner.closed
     expect(fs.existsSync(RunnerPaths.socket(runner.directory))).toBe(false)
   })
@@ -183,7 +183,7 @@ describe("runner", () => {
   test("only one runner serves a folder at a time", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    const first = await RunnerServer.serve({ directory: folderPath, version: "test", grace: 500 })
+    await using first = await serve({ directory: folderPath, version: "test", grace: 500 })
     expect(
       await RunnerServer.serve({ directory: folderPath, version: "test", wait: 100 }).catch((error) => error),
     ).toBeInstanceOf(RunnerServer.LockedError)
@@ -192,7 +192,7 @@ describe("runner", () => {
 
   test("refuses a client without the token and one without a shared protocol", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
     const exchange = (line: string) =>
       new Promise<string[]>((resolve) => {
         const lines: string[] = []
@@ -214,7 +214,7 @@ describe("runner", () => {
 
   test("reports a command that cannot start and leaves no file", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -228,7 +228,7 @@ describe("runner", () => {
 
   test("removing a command stops it and deletes its files", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -249,7 +249,7 @@ describe("runner output", () => {
   test("keeps the first and the newest bytes within the limit, and says how much it dropped", async () => {
     await using directory = await folder()
     const bounds = { head: 16, limit: 96 }
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test", bounds })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", bounds })
     const lines = Array.from({ length: 40 }, (_, index) => `line ${String(index).padStart(3, "0")}\n`).join("")
     await run(
       Effect.gen(function* () {
@@ -296,7 +296,7 @@ describe("runner output", () => {
 
   test("a command printing about 1 GB leaves an 8 MiB file", async () => {
     await using directory = await folder()
-    const runner = await RunnerServer.serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)

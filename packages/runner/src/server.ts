@@ -270,6 +270,7 @@ export async function serve(options: Options): Promise<Runner> {
       status: entry.reason ?? "exited",
       ...(status.code !== null ? { code: status.code } : {}),
       ...(status.signal !== null ? { signal: status.signal } : {}),
+      pid: entry.pid,
       started: entry.started,
       ended: Date.now(),
       size: entry.writer.size,

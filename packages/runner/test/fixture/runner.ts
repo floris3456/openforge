@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { Effect, Scope } from "effect"
 import { RunnerProtocol } from "../../src/protocol.js"
+import { RunnerServer } from "../../src/server.js"
 
 export async function folder() {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "runner-test-")))
@@ -10,6 +11,12 @@ export async function folder() {
     path: directory,
     [Symbol.asyncDispose]: () => fs.rm(directory, { recursive: true, force: true }),
   }
+}
+
+/** A runner in this process, shut down with its test even when the test fails, so no command outlives it. */
+export async function serve(options: RunnerServer.Options) {
+  const runner = await RunnerServer.serve(options)
+  return Object.assign(runner, { [Symbol.asyncDispose]: () => runner.shutdown() })
 }
 
 export const run = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>) => Effect.runPromise(Effect.scoped(effect))

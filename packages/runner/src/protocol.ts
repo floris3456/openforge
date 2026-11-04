@@ -28,6 +28,7 @@ export const Exit = Schema.Struct({
   code: Schema.optional(Schema.Number),
   signal: Schema.optional(Schema.String),
   error: Schema.optional(Schema.String),
+  pid: Schema.Number,
   started: Schema.Number,
   ended: Schema.Number,
   /** Bytes the command printed, including dropped ones. */

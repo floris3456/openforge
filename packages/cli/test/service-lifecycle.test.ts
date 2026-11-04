@@ -121,7 +121,7 @@ serviceTest(
         process.platform !== "win32" && Bun.which("lsof") ? `PID ${process.pid} (` : "another process"
       }`,
     )
-    expect(conflict).toContain("opencode service set port <port>")
+    expect(conflict).toContain("openforge service set port <port>")
     expect(await servers(home)).toEqual([])
     expect(await Bun.file(home.registration).exists()).toBe(false)
 
@@ -191,7 +191,7 @@ async function serviceHome(options: { readonly failBoot?: boolean } = {}) {
     root,
     port,
     entry: homeEntry,
-    registration: path.join(root, "state", "opencode", "service-local.json"),
+    registration: path.join(root, "state", "openforge", "service-local.json"),
     env: Object.fromEntries(
       Object.entries(isolatedEnv(root, overrides)).filter((entry): entry is [string, string] => entry[1] !== undefined),
     ),

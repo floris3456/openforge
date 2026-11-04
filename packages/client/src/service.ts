@@ -26,7 +26,7 @@ export type EnsureReason = "missing" | "version-mismatch"
 
 /** Options used to ensure the local OpenCode service is running. */
 export type EnsureOptions = DiscoverOptions & {
-  /** Service command and arguments. Defaults to `opencode serve --service`. */
+  /** Service command and arguments. Defaults to `openforge serve --service`. */
   readonly command?: ReadonlyArray<string>
   /** Environment variables added to the inherited service process environment. */
   readonly env?: Readonly<Record<string, string>>

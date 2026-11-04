@@ -38,7 +38,7 @@ export async function ensure(options: EnsureOptions = {}): Promise<Endpoint> {
     options.onStart?.(reason, previousVersion)
   }
   const spawnContender = async () => {
-    const [command, ...args] = options.command ?? ["opencode", "serve", "--service"]
+    const [command, ...args] = options.command ?? ["openforge", "serve", "--service"]
     if (command === undefined) throw new Error("Missing service command")
     try {
       return spawnServiceContender(command, args, await PtyHandoff.environment(options.file ?? fallback(), options.env))

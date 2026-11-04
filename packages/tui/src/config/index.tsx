@@ -1,6 +1,7 @@
 export * as Config from "."
 
 import { createBindingLookup } from "@opentui/keymap/extras"
+import { Product } from "@opencode/schema/product"
 import { Vcs } from "@opencode/schema/vcs"
 import { Schema } from "effect"
 import { createContext, createMemo, onCleanup, type JSX, useContext } from "solid-js"
@@ -249,7 +250,7 @@ export const Info = Schema.Struct({
   }),
   animations: Schema.optional(Schema.Boolean).annotate({ description: "Enable interface animations" }),
   highlights: Schema.optional(Schema.Boolean).annotate({
-    description: "Show the release highlights once after OpenCode updates",
+    description: `Show the release highlights once after ${Product.name} updates`,
   }),
   mouse: Schema.optional(Schema.Boolean).annotate({ description: "Enable terminal mouse capture" }),
   cursor: Schema.optional(Cursor),

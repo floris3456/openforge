@@ -6,10 +6,11 @@ import { Context, Effect, Layer } from "effect"
 // The variants resolve through the `workerd` bundle condition, like the
 // native-module stubs, so no runtime sniffing happens here.
 import { roots } from "#global-roots"
+import { Product } from "@opencode/schema/product"
 import { Flock } from "./flock.js"
 import { makeGlobalNode } from "./effect/app-node.js"
 
-const app = "opencode"
+const app = Product.folder
 const { data, cache, config, state, tmp } = roots(app)
 
 const paths = {

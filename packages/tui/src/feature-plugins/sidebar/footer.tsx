@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui"
+import { Product } from "@opencode/schema/product"
 import { createMemo, Show } from "solid-js"
 import { useTerminalDimensions } from "@opentui/solid"
 import { FilePath } from "../../ui/file-path"
@@ -54,7 +55,9 @@ export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: s
               ✕
             </text>
           </box>
-          <text fg={props.context.theme.text.muted}>OpenCode includes free models so you can start immediately.</text>
+          <text fg={props.context.theme.text.muted}>
+            {Product.name} includes free models so you can start immediately.
+          </text>
           <text fg={props.context.theme.text.muted}>
             Connect from 75+ providers to use other models, including Claude, GPT, Gemini etc
           </text>

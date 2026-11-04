@@ -1,5 +1,6 @@
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
+import { Product } from "@opencode/schema/product"
 import { Spec } from "../framework/spec"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
@@ -44,13 +45,13 @@ const PermissionParams = {
   ),
 }
 
-const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencode", {
-  description: "OpenCode command line interface",
+const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : Product.binary, {
+  description: `${Product.name} command line interface`,
   params: {
     ...ServerParams,
     ...PermissionParams,
     directory: Argument.String("directory").pipe(
-      Argument.withDescription("Directory to start OpenCode in"),
+      Argument.withDescription(`Directory to start ${Product.name} in`),
       Argument.optional,
     ),
     continue: Flag.Boolean("continue").pipe(
@@ -67,7 +68,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
   },
   commands: [
     Spec.make("upgrade", {
-      description: "Switch openforge to the latest release, or to a given version (kept or downloaded)",
+      description: `Switch ${Product.name} to the latest release, or to a given version (kept or downloaded)`,
       aliases: ["update"],
       params: {
         target: Argument.String("target").pipe(
@@ -81,7 +82,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       },
     }),
     Spec.make("uninstall", {
-      description: "Uninstall OpenCode, keeping session data, configuration, and state",
+      description: `Uninstall ${Product.name}, keeping session data, configuration, and state`,
       params: {
         dryRun: Flag.Boolean("dry-run").pipe(
           Flag.withDescription("Show what would be removed without removing"),
@@ -395,7 +396,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       },
     }),
     Spec.make("run", {
-      description: "Run OpenCode with a message",
+      description: `Run ${Product.name} with a message`,
       globalFlags: ServerFlags,
       params: {
         message: Argument.String("message").pipe(

@@ -4,7 +4,7 @@ import { run } from "@opencode/tui"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Config } from "../../config"
-import { Context, Effect, FileSystem, Option, Queue } from "effect"
+import { Context, Effect, Exit, Fiber, FileSystem, Option, Queue, Scope } from "effect"
 import path from "node:path"
 import { ServerConnection } from "../../services/server-connection"
 import { ReleaseLayout } from "../../upgrade/layout"
@@ -72,8 +72,10 @@ export default Runtime.handler(Commands, (input) =>
       latest = state
       listeners.forEach((notify) => notify(state))
     }
+    // Upgrades end with this TUI: closing the scope waits for a switch that has begun and cancels any other step.
+    const upgrades = yield* Scope.fork(yield* Scope.Scope)
     // Once per start, never on a timer. A standalone server shares the database, so it must not switch it.
-    if (!input.standalone) yield* updater.startup(publish).pipe(Effect.forkScoped({ startImmediately: true }))
+    if (!input.standalone) yield* updater.startup(publish).pipe(Effect.forkIn(upgrades, { startImmediately: true }))
     const global = yield* Global.Service
     const releaseBinary = path.join(ReleaseLayout.at(global.data).current, Release.binary)
     const relaunch: { to?: { readonly sessionID?: string } } = {}
@@ -149,7 +151,9 @@ export default Runtime.handler(Commands, (input) =>
                 type: "unavailable" as const,
                 message: "A --standalone server shares the database; upgrade from openforge without --standalone.",
               })
-            : runPromise(updater.upgrade({ notify: publish })),
+            : runPromise(
+                updater.upgrade({ notify: publish }).pipe(Effect.forkIn(upgrades), Effect.flatMap(Fiber.join)),
+              ),
         relaunch: relaunchable ? (sessionID) => (relaunch.to = { sessionID }) : undefined,
       },
       packages: {
@@ -175,6 +179,8 @@ export default Runtime.handler(Commands, (input) =>
       ...(relaunch.to.sessionID ? ["--session", relaunch.to.sessionID] : []),
       ...(input.auto || input.yolo || input.dangerouslySkipPermissions ? ["--auto"] : []),
     ]
+    // The new image replaces this process at once, so let upgrade work release its lock and temporary files first.
+    yield* Scope.close(upgrades, Exit.void)
     yield* Effect.logInfo("restarting the TUI on the release in use", { binary: releaseBinary, args })
     yield* Effect.try(() => process.execve?.(releaseBinary, [releaseBinary, ...args], process.env)).pipe(
       Effect.catch((error) =>

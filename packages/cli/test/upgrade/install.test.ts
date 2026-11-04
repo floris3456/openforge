@@ -196,7 +196,9 @@ describe("kept releases", () => {
         ),
       )
       const runner = yield* Effect.acquireRelease(
-        Effect.promise(() => RunnerServer.serve({ directory: RunnerPaths.directory(state, "0.0.2"), version: "0.0.2" })),
+        Effect.promise(() =>
+          RunnerServer.serve({ directory: RunnerPaths.directory(state, "0.0.2"), version: "0.0.2" }),
+        ),
         (runner) => Effect.promise(() => runner.shutdown()),
       )
       // A runner that has exited leaves its folder behind; that release goes as usual.

@@ -52,7 +52,12 @@ export async function serveV1(directory: string, protocols: number[] = [1]) {
               : { id: request.id, type: "error", code: "auth", message: "authentication failed" },
           )
         if (request.op === "start")
-          write({ id: request.id, type: "started", command: command(directory, request.command.deadline), existing: false })
+          write({
+            id: request.id,
+            type: "started",
+            command: command(directory, request.command.deadline),
+            existing: false,
+          })
         if (request.op === "list") write({ id: request.id, type: "list", commands: [command(directory, deadline)] })
         if (request.op === "deadline") {
           deadline = request.deadline
@@ -62,8 +67,20 @@ export async function serveV1(directory: string, protocols: number[] = [1]) {
         if (request.op === "watch") {
           write({ id: request.id, type: "command", command: command(directory, deadline) })
           if (request.output) {
-            write({ id: request.id, type: "output", offset: 0, data: Buffer.from("hello ").toString("base64"), size: 6 })
-            write({ id: request.id, type: "output", offset: 6, data: Buffer.from("world").toString("base64"), size: 11 })
+            write({
+              id: request.id,
+              type: "output",
+              offset: 0,
+              data: Buffer.from("hello ").toString("base64"),
+              size: 6,
+            })
+            write({
+              id: request.id,
+              type: "output",
+              offset: 6,
+              data: Buffer.from("world").toString("base64"),
+              size: 11,
+            })
           }
           write({ id: request.id, type: "exit", exit })
         }

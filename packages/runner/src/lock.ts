@@ -19,7 +19,9 @@ const load = () =>
           : ["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1", "libc.so"]
       for (const name of names) {
         try {
-          const library = ffi.dlopen(name, { flock: { args: [ffi.FFIType.i32, ffi.FFIType.i32], returns: ffi.FFIType.i32 } })
+          const library = ffi.dlopen(name, {
+            flock: { args: [ffi.FFIType.i32, ffi.FFIType.i32], returns: ffi.FFIType.i32 },
+          })
           return (fd: number, operation: number) => library.symbols.flock(fd, operation)
         } catch {}
       }

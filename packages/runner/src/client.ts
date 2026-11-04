@@ -9,16 +9,7 @@ import { RunnerPaths } from "./paths.js"
 import { RunnerProtocol } from "./protocol.js"
 
 export class RunnerError extends Schema.TaggedError<RunnerError>()("RunnerError", {
-  reason: Schema.Literals([
-    "unavailable",
-    "protocol",
-    "auth",
-    "closing",
-    "unknown",
-    "spawn",
-    "invalid",
-    "lost",
-  ]),
+  reason: Schema.Literals(["unavailable", "protocol", "auth", "closing", "unknown", "spawn", "invalid", "lost"]),
   message: Schema.String,
 }) {}
 
@@ -75,7 +66,10 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
     socket.once("error", (cause) => resume(Effect.fail(failure("unavailable", describe(cause)))))
     return Effect.sync(() => socket.destroy())
   })
-  yield* Scope.addFinalizer(scope, Effect.sync(() => socket.destroy()))
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.sync(() => socket.destroy()),
+  )
   socket.on("error", () => {})
   socket.setEncoding("utf8")
 
@@ -205,8 +199,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
               Queue.endUnsafe(queue)
               return true
             },
-            lost: () =>
-              Queue.failCauseUnsafe(queue, Cause.fail(failure("lost", "the runner closed the connection"))),
+            lost: () => Queue.failCauseUnsafe(queue, Cause.fail(failure("lost", "the runner closed the connection"))),
           })
           yield* Effect.addFinalizer(() => Effect.sync(() => handlers.delete(id)))
           write({

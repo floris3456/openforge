@@ -690,68 +690,75 @@ describe("SessionRestart background recovery", () => {
     }),
   )
 
-  it.live("picks up background shells the tool runner kept or finished across the restart, and delivers their results", () =>
-    Effect.gen(function* () {
-      const database = yield* Database.Service
-      const jobs = yield* Job.Service
-      const store = yield* SessionStore.Service
-      const bus = yield* Bus.Service
-      const host = yield* machine
-      const release = path.join(host.tmp, "release")
-      const sessionID = Session.ID.make("ses_background_runner_shells")
-      yield* seedSessions(database, [sessionID])
-      // The server that started them stopped and left them in its tool runner: one still runs, one finishes before
-      // the next server starts.
-      const [running, finished] = yield* Effect.gen(function* () {
-        const shell = yield* Shell.Service
-        const running = yield* shell.create({
-          shell: "/bin/sh",
-          command: `printf %s before; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s after`,
-          timeout: 0,
-        })
-        const finished = yield* shell.create({ shell: "/bin/sh", command: "printf done; exit 3", timeout: 0 })
-        yield* shell.wait(finished.id)
-        yield* (yield* ShellRunner.Service).detach
-        return [running, finished]
-      }).pipe(Effect.scoped, Effect.provide(host.service()))
-      yield* seedBackground(jobs, sessionID, [
-        { id: "call-runner-running", shellID: running.id, command: running.command },
-        { id: "call-runner-finished", shellID: finished.id, command: finished.command },
-      ])
+  it.live(
+    "picks up background shells the tool runner kept or finished across the restart, and delivers their results",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const jobs = yield* Job.Service
+        const store = yield* SessionStore.Service
+        const bus = yield* Bus.Service
+        const host = yield* machine
+        const release = path.join(host.tmp, "release")
+        const sessionID = Session.ID.make("ses_background_runner_shells")
+        yield* seedSessions(database, [sessionID])
+        // The server that started them stopped and left them in its tool runner: one still runs, one finishes before
+        // the next server starts.
+        const [running, finished] = yield* Effect.gen(function* () {
+          const shell = yield* Shell.Service
+          const running = yield* shell.create({
+            shell: "/bin/sh",
+            command: `printf %s before; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s after`,
+            timeout: 0,
+          })
+          const finished = yield* shell.create({ shell: "/bin/sh", command: "printf done; exit 3", timeout: 0 })
+          yield* shell.wait(finished.id)
+          yield* (yield* ShellRunner.Service).detach
+          return [running, finished]
+        }).pipe(Effect.scoped, Effect.provide(host.service()))
+        yield* seedBackground(jobs, sessionID, [
+          { id: "call-runner-running", shellID: running.id, command: running.command },
+          { id: "call-runner-finished", shellID: finished.id, command: finished.command },
+        ])
 
-      const observed = yield* Deferred.make<string[]>()
-      const scope = yield* Scope.make()
-      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
-      const restarted = yield* Job.make.pipe(Scope.provide(scope))
-      const shells = yield* Layer.buildWithScope(host.service(), scope)
-      const context = yield* buildExecution(
-        scope,
-        ({ sessionID }) =>
-          SessionInbox.promote(database.db, bus, sessionID, "steer").pipe(
-            Effect.andThen(store.context(sessionID)),
-            Effect.orDie,
-            Effect.map((messages) => messages.filter((message) => message.type === "synthetic")),
-            Effect.flatMap((notices) =>
-              notices.length === 2 ? Deferred.succeed(observed, notices.map((notice) => notice.text)) : Effect.void,
+        const observed = yield* Deferred.make<string[]>()
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const restarted = yield* Job.make.pipe(Scope.provide(scope))
+        const shells = yield* Layer.buildWithScope(host.service(), scope)
+        const context = yield* buildExecution(
+          scope,
+          ({ sessionID }) =>
+            SessionInbox.promote(database.db, bus, sessionID, "steer").pipe(
+              Effect.andThen(store.context(sessionID)),
+              Effect.orDie,
+              Effect.map((messages) => messages.filter((message) => message.type === "synthetic")),
+              Effect.flatMap((notices) =>
+                notices.length === 2
+                  ? Deferred.succeed(
+                      observed,
+                      notices.map((notice) => notice.text),
+                    )
+                  : Effect.void,
+              ),
+              Effect.asVoid,
             ),
-            Effect.asVoid,
-          ),
-        undefined,
-        restarted,
-        shells,
-      )
-      yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
-      expect((yield* restarted.pendingBackground).map((job) => job.id)).toEqual(["call-runner-running"])
-      expect(yield* restarted.get("call-runner-running")).toMatchObject({ status: "running" })
+          undefined,
+          restarted,
+          shells,
+        )
+        yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
+        expect((yield* restarted.pendingBackground).map((job) => job.id)).toEqual(["call-runner-running"])
+        expect(yield* restarted.get("call-runner-running")).toMatchObject({ status: "running" })
 
-      fs.writeFileSync(release, "")
-      expect(yield* Deferred.await(observed)).toEqual([
-        `<shell id="call-runner-finished" state="completed" command="printf done; exit 3">\ndone\n\nExited with code 3\n</shell>`,
-        `<shell id="call-runner-running" state="completed" command="${running.command}">\nbeforeafter\n</shell>`,
-      ])
-      yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)
-      expect(yield* restarted.pendingBackground).toEqual([])
-    }),
+        fs.writeFileSync(release, "")
+        expect(yield* Deferred.await(observed)).toEqual([
+          `<shell id="call-runner-finished" state="completed" command="printf done; exit 3">\ndone\n\nExited with code 3\n</shell>`,
+          `<shell id="call-runner-running" state="completed" command="${running.command}">\nbeforeafter\n</shell>`,
+        ])
+        yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)
+        expect(yield* restarted.pendingBackground).toEqual([])
+      }),
   )
 
   it.effect("does not bypass a claimed owner's restart budget for a shell notice", () =>

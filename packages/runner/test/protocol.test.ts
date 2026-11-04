@@ -28,9 +28,9 @@ describe("runner protocol", () => {
         expect((yield* connection.list).map((command) => command.id)).toEqual([started.command.id])
         const events = yield* connection.watch(started.command.id, { offset: 0, output: true }).pipe(Stream.runCollect)
         expect(events.map((event) => event.type)).toEqual(["command", "output", "output", "exit"])
-        expect(
-          Buffer.concat(events.flatMap((event) => (event.type === "output" ? [event.data] : []))).toString(),
-        ).toBe("hello world")
+        expect(Buffer.concat(events.flatMap((event) => (event.type === "output" ? [event.data] : []))).toString()).toBe(
+          "hello world",
+        )
         expect(events.at(-1)).toMatchObject({ type: "exit", exit: { status: "exited", code: 0, size: 11 } })
         yield* connection.signal(started.command.id, "SIGTERM", { remove: true })
       }),

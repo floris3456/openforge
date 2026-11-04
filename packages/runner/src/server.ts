@@ -109,7 +109,12 @@ export async function serve(options: Options): Promise<Runner> {
   fs.chmodSync(socketPath, 0o600)
   await RunnerOutput.writeAtomic(
     RunnerPaths.info(directory),
-    JSON.stringify({ pid: process.pid, version: options.version, protocols: RunnerProtocol.SPOKEN, started: Date.now() }),
+    JSON.stringify({
+      pid: process.pid,
+      version: options.version,
+      protocols: RunnerProtocol.SPOKEN,
+      started: Date.now(),
+    }),
   )
   const grace = setTimeout(() => idle(), options.grace ?? 10_000)
   grace.unref()
@@ -301,11 +306,7 @@ export async function serve(options: Options): Promise<Runner> {
     fs.rmSync(RunnerPaths.exit(entry.start.output), { force: true })
   }
 
-  function watch(
-    connection: Connection,
-    request: Extract<RunnerProtocol.Request, { op: "watch" }>,
-    entry: Entry,
-  ) {
+  function watch(connection: Connection, request: Extract<RunnerProtocol.Request, { op: "watch" }>, entry: Entry) {
     const item: Watch = {
       id: request.id,
       connection,

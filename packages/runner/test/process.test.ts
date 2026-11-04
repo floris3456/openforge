@@ -47,7 +47,10 @@ describe("runner process", () => {
           .pipe(Stream.runLast, Effect.forkScoped({ startImmediately: true }))
         process.kill(connection.pid, "SIGTERM")
         const last = yield* Fiber.join(exit)
-        expect(last._tag === "Some" && last.value).toMatchObject({ type: "exit", exit: { status: "killed", signal: "SIGKILL" } })
+        expect(last._tag === "Some" && last.value).toMatchObject({
+          type: "exit",
+          exit: { status: "killed", signal: "SIGKILL" },
+        })
         expect(yield* connection.closed).toBe("bye")
         expect(fs.existsSync(RunnerPaths.exit(input.output))).toBe(true)
         expect(alive(started.command.pgid)).toBe(false)

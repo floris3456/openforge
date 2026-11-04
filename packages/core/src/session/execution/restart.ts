@@ -1,7 +1,6 @@
 export * as SessionRestart from "./restart.js"
 
 import { Context, Deferred, Effect, Layer, Option, Schema } from "effect"
-import { Shell as ShellSchema } from "@opencode/schema/shell"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../../bus.js"
 import { Instance } from "../../instance/service.js"
@@ -178,7 +177,7 @@ export const layer = (options?: Options) =>
         recovery: Extract<Job.Recovery, { kind: "shell" }>,
         suspended: ReadonlySet<SessionSchema.ID>,
       ) {
-        const id = Schema.decodeUnknownOption(ShellSchema.ID)(recovery.shellID)
+        const id = Schema.decodeUnknownOption(Shell.ID)(recovery.shellID)
         const known =
           background.status === "running" && Option.isSome(id)
             ? yield* shells.get(id.value).pipe(Effect.option)

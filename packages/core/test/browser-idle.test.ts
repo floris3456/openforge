@@ -51,7 +51,14 @@ const it = testEffect(
           layer: LocationActivity.layer({ timeToLive, sweepInterval: "100 millis" }).pipe(
             Layer.provide(Layer.succeed(Clock.Clock, activityClock)),
           ),
-          deps: [Bus.node, Job.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node, ShellRunner.node],
+          deps: [
+            Bus.node,
+            Job.node,
+            LocationServiceMap.node,
+            SessionExecution.node,
+            SessionStore.node,
+            ShellRunner.node,
+          ],
         }),
       ),
     ],

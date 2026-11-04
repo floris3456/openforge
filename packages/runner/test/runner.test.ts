@@ -198,7 +198,13 @@ describe("runner", () => {
         const lines: string[] = []
         const socket = net.createConnection({ path: RunnerPaths.socket(runner.directory) })
         socket.setEncoding("utf8")
-        socket.on("data", RunnerProtocol.lines((value) => lines.push(value), () => {}))
+        socket.on(
+          "data",
+          RunnerProtocol.lines(
+            (value) => lines.push(value),
+            () => {},
+          ),
+        )
         socket.once("data", () => socket.write(line + "\n"))
         socket.on("close", () => resolve(lines))
       })

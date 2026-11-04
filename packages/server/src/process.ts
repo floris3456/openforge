@@ -111,9 +111,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       yield* installRestartContinuity(
         Context.get(context, SessionRestart.Service),
         Context.get(context, ShellRunner.Service),
-      ).pipe(
-        Effect.provideService(Scope.Scope, applicationScope),
-      )
+      ).pipe(Effect.provideService(Scope.Scope, applicationScope))
     }
     // Schedules fire from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
     yield* Effect.forkIn(Context.get(context, Schedule.Service).run, applicationScope)

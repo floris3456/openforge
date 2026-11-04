@@ -228,7 +228,10 @@ const layer = (options: Options) =>
           else yield* evict(oldest)
         }
         if (exit.status === "failed")
-          yield* Deferred.fail(entry.done, new RunnerStoppedError({ id: entry.info.id, message: exit.error ?? STOPPED }))
+          yield* Deferred.fail(
+            entry.done,
+            new RunnerStoppedError({ id: entry.info.id, message: exit.error ?? STOPPED }),
+          )
         else yield* Deferred.succeed(entry.done, entry.info)
         if (announce) yield* publishExited(entry)
       })
@@ -309,7 +312,7 @@ const layer = (options: Options) =>
         read: (offset, limit) =>
           RunnerClient.read(remote.directory, id, offset, limit).pipe(
             Effect.map((page): Page | undefined => page),
-            Effect.catch(() => Effect.succeed(undefined)),
+            Effect.orElseSucceed(() => undefined),
           ),
         watch: (offset) =>
           Stream.unwrap(
@@ -363,7 +366,9 @@ const layer = (options: Options) =>
         start?: Effect.Effect<void, RunnerClient.RunnerError>,
       ): Effect.fn.Return<Remote, RunnerClient.RunnerError> {
         const remoteScope = yield* Scope.fork(scope)
-        const connection = yield* (start ? RunnerClient.connectOrStart(directory, start) : RunnerClient.connect(directory)).pipe(
+        const connection = yield* (
+          start ? RunnerClient.connectOrStart(directory, start) : RunnerClient.connect(directory)
+        ).pipe(
           Scope.provide(remoteScope),
           Effect.onError(() => Scope.close(remoteScope, Exit.void)),
         )
@@ -405,7 +410,11 @@ const layer = (options: Options) =>
           if (!exit) continue
           const decoded = decodeMeta(exit.meta)
           if (decoded._tag === "None") return undefined
-          return yield* register({ info: describe(id, decoded.value, exit.pid), location: decoded.value.location, exit })
+          return yield* register({
+            info: describe(id, decoded.value, exit.pid),
+            location: decoded.value.location,
+            exit,
+          })
         }
         return undefined
       })
@@ -525,7 +534,9 @@ const layer = (options: Options) =>
               const live = entry.control
               if (live)
                 yield* live.watch(cursor).pipe(
-                  Stream.runForEach((event) => (event.type === "output" ? emit(event.data, event.offset, event.size) : Effect.void)),
+                  Stream.runForEach((event) =>
+                    event.type === "output" ? emit(event.data, event.offset, event.size) : Effect.void,
+                  ),
                   Effect.ignore,
                 )
               const info = yield* Deferred.await(entry.done).pipe(Effect.orElseSucceed(() => entry.info))

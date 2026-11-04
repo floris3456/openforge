@@ -92,7 +92,12 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           const progress = { copied: false, starting: false }
           const switched = yield* Effect.gen(function* () {
             progress.copied = yield* ReleaseDatabase.copy(target.database, copyOf(target, input.from))
-            if (input.restore) yield* ReleaseDatabase.restore(input.restore, target.database)
+            if (input.restore) {
+              yield* ReleaseDatabase.restore(input.restore, target.database)
+              yield* log(
+                `restored the database copy ${input.restore}; the database used until now is kept at ${copyOf(target, input.from)}`,
+              )
+            }
             yield* ReleaseLayout.point(target.layout, input.to)
             yield* log(`current now points at ${input.to}; starting its service`)
             progress.starting = true

@@ -39,6 +39,10 @@ export default Runtime.handler(
       })
       .pipe(Effect.ensuring(Effect.sync(() => stop("Stopped", 1))))
     if (outcome.type === "unavailable") return yield* Effect.fail(new Error(outcome.message))
+    if (outcome.type === "switched" && input.restoreDatabase)
+      log.info(
+        `The database used until now is kept beside openforge ${outcome.from}; to get it back: openforge upgrade ${outcome.from} --restore-database`,
+      )
     if (outcome.type === "current")
       log.info(
         Option.isSome(input.target)

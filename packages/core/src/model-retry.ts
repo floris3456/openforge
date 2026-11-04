@@ -21,43 +21,55 @@ const retryAfter = (input: Input) => {
 
 // Exponential from 2s capped at 10s per gap, for 10 retries: 2, 4, 8, then 10 × 7, about 84s of
 // waiting when every attempt fails (67–101s with jitter). `min` takes the faster schedule, so the
-// cap applies per gap; `max` with `recurs` bounds the count.
+// cap applies per gap; `max` with `recurs` bounds the count. A provider's retry-after is applied
+// on top, so the schedule needs no input and a restored policy can replay its earlier gaps.
 const schedule = Schedule.max([
   Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("10 seconds")]),
   Schedule.recurs(10),
-]).pipe(
-  Schedule.jittered,
-  Schedule.setInputType<Input>(),
-  Schedule.modifyDelay(({ input, duration: delay }) => {
-    const minimum = retryAfter(input)
-    const duration = minimum === undefined ? delay : Duration.max(delay, Duration.millis(minimum))
-    return Effect.succeed(Duration.millis(Math.ceil(Duration.toMillis(duration))))
-  }),
-)
+]).pipe(Schedule.jittered)
 
 // A timed-out attempt already waited minutes before failing, so the general allowance would let a
 // dead provider hold a call for most of an hour. Cap those attempts well below it.
 const MAX_TIMEOUT_RETRIES = 3
 
-export const policy = Effect.gen(function* () {
-  const step = yield* Schedule.toStep(schedule)
-  let attempt = 1
-  let timeouts = 0
-  return (input: Input) =>
-    Effect.gen(function* () {
+/** Where a retry sequence stands: the attempt its last retry scheduled, and how many attempts timed out. */
+export interface Progress {
+  readonly attempt: number
+  readonly timeouts: number
+}
+
+/** A retry policy that continues from `from`, as recorded by an earlier process. */
+export const resume = (from?: Progress) =>
+  Effect.gen(function* () {
+    const step = yield* Schedule.toStep(schedule)
+    let attempt = 1
+    let timeouts = 0
+    if (from !== undefined) {
       const now = yield* Clock.currentTimeMillis
-      const next = yield* step(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
-      if (!next) return undefined
-      const [, duration] = next
-      attempt++
-      if (input.cause.reason._tag === "Transport" && input.cause.reason.code === "Timeout") timeouts++
-      return {
-        attempt,
-        delay: Math.ceil(Duration.toMillis(duration)),
-        retry: input.retry && timeouts <= MAX_TIMEOUT_RETRIES,
-      }
-    })
-})
+      for (let replayed = 1; replayed < from.attempt; replayed++)
+        yield* step(now, undefined).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
+      attempt = from.attempt
+      timeouts = from.timeouts
+    }
+    const decide = (input: Input) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        const next = yield* step(now, undefined).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
+        if (!next) return undefined
+        const minimum = retryAfter(input)
+        const duration = minimum === undefined ? next[1] : Duration.max(next[1], Duration.millis(minimum))
+        attempt++
+        if (input.cause.reason._tag === "Transport" && input.cause.reason.code === "Timeout") timeouts++
+        return {
+          attempt,
+          delay: Math.ceil(Duration.toMillis(duration)),
+          retry: input.retry && timeouts <= MAX_TIMEOUT_RETRIES,
+        }
+      })
+    return { decide, progress: (): Progress => ({ attempt, timeouts }) }
+  })
+
+export const policy = Effect.map(resume(), (policy) => policy.decide)
 
 /** Retry a buffered model call from scratch; failed attempts never contribute to its returned output. */
 export const retry = <A, R>(effect: Effect.Effect<A, AIError, R>) =>

@@ -1,9 +1,10 @@
 export * as Permission from "./permission.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { Context, Deferred, Effect, Layer, Schema } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Layer, Option, Schema, Semaphore } from "effect"
 import { Permission } from "@opencode/schema/permission"
 import { Bus } from "./bus.js"
+import { SessionContinuity } from "./continuity.js"
 import { Location } from "./location.js"
 import { Agent } from "./agent.js"
 import { SessionErrors } from "./session/error.js"
@@ -39,6 +40,8 @@ export interface ReplyInput {
   readonly requestID: ID
   readonly reply: Reply
   readonly message?: string
+  /** Replies only to a request of this Session. */
+  readonly sessionID?: SessionSchema.ID
 }
 
 export interface AskResult {
@@ -99,6 +102,16 @@ export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
   return rulesets.flat()
 }
 
+/** Whether a rerun tool asks what it asked before the restart; a changed file changes the metadata's diff. */
+function sameRequest(left: Request, right: Request) {
+  return (
+    left.action === right.action &&
+    JSON.stringify(left.resources) === JSON.stringify(right.resources) &&
+    JSON.stringify(left.save ?? []) === JSON.stringify(right.save ?? []) &&
+    JSON.stringify(left.metadata ?? {}) === JSON.stringify(right.metadata ?? {})
+  )
+}
+
 export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
@@ -119,7 +132,15 @@ interface Pending {
   readonly request: Request
   readonly agent?: Agent.ID
   readonly deferred: Deferred.Deferred<void, DeclinedError | CorrectedError>
+  /** Stored, so the rerun of the asking tool after a restart finds it, and its answer. */
+  readonly durable: boolean
 }
+
+const StoredReply = Schema.Struct({ reply: Reply, message: Schema.optional(Schema.String) })
+const decodeRequest = Schema.decodeUnknownOption(Request)
+const decodeReply = Schema.decodeUnknownOption(StoredReply)
+// Replies a client may resend; enough for any burst of asks.
+const REPLIED_LIMIT = 1_000
 
 const layer = Layer.effect(
   Service,
@@ -130,11 +151,31 @@ const layer = Layer.effect(
     const sessions = yield* SessionStore.Service
     const saved = yield* PermissionSaved.Service
     const hooks = yield* PluginHooks.Service
+    const continuity = yield* SessionContinuity.Service
     const pending = new Map<ID, Pending>()
+    const replied = new Map<ID, SessionSchema.ID>()
     let closed = false
+
+    const settle = (deferred: Pending["deferred"], reply: typeof StoredReply.Type) => {
+      if (reply.reply !== "reject") return Deferred.succeed(deferred, undefined)
+      return Deferred.fail(
+        deferred,
+        reply.message ? new CorrectedError({ feedback: reply.message }) : new DeclinedError(),
+      )
+    }
+
+    // Serializes a rerun taking its stored request with an answer to that stored request.
+    const restoring = Semaphore.makeUnsafe(1)
+
+    const remember = (request: Request) => {
+      replied.set(request.id, request.sessionID)
+      if (replied.size > REPLIED_LIMIT) replied.delete(replied.keys().next().value!)
+    }
 
     const close = Effect.gen(function* () {
       closed = true
+      // A stopping process keeps its stored requests for the rerun of their tools in the next one.
+      if (continuity.stopping()) return pending.clear()
       yield* Effect.forEach(Array.from(pending.values()), (item) =>
         bus
           .publish(Permission.Event.Replied, {
@@ -142,7 +183,10 @@ const layer = Layer.effect(
             requestID: item.request.id,
             reply: "reject",
           })
-          .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError()))),
+          .pipe(
+            Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError())),
+            Effect.ensuring(item.durable ? continuity.requests.remove(item.request.id) : Effect.void),
+          ),
       )
       pending.clear()
     }).pipe(Effect.uninterruptible)
@@ -218,23 +262,57 @@ const layer = Layer.effect(
       }
     }
 
-    const create = (request: Request, agent?: Agent.ID) =>
-      Effect.uninterruptible(
-        Effect.gen(function* () {
-          const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
-          const item = { request, agent, deferred }
-          if (closed) {
-            yield* Deferred.fail(deferred, new DeclinedError())
+    /** What the asking tool call asked before a restart, when this call is its rerun. */
+    const stored = (input: Pick<Request, "sessionID" | "source">) =>
+      Effect.gen(function* () {
+        if (input.source === undefined || !(yield* continuity.rerun(input.source.id))) return undefined
+        return yield* continuity.requests.find("permission", {
+          sessionID: input.sessionID,
+          messageID: input.source.messageID,
+          callID: input.source.id,
+        })
+      })
+
+    const create = (request: Request, agent?: Agent.ID, durable = false) =>
+      restoring.withPermit(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
+            const before = durable ? yield* stored(request) : undefined
+            const previous = before && Option.getOrUndefined(decodeRequest(before.request))
+            // The rerun asks what it asked before: the same request, shown with the same id, and any answer applies.
+            const same = before && previous && before.agent === agent && sameRequest(previous, request)
+            if (before && !same) yield* continuity.requests.remove(before.id)
+            const value = same ? { ...request, id: previous.id } : request
+            const item: Pending = { request: value, agent, deferred, durable }
+            const answered = same ? Option.getOrUndefined(decodeReply(before.reply)) : undefined
+            if (answered) {
+              yield* settle(deferred, answered)
+              return item
+            }
+            if (closed) {
+              yield* Deferred.fail(deferred, new DeclinedError())
+              return item
+            }
+            if (pending.has(value.id))
+              return yield* Effect.die(new Error(`Duplicate pending permission ID: ${value.id}`))
+            pending.set(value.id, item)
+            if (durable && !same && value.source)
+              yield* continuity.requests.add({
+                id: value.id,
+                sessionID: value.sessionID,
+                kind: "permission",
+                messageID: value.source.messageID,
+                callID: value.source.id,
+                request: value,
+                ...(agent === undefined ? {} : { agent }),
+              })
+            yield* bus
+              .publish(Permission.Event.Asked, value)
+              .pipe(Effect.onError(() => Effect.sync(() => pending.delete(value.id))))
             return item
-          }
-          if (pending.has(request.id))
-            return yield* Effect.die(new Error(`Duplicate pending permission ID: ${request.id}`))
-          pending.set(request.id, item)
-          yield* bus
-            .publish(Permission.Event.Asked, request)
-            .pipe(Effect.onError(() => Effect.sync(() => pending.delete(request.id))))
-          return item
-        }),
+          }),
+        ),
       )
 
     const ask = Effect.fn("Permission.ask")(function* (input: AssertInput) {
@@ -260,17 +338,22 @@ const layer = Layer.effect(
               })
             }
             if (result.effect === "allow") return
-            const item = yield* create(request(input, result.message), input.agent)
-            return yield* restore(Deferred.await(item.deferred)).pipe(
+            // A wait the tool can rerun after a stop is stored; the rerun's request then takes the stored id.
+            const durable = input.source !== undefined && (yield* continuity.survives(input.source.id))
+            const item = yield* create(request(input, result.message), input.agent, durable)
+            return yield* restore(continuity.wait(input.source?.id, Deferred.await(item.deferred))).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
               // resurfaces as a typed failure at SessionModelRequest.executeTool. A decline
               // WITH feedback (CorrectedError) intentionally stays typed so the leaf can turn
               // it into ToolFailure and the model continues.
               Effect.catchTag("Permission.DeclinedError", (error) => Effect.die(error)),
-              Effect.ensuring(
-                Effect.sync(() => {
+              Effect.onExit((exit) =>
+                Effect.gen(function* () {
+                  // A stop keeps the request, and any answer, for the next process.
+                  if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && continuity.stopping()) return
                   pending.delete(item.request.id)
+                  if (item.durable) yield* continuity.requests.remove(item.request.id)
                 }),
               ),
             )
@@ -295,11 +378,47 @@ const layer = Layer.effect(
       return (yield* evaluateInput(input)).effect === "allow"
     })
 
+    // The answer is stored before it reaches the tool, so a stop in between still delivers it to the rerun.
+    const answer = (item: Pending, reply: typeof StoredReply.Type) =>
+      Effect.gen(function* () {
+        if (item.durable) yield* continuity.requests.reply(item.request.id, reply)
+        yield* settle(item.deferred, reply)
+        remember(item.request)
+        pending.delete(item.request.id)
+      })
+
+    // A request asked before a restart whose tool has not run again yet: the answer waits for the rerun.
+    const replyStored = (input: ReplyInput) =>
+      Effect.gen(function* () {
+        const row = yield* continuity.requests.get(input.requestID)
+        const request = row?.kind === "permission" ? Option.getOrUndefined(decodeRequest(row.request)) : undefined
+        if (!row || !request || (input.sessionID !== undefined && request.sessionID !== input.sessionID))
+          return yield* new NotFoundError({ requestID: input.requestID })
+        if (row.reply !== undefined && row.reply !== null) return
+        yield* continuity.requests.reply(request.id, {
+          reply: input.reply,
+          ...(input.reply === "reject" && input.message ? { message: input.message } : {}),
+        })
+        if (input.reply === "always" && request.save?.length)
+          yield* saved.add({ projectID: location.project.id, action: request.action, resources: request.save })
+        remember(request)
+        yield* bus.publish(Permission.Event.Replied, {
+          sessionID: request.sessionID,
+          requestID: request.id,
+          reply: input.reply,
+        })
+      })
+
     const reply = Effect.fn("Permission.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const existing = pending.get(input.requestID)
-          if (!existing) return yield* new NotFoundError({ requestID: input.requestID })
+          const owner = existing?.request.sessionID ?? replied.get(input.requestID)
+          if (owner === undefined) return yield* restoring.withPermit(replyStored(input))
+          if (input.sessionID !== undefined && owner !== input.sessionID)
+            return yield* new NotFoundError({ requestID: input.requestID })
+          // A client that resends an answer it already gave gets the same success.
+          if (!existing) return
           yield* bus.publish(Permission.Event.Replied, {
             sessionID: existing.request.sessionID,
             requestID: existing.request.id,
@@ -307,12 +426,9 @@ const layer = Layer.effect(
           })
 
           if (input.reply === "reject") {
-            yield* Deferred.fail(
-              existing.deferred,
-              input.message ? new CorrectedError({ feedback: input.message }) : new DeclinedError(),
-            )
-            pending.delete(input.requestID)
-            for (const [id, item] of pending) {
+            const stored = { reply: "reject" as const, ...(input.message ? { message: input.message } : {}) }
+            yield* answer(existing, stored)
+            for (const item of Array.from(pending.values())) {
               if (item.request.sessionID !== existing.request.sessionID) continue
               yield* bus.publish(Permission.Event.Replied, {
                 sessionID: item.request.sessionID,
@@ -320,11 +436,7 @@ const layer = Layer.effect(
                 reply: "reject",
               })
               // Feedback applies to the whole batch, so parallel asks don't end the step.
-              yield* Deferred.fail(
-                item.deferred,
-                input.message ? new CorrectedError({ feedback: input.message }) : new DeclinedError(),
-              )
-              pending.delete(id)
+              yield* answer(item, stored)
             }
             return
           }
@@ -336,11 +448,10 @@ const layer = Layer.effect(
               resources: existing.request.save,
             })
           }
-          yield* Deferred.succeed(existing.deferred, undefined)
-          pending.delete(input.requestID)
+          yield* answer(existing, { reply: input.reply })
           if (input.reply !== "always" || !existing.request.save?.length) return
 
-          for (const [id, item] of pending) {
+          for (const item of Array.from(pending.values())) {
             const result = yield* evaluateInput({ ...item.request, agent: item.agent }).pipe(
               Effect.catchTag("Session.NotFoundError", () => Effect.undefined),
             )
@@ -350,8 +461,7 @@ const layer = Layer.effect(
               requestID: item.request.id,
               reply: "always",
             })
-            yield* Deferred.succeed(item.deferred, undefined)
-            pending.delete(id)
+            yield* answer(item, { reply: "always" })
           }
         }),
       ),
@@ -376,5 +486,13 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, Location.node, Agent.node, SessionStore.node, PermissionSaved.node, PluginHooks.node],
+  deps: [
+    Bus.node,
+    Location.node,
+    Agent.node,
+    SessionStore.node,
+    PermissionSaved.node,
+    PluginHooks.node,
+    SessionContinuity.node,
+  ],
 })

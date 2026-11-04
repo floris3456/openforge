@@ -40,6 +40,7 @@ import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Skill } from "@opencode/core/skill"
 import { Config } from "@opencode/core/config"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { location } from "./fixture/location"
@@ -218,6 +219,7 @@ const locations = makeGlobalNode({
       const bus = yield* Bus.Service
       const store = yield* SessionStore.Service
       const saved = yield* PermissionSaved.Service
+      const continuity = yield* SessionContinuity.Service
       return yield* LayerMap.make(
         (ref: Location.Ref): Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError> => {
           if (ref.directory === missingDirectory && shellState.missingNow) {
@@ -252,6 +254,7 @@ const locations = makeGlobalNode({
                       Bus.node.replace(Layer.succeed(Bus.Service, bus)),
                       SessionStore.node.replace(Layer.succeed(SessionStore.Service, store)),
                       PermissionSaved.node.replace(Layer.succeed(PermissionSaved.Service, saved)),
+                      SessionContinuity.node.replace(Layer.succeed(SessionContinuity.Service, continuity)),
                       Location.node.replace(Layer.succeed(Location.Service, location(ref))),
                       Environment.node.replace(testEnvironment),
                       Image.node.replace(imagePassthrough),
@@ -278,7 +281,7 @@ const locations = makeGlobalNode({
       )
     }),
   ),
-  deps: [Bus.node, SessionStore.node, PermissionSaved.node],
+  deps: [Bus.node, SessionStore.node, PermissionSaved.node, SessionContinuity.node],
 })
 const it = testEffect(
   AppNodeBuilder.build(

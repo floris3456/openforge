@@ -3,6 +3,7 @@ export * as SessionRestart from "./restart.js"
 import { Context, Effect, Layer } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../../bus.js"
+import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
 import { Session } from "../../session.js"
 import { SessionEvent } from "../event.js"
@@ -72,10 +73,14 @@ export const layer = (options?: Options) =>
       const bus = yield* Bus.Service
       const jobs = yield* Job.Service
       const sessions = yield* Session.Service
+      const continuity = yield* SessionContinuity.Service
       const scope = yield* Effect.scope
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
-      const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+      const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, rested: boolean) {
+        // A stop after a completed pause cut nothing off: every execution continues where it rested, without a
+        // notice to the model and without spending the resume budget.
+        if (rested) return (yield* store.get(sessionID)) !== undefined
         // Durable before the resume runs, so a crash inside the resumed turn is
         // counted by the next sweep and the budget cannot be dodged.
         const attempts = yield* store.countResume(sessionID)
@@ -168,6 +173,7 @@ export const layer = (options?: Options) =>
         background: Job.Background,
         recovery: Extract<Job.Recovery, { kind: "subagent" }>,
         suspended: ReadonlySet<SessionSchema.ID>,
+        rested: boolean,
       ) {
         const child = yield* store.get(recovery.childSessionID)
         if (!child || child.parentID !== recovery.parentSessionID || !(yield* store.get(recovery.parentSessionID))) {
@@ -189,7 +195,7 @@ export const layer = (options?: Options) =>
           return
         }
         if (yield* execution.isActive(recovery.childSessionID)) return
-        if (!(yield* prepareResume(recovery.childSessionID))) {
+        if (!(yield* prepareResume(recovery.childSessionID, rested))) {
           yield* notify({ status: "error", error: RESUME_EXHAUSTED.message })
           return
         }
@@ -220,6 +226,7 @@ export const layer = (options?: Options) =>
 
       return Service.of({
         resumeSuspendedSessions: Effect.gen(function* () {
+          const rested = yield* continuity.rested
           const active = yield* execution.active
           const pending = yield* jobs.pendingBackground
           const children = pending.flatMap((background) =>
@@ -239,7 +246,7 @@ export const layer = (options?: Options) =>
               if ((yield* jobs.get(background.id))?.status === "running") return
               const recovery = background.recovery
               if (recovery.kind !== "subagent") return yield* recoverToolJob(background, recovery)
-              yield* recoverSubagent(background, recovery, suspended)
+              yield* recoverSubagent(background, recovery, suspended, rested)
             }),
             { discard: true },
           )
@@ -251,9 +258,10 @@ export const layer = (options?: Options) =>
             (sessionID) =>
               execution
                 .resume(sessionID)
-                .pipe(Effect.ignore, Effect.forkIn(scope), Effect.when(prepareResume(sessionID))),
+                .pipe(Effect.ignore, Effect.forkIn(scope), Effect.when(prepareResume(sessionID, rested))),
             { concurrency: "unbounded", discard: true },
           )
+          if (rested) yield* continuity.settleRested
           // Async observers consult this set at delivery; later completions wake parents normally.
           suspended.clear()
         }),
@@ -264,5 +272,5 @@ export const layer = (options?: Options) =>
 export const node = makeGlobalNode({
   service: Service,
   layer: layer(),
-  deps: [SessionStore.node, SessionExecution.node, Bus.node, Job.node, Session.node],
+  deps: [SessionStore.node, SessionExecution.node, Bus.node, Job.node, Session.node, SessionContinuity.node],
 })

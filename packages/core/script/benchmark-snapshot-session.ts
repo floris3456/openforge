@@ -21,6 +21,7 @@ import { Money } from "@opencode/schema/money"
 import { Effect, Layer, Logger, Stream } from "effect"
 import { Agent } from "../src/agent"
 import { Bus } from "../src/bus"
+import { SessionContinuity } from "../src/continuity"
 import { Database } from "../src/database/database"
 import { AppNodeBuilder } from "../src/effect/app-node-builder"
 import { Location } from "../src/location"
@@ -167,11 +168,12 @@ const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
   }).pipe(
     Effect.provide(snapshots),
     Effect.provide(
-      Layer.merge(
+      Layer.mergeAll(
         AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, SessionProjector.node, ToolOutput.node]), [
           Bus.node.replace(Bus.configured({ persist: true })),
         ]),
         TestLLM.testLayer(),
+        SessionContinuity.noopLayer,
       ),
     ),
     Effect.provide(Logger.layer([])),

@@ -8,6 +8,7 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { Form } from "@opencode/core/form"
 import { Job } from "@opencode/core/job"
 import { Location } from "@opencode/core/location"
@@ -86,6 +87,7 @@ const locations = Layer.effect(
         ).pipe(
           Layer.provideMerge(Form.layer),
           Layer.provide(Layer.succeed(Bus.Service, bus)),
+          Layer.provide(SessionContinuity.noopLayer),
           Layer.fresh,
         ) as unknown as Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError>,
       { idleTimeToLive: Duration.infinity },

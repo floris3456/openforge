@@ -3,9 +3,10 @@ export * as SubagentTool from "./subagent.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
-import { Effect, Predicate, Schema } from "effect"
+import { Effect, Option, Predicate, Schema } from "effect"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
+import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
 import { Model } from "../../model.js"
 import { Permission } from "../../permission.js"
@@ -26,6 +27,10 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
     "To send it follow-ups or change its instructions while it runs, call subagent again with this sessionID.",
   ].join("\n"),
 })
+
+/** What a parent's subagent call stores while it waits, so the next process waits for the same child. */
+const Attached = Schema.Struct({ childSessionID: SessionSchema.ID, agent: Schema.String })
+const decodeAttached = Schema.decodeUnknownOption(Attached)
 
 export const Input = Schema.Struct({
   agent: Schema.String.annotate({
@@ -71,6 +76,44 @@ export const Plugin = {
     const permission = yield* Permission.Service
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
+    const continuity = yield* SessionContinuity.Service
+
+    // A foreground call waits in a way that survives a stop: the child rests and resumes itself, and the rerun of
+    // this call waits for it again.
+    const follow = Effect.fnUntraced(function* (
+      recovery: Extract<Job.Recovery, { kind: "subagent" }>,
+      sessionID: SessionSchema.ID,
+      callID: string,
+    ) {
+      const child = recovery.childSessionID
+      const result = yield* continuity
+        .wait(callID, jobs.block({ id: child, sessionID }), { childSessionID: child, agent: recovery.agent })
+        .pipe(
+          Effect.onInterrupt(() =>
+            continuity.stopping()
+              ? Effect.void
+              : Effect.all([sessions.interrupt(child), jobs.cancel(child)], { discard: true }),
+          ),
+        )
+      if (result?.type === "backgrounded") {
+        yield* subagents.notify(recovery, result.info.started_at)
+        return backgroundResult(child)
+      }
+      // The stop interrupted the child first; the next process waits for it again.
+      if (result?.info.status === "running") return yield* Effect.interrupt
+      // Failure surfaces keep the sessionID visible so the model can continue the child.
+      if (result?.info.status === "error")
+        return yield* new ToolFailure({
+          message: `Subagent failed (sessionID: ${child}): ${result.info.error ?? "unknown error"}`,
+        })
+      if (result?.info.status === "cancelled")
+        return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child})` })
+      return {
+        sessionID: child,
+        status: "completed" as const,
+        output: result?.info.output ?? SubagentCompletion.NO_TEXT,
+      }
+    })
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const ref = yield* Effect.try({
@@ -113,6 +156,19 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
+              if (attached) {
+                const recovery = {
+                  kind: "subagent" as const,
+                  parentSessionID: context.sessionID,
+                  childSessionID: attached.childSessionID,
+                  agent: attached.agent,
+                  description: input.description,
+                }
+                yield* context.progress({ sessionID: attached.childSessionID, status: "running" })
+                yield* subagents.start(recovery)
+                return yield* follow(recovery, context.sessionID, context.id)
+              }
               const parent = yield* sessions
                 .get(context.sessionID)
                 .pipe(
@@ -237,29 +293,7 @@ export const Plugin = {
                 return backgroundResult(child.id)
               }
 
-              const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
-                Effect.onInterrupt(() =>
-                  Effect.all([sessions.interrupt(child.id), jobs.cancel(child.id)], {
-                    discard: true,
-                  }),
-                ),
-              )
-              if (result?.type === "backgrounded") {
-                yield* subagents.notify(recovery, result.info.started_at)
-                return backgroundResult(child.id)
-              }
-              // Failure surfaces keep the sessionID visible so the model can continue the child.
-              if (result?.info.status === "error")
-                return yield* new ToolFailure({
-                  message: `Subagent failed (sessionID: ${child.id}): ${result.info.error ?? "unknown error"}`,
-                })
-              if (result?.info.status === "cancelled")
-                return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child.id})` })
-              return {
-                sessionID: child.id,
-                status: "completed" as const,
-                output: result?.info.output ?? SubagentCompletion.NO_TEXT,
-              }
+              return yield* follow(recovery, context.sessionID, context.id)
             }).pipe(
               Effect.map((output) => ({
                 output,

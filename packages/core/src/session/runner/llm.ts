@@ -5,6 +5,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm"
 import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
+import { SessionContinuity } from "../../continuity.js"
 import { LocationLifecycle } from "../../location-lifecycle.js"
 import { InstructionState } from "../instruction-state.js"
 import { SessionCompaction } from "../compaction.js"
@@ -54,6 +55,7 @@ const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const jobs = yield* Job.Service
     const title = yield* SessionTitle.Service
+    const continuity = yield* SessionContinuity.Service
     const steps = yield* SessionStep.make
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
@@ -73,7 +75,32 @@ const layer = Layer.effect(
         if (promotable === "steer" && pending.delivery === "queue" && !control) return DrainResult.Complete()
       }
       yield* plugins.awaitActivation
+      const boundary = () =>
+        ({
+          kind: "boundary",
+          force,
+          ...(continuing ? { continuation: { step } } : {}),
+          ...(stepped ? { stepped } : {}),
+        }) as const
+      // Where an earlier process left this execution resting; a drain started while paused rests before it starts.
+      const restored = yield* continuity.restored(sessionID)
+      yield* continuity.boundary(restored.rest ? undefined : boundary())
+      const rest = restored.rest
+      if (rest?.kind === "boundary") {
+        force = rest.force
+        continuing = rest.continuation !== undefined
+        step = rest.continuation?.step ?? 1
+        stepped = rest.stepped ?? false
+        yield* continuity.clearRest(sessionID)
+      }
       yield* settleStaleCompactions(sessionID)
+      if (rest?.kind === "retry" || rest?.kind === "tools") {
+        continuing = yield* runStep(sessionID, undefined, rest.step, { rest, tools: restored.tools })
+        stepped = true
+        step = rest.step + 1
+        force = false
+        entering = false
+      }
       yield* settleStaleToolCalls(sessionID)
 
       const advanceToStep = Effect.fn("SessionRunner.advanceToStep")(() =>
@@ -207,9 +234,10 @@ const layer = Layer.effect(
       )
 
       while (true) {
+        yield* continuity.boundary(boundary())
         const next = yield* advanceToStep()
         if (next._tag !== "Ready") return next
-        continuing = yield* runStep(next.context, step)
+        continuing = yield* runStep(sessionID, next.context, step)
         stepped = true
         step++
         force = false
@@ -226,26 +254,59 @@ const layer = Layer.effect(
       return selected
     })
 
-    /** Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. */
-    const runStep = Effect.fn("SessionRunner.runStep")(function* (first: SessionContext.Loaded, step: number) {
-      const sessionID = first.session.id
-      let assistantMessageID = SessionMessage.ID.create()
-      const retry = yield* SessionRunnerRetry.make(bus, sessionID)
+    /**
+     * Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. `resume` continues a
+     * step an earlier process left waiting to retry, or with its reply streamed and its tools unsettled.
+     */
+    const runStep = Effect.fn("SessionRunner.runStep")(function* (
+      sessionID: SessionSchema.ID,
+      first: SessionContext.Loaded | undefined,
+      step: number,
+      resume?: {
+        readonly rest: SessionContinuity.RetryRest | SessionContinuity.ToolsRest
+        readonly tools: SessionContinuity.Restored["tools"]
+      },
+    ) {
+      let assistantMessageID = resume?.rest.assistantMessageID ?? SessionMessage.ID.create()
+      const retry = yield* SessionRunnerRetry.make(
+        bus,
+        continuity,
+        sessionID,
+        step,
+        resume?.rest.kind === "retry" ? resume.rest : undefined,
+      )
       let initial: SessionContext.Loaded | undefined = first
+      let finishing = resume?.rest.kind === "tools" ? resume.rest : undefined
       let recoverOverflow = true
       let recoverContinuation = true
+      if (resume?.rest.kind === "retry") {
+        yield* retry.resume(resume.rest)
+        if (resume.rest.mode === "continue") {
+          yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
+          assistantMessageID = SessionMessage.ID.create()
+        }
+      }
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
         const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
         initial = undefined
         const estimate = SessionCompaction.estimatePrompt(loaded)
-        const compacted = yield* compaction.compact({ reason: "auto", context: loaded, estimate })
-        if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
-        if (compacted.status === "completed") {
+        const finish = finishing && (yield* unsettled(finishing, resume?.tools))
+        if (finishing && !finish) {
+          // The step already settled; continue with a new one, as after any restart.
+          yield* continuity.clearStep(sessionID, finishing.assistantMessageID)
           assistantMessageID = SessionMessage.ID.create()
-          continue
         }
-        yield* compaction.precompute(Effect.succeed(loaded), estimate)
+        finishing = undefined
+        if (!finish) {
+          const compacted = yield* compaction.compact({ reason: "auto", context: loaded, estimate })
+          if (compacted.status === "failed") return yield* new StepFailedError({ error: compacted.error })
+          if (compacted.status === "completed") {
+            assistantMessageID = SessionMessage.ID.create()
+            continue
+          }
+          yield* compaction.precompute(Effect.succeed(loaded), estimate)
+        }
         const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
         const transcript = SessionModelRequest.baseTranscript({
           agent: loaded.agent.info,
@@ -308,6 +369,8 @@ const layer = Layer.effect(
                   .pipe(Effect.map((result) => result.status === "completed"))
               : Effect.succeed(false),
           ),
+          step,
+          ...(finish ? { resume: finish } : {}),
         })
         const completed = yield* SessionStep.Outcome.$match(outcome, {
           Completed: Effect.fnUntraced(function* (outcome) {
@@ -329,6 +392,7 @@ const layer = Layer.effect(
               decision: outcome.decision,
               error: outcome.error,
               assistantMessageID,
+              mode: "continue",
             })
             yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
             assistantMessageID = SessionMessage.ID.create()
@@ -374,6 +438,32 @@ const layer = Layer.effect(
         })
         if (completed !== undefined) return completed
       }
+    })
+
+    /** The unsettled tool calls of a step whose reply streamed before a restart; undefined once it settled. */
+    const unsettled = Effect.fnUntraced(function* (
+      rest: SessionContinuity.ToolsRest,
+      checkpoints: SessionContinuity.Restored["tools"] = new Map(),
+    ) {
+      const message = (yield* store.message(rest.assistantMessageID))?.message
+      if (message?.type !== "assistant" || message.time.completed !== undefined) return undefined
+      return {
+        rest,
+        calls: message.content.flatMap((part) => {
+          if (part.type !== "tool" || (part.state.status !== "running" && part.state.status !== "streaming")) return []
+          const checkpoint = checkpoints.get(part.id)
+          return [
+            {
+              id: part.id,
+              name: part.name,
+              input: part.state.status === "running" ? part.state.input : {},
+              called: part.state.status === "running",
+              executed: part.executed === true,
+              ...(checkpoint ? { checkpoint } : {}),
+            },
+          ]
+        }),
+      } satisfies SessionStep.Resume
     })
 
     const settleStaleCompactions = Effect.fn("SessionRunner.settleStaleCompactions")(function* (
@@ -453,5 +543,6 @@ export const node = makeLocationNode({
     Snapshot.node,
     ToolOutput.node,
     Database.node,
+    SessionContinuity.node,
   ],
 })

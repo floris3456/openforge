@@ -3,11 +3,14 @@ import { Deferred, Effect, Exit, Fiber } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { Form } from "@opencode/core/form"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { testEffect } from "./lib/effect"
 
-const forms = AppNodeBuilder.build(LayerNode.group([Bus.node, Form.node]))
+const forms = AppNodeBuilder.build(LayerNode.group([Bus.node, Form.node]), [
+  SessionContinuity.node.replace(SessionContinuity.noopLayer),
+])
 const it = testEffect(forms)
 
 const formID = Form.ID.create("frm_test")

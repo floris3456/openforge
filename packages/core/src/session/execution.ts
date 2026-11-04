@@ -2,6 +2,7 @@ export * as SessionExecution from "./execution.js"
 
 import { Cause, Context, Effect, Exit, Layer } from "effect"
 import { Bus } from "../bus.js"
+import { SessionContinuity } from "../continuity.js"
 import { Database } from "../database/database.js"
 import { Job } from "../job.js"
 import { Instance } from "../instance/service.js"
@@ -59,6 +60,7 @@ export const layer = Layer.effect(
     const bus = yield* Bus.Service
     const jobs = yield* Job.Service
     const db = (yield* Database.Service).db
+    const continuity = yield* SessionContinuity.Service
     const reportLifecycle = <A>(sessionID: SessionSchema.ID, effect: Effect.Effect<A>) =>
       effect.pipe(
         Effect.tapCause((cause) =>
@@ -78,8 +80,9 @@ export const layer = Layer.effect(
     const claimOnCommit = (sessionID: SessionSchema.ID) => ({
       commit: () => store.claim(sessionID),
     })
+    // A terminal also drops the records a restart would have continued from.
     const releaseOnCommit = (sessionID: SessionSchema.ID) => ({
-      commit: () => store.release(sessionID),
+      commit: () => store.release(sessionID).pipe(Effect.andThen(continuity.clear(sessionID))),
     })
     const drain = Effect.fnUntraced(function* (
       sessionID: SessionSchema.ID,
@@ -94,6 +97,7 @@ export const layer = Layer.effect(
         runner.drain({ sessionID, force, continuation, promotable, stepped }),
       ).pipe(
         instances.provide(session),
+        Effect.provideService(SessionContinuity.Current, continuity.activity(sessionID)),
         Effect.tapCause((cause) =>
           Cause.hasInterruptsOnly(cause)
             ? Effect.void
@@ -118,6 +122,7 @@ export const layer = Layer.effect(
         reportLifecycle(
           sessionID,
           Effect.gen(function* () {
+            yield* continuity.end(sessionID)
             const outcome = terminal(exit, reason)
             if (outcome.type === "succeeded") {
               yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
@@ -144,6 +149,8 @@ export const layer = Layer.effect(
           }),
         ),
     })
+    // Runs before the coordinator interrupts its executions, so they can tell a stop from a user interrupt.
+    yield* Effect.addFinalizer(() => continuity.stop)
 
     return Service.of({
       active: coordinator.active,
@@ -176,7 +183,7 @@ export const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [SessionStore.node, Instance.node, Bus.node, Database.node, Job.node],
+  deps: [SessionStore.node, Instance.node, Bus.node, Database.node, Job.node, SessionContinuity.node],
 })
 
 /** Low-level compatibility layer for callers that only need durable Session recording. */

@@ -1,6 +1,7 @@
 export * as Agent from "./agent.js"
 
 import { Schema } from "effect"
+import { ConfigSandbox } from "./config/sandbox.js"
 import { ephemeral, inventory } from "./event.js"
 import { optional } from "./schema.js"
 import { Model } from "./model.js"
@@ -32,6 +33,7 @@ export const Info = Schema.Struct({
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
   permissions: Permission.Ruleset,
+  sandbox: ConfigSandbox.Info.pipe(optional),
 })
   .annotate({ identifier: "Agent.Info" })
   .pipe(
@@ -48,6 +50,8 @@ export const Info = Schema.Struct({
             { action: "read", resource: "*.env", effect: "ask" },
             { action: "read", resource: "*.env.*", effect: "ask" },
             { action: "read", resource: "*.env.example", effect: "allow" },
+            // A shell command that leaves the sandbox (`sandbox: false`).
+            { action: "unsandboxed", resource: "*", effect: "ask" },
           ],
         }) satisfies Info,
     })),

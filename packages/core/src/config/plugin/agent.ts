@@ -3,6 +3,7 @@ export * as ConfigAgentPlugin from "./agent.js"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Document, Info, type Entry } from "@opencode/schema/config"
 import { ConfigAgent } from "@opencode/schema/config/agent"
+import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import path from "path"
 import { Effect, Option, PubSub, Schema, Stream } from "effect"
 import { Agent } from "../../agent.js"
@@ -30,7 +31,7 @@ type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof R
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
 const agentKeys = new Set(["variant", ...Object.keys(ConfigAgent.Info.fields)])
 // Fields only V2 understands. A file that uses any of them is read as V2, whatever else it contains.
-const nativeKeys = ["permissions", "request", "system", "disabled"]
+const nativeKeys = ["permissions", "request", "system", "disabled", "sandbox"]
 
 export const Plugin = define({
   id: "opencode.config.agent",
@@ -120,6 +121,7 @@ export const Plugin = define({
             if (item.permissions !== undefined) {
               agent.permissions.push(...expandPermissions(item.permissions, global.home))
             }
+            if (item.sandbox !== undefined) agent.sandbox = ConfigSandbox.merge(agent.sandbox, item.sandbox)
           })
         }
       }

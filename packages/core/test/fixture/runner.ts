@@ -17,6 +17,9 @@ import { hostEnvironmentLayer } from "./environment"
 import { location } from "./location"
 import { tmpdirScoped } from "./tmpdir"
 
+/** How long a test's runner waits for another command once nothing runs, instead of the real 10 s. */
+const GRACE = 200
+
 /**
  * One machine whose tool runners outlive the services that start commands in them, as `openforge runner` does.
  * `service()` builds the shell services of one service process; build it again for the next one.
@@ -33,7 +36,7 @@ export const machine = Effect.gen(function* () {
   const hosted = (directory: string) =>
     Effect.tryPromise({
       try: () =>
-        RunnerServer.serve({ directory, version: path.basename(directory) }).then(
+        RunnerServer.serve({ directory, version: path.basename(directory), grace: GRACE }).then(
           (runner) => void runners.push(runner),
         ),
       catch: (cause) => new RunnerClient.RunnerError({ reason: "spawn", message: String(cause) }),

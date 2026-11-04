@@ -13,7 +13,7 @@ import { alive, command, folder, run, serve, until } from "./fixture/runner.js"
 const collect = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   connection.watch(id, { offset, output }).pipe(Stream.runCollect)
 
-// Watches must be open before a command ends: the runner exits as soon as nothing runs.
+// Opened while the command still runs, as the service does.
 const watching = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   collect(connection, id, offset, output).pipe(Effect.forkScoped({ startImmediately: true }))
 
@@ -35,7 +35,7 @@ const readExit = (output: string) =>
 describe("runner", () => {
   test("starts a command, pushes its output from an offset and then its exit, and writes the exit file", async () => {
     await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -75,7 +75,7 @@ describe("runner", () => {
 
   test("starting the same id twice gives the same command", async () => {
     await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -102,6 +102,7 @@ describe("runner", () => {
       directory: path.join(directory.path, "runner"),
       version: "test",
       killAfter: 200,
+      grace: 50,
     })
     await run(
       Effect.gen(function* () {
@@ -126,7 +127,7 @@ describe("runner", () => {
 
   test("ends a command at its deadline, which the client can move or clear", async () => {
     await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -150,16 +151,22 @@ describe("runner", () => {
     await runner.closed
   })
 
-  test("exits once no command runs: stops listening first, says bye, and frees the folder", async () => {
+  test("after its last command it waits its grace period for another, then stops listening, says bye and frees the folder", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    await using runner = await serve({ directory: folderPath, version: "test" })
+    await using runner = await serve({ directory: folderPath, version: "test", grace: 300 })
     const closed = await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(folderPath)
-        const input = command(directory.path, "printf ok")
-        yield* connection.start(input)
+        const first = command(directory.path, "printf one")
+        yield* connection.start(first)
+        yield* Effect.promise(() => until(() => fs.existsSync(RunnerPaths.exit(first.output))))
+        // Nothing runs now, yet a late watch still gets the end, and the next command shares this runner.
+        expect(exitOf(yield* collect(connection, first.id))).toMatchObject({ status: "exited", code: 0 })
+        const second = command(directory.path, "printf two")
+        expect((yield* connection.start(second)).existing).toBe(false)
         const ended = yield* connection.closed
+        expect(Date.now() - readExit(second.output).ended).toBeGreaterThanOrEqual(300)
         expect(fs.existsSync(RunnerPaths.socket(folderPath))).toBe(false)
         return ended
       }),
@@ -171,6 +178,21 @@ describe("runner", () => {
     // The folder is free for the next runner.
     await using next = await serve({ directory: folderPath, version: "test", grace: 50 })
     await next.closed
+  })
+
+  test("once the runner has said bye, requests on its connection fail at once", async () => {
+    await using directory = await folder()
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await run(
+      Effect.gen(function* () {
+        const connection = yield* RunnerClient.connect(runner.directory)
+        expect(yield* connection.closed).toBe("bye")
+        const input = command(directory.path, "printf late")
+        expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
+        expect(yield* collect(connection, input.id).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
+      }).pipe(Effect.timeout("2 seconds")),
+    )
+    await runner.closed
   })
 
   test("a fresh runner that never gets a command exits after its grace period", async () => {
@@ -232,9 +254,29 @@ describe("runner", () => {
     await runner.closed
   })
 
+  test("an end is told only once its exit file is written, and removed commands leave no files", async () => {
+    await using directory = await folder()
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await run(
+      Effect.gen(function* () {
+        const connection = yield* RunnerClient.connect(runner.directory)
+        // Watched once started, a short command's watch often comes while its end is being written.
+        for (let index = 0; index < 300; index++) {
+          const input = command(directory.path, "exit 0")
+          yield* connection.start(input)
+          exitOf(yield* collect(connection, input.id, 0, false))
+          expect(fs.existsSync(RunnerPaths.exit(input.output))).toBe(true)
+          yield* connection.signal(input.id, "SIGKILL", { remove: true })
+        }
+      }),
+    )
+    await runner.closed
+    expect(fs.readdirSync(directory.path).filter((name) => name !== "runner")).toEqual([])
+  })
+
   test("removing a command stops it and deletes its files", async () => {
     await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)
@@ -255,7 +297,12 @@ describe("runner output", () => {
   test("keeps the first and the newest bytes within the limit, and says how much it dropped", async () => {
     await using directory = await folder()
     const bounds = { head: 16, limit: 96 }
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", bounds })
+    await using runner = await serve({
+      directory: path.join(directory.path, "runner"),
+      version: "test",
+      bounds,
+      grace: 50,
+    })
     const lines = Array.from({ length: 40 }, (_, index) => `line ${String(index).padStart(3, "0")}\n`).join("")
     await run(
       Effect.gen(function* () {
@@ -302,7 +349,7 @@ describe("runner output", () => {
 
   test("a command printing about 1 GB leaves an 8 MiB file", async () => {
     await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test" })
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(runner.directory)

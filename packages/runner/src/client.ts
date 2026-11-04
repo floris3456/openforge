@@ -117,9 +117,12 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
   const write = (value: object) => {
     if (!socket.destroyed) socket.write(JSON.stringify(value) + "\n")
   }
+  // Once the connection has ended nothing answers, so later requests fail at once.
+  const gone = () => failure(said ? "closing" : "lost", "the runner closed the connection")
 
   const request = <A>(build: (id: number) => object, accept: (frame: RunnerProtocol.Frame) => A | undefined) =>
     Effect.callback<A, RunnerError>((resume) => {
+      if (Deferred.isDoneUnsafe(closed)) return resume(Effect.fail(gone()))
       const id = next++
       handlers.set(id, {
         frame: (frame) => {
@@ -134,7 +137,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
           }
           return true
         },
-        lost: () => resume(Effect.fail(failure(said ? "closing" : "lost", "the runner closed the connection"))),
+        lost: () => resume(Effect.fail(gone())),
       })
       write(build(id))
       return Effect.sync(() => handlers.delete(id))
@@ -179,6 +182,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
     watch: (command, options) =>
       Stream.callback<WatchEvent, RunnerError>((queue) =>
         Effect.gen(function* () {
+          if (Deferred.isDoneUnsafe(closed)) return Queue.failCauseUnsafe(queue, Cause.fail(gone()))
           const id = next++
           handlers.set(id, {
             frame: (frame) => {

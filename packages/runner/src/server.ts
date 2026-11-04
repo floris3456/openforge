@@ -14,7 +14,7 @@ export type Options = {
   readonly directory: string
   /** The release this runner belongs to, reported in its greeting. */
   readonly version: string
-  /** How long a fresh runner waits for its first command before it exits. */
+  /** How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits. */
   readonly grace?: number
   /** How long a group gets between SIGTERM and SIGKILL. */
   readonly killAfter?: number
@@ -44,6 +44,12 @@ const PACE = 50
 const DRAIN = 1_000
 // Ended commands stay listed while the runner lives; their exit files outlast it.
 const ENDED_LIMIT = 256
+// Each chunk read from a pipe is garbage at once, and so is an ended command's process and pipes, yet a collection
+// waits for heap pressure that a flood of output or of short commands outruns. One runs after this much of either,
+// so the runner's memory stays flat (1 GB: +25 MB instead of +140 MB).
+const COLLECT = 16 * 1024 * 1024
+// What an ended command counts as (it leaves about 40 KB).
+const ENDED_GARBAGE = 64 * 1024
 
 type Entry = {
   readonly id: string
@@ -55,6 +61,8 @@ type Entry = {
   deadline: number | null
   reason?: "timeout" | "killed"
   removed: boolean
+  /** Its pipes have closed; `exit` follows once the exit file is written. */
+  ended: boolean
   exit?: RunnerProtocol.Exit
   deadlineTimer?: ReturnType<typeof setTimeout>
   killTimer?: ReturnType<typeof setTimeout>
@@ -79,7 +87,7 @@ type Watch = {
 
 /**
  * Runs the tool runner in this process: it owns the folder's lock, listens on its socket and runs the commands its
- * clients start, each in its own process group. It exits as soon as no command runs.
+ * clients start, each in its own process group. It exits once nothing has run for its grace period.
  */
 export async function serve(options: Options): Promise<Runner> {
   const directory = options.directory
@@ -95,6 +103,7 @@ export async function serve(options: Options): Promise<Runner> {
 
   const entries = new Map<string, Entry>()
   const connections = new Set<Connection>()
+  let unswept = 0
   let closing = false
   let resolveClosed = () => {}
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve))
@@ -116,8 +125,17 @@ export async function serve(options: Options): Promise<Runner> {
       started: Date.now(),
     }),
   )
-  const grace = setTimeout(() => idle(), options.grace ?? 10_000)
-  grace.unref()
+  let stopping = false
+  let grace: ReturnType<typeof setTimeout> | undefined
+  // Nothing runs: wait a while for the next command, so a burst of short ones shares this runner. Asked to stop, exit.
+  function rest() {
+    if ([...entries.values()].some((entry) => !entry.exit)) return
+    if (stopping) return idle()
+    clearTimeout(grace)
+    grace = setTimeout(idle, options.grace ?? 10_000)
+    grace.unref()
+  }
+  rest()
 
   function accept(socket: net.Socket) {
     if (closing) return socket.destroy()
@@ -165,14 +183,14 @@ export async function serve(options: Options): Promise<Runner> {
     if (!entry) return fail(connection, request.id, "unknown", `unknown command ${request.command}`)
     if (request.op === "watch") return watch(connection, request, entry)
     if (request.op === "deadline") {
-      if (!entry.exit) arm(entry, request.deadline)
+      if (!entry.ended) arm(entry, request.deadline)
       return send(connection, { id: request.id, type: "command", command: describe(entry) })
     }
     if (request.remove) {
       entry.removed = true
       if (entry.exit) discard(entry)
     }
-    if (!entry.exit) signal(entry, request.signal)
+    if (!entry.ended) signal(entry, request.signal)
     return send(connection, { id: request.id, type: "ok" })
   }
 
@@ -185,7 +203,7 @@ export async function serve(options: Options): Promise<Runner> {
       writer?.close()
       fs.rmSync(input.output, { force: true })
       fail(connection, id, "spawn", cause instanceof Error ? cause.message : String(cause))
-      if (![...entries.values()].some((entry) => !entry.exit)) idle()
+      rest()
     }
     let writer: RunnerOutput.Writer | undefined
     let child: ChildProcess
@@ -217,32 +235,47 @@ export async function serve(options: Options): Promise<Runner> {
         watches: new Set(),
         deadline: null,
         removed: false,
+        ended: false,
       }
       entries.set(input.id, entry)
       arm(entry, input.deadline)
       const append = (chunk: Buffer) => {
-        if (entry.exit) return
+        if (entry.ended) return
         // A full disk loses output, not the runner.
         try {
           output.append(chunk)
         } catch {}
+        sweep(chunk.length)
         entry.watches.forEach((watch) => watch.output && !watch.paced && pump(watch))
       }
       child.stdout?.on("data", append)
       child.stderr?.on("data", append)
       let status: { code: number | null; signal: NodeJS.Signals | null } | undefined
+      let drain: ReturnType<typeof setTimeout> | undefined
       child.once("exit", (code, signal) => {
         status = { code, signal }
         clearTimeout(entry.deadlineTimer)
         // Pipes still held by the group's other processes are closed after a moment, so the command still ends.
-        setTimeout(() => {
+        drain = setTimeout(() => {
           child.stdout?.destroy()
           child.stderr?.destroy()
-        }, DRAIN).unref()
+        }, DRAIN)
+        drain.unref()
       })
-      child.once("close", () => end(entry, status ?? { code: child.exitCode, signal: child.signalCode }))
+      child.once("close", () => {
+        clearTimeout(drain)
+        end(entry, status ?? { code: child.exitCode, signal: child.signalCode })
+        sweep(ENDED_GARBAGE)
+      })
       send(connection, { id, type: "started", command: describe(entry), existing: false })
     })
+  }
+
+  function sweep(garbage: number) {
+    unswept += garbage
+    if (unswept < COLLECT) return
+    unswept = 0
+    Bun.gc(true)
   }
 
   function arm(entry: Entry, deadline: number | null) {
@@ -251,7 +284,7 @@ export async function serve(options: Options): Promise<Runner> {
     if (deadline === null) return
     const wait = Math.min(Math.max(0, deadline - Date.now()), 2 ** 31 - 1)
     entry.deadlineTimer = setTimeout(() => {
-      if (entry.exit || entry.deadline !== deadline) return
+      if (entry.ended || entry.deadline !== deadline) return
       if (Date.now() < deadline) return arm(entry, deadline)
       entry.reason ??= "timeout"
       signal(entry, "SIGTERM")
@@ -269,6 +302,7 @@ export async function serve(options: Options): Promise<Runner> {
 
   function end(entry: Entry, status: { code: number | null; signal: NodeJS.Signals | null }) {
     clearTimeout(entry.deadlineTimer)
+    entry.ended = true
     const layout = finalize(entry.writer)
     const exit: RunnerProtocol.Exit = {
       id: entry.id,
@@ -283,20 +317,22 @@ export async function serve(options: Options): Promise<Runner> {
       ...(layout ? { layout } : {}),
       meta: entry.start.meta,
     }
-    entry.exit = exit
+    // Told only once its exit file is written, so whoever hears of the end can rely on the file.
     const written = entry.removed
-      ? Promise.resolve(discard(entry))
+      ? Promise.resolve()
       : RunnerOutput.writeAtomic(RunnerPaths.exit(entry.start.output), JSON.stringify(exit))
     void written
       .catch(() => {})
       .then(() => {
+        entry.exit = exit
+        if (entry.removed) discard(entry)
         entry.watches.forEach(pump)
         const ended = [...entries.values()].filter((item) => item.exit)
         ended.slice(0, -ENDED_LIMIT).forEach((item) => {
           item.writer.close()
           entries.delete(item.id)
         })
-        if (![...entries.values()].some((item) => !item.exit)) idle()
+        rest()
       })
   }
 
@@ -422,9 +458,10 @@ export async function serve(options: Options): Promise<Runner> {
     directory,
     closed,
     shutdown: () => {
+      stopping = true
       const running = [...entries.values()].filter((entry) => !entry.exit)
       if (running.length === 0) idle()
-      running.forEach((entry) => signal(entry, "SIGTERM"))
+      running.filter((entry) => !entry.ended).forEach((entry) => signal(entry, "SIGTERM"))
       return closed
     },
   }

@@ -14,6 +14,9 @@ test("preserves permission roots and self-contained metadata", () => {
     title: "WebFetch https://example.com",
     lines: ["URL: https://example.com"],
   })
+  expect(
+    permissionPresentation({ action: "unsandboxed", resources: ["make install"], input: { command: "make install" } }),
+  ).toMatchObject({ title: "Run outside the sandbox", lines: ["$ make install"] })
   expect(permissionPresentation({ action: "websearch", resources: [], metadata: { query: "releases" } })).toMatchObject(
     {
       title: 'Web Search "releases"',

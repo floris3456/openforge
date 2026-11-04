@@ -16538,6 +16538,9 @@
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/Config.Sandbox"
           }
         },
         "required": ["id", "name", "request", "mode", "hidden", "permissions"],
@@ -16833,6 +16836,9 @@
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/Config.Sandbox"
           }
         },
         "additionalProperties": false
@@ -17023,6 +17029,9 @@
           },
           "permissions": {
             "$ref": "#/components/schemas/Permission.Ruleset"
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/Config.Sandbox"
           },
           "policies": {
             "type": "array",
@@ -17898,6 +17907,37 @@
         },
         "required": ["path"],
         "additionalProperties": false
+      },
+      "Config.Sandbox": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/Config.Sandbox.Mode"
+          },
+          "network": {
+            "type": "boolean"
+          },
+          "write": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deny_read": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Config.Sandbox.Mode": {
+        "type": "string",
+        "enum": ["write", "read", "off"]
       },
       "Config.WarmingEncoded": {
         "type": "object",

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode/sandbox",
+  "version": "2.2.5",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/sandbox.ts",
+    "./*": "./src/*.ts"
+  },
+  "imports": {
+    "#native": {
+      "types": "./src/native.bun.ts",
+      "bun": "./src/native.bun.ts",
+      "node": "./src/native.node.ts",
+      "default": "./src/native.bun.ts"
+    }
+  },
+  "scripts": {
+    "test": "bun test --only-failures",
+    "typecheck": "bun check --no-script",
+    "typecheck:tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native": "catalog:"
+  }
+}

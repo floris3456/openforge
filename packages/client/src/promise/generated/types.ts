@@ -33,6 +33,8 @@ export type AgentColor = string
 
 export type PermissionEffect = "allow" | "deny" | "ask"
 
+export type ConfigSandboxMode = "write" | "read" | "off"
+
 export type PluginID = string
 
 export type PluginSource =
@@ -406,6 +408,14 @@ export type ConfigModelVariantSettings = { compaction?: ProviderCompaction; enco
 }
 
 export type PermissionRule = { action: string; resource: string; effect: PermissionEffect }
+
+export type ConfigSandbox = {
+  mode?: ConfigSandboxMode
+  network?: boolean
+  write?: Array<string>
+  deny_read?: Array<string>
+  required?: boolean
+}
 
 export type PluginInfo = { id?: PluginID; source: PluginSource; features: PluginFeatures; state: PluginState }
 
@@ -2389,6 +2399,7 @@ export type ConfigEntry =
         username?: string
         timezone?: string
         permissions?: PermissionRuleset
+        sandbox?: ConfigSandbox
         policies?: Array<{
           action:
             | "provider.use"
@@ -2413,6 +2424,7 @@ export type ConfigEntry =
             steps?: number
             disabled?: boolean
             permissions?: PermissionRuleset
+            sandbox?: ConfigSandbox
           }
         }
         snapshots?: boolean
@@ -2679,6 +2691,7 @@ export type AgentInfo = {
   color?: AgentColor
   steps?: number
   permissions: PermissionRuleset
+  sandbox?: ConfigSandbox
 }
 
 export type SessionsResponse = {

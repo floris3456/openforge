@@ -159,7 +159,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
   const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
   const result = await Bun.build({
-    entrypoints: ["./src/index.ts", "./src/photon-worker.ts"],
+    entrypoints: ["./src/main.ts", "./src/photon-worker.ts"],
     tsconfig: "./tsconfig.json",
     plugins: [
       appAssetsPlugin,

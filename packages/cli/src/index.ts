@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+// First, so `sandbox-exec` runs before the other imports load.
+import "./sandbox-exec"
 import { ensurePluginRuntime } from "@opencode/plugin/runtime"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Cause, Effect } from "effect"

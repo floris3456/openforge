@@ -249,6 +249,13 @@ describe("runner", () => {
         const input = command(directory.path, "true", { cwd: path.join(directory.path, "missing") })
         expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "spawn" })
         expect(fs.existsSync(input.output)).toBe(false)
+        const missing = {
+          ...command(directory.path, "true"),
+          argv: [path.join(directory.path, "no-such-shell")] as const,
+        }
+        expect(yield* connection.start(missing).pipe(Effect.flip)).toMatchObject({ reason: "spawn" })
+        expect(fs.existsSync(missing.output)).toBe(false)
+        expect((yield* connection.list).map((item) => item.id)).toEqual([])
       }),
     )
     await runner.closed

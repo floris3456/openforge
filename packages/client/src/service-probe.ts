@@ -37,7 +37,8 @@ function fail(message: string) {
 
 /** The default registration file. */
 export function fallback() {
-  return join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), "opencode", "service.json")
+  // openforge's state folder (Product.folder in @opencode/schema, which this module must not import).
+  return join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), "openforge", "service.json")
 }
 
 /** Whether two registrations describe the same service instance. */

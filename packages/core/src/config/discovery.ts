@@ -5,6 +5,7 @@ import path from "path"
 import { Effect } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { Product } from "@opencode/schema/product"
 import { Location } from "../location.js"
 import { AbsolutePath } from "../schema.js"
 import type { Options } from "../config.js"
@@ -24,11 +25,11 @@ export interface Sources {
   readonly agents: readonly AbsolutePath[]
 }
 
-/** Platform system configuration directory (`/Library/Application Support/opencode`, `/etc/opencode`, `%ProgramData%\opencode`). */
+/** Platform system configuration directory (`/Library/Application Support/openforge`, `/etc/openforge`, `%ProgramData%\openforge`). */
 export function systemDirectory(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env) {
-  if (platform === "darwin") return AbsolutePath.make("/Library/Application Support/opencode")
-  if (platform === "win32") return AbsolutePath.make(path.join(env.ProgramData || "C:\\ProgramData", "opencode"))
-  return AbsolutePath.make("/etc/opencode")
+  if (platform === "darwin") return AbsolutePath.make(`/Library/Application Support/${Product.folder}`)
+  if (platform === "win32") return AbsolutePath.make(path.join(env.ProgramData || "C:\\ProgramData", Product.folder))
+  return AbsolutePath.make(`/etc/${Product.folder}`)
 }
 
 /** macOS MDM managed preferences plists, most specific first; the first one present wins. */

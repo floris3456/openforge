@@ -17,6 +17,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionStore } from "@opencode/core/session/store"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
 import { tmpdirScoped } from "./fixture/tmpdir"
@@ -50,7 +51,14 @@ const it = testEffect(
           layer: LocationActivity.layer({ timeToLive, sweepInterval: "100 millis" }).pipe(
             Layer.provide(Layer.succeed(Clock.Clock, activityClock)),
           ),
-          deps: [Bus.node, Job.node, LocationServiceMap.node, SessionExecution.node, SessionStore.node],
+          deps: [
+            Bus.node,
+            Job.node,
+            LocationServiceMap.node,
+            SessionExecution.node,
+            SessionStore.node,
+            ShellRunner.node,
+          ],
         }),
       ),
     ],

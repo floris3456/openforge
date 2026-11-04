@@ -5,6 +5,7 @@ import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Schedule } from "@opencode/core/schedule"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { InstallationEvent } from "@opencode/schema/installation-event"
 import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
@@ -121,9 +122,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     )
     const continuity = Context.get(context, SessionContinuity.Service)
     if (lifecycle) {
-      yield* installRestartContinuity(Context.get(context, SessionRestart.Service), continuity).pipe(
-        Effect.provideService(Scope.Scope, applicationScope),
-      )
+      yield* installRestartContinuity(
+        Context.get(context, SessionRestart.Service),
+        Context.get(context, ShellRunner.Service),
+        continuity,
+      ).pipe(Effect.provideService(Scope.Scope, applicationScope))
     }
     // Schedules fire from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
     // A paused start fires nothing until it is resumed.
@@ -274,12 +277,15 @@ function unavailable(status: Status.State) {
 /**
  * The managed server owns restart continuity: at boot it resumes Sessions whose execution claim was
  * never released. Claims are written when execution starts (see SessionExecution), so recovery covers
- * graceful restarts and unclean deaths alike — no shutdown hook participates.
+ * graceful restarts and unclean deaths alike. The one shutdown hook runs before the services stop: shell
+ * commands their shutdown interrupts keep running in the tool runner, for the next server to pick up.
  */
 const installRestartContinuity = Effect.fnUntraced(function* (
   restart: SessionRestart.Interface,
+  shells: ShellRunner.Interface,
   continuity: SessionContinuity.Interface,
 ) {
+  yield* Effect.addFinalizer(() => shells.detach)
   // A paused start resumes nothing until it is resumed.
   yield* Effect.forkScoped(continuity.awaitOpen.pipe(Effect.andThen(restart.resumeSuspendedSessions)))
 })

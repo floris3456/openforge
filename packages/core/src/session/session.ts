@@ -9,6 +9,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { Instance } from "../instance/service.js"
+import { KV } from "../kv.js"
 import { ShellResult } from "../shell/result.js"
 import type { Skill } from "../skill.js"
 import {
@@ -47,6 +48,7 @@ export const make = Effect.fn("Session.make")(function* () {
   const execution = yield* SessionExecution.Service
   const admission = yield* SessionInbox.Service
   const fs = yield* FSUtil.Service
+  const kv = yield* KV.Service
   const scope = yield* Scope.Scope
 
   const get = Effect.fn("Session.get")(function* (sessionID: SessionSchema.ID) {
@@ -208,30 +210,71 @@ export const make = Effect.fn("Session.make")(function* () {
         ),
         Effect.orDie,
       )
+      const pending = { sessionID, notificationID: SessionMessage.ID.create(), shell: started.info }
       yield* bus.publish(
         SessionEvent.Shell.Started,
         {
           sessionID,
           shell: started.info,
         },
-        { id: input.id ? Event.ID.make(input.id.replace(/^msg_/, "evt_")) : undefined },
+        {
+          id: input.id ? Event.ID.make(input.id.replace(/^msg_/, "evt_")) : undefined,
+          commit: () => kv.set(SessionShell.key(started.info.id), SessionShell.encode(pending)),
+        },
       )
-      const terminal = yield* started.result
-      const preview = yield* started.output
-      yield* bus.publish(SessionEvent.Shell.Ended, {
-        sessionID,
-        shell: terminal.info,
-        output: preview,
-      })
-      yield* synthetic(sessionID, {
-        ...ShellResult.userNotification(terminal),
-        resume: false,
-      }).pipe(
-        Effect.catchTag("Session.NotFoundError", () => Effect.void),
-        Effect.orDie,
-      )
+      yield* report(pending, started)
     }).pipe(Effect.forkIn(scope, { startImmediately: true }))
     yield* Fiber.join(running)
+  })
+  // Shows a `!` command's end and admits its result for the model, then forgets it.
+  const report = Effect.fnUntraced(function* (
+    pending: SessionShell.Pending,
+    started: Effect.Success<ReturnType<typeof SessionShell.start>>,
+  ) {
+    const terminal = yield* started.result
+    const preview = yield* started.output
+    yield* bus.publish(SessionEvent.Shell.Ended, {
+      sessionID: pending.sessionID,
+      shell: terminal.info,
+      output: preview,
+    })
+    yield* synthetic(pending.sessionID, {
+      id: pending.notificationID,
+      ...ShellResult.userNotification(terminal),
+      resume: false,
+    }).pipe(
+      Effect.catchTag("Session.NotFoundError", () => Effect.void),
+      Effect.orDie,
+    )
+    yield* kv.remove(SessionShell.key(pending.shell.id))
+  })
+  // `!` commands an earlier service started and could not report: each is reported once it ends, as it would have been.
+  const recoverShells = Effect.fn("Session.recoverShells")(function* () {
+    let after: string | undefined
+    while (true) {
+      const page = yield* kv.scan({ prefix: SessionShell.PREFIX, after })
+      yield* Effect.forEach(
+        page.entries,
+        Effect.fnUntraced(
+          function* (entry) {
+            const pending = SessionShell.decode(entry.value)
+            if (pending._tag === "None") return yield* kv.remove(entry.key)
+            const session = yield* store.get(pending.value.sessionID)
+            if (!session) return yield* kv.remove(entry.key)
+            const started = yield* SessionShell.resume({ session, shell: pending.value.shell }).pipe(
+              Effect.provideService(Instance.Service, instances),
+            )
+            // One that finished while no service ran is admitted now; a running one when it ends.
+            if (started.info.status === "running") yield* report(pending.value, started).pipe(Effect.forkIn(scope))
+            else yield* report(pending.value, started)
+          },
+          Effect.catch((error) => Effect.logWarning("cannot follow a `!` command after the restart", { error })),
+        ),
+        { discard: true },
+      )
+      if (page.next === undefined) return
+      after = page.next
+    }
   })
   const skill = Effect.fn("Session.skill")(function* (
     sessionID: SessionSchema.ID,
@@ -437,7 +480,7 @@ export const make = Effect.fn("Session.make")(function* () {
       revert,
     }
   }
-  return { forSession }
+  return { forSession, recoverShells }
 })
 
 export type Handle = ReturnType<Effect.Success<ReturnType<typeof make>>["forSession"]>

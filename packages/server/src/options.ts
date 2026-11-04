@@ -46,5 +46,23 @@ export const ServerOptions = Schema.Struct({
       fff: Schema.optional(Schema.Boolean),
     }),
   ),
+  runner: Schema.optional(
+    Schema.Struct({
+      /**
+       * Starts the tool runner as `command <folder>`, detached, so shell commands outlive this server. Without it
+       * the runner runs inside this server, and its commands end with it.
+       */
+      command: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
+  sandbox: Schema.optional(
+    Schema.Struct({
+      /**
+       * Starts this openforge, whose hidden `sandbox-exec` command confines the agents' shell commands on Linux.
+       * Without it they run unsandboxed.
+       */
+      command: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 export type ServerOptions = typeof ServerOptions.Type

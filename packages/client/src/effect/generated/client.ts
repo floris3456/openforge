@@ -281,6 +281,8 @@ import type {
   ShellOutputOutput,
   ShellRemoveInput,
   ShellRemoveOutput,
+  ExperimentalShellWatchInput,
+  ExperimentalShellWatchOutput,
   ReferenceListInput,
   ReferenceListOutput,
   WorktreeListInput,
@@ -1806,6 +1808,21 @@ const adaptGroupShell = (raw: RawClient["server.shell"]) => ({
   remove: EndpointShellRemove(raw),
 })
 
+const EndpointExperimentalShellWatch = (raw: RawClient["server.shell"]) => (input: ExperimentalShellWatchInput) =>
+  preserveStream<ExperimentalShellWatchOutput>()(
+    Stream.unwrap(
+      raw["shell.watch"]({
+        params: { id: input["id"] },
+        query: { location: input["location"], cursor: input["cursor"] },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((stream) => stream.pipe(Stream.mapError(mapClientError))),
+      ),
+    ),
+  )
+
+const adaptGroupExperimentalShell = (raw: RawClient["server.shell"]) => ({ watch: EndpointExperimentalShellWatch(raw) })
+
 const EndpointReferenceList = (raw: RawClient["server.reference"]) => (input?: ReferenceListInput) =>
   preserveEffect<ReferenceListOutput>()(
     raw["reference.list"]({ query: { location: input?.["location"] } }).pipe(Effect.mapError(mapClientError)),
@@ -1992,6 +2009,7 @@ const adaptClient = (raw: RawClient) => {
       integration: adaptGroupExperimentalIntegration(raw["server.integration"]),
       mcp: adaptGroupExperimentalMcp(raw["server.mcp"]),
       file: adaptGroupExperimentalFile(raw["server.fs"]),
+      shell: adaptGroupExperimentalShell(raw["server.shell"]),
       migration: adaptGroupExperimentalMigration(raw["server.migration"]),
       usage: adaptGroupExperimentalUsage(raw["server.usage"]),
       config: adaptGroupExperimentalConfig(raw["server.config"]),
@@ -2094,6 +2112,11 @@ const adaptClient = (raw: RawClient) => {
       watch: client.experimental.file.watch,
       /** @deprecated Use `client.experimental.file.unwatch`. Removed in the next minor. */
       unwatch: client.experimental.file.unwatch,
+    },
+    shell: {
+      ...client.shell,
+      /** @deprecated Use `client.experimental.shell.watch`. Removed in the next minor. */
+      watch: client.experimental.shell.watch,
     },
     /** @deprecated Use `client.experimental.migration`. Removed in the next minor. */
     migration: {

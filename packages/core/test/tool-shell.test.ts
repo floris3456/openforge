@@ -24,6 +24,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { Agent } from "@opencode/core/agent"
 import { Job } from "@opencode/core/job"
 import { Session } from "@opencode/core/session"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionMessage } from "@opencode/core/session/message"
@@ -138,6 +139,7 @@ const shellPluginSupervisor = makeLocationNode({
     Job.node,
     Shell.node,
     ShellSelect.node,
+    SessionContinuity.node,
     Tool.node,
   ],
 })
@@ -1224,6 +1226,7 @@ describe("ShellTool", () => {
             Job.node,
             Shell.node,
             ShellSelect.node,
+            SessionContinuity.node,
             Tool.node,
           ],
         })

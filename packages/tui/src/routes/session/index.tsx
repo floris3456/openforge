@@ -97,6 +97,7 @@ import { useClipboard } from "../../context/clipboard"
 import { nextThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { collapseShellOutput, collapseToolOutput } from "../../util/collapse-tool-output"
+import { followShellOutput } from "../../util/shell-output"
 import { Keymap, type KeymapCommand } from "../../context/keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { useLocation } from "../../context/location"
@@ -3008,63 +3009,49 @@ function ShellDisplay(props: {
   const [expanded, setExpanded] = createSignal(false)
   const [backgroundOutput, setBackgroundOutput] = createSignal("")
   const [outputTruncated, setOutputTruncated] = createSignal(false)
-  let loading = false
-  let drainRequested = false
-  let cursor = 0
   let wasRunning = false
-  const loadBackgroundOutput = async (drain = false) => {
-    if (props.status === "completed" && props.output !== undefined) return
+  let unfollow: (() => void) | undefined
+  // Pushed by the server until the command ends; one follow at a time, kept after it ends.
+  const follow = () => {
     const id = props.shellID
-    if (!id) return
-    if (loading) {
-      if (drain) drainRequested = true
-      return
-    }
-    loading = true
-    do {
-      const response = await client.api.shell
-        .output({
-          id,
-          cursor,
-          limit: SHELL_DISPLAY_LIMIT,
-          location: location ? { directory: location.directory } : undefined,
-        })
-        .catch(() => undefined)
-      if (!response) break
-      if (response.data.output)
-        setBackgroundOutput((output) => {
-          const next = stripAnsi(output + response.data.output)
-          if (next.length <= SHELL_DISPLAY_LIMIT) return next
-          setOutputTruncated(true)
-          return next.slice(-SHELL_DISPLAY_LIMIT)
-        })
-      if (response.data.cursor <= cursor) break
-      cursor = response.data.cursor
-      if (!drain || cursor >= response.data.size) break
-      const tail = Math.max(cursor, response.data.size - SHELL_DISPLAY_LIMIT)
-      if (tail > cursor) {
-        cursor = tail
-        setOutputTruncated(true)
-      }
-    } while (true)
-    loading = false
-    if (drainRequested) {
-      drainRequested = false
-      void loadBackgroundOutput(true)
-    }
+    if (!id || unfollow) return
+    if (props.status === "completed" && props.output !== undefined) return
+    unfollow = followShellOutput(
+      () => client.api,
+      { id, location: location ? { directory: location.directory } : undefined, limit: SHELL_DISPLAY_LIMIT },
+      {
+        reset: (earlier) => {
+          setBackgroundOutput("")
+          setOutputTruncated(earlier)
+        },
+        output: (text) =>
+          setBackgroundOutput((output) => {
+            const next = output + stripAnsi(text)
+            if (next.length <= SHELL_DISPLAY_LIMIT) return next
+            setOutputTruncated(true)
+            return next.slice(-SHELL_DISPLAY_LIMIT)
+          }),
+      },
+    )
   }
+  const stop = () => {
+    unfollow?.()
+    unfollow = undefined
+  }
+  onCleanup(stop)
   createEffect(() => {
+    // The message carries the final output.
+    if (props.status === "completed" && props.output !== undefined) return stop()
     const running = backgroundRunning()
     if (!running) {
-      if (wasRunning) void loadBackgroundOutput(true)
+      // Ended: a follow still open reads the rest; otherwise read it once now.
+      if (wasRunning) follow()
       wasRunning = false
       return
     }
     wasRunning = true
-    if (props.background && !expanded()) return
-    void loadBackgroundOutput()
-    const interval = setInterval(() => void loadBackgroundOutput(), 1_000)
-    onCleanup(() => clearInterval(interval))
+    if (props.background && !expanded()) return stop()
+    follow()
   })
   const output = createMemo(() => {
     if (props.status === "streaming") return ""
@@ -3087,7 +3074,7 @@ function ShellDisplay(props: {
   const toggle = () => {
     const next = !expanded()
     setExpanded(next)
-    if (next) void loadBackgroundOutput(!backgroundRunning())
+    if (next) follow()
   }
 
   return (

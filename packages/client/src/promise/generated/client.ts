@@ -283,6 +283,8 @@ import type {
   ShellOutputOutput,
   ShellRemoveInput,
   ShellRemoveOutput,
+  ExperimentalShellWatchInput,
+  ExperimentalShellWatchOutput,
   ReferenceListInput,
   ReferenceListOutput,
   WorktreeListInput,
@@ -1721,6 +1723,23 @@ export function make(options: ClientOptions) {
             requestOptions,
           ).then((value) => value.data),
       },
+      shell: {
+        watch: (
+          input: ExperimentalShellWatchInput,
+          requestOptions?: RequestOptions,
+        ): AsyncIterable<ExperimentalShellWatchOutput> =>
+          sse<ExperimentalShellWatchOutput>(
+            {
+              method: "GET",
+              path: `/api/experimental/shell/${encodeURIComponent(input.id)}/watch`,
+              query: { location: input["location"], cursor: input["cursor"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404],
+              empty: false,
+            },
+            requestOptions,
+          ),
+      },
       migration: {
         v1: {
           status: (requestOptions?: RequestOptions) =>
@@ -2785,6 +2804,11 @@ export function make(options: ClientOptions) {
       watch: client.experimental.file.watch,
       /** @deprecated Use `client.experimental.file.unwatch`. Removed in the next minor. */
       unwatch: client.experimental.file.unwatch,
+    },
+    shell: {
+      ...client.shell,
+      /** @deprecated Use `client.experimental.shell.watch`. Removed in the next minor. */
+      watch: client.experimental.shell.watch,
     },
     /** @deprecated Use `client.experimental.migration`. Removed in the next minor. */
     migration: {

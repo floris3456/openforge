@@ -68,6 +68,7 @@ import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
 import { SessionContinuity } from "./continuity.js"
+import { KV } from "./kv.js"
 
 // get project -> project.locations
 //
@@ -231,6 +232,8 @@ export interface Interface {
   readonly shell: (
     input: Parameters<Session.Handle["shell"]>[0] & { sessionID: SessionSchema.ID },
   ) => ReturnType<Session.Handle["shell"]>
+  /** Reports the `!` commands an earlier service started and could not report, each once it ends. */
+  readonly recoverShells: () => Effect.Effect<void>
   readonly skill: (
     input: Parameters<Session.Handle["skill"]>[0] & { sessionID: SessionSchema.ID },
   ) => ReturnType<Session.Handle["skill"]>
@@ -497,6 +500,7 @@ const layer = Layer.effect(
         )
       }),
       shell: (input) => sessions.forSession(input.sessionID).shell(input),
+      recoverShells: sessions.recoverShells,
       skill: (input) => sessions.forSession(input.sessionID).skill(input),
       switchAgent: (input) => sessions.forSession(input.sessionID).switchAgent(input),
       switchModel: (input) => sessions.forSession(input.sessionID).switchModel(input),
@@ -548,6 +552,7 @@ export const node: LayerNode.Provider<Service, never, typeof Node.tags.values.gl
     Job.node,
     SessionEnvironment.node,
     Database.node,
+    KV.node,
     Bus.node,
     Project.node,
     SessionExecution.node,

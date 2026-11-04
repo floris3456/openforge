@@ -4,6 +4,8 @@
 //   ~/.local/bin/openforge -> <data>/current/openforge
 // A release folder also holds the database copy made when openforge last switched away from it.
 
+import { RunnerLock } from "@opencode/runner/lock"
+import { RunnerPaths } from "@opencode/runner/paths"
 import { AppProcess } from "@opencode/util/process"
 import { Effect, FileSystem, Option, Schema } from "effect"
 import { ChildProcess } from "effect/process"
@@ -20,15 +22,18 @@ export type Layout = {
   readonly current: string
   readonly locks: string
   readonly state: string
+  /** The releases' tool runner folders (`RunnerPaths.root`); a release whose runner still runs is kept. */
+  readonly runners: string | undefined
 }
 
-export function at(data: string): Layout {
+export function at(data: string, runners?: string): Layout {
   return {
     data,
     releases: path.join(data, "releases"),
     current: path.join(data, "current"),
     locks: SwitchLock.directory(data),
     state: path.join(data, "upgrade.json"),
+    runners,
   }
 }
 
@@ -69,10 +74,26 @@ export const point = Effect.fn("upgrade.layout.point")(function* (layout: Layout
     .pipe(Effect.tapError(() => fs.remove(temporary, { force: true }).pipe(Effect.ignore)))
 })
 
-/** Removes all but the newest `keep` releases, never one in `protect`. Returns the removed versions. */
+/** Releases whose tool runner still runs: their binary still runs commands. */
+export const running = Effect.fn("upgrade.layout.running")(function* (layout: Layout) {
+  const runners = layout.runners
+  if (!runners) return []
+  const fs = yield* FileSystem.FileSystem
+  const names = yield* fs.readDirectory(runners).pipe(Effect.orElseSucceed(() => []))
+  const live = yield* Effect.filter(names, (name) =>
+    Effect.promise(() => RunnerLock.held(RunnerPaths.lock(path.join(runners, name)))),
+  )
+  return live.flatMap((name) => ReleaseVersion.normalize(name) ?? [])
+})
+
+/**
+ * Removes all but the newest `keep` releases, never one in `protect` nor one whose tool runner still runs. Returns
+ * the removed versions.
+ */
 export const prune = Effect.fn("upgrade.layout.prune")(function* (layout: Layout, protect: ReadonlyArray<string>) {
   const fs = yield* FileSystem.FileSystem
-  const removed = (yield* installed(layout)).slice(keep).filter((version) => !protect.includes(version))
+  const kept = [...protect, ...(yield* running(layout))]
+  const removed = (yield* installed(layout)).slice(keep).filter((version) => !kept.includes(version))
   yield* Effect.forEach(removed, (version) => fs.remove(folder(layout, version), { recursive: true, force: true }))
   return removed
 })

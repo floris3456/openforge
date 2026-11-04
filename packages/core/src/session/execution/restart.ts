@@ -1,11 +1,14 @@
 export * as SessionRestart from "./restart.js"
 
-import { Context, Effect, Layer } from "effect"
+import { Context, Deferred, Effect, Layer, Option, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../../bus.js"
+import { Instance } from "../../instance/service.js"
 import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
 import { Session } from "../../session.js"
+import { Shell } from "../../shell.js"
+import { ShellRunner } from "../../shell/runner.js"
 import { SessionEvent } from "../event.js"
 import { SessionExecution } from "../execution.js"
 import { SessionSchema } from "../schema.js"
@@ -73,6 +76,8 @@ export const layer = (options?: Options) =>
       const bus = yield* Bus.Service
       const jobs = yield* Job.Service
       const sessions = yield* Session.Service
+      const shells = yield* ShellRunner.Service
+      const instances = yield* Instance.Service
       const continuity = yield* SessionContinuity.Service
       const scope = yield* Effect.scope
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
@@ -169,6 +174,81 @@ export const layer = (options?: Options) =>
         yield* jobs.completeBackground(background.notificationID)
       })
 
+      // A background shell still running in the tool runner (or finished there meanwhile) is picked up again, and
+      // its completion notice is delivered as the shell tool would have. One the runner no longer knows was lost
+      // with the server, and is reported cancelled.
+      const recoverShell = Effect.fnUntraced(function* (
+        background: Job.Background,
+        recovery: Extract<Job.Recovery, { kind: "shell" }>,
+        suspended: ReadonlySet<SessionSchema.ID>,
+      ) {
+        const id = Schema.decodeUnknownOption(Shell.ID)(recovery.shellID)
+        const known =
+          background.status === "running" && Option.isSome(id)
+            ? yield* shells.get(id.value).pipe(Effect.option)
+            : Option.none()
+        if (Option.isNone(known)) return yield* recoverToolJob(background, recovery)
+        const session = yield* sessions.get(recovery.sessionID).pipe(Effect.option)
+        if (Option.isNone(session)) return yield* jobs.completeBackground(background.notificationID)
+        const started = known.value
+        const settled = yield* Deferred.make<{ output: ReturnType<typeof ShellResult.output>; text: string }>()
+        yield* jobs.start({
+          id: background.id,
+          type: "shell",
+          title: recovery.command,
+          metadata: { sessionID: recovery.sessionID, shellID: recovery.shellID },
+          notificationID: background.notificationID,
+          recovery,
+          run: Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            return yield* Effect.gen(function* () {
+              const result = yield* shell.result(started)
+              if (!result.capture) return yield* new Shell.NotFoundError({ id: started.id })
+              const output = ShellResult.output(result)
+              const text = [output.output, ShellResult.notice(output), ShellResult.sandbox(result.info)]
+                .filter((text) => text)
+                .join("\n\n")
+              yield* Deferred.succeed(settled, { output, text })
+              return text
+            }).pipe(Effect.onInterrupt(() => shell.remove(started.id).pipe(Effect.ignore)))
+          }).pipe(instances.provide(session.value)),
+        })
+        yield* jobs.background(background.id)
+        const notify = jobs.wait({ id: background.id }).pipe(
+          Effect.flatMap(({ info }) =>
+            Effect.gen(function* () {
+              if (!info || info.status === "running") return
+              const done = info.status === "completed" ? yield* Deferred.await(settled) : undefined
+              const output = done?.output
+              const text = done ? done.text : info.status === "error" ? (info.error ?? "Command failed") : "Cancelled"
+              yield* sessions
+                .synthetic({
+                  id: background.notificationID,
+                  sessionID: recovery.sessionID,
+                  description: recovery.command,
+                  ...ShellResult.notification({
+                    jobID: background.id,
+                    shellID: recovery.shellID,
+                    command: recovery.command,
+                    state: info.status,
+                    text,
+                    output,
+                  }),
+                  ...(suspended.has(recovery.sessionID) ? { resume: false } : {}),
+                })
+                .pipe(
+                  Effect.catchTag("Session.NotFoundError", () => Effect.void),
+                  Effect.orDie,
+                )
+              yield* jobs.completeBackground(background.notificationID)
+            }),
+          ),
+        )
+        // A command that finished while no server ran is admitted now, before suspended Sessions resume.
+        if (started.status === "running") yield* notify.pipe(Effect.forkIn(scope))
+        else yield* notify
+      })
+
       const recoverSubagent = Effect.fnUntraced(function* (
         background: Job.Background,
         recovery: Extract<Job.Recovery, { kind: "subagent" }>,
@@ -245,11 +325,13 @@ export const layer = (options?: Options) =>
             Effect.fnUntraced(function* (background) {
               if ((yield* jobs.get(background.id))?.status === "running") return
               const recovery = background.recovery
+              if (recovery.kind === "shell") return yield* recoverShell(background, recovery, suspended)
               if (recovery.kind !== "subagent") return yield* recoverToolJob(background, recovery)
               yield* recoverSubagent(background, recovery, suspended, rested)
             }),
             { discard: true },
           )
+          yield* sessions.recoverShells()
 
           // Background completion can wake a parent, so inspect local ownership only after recovery.
           const resumed = yield* execution.active
@@ -272,5 +354,14 @@ export const layer = (options?: Options) =>
 export const node = makeGlobalNode({
   service: Service,
   layer: layer(),
-  deps: [SessionStore.node, SessionExecution.node, Bus.node, Job.node, Session.node, SessionContinuity.node],
+  deps: [
+    SessionStore.node,
+    SessionExecution.node,
+    Bus.node,
+    Job.node,
+    Session.node,
+    ShellRunner.node,
+    Instance.node,
+    SessionContinuity.node,
+  ],
 })

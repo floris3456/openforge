@@ -1,6 +1,7 @@
 // openforge's self-upgrade: one install method (GitHub releases, see ./release.ts), checked once at startup and
 // on `/update` or `openforge upgrade`; never on a timer.
 
+import { RunnerPaths } from "@opencode/runner/paths"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
@@ -62,6 +63,8 @@ export class Service extends Context.Service<Service, Interface>()("@openforge/c
 
 export type Options = {
   readonly data: string
+  /** The releases' tool runner folders; a release whose runner still runs is never removed. */
+  readonly runners?: string
   readonly config: string
   readonly log: string
   readonly version: string
@@ -83,7 +86,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
   const fs = yield* FileSystem.FileSystem
   const flock = yield* EffectFlock.Service
   const context = yield* Effect.context<FileSystem.FileSystem | AppProcess.Service | EffectFlock.Service>()
-  const layout = ReleaseLayout.at(options.data)
+  const layout = ReleaseLayout.at(options.data, options.runners)
   const running = yield* Semaphore.make(1)
 
   const readPolicy = Effect.fnUntraced(function* () {
@@ -307,6 +310,7 @@ export const layer = Layer.effect(
     const context = yield* Effect.context<FileSystem.FileSystem | Global.Service>()
     return yield* make({
       data: global.data,
+      runners: RunnerPaths.root(global.state),
       config: global.config,
       log: global.log,
       version: OPENCODE_VERSION,

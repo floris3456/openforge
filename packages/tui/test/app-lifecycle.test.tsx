@@ -9,7 +9,7 @@ import { GoUpsellArtRenderable } from "../src/component/go-upsell-art"
 import { SimulationRenderer } from "@opencode/simulation/frontend/renderer"
 import path from "node:path"
 import { Writable } from "node:stream"
-import { createEventStream, createFetch, directory, json } from "./fixture/tui-client"
+import { createEventStream, createFetch, createSseResponse, directory, json } from "./fixture/tui-client"
 import { tmpdir } from "./fixture/fixture"
 import { createAppFixture } from "./fixture/app"
 import { waitForHighlightedFrame } from "./fixture/frame"
@@ -1123,11 +1123,13 @@ test("completed user shell output replaces a partial live read when the final re
   const completed = `${partial}last persisted output\n`
   let finished = false
   let failedReads = 0
+  let reads = 0
+  let live: ReturnType<typeof createSseResponse> | undefined
   await using setup = await createAppFixture({
     state: state.path,
     config: { animations: false, tabs: { mode: "off" }, session: { sidebar: "hide" } },
     args: { sessionID: session.id },
-    fetch: (url) => {
+    fetch: (url, request) => {
       if (url.pathname === "/api/session") return json({ data: [session], cursor: {} })
       if (url.pathname === `/api/session/${session.id}`) return json({ data: session })
       if (url.pathname === `/api/session/${session.id}/message`)
@@ -1156,6 +1158,7 @@ test("completed user shell output replaces a partial live read when the final re
           failedReads++
           return json({ message: "Shell output unavailable" }, { status: 404 })
         }
+        reads++
         return json({
           location: { directory },
           data: {
@@ -1166,6 +1169,18 @@ test("completed user shell output replaces a partial live read when the final re
           },
         })
       }
+      if (url.pathname === `/api/experimental/shell/${shell.id}/watch`) {
+        live = createSseResponse(request.signal)
+        const cursor = Number(url.searchParams.get("cursor") ?? 0)
+        live.send({
+          type: "output",
+          output: partial.slice(cursor),
+          cursor: partial.length,
+          size: partial.length,
+          truncated: false,
+        })
+        return live.response
+      }
       return undefined
     },
   })
@@ -1173,8 +1188,14 @@ test("completed user shell output replaces a partial live read when the final re
   const running = await setup.waitForFrame((frame) => frame.includes(partial.trim()))
   expect(running).toContain(shell.command)
   expect(running).not.toContain("Background")
+  // Pushed, not polled: one size read while it runs.
+  await Bun.sleep(1100)
+  expect(reads).toBe(1)
+  expect(live?.open).toBe(true)
 
+  // The live stream ends without the rest of the output, and the output is gone.
   finished = true
+  live?.close()
   setup.events.emit({
     id: "evt_shell_exited",
     created: 2,
@@ -1182,7 +1203,8 @@ test("completed user shell output replaces a partial live read when the final re
     location: { directory },
     data: { id: shell.id, status: "exited", exit: 0 },
   })
-  await setup.waitFor(() => failedReads > 0)
+  // Reconnecting a moment later finds it gone.
+  await setup.waitFor(() => failedReads > 0, { maxPasses: 150 })
   setup.events.emit({
     id: "evt_shell_ended",
     created: 3,

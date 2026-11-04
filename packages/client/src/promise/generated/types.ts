@@ -1122,6 +1122,10 @@ export type SessionInboxUserPayload1 = {
   metadata?: { [x: string]: any }
 }
 
+export type ShellWatchEvent =
+  | { type: "output"; output: string; cursor: number; size: number; truncated: boolean }
+  | { type: "exited"; info: ShellInfo }
+
 export type SessionMessageToolStateCompleted = {
   status: "completed"
   input: { [x: string]: JsonValue }
@@ -4765,6 +4769,14 @@ export type ShellRemoveInput = {
 
 export type ShellRemoveOutput = void
 
+export type ExperimentalShellWatchInput = {
+  readonly id: string
+  readonly location?: { readonly directory?: string | undefined } | undefined
+  readonly cursor?: number | undefined
+}
+
+export type ExperimentalShellWatchOutput = ShellWatchEvent
+
 export type ReferenceListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 
 export type ReferenceListOutput = { location: LocationPublicRef; data: Array<ReferenceInfo> }
@@ -5012,6 +5024,12 @@ export type FileUnwatchInput = ExperimentalFileUnwatchInput
 
 /** @deprecated Use `ExperimentalFileUnwatchOutput`. Removed in the next minor. */
 export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
+
+/** @deprecated Use `ExperimentalShellWatchInput`. Removed in the next minor. */
+export type ShellWatchInput = ExperimentalShellWatchInput
+
+/** @deprecated Use `ExperimentalShellWatchOutput`. Removed in the next minor. */
+export type ShellWatchOutput = ExperimentalShellWatchOutput
 
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput

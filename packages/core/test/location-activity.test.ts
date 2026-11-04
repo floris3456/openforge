@@ -23,8 +23,12 @@ import { SessionEvent } from "@opencode/core/session/event"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { Workspace } from "@opencode/core/workspace"
 import { Document, Info } from "@opencode/schema/config"
+import { Shell } from "@opencode/schema/shell"
+import { Global } from "@opencode/util/global"
+import path from "path"
 import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { testEffect } from "./lib/effect"
 
@@ -112,6 +116,8 @@ const it = testEffect(
       LocationServiceMap.node,
       SessionExecution.node,
       LocationActivity.node,
+      ShellRunner.node,
+      Global.node,
     ]),
     [
       LocationServiceMap.node.replace(
@@ -262,6 +268,45 @@ describe("LocationActivity eviction", () => {
         expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
       }),
     )
+
+  it.effect("keeps a location while one of its shell commands runs in the tool runner", () =>
+    Effect.gen(function* () {
+      const map = yield* LocationServiceMap.Service
+      const shells = yield* ShellRunner.Service
+      const global = yield* Global.Service
+      const ref = LocationServiceMap.canonical({ directory: AbsolutePath.make("/project") })
+      const idle = Location.Ref.make({ directory: ref.directory, workspaceID: Workspace.ID.make("wrk_idle") })
+      yield* Location.Service.pipe(Effect.provide(map.get(ref)), Effect.scoped)
+      yield* Location.Service.pipe(Effect.provide(map.get(idle)), Effect.scoped)
+      const id = Shell.ID.ascending()
+      // A user's `!` command: no session execution or job owns it.
+      yield* shells.start({
+        info: {
+          id,
+          status: "running",
+          command: "sleep 30",
+          cwd: global.data,
+          shell: "/bin/sh",
+          file: path.join(global.data, "shell", "activity", `${id}.out`),
+          metadata: {},
+          time: { started: Date.now() },
+        },
+        location: ref,
+        argv: ["/bin/sh", "-c", "sleep 30"],
+        cwd: global.data,
+        env: {},
+        deadline: undefined,
+      })
+
+      yield* TestClock.adjust("1 minute")
+      yield* TestClock.adjust("62 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([ref])
+
+      yield* shells.remove(id)
+      yield* TestClock.adjust("62 minutes")
+      expect(Array.from(yield* RcMap.keys(map.rcMap))).toEqual([])
+    }),
+  )
 
   for (const [timeout, after, evicted] of [
     ["10 minutes", "11 minutes", true],

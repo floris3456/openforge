@@ -4,8 +4,10 @@ import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
+import { Sandbox } from "@opencode/sandbox"
 import type { Tool } from "@opencode/schema/tool"
-import { Deferred, Effect, Schema, Scope } from "effect"
+import { Deferred, Effect, Option, Schema, Scope } from "effect"
+import { SessionContinuity } from "../../continuity.js"
 import { Environment } from "../../environment/index.js"
 import { Job } from "../../job.js"
 import { FileAccess } from "../../file-access.js"
@@ -41,6 +43,9 @@ const description = (shell?: string) =>
     "Rely on automatic truncation unless filtering the output is more useful.",
     "Commands accept an optional timeout, background commands have no timeout by default.",
     "Background commands return immediately, and you will be notified when they complete.",
+    "Commands run in a sandbox that lets them write only to the chat's folder, its git folders, the temp folder and the package caches, unless the config allows more.",
+    "When a sandboxed command fails, its result says where it may write.",
+    "If the sandbox stopped a command that has to write elsewhere, run it again with `sandbox: false`, which asks the user for permission first.",
   ].join(" ")
 
 export const Input = Schema.Struct({
@@ -56,7 +61,15 @@ export const Input = Schema.Struct({
     description:
       "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion.",
   }),
+  sandbox: Schema.optionalKey(Schema.Boolean).annotate({
+    description:
+      "Set to false to run the command outside the sandbox. Asks the user for permission first, so use it only when the sandbox stopped the command and it has to write outside the places the sandbox allows.",
+  }),
 })
+
+/** What a foreground call stores while it waits for its command, so the next process waits for the same one. */
+const Attached = Schema.Struct({ shellID: Shell.ID, timeout: NonNegativeInt })
+const decodeAttached = Schema.decodeUnknownOption(Attached)
 
 const StructuredOutput = Schema.Struct({
   exit: Schema.optionalKey(Schema.Number),
@@ -70,13 +83,18 @@ const Output = Schema.Struct({
   ...StructuredOutput.fields,
   output: Schema.String,
   status: Schema.optionalKey(Schema.Literals(["completed", "running"])),
+  sandbox: Schema.optionalKey(Schema.String),
 })
 
 type Output = typeof Output.Type
 
 const resultMessages = (output: Output) => {
   const notice = output.status === "running" ? BACKGROUND_INSTRUCTION : ShellResult.notice(output)
-  return [...(output.output ? [output.output] : []), ...(notice ? [notice] : [])]
+  return [
+    ...(output.output ? [output.output] : []),
+    ...(notice ? [notice] : []),
+    ...(output.sandbox ? [output.sandbox] : []),
+  ]
 }
 
 const toolResult = (output: Output) => {
@@ -110,8 +128,13 @@ export const Plugin = {
     const shellSelect = yield* ShellSelect.Service
     const compatibleShell = shellSelect.resolve({ priority: "compat" })
     const permission = yield* Permission.Service
+    const continuity = yield* SessionContinuity.Service
 
-    const prepare = Effect.fn("ShellTool.prepare")(function* (invocation: ShellCreateBefore, context: Tool.Context) {
+    const prepare = Effect.fn("ShellTool.prepare")(function* (
+      invocation: ShellCreateBefore,
+      context: Tool.Context,
+      unsandboxed: boolean,
+    ) {
       const source = {
         type: "tool" as const,
         messageID: context.messageID,
@@ -133,6 +156,15 @@ export const Plugin = {
           action: name,
           resources: parsed.commands.map((command) => command.resource),
           save: parsed.commands.map((command) => command.save),
+          sessionID: context.sessionID,
+          agent: context.agent,
+          source,
+        })
+      if (unsandboxed)
+        yield* permission.assert({
+          action: Sandbox.permission,
+          resources: [invocation.command],
+          save: [invocation.command],
           sessionID: context.sessionID,
           agent: context.agent,
           source,
@@ -192,25 +224,33 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              // A call a restart continues finds the command it started still running, or finished, in the runner.
+              const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
               const timeout = input.background === true ? (input.timeout ?? 0) : (input.timeout ?? DEFAULT_TIMEOUT_MS)
-              let finalTimeout = timeout
-              const info = yield* shell.create(
-                {
-                  command: input.command,
-                  cwd: input.workdir,
-                  timeout,
-                  shell: yield* compatibleShell,
-                  metadata: { sessionID: context.sessionID },
-                },
-                (invocation) =>
-                  Effect.gen(function* () {
-                    invocation.env.AGENT = "1"
-                    invocation.env.OPENCODE = "1"
-                    invocation.env.AI_AGENT ||= "opencode"
-                    invocation.env.OPENCODE_SESSION_ID = context.sessionID
-                    finalTimeout = yield* prepare(invocation, context)
-                  }),
-              )
+              let finalTimeout = attached?.timeout ?? timeout
+              const info = attached
+                ? yield* shell.get(attached.shellID)
+                : yield* shell.create(
+                    {
+                      command: input.command,
+                      cwd: input.workdir,
+                      timeout,
+                      shell: yield* compatibleShell,
+                      metadata: {
+                        sessionID: context.sessionID,
+                        agent: context.agent,
+                        ...(input.sandbox === false ? { sandbox: false } : {}),
+                      },
+                    },
+                    (invocation) =>
+                      Effect.gen(function* () {
+                        invocation.env.AGENT = "1"
+                        invocation.env.OPENCODE = "1"
+                        invocation.env.AI_AGENT ||= "opencode"
+                        invocation.env.OPENCODE_SESSION_ID = context.sessionID
+                        finalTimeout = yield* prepare(invocation, context, input.sandbox === false)
+                      }),
+                  )
               yield* context.progress({ shellID: info.id })
 
               const settled = yield* Deferred.make<Output>()
@@ -218,12 +258,14 @@ export const Plugin = {
                 const result = yield* shell.result(info)
                 if (!result.capture) return yield* new Shell.NotFoundError({ id: info.id })
                 const output = ShellResult.output(result)
+                const note = ShellResult.sandbox(result.info)
                 return {
                   ...output,
                   output: output.timeout
                     ? `${output.output}\n\nCommand exceeded timeout of ${finalTimeout} ms. Retry with a larger timeout if the command is expected to take longer.`
                     : output.output,
                   status: "completed" as const,
+                  ...(note ? { sandbox: note } : {}),
                 }
               }).pipe(
                 Effect.tap((output) => Deferred.succeed(settled, output)),
@@ -251,9 +293,28 @@ export const Plugin = {
                 return backgroundResult(info.id, info.file)
               }
 
-              const result = yield* jobs
-                .block({ id: job.id, sessionID: context.sessionID })
-                .pipe(Effect.onInterrupt(() => jobs.cancel(job.id).pipe(Effect.ignore)))
+              // The wait survives a stop: the command keeps running in the runner, and the next process waits for it
+              // again. A stop ends the job with its command still running; anything else that interrupts the wait
+              // ends the command.
+              const result = yield* continuity
+                .wait(
+                  context.id,
+                  jobs
+                    .block({ id: job.id, sessionID: context.sessionID })
+                    .pipe(
+                      Effect.flatMap((result) =>
+                        result?.type === "finished" && result.info.status === "running"
+                          ? Effect.interrupt
+                          : Effect.succeed(result),
+                      ),
+                    ),
+                  { shellID: info.id, timeout: finalTimeout },
+                )
+                .pipe(
+                  Effect.onInterrupt(() =>
+                    continuity.stopping() ? Effect.void : jobs.cancel(job.id).pipe(Effect.ignore),
+                  ),
+                )
               if (result?.type === "backgrounded") {
                 yield* shell.timeout(info.id, 0)
                 yield* notifyWhenDone(context.sessionID, job.id, info.id, info.command, settled)

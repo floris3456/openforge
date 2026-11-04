@@ -69,6 +69,23 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
       ),
   )
   .add(
+    HttpApiEndpoint.get("shell.watch", "/api/experimental/shell/:id/watch", {
+      params: { id: Shell.ID },
+      query: Schema.Struct({ ...LocationQuery.fields, ...Shell.WatchInput.fields }),
+      success: HttpApiSchema.StreamSse({ data: Shell.WatchEvent }),
+      error: ShellNotFoundError,
+    })
+      .annotateMerge(locationQueryOpenApi)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "experimental.shell.watch",
+          summary: "Watch shell output",
+          description:
+            "Experimental. Streams combined output from an absolute byte cursor as it arrives, then the final command info once it has ended. A reader that falls behind skips ahead and is told so (truncated).",
+        }),
+      ),
+  )
+  .add(
     HttpApiEndpoint.delete("shell.remove", "/api/shell/:id", {
       params: { id: Shell.ID },
       query: LocationQuery,

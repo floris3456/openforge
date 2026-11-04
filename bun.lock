@@ -265,6 +265,7 @@
         "@opencode/plugin-browser": "workspace:*",
         "@opencode/pty": "0.4.0",
         "@opencode/runner": "workspace:*",
+        "@opencode/sandbox": "workspace:*",
         "@opencode/schema": "workspace:*",
         "@opencode/util": "workspace:*",
         "@parcel/watcher": "2.5.1",

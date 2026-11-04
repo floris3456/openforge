@@ -149,6 +149,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
                 : !truthy(process.env.OPENCODE_DISABLE_FFF),
           },
           runner: { command: [...selfCommand(), "runner"] },
+          sandbox: { command: selfCommand() },
         },
         serviceOptions === undefined
           ? undefined

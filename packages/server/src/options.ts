@@ -55,5 +55,14 @@ export const ServerOptions = Schema.Struct({
       command: Schema.optional(Schema.Array(Schema.String)),
     }),
   ),
+  sandbox: Schema.optional(
+    Schema.Struct({
+      /**
+       * Starts this openforge, whose hidden `sandbox-exec` command confines the agents' shell commands on Linux.
+       * Without it they run unsandboxed.
+       */
+      command: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 export type ServerOptions = typeof ServerOptions.Type

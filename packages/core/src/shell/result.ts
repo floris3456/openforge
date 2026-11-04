@@ -27,6 +27,12 @@ export function output(result: Result): Output {
   }
 }
 
+/** The note of a sandboxed command that exited with an error: where the sandbox let it write, and how to go outside. */
+export function sandbox(info: Shell.Info) {
+  const note = info.metadata.sandbox
+  return typeof note === "string" && info.exit !== undefined && info.exit !== 0 ? note : undefined
+}
+
 export function notice(output: Pick<Output, "exit" | "signal" | "timeout">) {
   if (output.timeout) return "Timed out before completion"
   if (output.signal !== undefined) return `Killed by ${output.signal}`

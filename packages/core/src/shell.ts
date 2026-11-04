@@ -31,6 +31,9 @@ import { ShellWrap } from "./shell/wrap.js"
 export { NotFoundError, RunnerStoppedError } from "./shell/runner.js"
 export const ID = Shell.ID
 export type ID = Shell.ID
+export const Info = Shell.Info
+export type Info = Shell.Info
+export const Event = Shell.Event
 
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = ShellRunner.DIRECTORY
@@ -348,6 +351,17 @@ const layer = () =>
         yield* hooks.trigger("shell", "create.before", invocation)
         if (before) yield* before(invocation)
 
+        const metadata = input.metadata ?? {}
+        const command = yield* wrap.wrap(
+          {
+            argv: [invocation.shell, ...ShellSelect.args(invocation.shell, invocation.command)],
+            cwd: invocation.cwd,
+            env: Object.fromEntries(
+              Object.entries(invocation.env).flatMap(([name, value]) => (value === undefined ? [] : [[name, value]])),
+            ),
+          },
+          { metadata },
+        )
         const id = Shell.ID.ascending()
         // Wall-clock time: the runner holds the deadline as a point in time, outside this service's clock.
         const started = Date.now()
@@ -358,19 +372,10 @@ const layer = () =>
           cwd: invocation.cwd,
           shell: invocation.shell,
           file: path.join(outputDir, `${id}.out`),
-          metadata: input.metadata ?? {},
+          // A sandboxed command keeps its note with it, so a later service still has it for the command's result.
+          metadata: command.note ? { ...metadata, sandbox: command.note } : metadata,
           time: { started },
         }
-        const command = yield* wrap.wrap(
-          {
-            argv: [invocation.shell, ...ShellSelect.args(invocation.shell, invocation.command)],
-            cwd: invocation.cwd,
-            env: Object.fromEntries(
-              Object.entries(invocation.env).flatMap(([name, value]) => (value === undefined ? [] : [[name, value]])),
-            ),
-          },
-          { metadata: info.metadata },
-        )
         const deadline = invocation.timeout > 0 ? started + invocation.timeout : undefined
         if (location.workspaceID !== undefined || process.platform === "win32")
           return yield* inProcess(info, command, deadline)

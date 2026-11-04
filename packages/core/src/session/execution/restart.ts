@@ -191,7 +191,7 @@ export const layer = (options?: Options) =>
         const session = yield* sessions.get(recovery.sessionID).pipe(Effect.option)
         if (Option.isNone(session)) return yield* jobs.completeBackground(background.notificationID)
         const started = known.value
-        const settled = yield* Deferred.make<ReturnType<typeof ShellResult.output>>()
+        const settled = yield* Deferred.make<{ output: ReturnType<typeof ShellResult.output>; text: string }>()
         yield* jobs.start({
           id: background.id,
           type: "shell",
@@ -205,8 +205,11 @@ export const layer = (options?: Options) =>
               const result = yield* shell.result(started)
               if (!result.capture) return yield* new Shell.NotFoundError({ id: started.id })
               const output = ShellResult.output(result)
-              yield* Deferred.succeed(settled, output)
-              return [output.output, ShellResult.notice(output)].filter((text) => text).join("\n\n")
+              const text = [output.output, ShellResult.notice(output), ShellResult.sandbox(result.info)]
+                .filter((text) => text)
+                .join("\n\n")
+              yield* Deferred.succeed(settled, { output, text })
+              return text
             }).pipe(Effect.onInterrupt(() => shell.remove(started.id).pipe(Effect.ignore)))
           }).pipe(instances.provide(session.value)),
         })
@@ -215,12 +218,9 @@ export const layer = (options?: Options) =>
           Effect.flatMap(({ info }) =>
             Effect.gen(function* () {
               if (!info || info.status === "running") return
-              const output = info.status === "completed" ? yield* Deferred.await(settled) : undefined
-              const text = output
-                ? [output.output, ShellResult.notice(output)].filter((text) => text).join("\n\n")
-                : info.status === "error"
-                  ? (info.error ?? "Command failed")
-                  : "Cancelled"
+              const done = info.status === "completed" ? yield* Deferred.await(settled) : undefined
+              const output = done?.output
+              const text = done ? done.text : info.status === "error" ? (info.error ?? "Command failed") : "Cancelled"
               yield* sessions
                 .synthetic({
                   id: background.notificationID,

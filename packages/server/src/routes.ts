@@ -22,6 +22,7 @@ import { SessionTransfer } from "@opencode/core/session/transfer"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
 import { ShellRunner } from "@opencode/core/shell/runner"
 import { ShellSelect } from "@opencode/core/shell/select"
+import { ShellWrap } from "@opencode/core/shell/wrap"
 import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
 import { Mcp } from "@opencode/core/mcp/index"
@@ -151,6 +152,16 @@ function makeRoutes<AuthError, AuthServices>(
         options.runner?.command?.length ? { launch: ShellRunner.detached(options.runner.command) } : {},
       ),
     ),
+    ...(options.sandbox?.command?.length
+      ? [
+          ShellWrap.node.replace(
+            ShellWrap.configured({
+              self: options.sandbox.command,
+              database: options.database?.path === ":memory:" ? undefined : options.database?.path,
+            }),
+          ),
+        ]
+      : []),
     Mcp.node.replace(
       Mcp.configured({
         clientInfo: {

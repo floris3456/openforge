@@ -58,7 +58,9 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       if (next.type === "switched" && !props.updater?.relaunch) epilogue.updatedVersion(next.version)
       // The dialog shows every step itself; without it, the steps that need attention become toasts.
       if (dialog.stack.length > 0) return
-      if (next.type === "ready") toast.show({ variant: "info", message: readyMessage(next.version), duration: 60_000 })
+      // Stays up while the chat runs; the switching toast replaces it.
+      if (next.type === "ready")
+        toast.show({ variant: "info", message: readyMessage(next.version), duration: 60 * 60_000 })
       if (next.type === "switching")
         toast.show({ variant: "info", message: `Switching to openforge ${next.version}…`, duration: 30_000 })
       if (next.type === "failed") toast.show({ variant: "error", message: next.message, duration: 60_000 })

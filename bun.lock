@@ -599,6 +599,18 @@
         "typescript": "catalog:",
       },
     },
+    "packages/runner": {
+      "name": "@opencode/runner",
+      "version": "2.2.5",
+      "dependencies": {
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@tsconfig/bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native": "catalog:",
+      },
+    },
     "packages/schema": {
       "name": "@opencode/schema",
       "version": "2.2.5",
@@ -1952,6 +1964,8 @@
     "@opencode/pty-win32-arm64": ["@opencode/pty-win32-arm64@0.4.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-IKJMUnS2aluWqRj13enMWomYtwbXq8rStcf/mUbxBoAGTDMtWR/ZrRmKb2ptR7KUqDjdSEa+8C8rczS7uGFl9g=="],
 
     "@opencode/pty-win32-x64": ["@opencode/pty-win32-x64@0.4.0", "", { "os": "win32", "cpu": "x64" }, "sha512-P1QJLUX918/y8he8VEBSYoiN5bYhUnJtEaEpiE5fxoYsDP9nqAHXqIrGxTNNnda5jOBcCalxxy0WhL8qgeKOqQ=="],
+
+    "@opencode/runner": ["@opencode/runner@workspace:packages/runner"],
 
     "@opencode/schema": ["@opencode/schema@workspace:packages/schema"],
 

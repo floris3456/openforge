@@ -68,7 +68,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
   },
   commands: [
     Spec.make("upgrade", {
-      description: `Switch ${Product.name} to the latest release, or to a given version (kept or downloaded)`,
+      description: `Switch ${Product.name} to the latest release, or to a given version (kept or downloaded), while chats run`,
       aliases: ["update"],
       params: {
         target: Argument.String("target").pipe(

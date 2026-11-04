@@ -167,8 +167,12 @@ Control update checks from the global config. Set `update` to `"disable"` to
 skip them, `"notify"` to show available updates before installing them, or
 `"auto"` to install updates automatically. When omitted, `update` defaults to `"notify"`.
 
-Automatic installation does not restart a running server. Restart it manually to activate the installed update.
-Project-level values are ignored.
+With `"auto"`, openforge installs a newer release when it starts and switches
+the background service to it at once, while chats run: they rest for the
+switch and continue on the new release, and a release that fails to start is
+rolled back. See [`upgrade`](/cli/commands#upgrade). The TUI then restarts on
+the new release and keeps what you were typing. Project-level values are
+ignored.
 
 ```jsonc
 {

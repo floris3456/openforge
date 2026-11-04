@@ -385,6 +385,15 @@ Allow a browser client from another origin.
 $ opencode serve --cors https://app.example.com
 ```
 
+Start paused, as a release switch starts the new background service. Reads are
+answered; model calls and tools wait, and prompts, answers and permission
+replies get `503` ("switching, try again in 1 s") until
+`POST /api/experimental/service/resume`.
+
+```bash
+$ openforge serve --service --paused
+```
+
 View all subcommands and flags.
 
 ```bash
@@ -588,22 +597,38 @@ $ opencode debug --help
 
 ## upgrade
 
-Upgrades OpenCode to the latest or a specific version. Alias: `update`.
+Switches openforge to the latest release, or to a given version, kept or
+downloaded. Alias: `update`. `/update` in the TUI does the same.
 
 ```bash
-$ opencode upgrade
+$ openforge upgrade
+$ openforge upgrade 0.1.1
 ```
 
-Upgrade to a specific version with a specific package manager.
+The switch happens while chats run. openforge pauses the background service:
+replies being streamed and tools already running finish, then every chat rests.
+It stops the service, copies the database next to the release it leaves, starts
+the new release paused and checks it within 10 s, then resumes every chat where
+it rested. Prompts, answers and permission replies sent meanwhile are sent
+again until the new release takes them, for up to 2 minutes. If anything
+fails, openforge goes back to the release it left, and the chats resume there.
+
+If something has not finished within 2 minutes, the pause is lifted and the
+chats carry on; the switch tries again once that has finished, and the TUI and
+this command say what it waits for. A switch away from a release before 0.1.0
+waits until no chat is running, since those releases cannot pause.
+
+Going back to an older release needs a database it can read. Use the copy made
+when that release was left, which lacks everything stored since then:
 
 ```bash
-$ opencode upgrade 2.0.21 --method bun
+$ openforge upgrade 0.1.0 --restore-database
 ```
 
-View all subcommands and flags.
+View all flags.
 
 ```bash
-$ opencode upgrade --help
+$ openforge upgrade --help
 ```
 
 ## uninstall

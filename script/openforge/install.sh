@@ -104,7 +104,7 @@ ln -sfn "$data/current/openforge" "$bin/openforge"
 
 printf 'openforge %s is installed: %s\n' "$version" "$bin/openforge"
 if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
-  printf 'It replaced openforge %s. Next time, run "openforge upgrade": it switches once no chat runs and can roll back.\n' "$previous"
+  printf 'It replaced openforge %s. Next time, run "openforge upgrade": it switches while chats run and can roll back.\n' "$previous"
 fi
 case ":$PATH:" in
   *":$bin:"*) ;;

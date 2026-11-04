@@ -244,6 +244,8 @@ describe("upgrade", () => {
       expect(log).toContain(`0.0.1 -> 0.0.2: stopping the background service\n`)
       expect(log).toContain(`0.0.1 -> 0.0.2: failed: ${reason}\n`)
     }),
+    // Stopping escalates from SIGTERM to SIGKILL and polls about 5 s after each before it gives up.
+    30_000,
   )
 
   it.live("rolls back a release that fails to start and does not retry it on its own until a newer one is out", () =>

@@ -82,61 +82,59 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
       if (!(yield* fs.exists(ReleaseLayout.binary(target.layout, input.to))))
         return yield* new UpgradeError({ reason: `openforge ${input.to} is not installed.` })
 
-      yield* log("stopping the background service")
-      yield* stop(target)
-      const prepared = yield* prepare(target, input).pipe(
-        Effect.tapError((error) =>
-          log(`could not prepare: ${error.message}; starting ${input.from} again`).pipe(
-            Effect.andThen(start(target, input.from)),
-            Effect.ignore,
-          ),
-        ),
-      )
-      yield* ReleaseLayout.point(target.layout, input.to)
-      yield* log(`current now points at ${input.to}; starting its service`)
-      const started = yield* start(target, input.to).pipe(Effect.exit)
-      if (Exit.isSuccess(started)) {
-        yield* log(`switched; the service reports ${input.to}`)
-        yield* ReleaseLayout.clearBad(target.layout, input.to)
-        const removed = yield* ReleaseLayout.prune(target.layout, [input.to, input.from])
-        if (removed.length) yield* log(`removed old releases ${removed.join(", ")}`)
-        return { type: "switched" as const, from: input.from, to: input.to }
-      }
+      // Once the service is stopped the switch runs to its end, even if this process is asked to exit meanwhile.
+      return yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* log("stopping the background service")
+          yield* stop(target)
+          const existed = yield* fs.exists(target.database)
+          const progress = { copied: false, starting: false }
+          const switched = yield* Effect.gen(function* () {
+            progress.copied = yield* ReleaseDatabase.copy(target.database, copyOf(target, input.from))
+            if (input.restore) yield* ReleaseDatabase.restore(input.restore, target.database)
+            yield* ReleaseLayout.point(target.layout, input.to)
+            yield* log(`current now points at ${input.to}; starting its service`)
+            progress.starting = true
+            yield* start(target, input.to)
+          }).pipe(Effect.exit)
+          if (Exit.isSuccess(switched)) {
+            yield* log(`switched; the service reports ${input.to}`)
+            yield* ReleaseLayout.clearBad(target.layout, input.to)
+            const removed = yield* ReleaseLayout.prune(target.layout, [input.to, input.from])
+            if (removed.length) yield* log(`removed old releases ${removed.join(", ")}`)
+            return { type: "switched" as const, from: input.from, to: input.to }
+          }
 
-      const reason = Exit.isFailure(started) ? failureMessage(started) : ""
-      yield* log(`failed: ${reason}`)
-      yield* log(`rolling back to ${input.from}`)
-      yield* stop(target).pipe(Effect.ignore)
-      yield* ReleaseLayout.point(target.layout, input.from)
-      yield* prepared
-        ? ReleaseDatabase.restore(copyOf(target, input.from), target.database)
-        : ReleaseDatabase.remove(target.database)
-      const restarted = yield* start(target, input.from).pipe(Effect.exit)
-      yield* log(
-        Exit.isSuccess(restarted)
-          ? `rolled back; the service reports ${input.from}`
-          : `rolled back, but ${input.from} did not start either: ${failureMessage(restarted)}`,
+          const reason = failureMessage(switched)
+          yield* log(`failed: ${reason}`)
+          yield* log(`rolling back to ${input.from}`)
+          yield* stop(target).pipe(Effect.ignore)
+          yield* ReleaseLayout.point(target.layout, input.from)
+          if (progress.copied) yield* ReleaseDatabase.restore(copyOf(target, input.from), target.database)
+          // Without a database before the switch, whatever the new release created goes. A database whose copy
+          // failed was not touched yet.
+          if (!existed) yield* ReleaseDatabase.remove(target.database)
+          const restarted = yield* start(target, input.from).pipe(Effect.exit)
+          yield* log(
+            Exit.isSuccess(restarted)
+              ? `rolled back; the service reports ${input.from}`
+              : `rolled back, but ${input.from} did not start either: ${failureMessage(restarted)}`,
+          )
+          // Only a release whose own service failed is remembered as bad; a full disk is not its fault.
+          if (!progress.starting)
+            return yield* new UpgradeError({ reason: `Could not switch to openforge ${input.to}: ${reason}` })
+          yield* ReleaseLayout.markBad(target.layout, input.to, { reason, log: target.log })
+          return {
+            type: "rolled-back" as const,
+            from: input.from,
+            to: input.to,
+            reason,
+            restored: Exit.isSuccess(restarted),
+          }
+        }),
       )
-      yield* ReleaseLayout.markBad(target.layout, input.to, { reason, log: target.log })
-      return {
-        type: "rolled-back" as const,
-        from: input.from,
-        to: input.to,
-        reason,
-        restored: Exit.isSuccess(restarted),
-      }
     }),
   )
-})
-
-/** Makes the database copy for the release being left, then applies `restore`. False when there is no database. */
-const prepare = Effect.fnUntraced(function* (
-  target: Target,
-  input: { readonly from: string; readonly restore?: string },
-) {
-  const copied = yield* ReleaseDatabase.copy(target.database, copyOf(target, input.from))
-  if (input.restore) yield* ReleaseDatabase.restore(input.restore, target.database)
-  return copied || input.restore !== undefined
 })
 
 /** Stops the managed service, handing persistent terminals to the next one. */

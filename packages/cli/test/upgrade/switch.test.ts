@@ -149,6 +149,45 @@ describe("switch", () => {
     }),
   )
 
+  it.live("restarts the old release, keeps its database and marks nothing bad when the copy fails", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.0.1", { version: "0.0.2" })
+      const folder = ReleaseLayout.folder(test.switching.layout, "0.0.1")
+      // Only the original database holds this row; a recreated one would not.
+      writeMigrations(test.switching.database, ["user-data"])
+      // The copy goes beside 0.0.1's binary; a read-only folder makes VACUUM INTO fail.
+      yield* Effect.acquireRelease(
+        Effect.promise(() => fs.chmod(folder, 0o555)),
+        () => Effect.promise(() => fs.chmod(folder, 0o755)),
+      )
+      const error = yield* ReleaseSwitch.run(test.switching, {
+        from: "0.0.1",
+        to: "0.0.2",
+        busy: Effect.succeed(false),
+      }).pipe(test.provide, Effect.flip)
+      expect(error.message).toStartWith("Could not switch to openforge 0.0.2: Could not use the database")
+      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.1")
+      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
+      expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "user-data"])
+      expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
+    }),
+  )
+
+  it.live("removes the database a failed release created when there was none before", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.0.1", { version: "0.0.2", serve: "crash" })
+      yield* Effect.promise(() => fs.rm(test.switching.database))
+      const result = yield* ReleaseSwitch.run(test.switching, {
+        from: "0.0.1",
+        to: "0.0.2",
+        busy: Effect.succeed(false),
+      }).pipe(test.provide)
+      expect(result).toMatchObject({ type: "rolled-back", restored: true })
+      // Only 0.0.1, started again, wrote to the database that is there now.
+      expect(migrations(test.switching.database)).toEqual(["m-0.0.1"])
+    }),
+  )
+
   it.live("leaves everything alone when a chat started or another process already switched", () =>
     Effect.gen(function* () {
       const test = yield* installed("0.0.1", { version: "0.0.2" })

@@ -1183,6 +1183,8 @@ test("preserves sibling catalogs through location preload, branch, shell, and we
     expect(setup.data.shell.get(shell.id)).toBe(first)
     expect(setup.data.location.vcs.info()?.branch).toEqual({ current: "feature", default: "main" })
     expect(requests.toSorted()).toEqual([
+      // Each connection reads whether a release switch is under way.
+      "/api/experimental/service/status",
       "/api/location",
       "/api/project",
       "/api/reference",

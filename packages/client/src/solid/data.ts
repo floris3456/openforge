@@ -7,6 +7,7 @@ import type {
   AgentInfo,
   CommandInfo,
   ConfigEntry,
+  ContinuityWork,
   SessionFormCancelInput,
   FormInfo,
   SessionFormReplyInput,
@@ -65,6 +66,13 @@ export type DataSessionStatus = "idle" | "running"
  * execution that ended without delivering it, and `queued` waits for every steer to drain.
  */
 export type DataPendingStatus = "starting" | "steering" | "stranded" | "queued"
+/**
+ * A release switch under way on the service: `pausing` while its chats come to rest, with what it still waits for,
+ * and `paused` once they rest, until a release resumes them.
+ */
+export type DataServicePause =
+  | { readonly state: "pausing"; readonly waiting: ReadonlyArray<ContinuityWork> }
+  | { readonly state: "paused" }
 type OpenCodeEventMap = { [Type in OpenCodeEvent["type"]]: Extract<OpenCodeEvent, { type: Type }> }
 
 export type CreateDataInput = {
@@ -460,6 +468,33 @@ export function createData(config: CreateDataInput) {
     })
   }
 
+  // A release switch, as the service reports it. Events are not replayed, so each connection reads the service's own
+  // state; an event that arrives meanwhile is newer than that read.
+  const [pause, setPause] = createSignal<DataServicePause>()
+  let pauseRead = 0
+  function notePause(next: DataServicePause | undefined) {
+    pauseRead++
+    setPause(next)
+  }
+  function readPause() {
+    const read = ++pauseRead
+    void api()
+      .experimental.service.status()
+      .then(
+        (status) =>
+          status.state === "running"
+            ? undefined
+            : status.state === "pausing"
+              ? { state: "pausing" as const, waiting: status.waiting }
+              : { state: "paused" as const },
+        // A release from before 0.1.0 has no pause.
+        () => undefined,
+      )
+      .then((next) => {
+        if (read === pauseRead) setPause(next)
+      })
+  }
+
   // Capture creation before settlement clears its entry, so dependent RPCs still see a failed create.
   function sendAdmission<Value>(sessionID: string, send: () => Promise<Value>, gate?: Promise<unknown>) {
     const created = creating.get(sessionID)
@@ -741,7 +776,18 @@ export function createData(config: CreateDataInput) {
 
   function handleEvent(event: OpenCodeEvent) {
     switch (event.type) {
+      case "service.pausing":
+        notePause({ state: "pausing", waiting: event.data.waiting })
+        return
+      case "service.paused":
+        notePause({ state: "paused" })
+        return
+      case "service.pause.expired":
+      case "service.resumed":
+        notePause(undefined)
+        return
       case "server.connected": {
+        readPause()
         const updates = new Map<string, DataSessionStatus | undefined>()
         activeUpdates = updates
         refresh(() =>
@@ -1534,6 +1580,12 @@ export function createData(config: CreateDataInput) {
   const result = {
     on: config.event.on,
     listen: config.event.listen,
+    service: {
+      /** A release switch under way on the service; undefined while it runs as usual. */
+      pause() {
+        return pause()
+      },
+    },
     session: {
       list() {
         return sessions()
@@ -2038,11 +2090,19 @@ export function createData(config: CreateDataInput) {
         },
         reply(input: SessionFormReplyInput, ref?: LocationRef) {
           const options = formRequestOptions(input.sessionID, ref)
-          return settleForm(input, ref, resent(() => api().session.form.reply(input, options)))
+          return settleForm(
+            input,
+            ref,
+            resent(() => api().session.form.reply(input, options)),
+          )
         },
         cancel(input: SessionFormCancelInput, ref?: LocationRef) {
           const options = formRequestOptions(input.sessionID, ref)
-          return settleForm(input, ref, resent(() => api().session.form.cancel(input, options)))
+          return settleForm(
+            input,
+            ref,
+            resent(() => api().session.form.cancel(input, options)),
+          )
         },
       },
     },

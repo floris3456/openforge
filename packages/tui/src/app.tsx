@@ -57,6 +57,7 @@ import { ClientProvider, useClient } from "./context/client"
 import { StartupLoading } from "./component/startup-loading"
 import { DevToolsBar } from "./component/devtools-bar"
 import { Reconnecting } from "./component/reconnecting"
+import { SwitchNotice } from "./component/switch-notice"
 import { MigrationOverlay } from "./component/migration-overlay"
 import { DataProvider, useData } from "./context/data"
 import { SessionTabsProvider, useSessionTabs } from "./context/session-tabs"
@@ -97,7 +98,12 @@ import { openUrl } from "@opencode/util/open"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { Config, ConfigProvider, useConfig } from "./config"
 import { newSessionLocation } from "./config/new-session-location"
-import { UpdateNotificationProvider, useUpdateNotification, type UpdateSource } from "./context/update-notification"
+import {
+  switchingMessage,
+  UpdateNotificationProvider,
+  useUpdateNotification,
+  type UpdateSource,
+} from "./context/update-notification"
 import { PluginProvider, usePlugin, type PackageSource } from "./plugin/context"
 import { localPluginDirectories } from "./plugin/discovery"
 import { PluginRoute, Slot } from "./plugin/render"
@@ -1402,6 +1408,25 @@ function App() {
     if (reconnectTimer) clearTimeout(reconnectTimer)
   })
 
+  // A release switch under way, started from this screen or seen in the service's pause events. Its notice says what
+  // the switch waits for and the screen stays usable; the full-screen overlay comes back only when the service stays
+  // away longer than a switch takes, a rollback included.
+  const switching = createMemo(() => {
+    const pause = data.service.pause()
+    const current = updater.state()
+    const own = current?.type === "switching" ? current : undefined
+    if (!pause && !own) return undefined
+    return switchingMessage(own?.version, pause?.state === "pausing" ? pause.waiting : own?.waiting, updater.title)
+  })
+  const inSwitch = createMemo(() => switching() !== undefined)
+  const [switchOverdue, setSwitchOverdue] = createSignal(false)
+  createEffect(() => {
+    setSwitchOverdue(false)
+    if (!inSwitch() || client.connection.status() === "connected") return
+    const timer = setTimeout(() => setSwitchOverdue(true), 60_000)
+    onCleanup(() => clearTimeout(timer))
+  })
+
   return (
     <box
       width={dimensions().width}
@@ -1476,9 +1501,10 @@ function App() {
       <Show when={!startup.skipInitialLoading}>
         <StartupLoading ready={plugins.ready} />
       </Show>
-      <Show when={showReconnecting()}>
+      <Show when={showReconnecting() && (!inSwitch() || switchOverdue())}>
         <Reconnecting managed={client.restart !== undefined} />
       </Show>
+      <Show when={!switchOverdue() && switching()}>{(message) => <SwitchNotice message={message()} />}</Show>
       <MigrationOverlay />
       <Toast />
     </box>

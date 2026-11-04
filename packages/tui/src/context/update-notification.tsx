@@ -97,13 +97,12 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       setState(next)
       // Leaving a screen that cannot restart itself tells the user to start the new release.
       if (next.type === "switched" && !props.updater?.relaunch) epilogue.updatedVersion(next.version)
-      // The dialog shows every step itself; without it, the steps that need attention become toasts.
+      // The dialog shows every step itself; without it, the steps that need attention become toasts. A switch in
+      // progress has its own notice (see app.tsx).
       if (dialog.stack.length > 0) return
-      // Stays up while the switch waits; the switching toast replaces it.
+      // Stays up while the switch waits.
       if (next.type === "waiting")
         toast.show({ variant: "info", message: waitingMessage(next, title), duration: 60 * 60_000 })
-      if (next.type === "switching")
-        toast.show({ variant: "info", message: switchingMessage(next.version, next.waiting, title), duration: 30_000 })
       if (next.type === "failed") toast.show({ variant: "error", message: next.message, duration: 60_000 })
       if (next.type === "switched" && !props.updater?.relaunch)
         toast.show({

@@ -7,6 +7,8 @@ const timing = {
   maxSpawnDelay: 1_200,
   promiseTimeout: 3_000,
   stopPollInterval: 5,
+  stopTimeout: 500,
+  killTimeout: 500,
 }
 
 export function accelerate<A extends object, B>(ensure: (options?: A) => B) {

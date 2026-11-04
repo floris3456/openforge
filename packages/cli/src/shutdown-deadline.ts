@@ -4,7 +4,7 @@ import { Duration, Effect } from "effect"
 /** After SIGTERM or SIGINT, teardown gets this long before the process reports what it is stuck on and exits. */
 export const DEADLINE = Duration.seconds(10)
 // The file logger batches writes for up to a second.
-const LOG_FLUSH = Duration.millis(1_500)
+export const LOG_FLUSH = Duration.millis(1_500)
 
 /**
  * Bounds signal-initiated teardown. NodeRuntime.runMain interrupts the main fiber on SIGTERM or SIGINT and then waits

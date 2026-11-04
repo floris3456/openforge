@@ -1,8 +1,16 @@
 import { expect, test } from "bun:test"
+import { Duration } from "effect"
 import path from "node:path"
+import { defaultEnsureTiming } from "../../client/src/service-timing"
+import { ShutdownDeadline } from "../src/shutdown-deadline"
 
 // Windows cannot catch SIGTERM: the process ends at once, so there is no teardown to bound.
 const posix = test.skipIf(process.platform === "win32")
+
+test("stopping the service waits longer than its own shutdown deadline before SIGKILL", () => {
+  const own = Duration.toMillis(ShutdownDeadline.DEADLINE) + Duration.toMillis(ShutdownDeadline.LOG_FLUSH)
+  expect(defaultEnsureTiming.stopTimeout).toBeGreaterThan(own)
+})
 
 posix("exits when teardown outlives the deadline and names what is pending", async () => {
   await hang(200, async (proc, pid) => {

@@ -13,6 +13,7 @@ import {
   stoppedExitCode,
 } from "./fixture/service-fixture"
 import { accelerate } from "./fixture/service-timing"
+import { defaultEnsureTiming, withEnsureTiming } from "../src/service-timing"
 
 const ensure = accelerate(Service.ensure)
 const stop = accelerate(Service.stop)
@@ -228,6 +229,20 @@ test("stop escalates when the registration disappears before the process exits",
   expect(await Bun.file(registration).exists()).toBe(false)
   await existing.exited
 }, 15_000)
+
+// A service bounds its own shutdown (10 s in the CLI); a stop waits stopTimeout, 12 s by default, before SIGKILL.
+test.skipIf(!catchesSigterm)("stop lets a service finish shutting down within stopTimeout", async () => {
+  await using fixture = await serviceFixture()
+  const existing = fixture.spawn("lingering", "700")
+  await fixture.waitForFile()
+
+  await run(Service.stop(withEnsureTiming({ file: fixture.registration }, { stopPollInterval: 5, stopTimeout: 1_500 })))
+
+  await existing.exited
+  expect(existing.signalCode).toBeNull()
+  expect(existing.exitCode).toBe(0)
+  expect(defaultEnsureTiming.stopTimeout).toBe(12_000)
+})
 
 test.skipIf(process.platform === "win32")(
   "stop fails when the process survives SIGKILL",

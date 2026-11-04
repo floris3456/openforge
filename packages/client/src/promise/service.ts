@@ -142,12 +142,13 @@ function stopped(pid: number) {
   }
 }
 
-async function waitUntilStopped(pid: number, timing: EnsureTiming) {
-  for (let attempt = 0; attempt <= timing.stopPollAttempts; attempt++) {
-    if (stopped(pid)) return true
-    if (attempt < timing.stopPollAttempts) await delay(timing.stopPollInterval)
+async function waitUntilStopped(pid: number, timing: EnsureTiming, limit: number) {
+  const deadline = Date.now() + limit
+  while (!stopped(pid)) {
+    if (Date.now() >= deadline) return false
+    await delay(timing.stopPollInterval)
   }
-  return false
+  return true
 }
 
 async function terminate(info: Info, options: { readonly file?: string }, timing: EnsureTiming) {
@@ -156,9 +157,10 @@ async function terminate(info: Info, options: { readonly file?: string }, timing
   signal(info.pid, "SIGTERM")
   // The registration can disappear or change hands before this process exits. Only the PID we
   // signalled can tell us whether it has stopped, so escalate based on that process.
-  if (!(await waitUntilStopped(info.pid, timing))) {
+  if (!(await waitUntilStopped(info.pid, timing, timing.stopTimeout))) {
     signal(info.pid, "SIGKILL")
-    if (!(await waitUntilStopped(info.pid, timing))) throw new Error(`Server process ${info.pid} is still running`)
+    if (!(await waitUntilStopped(info.pid, timing, timing.killTimeout)))
+      throw new Error(`Server process ${info.pid} is still running`)
   }
   const latest = await read(options.file)
   if (latest === undefined || !same(latest, info)) return

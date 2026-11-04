@@ -163,10 +163,9 @@ const registered = Effect.fnUntraced(function* (file?: string, timeout?: number)
   return { info, ...(yield* Effect.promise(() => probeResult(info, timeout))) }
 })
 
-// 50ms cadence bounded at ~5s, shared by stop escalation and each ensure
-// discovery window.
-const poll = (timing: EnsureTiming) =>
-  Schedule.max([Schedule.spaced(timing.stopPollInterval), Schedule.recurs(timing.stopPollAttempts)])
+// 50ms cadence bounded by wall clock: stopTimeout after SIGTERM, killTimeout after SIGKILL.
+const poll = (timing: EnsureTiming, limit: number) =>
+  Schedule.spaced(timing.stopPollInterval).pipe(Schedule.upTo({ duration: limit }))
 
 const signal = (pid: number, name: NodeJS.Signals) =>
   Effect.try({ try: () => process.kill(pid, name), catch: (cause) => cause }).pipe(Effect.ignore)
@@ -183,12 +182,12 @@ const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly f
   const current = yield* read(options.file)
   if (current === undefined || !same(current, info)) return
   yield* signal(info.pid, "SIGTERM")
-  const done = yield* stopped(info.pid).pipe(Effect.retry(poll(timing)), Effect.option)
+  const done = yield* stopped(info.pid).pipe(Effect.retry(poll(timing, timing.stopTimeout)), Effect.option)
   // The registration can disappear or change hands before this process exits. Only the PID we
   // signalled can tell us whether it has stopped, so escalate based on that process.
   if (Option.isNone(done)) {
     yield* signal(info.pid, "SIGKILL")
-    yield* stopped(info.pid).pipe(Effect.retry(poll(timing)))
+    yield* stopped(info.pid).pipe(Effect.retry(poll(timing, timing.killTimeout)))
   }
   const latest = yield* read(options.file)
   if (latest === undefined || !same(latest, info)) return

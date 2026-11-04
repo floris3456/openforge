@@ -576,6 +576,12 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         ),
         service: Flag.Boolean("service").pipe(Flag.withDefault(false)),
         stdio: Flag.Boolean("stdio").pipe(Flag.withDefault(false)),
+        paused: Flag.Boolean("paused").pipe(
+          Flag.withDescription(
+            "Start with model calls and tools held and writes refused, until POST /api/experimental/service/resume",
+          ),
+          Flag.withDefault(false),
+        ),
       },
     }),
   ],

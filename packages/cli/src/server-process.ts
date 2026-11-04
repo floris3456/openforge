@@ -29,6 +29,7 @@ export type Options = {
   readonly hostname?: string
   readonly port?: number
   readonly cors?: readonly string[]
+  readonly paused?: boolean
 }
 
 // The process effect lives until server shutdown; tracing it would parent every request to one process-lifetime trace.
@@ -114,6 +115,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           password,
           pty: { handoff },
           simulation: truthy(process.env.OPENCODE_SIMULATE),
+          paused: options.paused,
           database: {
             path: databasePath(global.data),
           },

@@ -1606,6 +1606,13 @@ export function createData(config: CreateDataInput) {
       resending() {
         return resending()
       },
+      /**
+       * Sends a write the way prompts are sent: again after a connection error or a 503, for up to 2 minutes, while
+       * openforge switches releases. Only for writes the service may receive twice, such as selecting an agent.
+       */
+      resend<Value>(send: () => Promise<Value>) {
+        return resent(send)
+      },
       remember(info: SessionInfo) {
         batch(() => {
           clearDeleted(info.id)
@@ -1765,9 +1772,10 @@ export function createData(config: CreateDataInput) {
           sync.complete(`session.pending:${id}`)
           sync.complete(`session.message:${id}`)
         }
-        // Wrapped so even a synchronous client failure reaches the rollback.
+        // Wrapped so even a synchronous client failure reaches the rollback. Resent through a release switch: the
+        // service returns the session it already has for this id.
         const request = Promise.resolve()
-          .then(() => api().session.create({ ...payload, id, location }))
+          .then(() => resent(() => api().session.create({ ...payload, id, location })))
           .then((info) => {
             sessionOutbox.delete(id)
             result.session.remember(info)

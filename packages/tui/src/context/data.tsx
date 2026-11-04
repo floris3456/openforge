@@ -10,7 +10,7 @@ export type { FormWithLocation } from "@opencode/client/solid"
 
 export const { use: useData, provider: DataProvider } = createSimpleContext({
   name: "Data",
-  init: (props: { directory: string }) => {
+  init: (props: { directory: string; resendLimit?: number }) => {
     const client = useClient()
     const data = createData({
       // Only the transcript store reads stored media as `media:<hash>` refs; plugins and other callers keep inline bytes.
@@ -18,6 +18,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
       event: client.event,
       connection: client.connection,
       directory: props.directory,
+      resendLimit: props.resendLimit,
     })
     data satisfies Plugin.Context["data"]
     const [generatingTitles, setGeneratingTitles] = createStore<Record<string, boolean | undefined>>({})

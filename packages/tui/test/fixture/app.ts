@@ -16,6 +16,7 @@ export async function createAppFixture(
     args?: TuiInput["args"]
     fetch?: FetchHandler
     updater?: TuiInput["updater"]
+    resendLimit?: TuiInput["resendLimit"]
     // A renderer whose owner already set up its terminal, such as the simulation renderer.
     setup?: TestRendererSetup
   } = {},
@@ -54,6 +55,7 @@ export async function createAppFixture(
       terminalHandoff: async () => ({ renderer: setup.renderer, mode: "dark", complete: ready.resolve }),
       args: input.args ?? {},
       updater: input.updater,
+      resendLimit: input.resendLimit,
       log: () => {},
     }).pipe(
       Effect.provide(

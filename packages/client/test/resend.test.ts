@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test"
 import { createRoot } from "solid-js"
 import { createData, type CreateDataInput } from "../src/solid"
-import { ClientError, isResendTimeoutError, OpenCode, resendable, type OpenCodeEvent } from "../src/promise"
+import {
+  ClientError,
+  isResendTimeoutError,
+  OpenCode,
+  ResendTimeoutError,
+  resendable,
+  type OpenCodeEvent,
+} from "../src/promise"
 
 type Handler = (event: OpenCodeEvent) => void
 
@@ -13,7 +20,13 @@ function fixture(answer: (request: Request, body: unknown) => Promise<Response> 
     baseUrl: "http://openforge.local",
     fetch: async (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init)
-      const body = request.method === "GET" ? undefined : await request.clone().json().catch(() => undefined)
+      const body =
+        request.method === "GET"
+          ? undefined
+          : await request
+              .clone()
+              .json()
+              .catch(() => undefined)
       requests.push({ method: request.method, path: new URL(request.url).pathname, body })
       return answer(request, body)
     },
@@ -33,11 +46,12 @@ function fixture(answer: (request: Request, body: unknown) => Promise<Response> 
         listen: () => () => {},
       },
     }),
+    api,
     requests,
     emit: (type: "server.connected" | "service.resumed") =>
-      handlers.get(type)?.forEach((handler) =>
-        handler({ id: `evt_${type}`, created: Date.now(), type, data: {} } as OpenCodeEvent),
-      ),
+      handlers
+        .get(type)
+        ?.forEach((handler) => handler({ id: `evt_${type}`, created: Date.now(), type, data: {} } as OpenCodeEvent)),
     dispose,
   }))
 }
@@ -77,6 +91,75 @@ test("only a connection error or a 503 is resent", () => {
   expect(resendable({ _tag: "SessionNotFoundError", message: "missing" })).toBe(false)
   const aborted = new DOMException("The operation was aborted.", "AbortError")
   expect(resendable(new ClientError("Transport", { cause: aborted }))).toBe(false)
+  // A caller that wraps the failure keeps it resendable; one that already gave up is reported.
+  const refusedWrite = new ClientError("UnexpectedStatus", { cause: { status: 503 }, detail: "503" })
+  expect(resendable(new Error("Failed to switch model", { cause: refusedWrite }))).toBe(true)
+  expect(resendable(new Error("Failed to switch model", { cause: new Error("bad model") }))).toBe(false)
+  expect(resendable(new ResendTimeoutError({ cause: refusedWrite }))).toBe(false)
+})
+
+test("a prompt whose model selection is refused during a switch is resent with it", async () => {
+  let up = false
+  const setup = fixture((request, body) => {
+    if (!up) return switching()
+    if (request.url.endsWith("/model")) return new Response(null, { status: 204 })
+    return admitted(body)
+  })
+  try {
+    const sent = setup.data.session.prompt({
+      sessionID: "ses_switch",
+      id: "msg_model",
+      text: "Carry on",
+      // As the TUI commits the composer's model before the prompt.
+      prepare: () =>
+        setup.api.session
+          .switchModel({ sessionID: "ses_switch", model: { providerID: "fake", id: "slow" } })
+          .catch((error: unknown) => {
+            throw new Error("Failed to switch model", { cause: error })
+          }),
+    })
+    await until(() => setup.data.session.resending() === 1)
+    up = true
+    setup.emit("service.resumed")
+    expect((await sent).id).toBe("msg_model")
+    expect(setup.requests.map((request) => request.path)).toEqual([
+      "/api/session/ses_switch/model",
+      "/api/session/ses_switch/model",
+      "/api/session/ses_switch/prompt",
+    ])
+  } finally {
+    setup.dispose()
+  }
+})
+
+test("a new chat started during a switch is created with the same id once the service takes it", async () => {
+  let up = false
+  const setup = fixture((request, body) => {
+    if (!up) return switching()
+    const input = body as { id: string; location: { directory: string } }
+    return Response.json({
+      data: {
+        id: input.id,
+        projectID: "prj_test",
+        location: input.location,
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1, updated: 1 },
+      },
+    })
+  })
+  try {
+    const created = setup.data.session.create({ id: "ses_new", location: { directory: "/project" } })
+    await until(() => setup.data.session.resending() === 1)
+    expect(setup.data.session.get("ses_new")).toBeDefined()
+    up = true
+    setup.emit("service.resumed")
+    expect((await created.request).id).toBe("ses_new")
+    const creates = setup.requests.filter((request) => request.path === "/api/session")
+    expect(creates.map((request) => (request.body as { id: string }).id)).toEqual(["ses_new", "ses_new"])
+  } finally {
+    setup.dispose()
+  }
 })
 
 test("a prompt sent during a switch is resent with the same id once the new service connects and resumes", async () => {
@@ -118,9 +201,10 @@ test("a prompt sent during a switch is resent with the same id once the new serv
 test("a prompt the service never takes fails after the limit and leaves the transcript", async () => {
   const setup = fixture(() => switching(), 50)
   try {
-    const error = await setup.data.session
-      .prompt({ sessionID: "ses_switch", id: "msg_late", text: "Keep me" })
-      .then(() => undefined, (cause: unknown) => cause)
+    const error = await setup.data.session.prompt({ sessionID: "ses_switch", id: "msg_late", text: "Keep me" }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
     expect(isResendTimeoutError(error)).toBe(true)
     expect(setup.data.session.message.get("ses_switch", "msg_late")).toBeUndefined()
     expect(setup.data.session.resending()).toBe(0)
@@ -153,7 +237,11 @@ test("a permission reply and a form answer given during a switch are resent with
       requestID: "per_switch",
       decision: "once",
     })
-    const answered = setup.data.session.form.reply({ sessionID: "ses_switch", formID: "frm_switch", answer: { q0: "Yes" } })
+    const answered = setup.data.session.form.reply({
+      sessionID: "ses_switch",
+      formID: "frm_switch",
+      answer: { q0: "Yes" },
+    })
     await until(() => setup.data.session.resending() === 2)
     up = true
     setup.emit("service.resumed")

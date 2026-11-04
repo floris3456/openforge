@@ -216,6 +216,8 @@ export type TuiInput = {
     | undefined
   >
   log?: LogSink
+  /** Milliseconds a prompt is resent while openforge switches before it is reported; 2 minutes unless a test shortens it. */
+  resendLimit?: number
 }
 
 export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
@@ -417,7 +419,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               service={service}
                                             >
                                               <PermissionProvider>
-                                                <DataProvider directory={directory}>
+                                                <DataProvider directory={directory} resendLimit={input.resendLimit}>
                                                   <LocationProvider>
                                                     <SessionTabsProvider>
                                                       <SessionTerminalsProvider>

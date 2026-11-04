@@ -32,6 +32,7 @@ import { parseSlashHead } from "../../prompt/parse"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
 import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
+import { isResendTimeoutError } from "@opencode/client/promise"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
@@ -1192,16 +1193,30 @@ export function Prompt(props: PromptProps) {
       props.onSubmit?.()
     }
     const restoreEntry = () => {
-      if (disposed || input.isDestroyed || input.plainText !== "") return
+      if (disposed || input.isDestroyed || input.plainText !== "") return false
       input.setText(entry.text)
       setStore("prompt", entry)
       setStore("mode", entry.mode ?? "normal")
       restoreExtmarksFromPrompt(entry)
       input.cursorOffset = measure(entry.text)
+      return true
     }
     const fail = (title: string, error: unknown) => {
       toast.show({ title, message: errorMessage(error), variant: "error" })
       restoreEntry()
+    }
+    // Resent for 2 minutes while openforge switched releases or could not be reached. The text goes back in the
+    // composer; when something new was typed meanwhile, it stays in the prompt history.
+    const unsent = () => {
+      const restored = restoreEntry()
+      toast.show({
+        title: "Prompt not sent",
+        message: restored
+          ? "openforge did not take it within 2 minutes, so it is back in the composer. Send it again once openforge answers."
+          : "openforge did not take it within 2 minutes. What you typed since stays in the composer; the prompt is in the prompt history (↑).",
+        variant: "error",
+        duration: 60_000,
+      })
     }
     const attempt = async (title: string, run: () => Promise<unknown>) => {
       return run().then(
@@ -1252,7 +1267,8 @@ export function Prompt(props: PromptProps) {
       newSession = {
         gate: created.request.then(async (info) => {
           if (terminalEnvironment.variables !== undefined) {
-            await client.api.session.environment({ sessionID: created.id, variables: terminalEnvironment.variables })
+            const variables = terminalEnvironment.variables
+            await data.session.resend(() => client.api.session.environment({ sessionID: created.id, variables }))
           }
         }),
         recover: (error) => {
@@ -1337,7 +1353,8 @@ export function Prompt(props: PromptProps) {
       )
     } else {
       move.startSubmit()
-      if (!(await attempt("Failed to prepare session", prepareAgent))) return true
+      // Selecting the agent is a write as well; it outlasts a release switch with the prompt.
+      if (!(await attempt("Failed to prepare session", () => data.session.resend(prepareAgent)))) return true
       // Revert must settle before optimistic admission: its committed echo
       // splices every local row at or after the boundary, which would include
       // a freshly admitted prompt.
@@ -1377,7 +1394,11 @@ export function Prompt(props: PromptProps) {
           // the server makes an unchanged selection a no-op.
           prepare: commitModel,
         })
-        .catch((error) => (newSession ? newSession.recover(error) : fail("Failed to send prompt", error)))
+        .catch((error) => {
+          if (newSession) return newSession.recover(error)
+          if (isResendTimeoutError(error)) return unsent()
+          fail("Failed to send prompt", error)
+        })
       if (pendingEditorSelection) editor.markSelectionSent()
     }
 

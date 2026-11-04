@@ -47,12 +47,17 @@ export async function resend<A>(send: () => Promise<A>, options: ResendOptions =
   }
 }
 
-/** Whether a failed write may be sent again: the service could not be reached, or it is switching, starting or stopping. */
-export function resendable(error: unknown) {
+/**
+ * Whether a failed write may be sent again: the service could not be reached, or it is switching, starting or
+ * stopping. An error that wraps such a failure (as its `cause`) counts too; one that already gave up does not.
+ */
+export function resendable(error: unknown): boolean {
+  if (error instanceof ResendTimeoutError) return false
   if (error instanceof ClientError) {
     if (error.reason === "Transport") return !(error.cause instanceof Error && error.cause.name === "AbortError")
     return error.reason === "UnexpectedStatus" && status(error.cause) === 503
   }
+  if (error instanceof Error && error.cause !== undefined && resendable(error.cause)) return true
   // A 503 an endpoint declares arrives as the service's own error body.
   return (
     typeof error === "object" &&

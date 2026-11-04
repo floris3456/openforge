@@ -59,6 +59,27 @@ test("waits with the restart while the prompt holds text", async () => {
   expect(fake.relaunches).toEqual([undefined])
 })
 
+test("the screen that ran /update restarts too, with its dialog still open", async () => {
+  const fake = source()
+  const updater = {
+    ...fake.updater,
+    upgrade: async () => {
+      fake.switched("0.0.2")
+      return { type: "switched" as const, from: "0.0.1", to: "0.0.2" }
+    },
+  }
+  await using setup = await createAppFixture({ updater })
+  await setup.ready
+  await setup.waitForFrame((frame) => frame.includes("commands"))
+  await setup.mockInput.typeText("/update")
+  await setup.waitForFrame((frame) => frame.includes("Upgrade openforge"))
+  setup.mockInput.pressKey("RETURN")
+  await setup.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.2; restarting"))
+  await until(() => fake.relaunches.length > 0)
+  expect(fake.relaunches).toEqual([undefined])
+  await until(() => setup.renderer.isDestroyed)
+})
+
 test("restarts back on the open chat", async () => {
   const location = { directory, project: { id: "project", directory, canonical: directory } }
   const session = {

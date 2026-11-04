@@ -1,8 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process"
+import { launchService, type ServiceProcess } from "./service-launch.js"
 import type { EnsureTiming } from "./service-timing.js"
 
 export type ServiceContender = {
-  readonly child: ChildProcess
+  readonly child: ServiceProcess
   readonly error: () => Error | undefined
   readonly closed: () => boolean
   readonly stderr: () => string
@@ -16,12 +16,8 @@ export function spawnServiceContender(
   args: ReadonlyArray<string>,
   env?: Readonly<Record<string, string | undefined>>,
 ): ServiceContender {
-  const child = spawn(command, args, {
-    detached: true,
-    windowsHide: true,
-    stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, ...env },
-  })
+  const service = launchService(command, args, { ...process.env, ...env })
+  const child = service.launcher
   let error: Error | undefined
   let closed = false
   let stderr = Buffer.alloc(0)
@@ -42,7 +38,7 @@ export function spawnServiceContender(
   })
   child.unref()
   return {
-    child,
+    child: service,
     error: () => error,
     closed: () => closed,
     stderr: () => stderr.toString("utf8").trim(),

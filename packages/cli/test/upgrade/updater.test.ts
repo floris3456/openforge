@@ -1,7 +1,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schedule } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { testEffect } from "../../../core/test/lib/effect"
@@ -189,10 +189,60 @@ describe("upgrade", () => {
       yield* test.publish("0.0.2")
       test.releases["0.0.2"].SHA256SUMS = `${"0".repeat(64)}  openforge-linux-x64.tar.gz\n`
       const error = yield* (yield* test.make()).upgrade({ notify: test.notify }).pipe(Effect.flip)
+      expect(error.message).toStartWith("upgrade to 0.0.2 failed: ")
       expect(error.message).toContain("disagree")
+      expect(error.message).toEndWith(`; still on 0.0.1. Log: ${test.switching.log}`)
       expect(test.states.at(-1)).toEqual({ type: "failed", message: error.message })
       expect(yield* test.current).toBe("0.0.1")
       expect(yield* test.reported).toBe("0.0.1")
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain("0.0.1 -> 0.0.2: failed to install: ")
+    }),
+  )
+
+  it.live("says so when the old service does not stop, and does not hold that against the new release", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2" })
+      yield* test.publish("0.0.2")
+      // 0.0.1's service again, now under a parent that never reaps it, as under a TUI that replaced itself: once
+      // stopped it stays a zombie, which still counts as running.
+      yield* Service.stop({ file: test.switching.service.file })
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.spawn(
+            [
+              "sh",
+              "-c",
+              '"$@" & exec sleep 60',
+              "sh",
+              ReleaseLayout.binary(test.switching.layout, "0.0.1"),
+              "serve",
+              "--service",
+            ],
+            { env: { ...process.env, ...test.switching.service.env }, stdout: "ignore", stderr: "inherit" },
+          ),
+        ),
+        (keeper) =>
+          Effect.promise(async () => {
+            keeper.kill("SIGKILL")
+            await keeper.exited
+          }),
+      )
+      yield* test.reported.pipe(
+        Effect.flatMap((version) => (version === "0.0.1" ? Effect.void : Effect.fail("not yet"))),
+        Effect.retry(Schedule.spaced("20 millis")),
+        Effect.timeout("5 seconds"),
+      )
+      const pid = (yield* Effect.promise(() => Bun.file(test.switching.service.file).json())).pid
+      const error = yield* (yield* test.make()).upgrade({ notify: test.notify }).pipe(Effect.flip)
+      const reason = `the background service did not stop: Server process ${pid} is still running`
+      expect(error.message).toBe(`upgrade to 0.0.2 failed: ${reason}; still on 0.0.1. Log: ${test.switching.log}`)
+      expect(test.states.at(-1)).toEqual({ type: "failed", message: error.message })
+      expect(yield* test.current).toBe("0.0.1")
+      expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain(`0.0.1 -> 0.0.2: stopping the background service\n`)
+      expect(log).toContain(`0.0.1 -> 0.0.2: failed: ${reason}\n`)
     }),
   )
 
@@ -205,8 +255,8 @@ describe("upgrade", () => {
       const error = test.states.at(-1)
       expect(error?.type).toBe("failed")
       if (error?.type !== "failed") return
-      expect(error.message).toStartWith("upgrade to 0.0.2 failed, back on 0.0.1: ")
-      expect(error.message).toEndWith(`. Log: ${test.switching.log}`)
+      expect(error.message).toStartWith("upgrade to 0.0.2 failed: The service of openforge 0.0.2 exited (code 3).")
+      expect(error.message).toEndWith(`; still on 0.0.1. Log: ${test.switching.log}`)
       expect(yield* test.current).toBe("0.0.1")
       expect(yield* test.reported).toBe("0.0.1")
 
@@ -221,7 +271,7 @@ describe("upgrade", () => {
 
       // By hand it is tried again (and rolls back again).
       expect((yield* updater.upgrade({ target: "0.0.2" }).pipe(Effect.flip)).message).toStartWith(
-        "upgrade to 0.0.2 failed, back on 0.0.1",
+        "upgrade to 0.0.2 failed: ",
       )
 
       // A newer release is tried on its own.

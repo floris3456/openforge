@@ -45,11 +45,11 @@ test("upgrade progress replaces checking, waits for running chats and reports a 
     await app.waitForFrame((frame) => frame.includes("openforge 0.0.1 is ready; switches when no chat is running"))
     setState({ type: "switching", version: "0.0.1" })
     await app.waitForFrame((frame) => frame.includes("Switching to openforge 0.0.1"))
-    const failure = "upgrade to 0.0.1 failed, back on 0.0.0: boom. Log: /data/log/upgrade.log"
+    const failure = "upgrade to 0.0.1 failed: boom; still on 0.0.0. Log: /data/log/upgrade.log"
     setState({ type: "failed", version: "0.0.1", message: failure })
     pending.reject(new Error(failure))
     await app.waitForFrame(
-      (frame) => frame.includes("upgrade to 0.0.1 failed, back on 0.0.0") && !frame.includes("Switching"),
+      (frame) => frame.includes("upgrade to 0.0.1 failed: boom; still on 0.0.0") && !frame.includes("Switching"),
     )
     expect(app.captureCharFrame()).not.toContain("Restart")
   } finally {
@@ -58,9 +58,11 @@ test("upgrade progress replaces checking, waits for running chats and reports a 
   }
 })
 
-test("a finished switch offers to restart this screen", async () => {
+test("a finished switch says whether this screen restarts on its own", async () => {
   await using temporary = await tmpdir()
   const [state] = createSignal<UpdateState>({ type: "switched", version: "0.0.1" })
+  // "manual": this screen cannot restart itself; "held": it waits for the typed prompt.
+  const [restarts, setRestarts] = createSignal<"manual" | "held" | "now">("manual")
   const app = await testRender(
     () => (
       <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path, home: temporary.path }}>
@@ -69,7 +71,11 @@ test("a finished switch offers to restart this screen", async () => {
             <Keymap.Provider>
               <ToastProvider>
                 <DialogProvider>
-                  <DialogUpdate state={state} restart={() => {}} />
+                  <DialogUpdate
+                    state={state}
+                    restart={() => {}}
+                    held={restarts() === "manual" ? undefined : () => restarts() === "held"}
+                  />
                 </DialogProvider>
               </ToastProvider>
             </Keymap.Provider>
@@ -80,10 +86,13 @@ test("a finished switch offers to restart this screen", async () => {
     { width: 80, height: 24, kittyKeyboard: true },
   )
   try {
-    await app.renderOnce()
-    const frame = app.captureCharFrame()
-    expect(frame).toContain("openforge 0.0.1 is running")
-    expect(frame.toLowerCase()).toContain("restart")
+    app.renderer.start()
+    await app.waitForFrame((frame) => frame.includes("openforge 0.0.1 is running. Restart closes this screen"))
+    expect(app.captureCharFrame().toLowerCase()).toContain("restart")
+    setRestarts("now")
+    await app.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.1; restarting"))
+    setRestarts("held")
+    await app.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.1; this screen restarts on it once"))
   } finally {
     app.renderer.destroy()
   }

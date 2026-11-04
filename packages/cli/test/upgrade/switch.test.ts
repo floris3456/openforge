@@ -6,6 +6,7 @@ import { describe, expect } from "bun:test"
 import { Deferred, Effect, Fiber } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { ancestors } from "../../../client/test/fixture/service-fixture"
 import { testEffect } from "../../../core/test/lib/effect"
 import { ReleaseDatabase } from "../../src/upgrade/database"
 import { ReleaseLayout } from "../../src/upgrade/layout"
@@ -89,6 +90,15 @@ describe("switch steps", () => {
       expect(error.message).toContain("did not answer with that version within 4s")
     }),
   )
+
+  // The TUI that switches replaces itself with the new release next and would never reap a child.
+  it.live("starts the service outside the switching process", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.0.1")
+      const info = yield* Effect.promise(() => Bun.file(test.switching.service.file).json())
+      expect(ancestors(info.pid)).not.toContain(process.pid)
+    }),
+  )
 })
 
 describe("switch", () => {
@@ -160,12 +170,14 @@ describe("switch", () => {
         Effect.promise(() => fs.chmod(folder, 0o555)),
         () => Effect.promise(() => fs.chmod(folder, 0o755)),
       )
-      const error = yield* ReleaseSwitch.run(test.switching, {
+      const result = yield* ReleaseSwitch.run(test.switching, {
         from: "0.0.1",
         to: "0.0.2",
         busy: Effect.succeed(false),
-      }).pipe(test.provide, Effect.flip)
-      expect(error.message).toStartWith("Could not switch to openforge 0.0.2: Could not use the database")
+      }).pipe(test.provide)
+      expect(result).toMatchObject({ type: "rolled-back", restored: true })
+      if (result.type !== "rolled-back") return
+      expect(result.reason).toStartWith("Could not use the database")
       expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.1")
       expect((yield* reported(test.switching))?.version).toBe("0.0.1")
       expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "user-data"])

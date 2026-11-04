@@ -12,6 +12,8 @@ export function DialogUpdate(props: {
   start?: () => Promise<UpdateOutcome>
   state: () => UpdateState | undefined
   restart: () => void
+  /** Present when this screen restarts on its own once switched: whether a typed prompt holds that back. */
+  held?: () => boolean
 }) {
   const dialog = useDialog()
   const theme = useTheme().surface("dialog")
@@ -123,10 +125,22 @@ export function DialogUpdate(props: {
             <Match when={current.type === "switching" && current}>
               {(state) => <Spinner shimmer={theme.text.base}>{`Switching to openforge ${state().version}…`}</Spinner>}
             </Match>
+            <Match when={current.type === "switched" && props.held && !props.held() && current}>
+              {(state) => (
+                <Spinner shimmer={theme.text.base}>{`Switched to openforge ${state().version}; restarting…`}</Spinner>
+              )}
+            </Match>
+            <Match when={current.type === "switched" && props.held && current}>
+              {(state) => (
+                <text fg={theme.text.muted} wrapMode="word">
+                  {`Switched to openforge ${state().version}; this screen restarts on it once the prompt is empty.`}
+                </text>
+              )}
+            </Match>
             <Match when={current.type === "switched" && current}>
               {(state) => (
                 <text fg={theme.text.muted} wrapMode="word">
-                  {`openforge ${state().version} is running. Restart opens this chat again on it.`}
+                  {`openforge ${state().version} is running. Restart closes this screen; start openforge again to use it.`}
                 </text>
               )}
             </Match>

@@ -6,10 +6,10 @@
 
 import { Service, type Endpoint } from "@opencode/client/effect/service"
 import { OpenCode } from "@opencode/client/promise"
+import { launchService, type ServiceProcess } from "@opencode/client/service-launch"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Logging } from "@opencode/util/observability/logging"
 import { Deferred, Duration, Effect, Exit, FileSystem, Option, Schedule, Schema } from "effect"
-import { spawn } from "node:child_process"
 import path from "node:path"
 import { Release, UpgradeError } from "./release"
 import { ReleaseDatabase } from "./database"
@@ -63,30 +63,31 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
 ) {
   const flock = yield* EffectFlock.Service
   const fs = yield* FileSystem.FileSystem
-  const log = (message: string) => append(target.log, `${input.from} -> ${input.to}: ${message}`)
+  const log = (message: string) => note(target, input, message)
+  // A failure that changed nothing; `from` stays in use.
+  const fail = (reason: string) => Effect.fail(new UpgradeError({ reason }))
   yield* Logging.trim(target.log, { max: 1024 * 1024, keep: 512 * 1024 }).pipe(Effect.ignore)
   return yield* Effect.scoped(
     Effect.gen(function* () {
       yield* flock
         .acquire(SwitchLock.key, target.layout.locks, { timeoutMs: Duration.toMillis(SwitchLock.timeout) })
-        .pipe(
-          Effect.mapError(() => new UpgradeError({ reason: "Another openforge process is still switching releases." })),
-        )
+        .pipe(Effect.catch(() => fail("another openforge process is still switching releases")))
       const current = yield* ReleaseLayout.current(target.layout)
       if (current === input.to) return { type: "unchanged" as const, version: input.to }
       if (current !== input.from)
-        return yield* new UpgradeError({
-          reason: `openforge changed from ${input.from} to ${current ?? "nothing"} meanwhile; not switching.`,
-        })
+        return yield* fail(`openforge changed from ${input.from} to ${current ?? "nothing"} meanwhile`)
       if (yield* input.busy) return { type: "busy" as const }
       if (!(yield* fs.exists(ReleaseLayout.binary(target.layout, input.to))))
-        return yield* new UpgradeError({ reason: `openforge ${input.to} is not installed.` })
+        return yield* fail(`openforge ${input.to} is not installed`)
 
       // Once the service is stopped the switch runs to its end, even if this process is asked to exit meanwhile.
       return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* log("stopping the background service")
-          yield* stop(target)
+          // Not the new release's fault, so it is not remembered as bad.
+          yield* stop(target).pipe(
+            Effect.catch((error) => fail(`the background service did not stop: ${error.message}`)),
+          )
           const existed = yield* fs.exists(target.database)
           const progress = { copied: false, starting: false }
           const switched = yield* Effect.gen(function* () {
@@ -121,9 +122,7 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
               : `rolled back, but ${input.from} did not start either: ${failureMessage(restarted)}`,
           )
           // Only a release whose own service failed is remembered as bad; a full disk is not its fault.
-          if (!progress.starting)
-            return yield* new UpgradeError({ reason: `Could not switch to openforge ${input.to}: ${reason}` })
-          yield* ReleaseLayout.markBad(target.layout, input.to, { reason, log: target.log })
+          if (progress.starting) yield* ReleaseLayout.markBad(target.layout, input.to, { reason, log: target.log })
           return {
             type: "rolled-back" as const,
             from: input.from,
@@ -134,7 +133,7 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
         }),
       )
     }),
-  )
+  ).pipe(Effect.tapError((error) => log(`failed: ${error.message}`)))
 })
 
 /** Stops the managed service, handing persistent terminals to the next one. */
@@ -143,8 +142,8 @@ export const stop = Effect.fn("upgrade.switch.stop")(function* (target: Target) 
 })
 
 /**
- * Starts the service from `current` and requires it to answer with `version` within 10 s. The switch spawns exactly
- * one process and stops it by its PID when the check fails, so no attempt of a failed release is left starting up
+ * Starts the service from `current` and requires it to answer with `version` within 10 s. The switch starts exactly
+ * one service and stops it by its PID when the check fails, so no attempt of a failed release is left starting up
  * once a rollback restores the database.
  */
 export const start = Effect.fn("upgrade.switch.start")(function* (target: Target, version: string) {
@@ -155,23 +154,25 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
     ...(yield* handoff(target.service.file)),
     [SwitchLock.variable]: "1",
   }
-  const child = yield* Effect.try({
-    try: () =>
-      spawn(path.join(target.layout.current, Release.binary), ["serve", "--service"], {
-        detached: true,
-        stdio: ["ignore", "ignore", "pipe"],
-        env,
-      }),
+  // Started outside this process, which may replace itself with the new release and could then never reap it.
+  const service = yield* Effect.try({
+    try: () => launchService(path.join(target.layout.current, Release.binary), ["serve", "--service"], env),
     catch: (cause) => new Error(`Could not start openforge ${version}: ${String(cause)}`),
   })
+  const child = service.launcher
   let stderr = ""
   const collect = (chunk: Buffer) => {
     stderr = (stderr + chunk.toString("utf8")).slice(-8_192)
   }
   child.stderr?.on("data", collect)
   const exited = yield* Deferred.make<string>()
-  child.once("exit", (code, signal) => Deferred.doneUnsafe(exited, Effect.succeed(signal ?? `code ${code}`)))
   child.once("error", (cause) => Deferred.doneUnsafe(exited, Effect.succeed(cause.message)))
+  void service.exited.then(() =>
+    Deferred.doneUnsafe(
+      exited,
+      Effect.succeed(service.signalCode ?? (service.exitCode === null ? "status unknown" : `code ${service.exitCode}`)),
+    ),
+  )
   child.unref()
   const detail = () => (stderr.trim() ? `\n${stderr.trim()}` : "")
 
@@ -192,7 +193,7 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
   }
   if (result?.type === "exited")
     return yield* Effect.fail(new Error(`The service of openforge ${version} exited (${result.reason}).${detail()}`))
-  yield* kill(child.pid, exited)
+  yield* kill(service, exited)
   return yield* Effect.fail(
     new Error(
       `The service of openforge ${version} did not answer with that version within ${Duration.format(timeout)}.${detail()}`,
@@ -200,12 +201,10 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
   )
 })
 
-const kill = Effect.fnUntraced(function* (pid: number | undefined, exited: Deferred.Deferred<string>) {
-  if (pid === undefined) return
-  const signal = (name: NodeJS.Signals) => Effect.sync(() => process.kill(pid, name)).pipe(Effect.ignore)
-  yield* signal("SIGTERM")
+const kill = Effect.fnUntraced(function* (service: ServiceProcess, exited: Deferred.Deferred<string>) {
+  yield* Effect.sync(() => service.kill("SIGTERM"))
   if (Option.isSome(yield* Deferred.await(exited).pipe(Effect.timeoutOption("3 seconds")))) return
-  yield* signal("SIGKILL")
+  yield* Effect.sync(() => service.kill("SIGKILL"))
   yield* Deferred.await(exited).pipe(Effect.timeoutOption("2 seconds"))
 })
 
@@ -275,6 +274,10 @@ function failureMessage(exit: Exit.Exit<unknown, unknown>) {
   if (error instanceof Error) return error.message
   return error === undefined ? "the service stopped unexpectedly" : String(error)
 }
+
+/** Adds a line about going from `from` to `to` to the upgrade log; never fails. */
+export const note = (target: Target, input: { readonly from: string; readonly to: string }, message: string) =>
+  append(target.log, `${input.from} -> ${input.to}: ${message}`)
 
 const append = Effect.fnUntraced(
   function* (file: string, line: string) {

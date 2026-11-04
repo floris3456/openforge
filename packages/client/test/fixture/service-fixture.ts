@@ -105,6 +105,19 @@ export async function serviceFixture() {
   }
 }
 
+/** The processes above `pid`, nearest first, up to init. */
+export function ancestors(pid: number) {
+  const parent = (child: number) =>
+    Number(
+      Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(child)])
+        .stdout.toString()
+        .trim(),
+    )
+  const chain: number[] = []
+  for (let current = parent(pid); current > 1 && chain.length < 64; current = parent(current)) chain.push(current)
+  return chain
+}
+
 // The service listens on an ephemeral port. Once it stops, any process may reuse that port for an outgoing connection
 // (Windows hands them out from 49152 up, and other suites run alongside), so binding it again proves nothing. What the
 // tests need is that nothing accepts connections there anymore.

@@ -192,22 +192,30 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       })
     const switching = yield* target()
     const restore = yield* database(switching, { from, to, restore: input.restoreDatabase ?? false })
+    // Every step from here on is in the upgrade log; a failed one leaves `from` in use.
+    const failed = (reason: string) =>
+      new UpgradeError({
+        reason: `upgrade to ${to} failed: ${reason.replace(/\.$/, "")}; still on ${from}. Log: ${switching.log}`,
+      })
     if (manifest) {
       notify({ type: "installing", version: to })
-      yield* install(manifest, status.platform)
+      yield* install(manifest, status.platform).pipe(
+        Effect.tapError((error) => ReleaseSwitch.note(switching, { from, to }, `failed to install: ${error.message}`)),
+        Effect.mapError((error) => failed(error.message)),
+      )
     }
     const result = yield* Effect.gen(function* () {
       yield* ReleaseSwitch.idle(switching, () => notify({ type: "ready", version: to }))
       notify({ type: "switching", version: to })
       return yield* ReleaseSwitch.run(switching, { from, to, busy: ReleaseSwitch.busy(switching), restore })
-    }).pipe(Effect.repeat({ until: (result) => result.type !== "busy" }))
-    if (result.type === "rolled-back") {
-      const reason =
-        `upgrade to ${to} failed, back on ${from}: ${result.reason}` +
-        (result.restored ? "" : ` (openforge ${from} did not start again either)`) +
-        `. Log: ${switching.log}`
-      return yield* new UpgradeError({ reason })
-    }
+    }).pipe(
+      Effect.repeat({ until: (result) => result.type !== "busy" }),
+      Effect.mapError((error) => failed(error.message)),
+    )
+    if (result.type === "rolled-back")
+      return yield* failed(
+        result.restored ? result.reason : `${result.reason} (openforge ${from} did not start again either)`,
+      )
     notify({ type: "switched", version: to })
     return { type: "switched" as const, from, to }
   })

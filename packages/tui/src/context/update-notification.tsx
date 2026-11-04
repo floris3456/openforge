@@ -34,6 +34,8 @@ export type UpdateSource = {
   readonly relaunch?: (sessionID?: string) => void
 }
 
+const updateDialog = Symbol("update dialog")
+
 export function readyMessage(version: string) {
   return `openforge ${version} is ready; switches when no chat is running`
 }
@@ -72,14 +74,12 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
         })
     }
 
-    // Restart only between tasks: a typed prompt or an open dialog would be lost.
-    const settled = () => {
+    // Restart only between tasks: a typed prompt or another open dialog would be lost. The upgrade dialog is not.
+    const typed = () => {
       const prompt = promptRef.current?.current
-      return (
-        dialog.stack.length === 0 &&
-        (!prompt || (prompt.text.trim() === "" && !prompt.files?.length && prompt.pasted.length === 0))
-      )
+      return !!prompt && (prompt.text.trim() !== "" || !!prompt.files?.length || prompt.pasted.length > 0)
     }
+    const settled = () => (dialog.stack.length === 0 || dialog.key === updateDialog) && !typed()
 
     const restart = () => {
       const relaunch = props.updater?.relaunch
@@ -126,13 +126,18 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       if (!updater) return
       const active = state()?.type
       const running = active === "installing" || active === "ready" || active === "switching"
-      dialog.replace(() => (
-        <DialogUpdate
-          start={running || active === "switched" ? undefined : () => updater.upgrade()}
-          state={state}
-          restart={restart}
-        />
-      ))
+      dialog.replace(
+        () => (
+          <DialogUpdate
+            start={running || active === "switched" ? undefined : () => updater.upgrade()}
+            state={state}
+            restart={restart}
+            held={updater.relaunch ? typed : undefined}
+          />
+        ),
+        undefined,
+        { key: updateDialog },
+      )
     }
 
     return {

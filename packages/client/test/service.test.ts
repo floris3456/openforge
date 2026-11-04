@@ -2,8 +2,10 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { expect, test } from "bun:test"
 import { Effect, FileSystem } from "effect"
 import { writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { Service, type EnsureReason } from "../src/effect/service"
 import {
+  ancestors,
   catchesSigterm,
   expectNotListening,
   serviceFixture,
@@ -238,6 +240,46 @@ test.skipIf(process.platform === "win32")(
 
     await expect(run(stop({ file: registration }))).rejects.toThrow(`Server process ${original.pid} is still running`)
     expect(await Bun.file(registration + ".signal").text()).toBe("SIGTERM")
+  },
+  15_000,
+)
+
+// A TUI that restarts on a new release replaces itself (execve), and the new image never reaps a child the old one
+// started: a service started as its child would stay a zombie once stopped, and a zombie still counts as running.
+test.skipIf(process.platform === "win32")(
+  "a service started by ensure is no child of the starting process and stops after that process replaced itself",
+  async () => {
+    await using fixture = await serviceFixture()
+    const registration = fixture.registration
+    const starter = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "fixture", "ensure-and-exec.ts"),
+        registration,
+        ...fixture.command("graceful"),
+      ],
+      { stdout: "ignore", stderr: "inherit" },
+    )
+    try {
+      await fixture.waitForFile(registration + ".ensured")
+      const info = await Bun.file(registration).json()
+      fixture.track(info.pid)
+      expect(ancestors(info.pid)).not.toContain(starter.pid)
+      expect(ancestors(info.pid)).not.toContain(process.pid)
+      // execve keeps the PID; wait until the starter runs `sleep`.
+      while (
+        !Bun.spawnSync(["ps", "-o", "comm=", "-p", String(starter.pid)])
+          .stdout.toString()
+          .trim()
+          .endsWith("sleep")
+      )
+        await Bun.sleep(10)
+      await run(stop({ file: registration }))
+      expect(() => process.kill(info.pid, 0)).toThrow()
+    } finally {
+      starter.kill("SIGKILL")
+      await starter.exited
+    }
   },
   15_000,
 )

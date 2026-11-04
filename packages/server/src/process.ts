@@ -69,6 +69,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
   const application = yield* Ref.make(Option.none<App>())
   const writable = yield* Ref.make<() => boolean>(() => true)
+  const stopping = yield* Ref.make<Effect.Effect<void>>(Effect.void)
   const app = dispatch(
     password,
     status,
@@ -100,6 +101,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   const applicationScope = yield* Scope.fork(parentScope)
   yield* Effect.addFinalizer(() =>
     status.beginStopping.pipe(
+      // Before any Location closes, so waits that survive a stop keep their records instead of being cancelled.
+      Effect.andThen(Effect.flatten(Ref.get(stopping))),
       Effect.andThen(Ref.set(application, Option.none())),
       Effect.andThen(Effect.sync(() => bound.server.closeAllConnections())),
     ),
@@ -129,6 +132,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       applicationScope,
     )
     yield* Ref.set(writable, () => !continuity.refusesWrites())
+    yield* Ref.set(stopping, continuity.stop)
     yield* Ref.set(application, Option.some(Context.get(context, HttpRouter.HttpRouter).asHttpEffect()))
     yield* status.ready
     const bus = Context.get(context, Bus.Service)

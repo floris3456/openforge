@@ -10685,6 +10685,10 @@
                     "tui.session.select",
                     "installation.updated",
                     "installation.update-available",
+                    "service.pausing",
+                    "service.paused",
+                    "service.pause.expired",
+                    "service.resumed",
                     "vcs.branch.updated",
                     "mcp.status.changed",
                     "mcp.resources.changed"
@@ -10794,6 +10798,10 @@
                           "tui.session.select",
                           "installation.updated",
                           "installation.update-available",
+                          "service.pausing",
+                          "service.paused",
+                          "service.pause.expired",
+                          "service.resumed",
                           "vcs.branch.updated",
                           "mcp.status.changed",
                           "mcp.resources.changed"
@@ -13993,6 +14001,163 @@
         },
         "description": "Serve HTML and static files from the local provider. Experimental: needs experimental.artifacts in the Location's config and may change without notice.",
         "summary": "View local artifact"
+      }
+    },
+    "/api/experimental/service/status": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.service.status",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Continuity.Status"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Whether the service is running, pausing or paused, what a pause still waits for, and which executions rest. Experimental: may change without compatibility guarantees.",
+        "summary": "Get service pause state"
+      }
+    },
+    "/api/experimental/service/pause": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.service.pause",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Continuity.PauseResult"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Stop starting model calls and in-service tools, and answer once every execution rests at a step boundary or in a wait that survives a stop, recorded in the database. Prompts and answers are still accepted. If that takes longer than the timeout, the pause is lifted and the answer lists what was still running. Experimental: may change without compatibility guarantees.",
+        "summary": "Pause the service",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Continuity.PausePayload"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/service/resume": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.service.resume",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Continuity.Status"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Lift a pause, or end a paused start: writes are accepted again and every resting execution continues where it rested. Experimental: may change without compatibility guarantees.",
+        "summary": "Resume the service"
       }
     },
     "/api/shell": {
@@ -18093,6 +18258,117 @@
           }
         },
         "required": ["status", "message"],
+        "additionalProperties": false
+      },
+      "Continuity.PausePayload": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 9007199254740991,
+                "exclusiveMinimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Continuity.PauseResult": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "paused": {
+                "type": "boolean",
+                "enum": [true]
+              },
+              "rested": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Session.ID"
+                }
+              }
+            },
+            "required": ["paused", "rested"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "paused": {
+                "type": "boolean",
+                "enum": [false]
+              },
+              "waiting": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Continuity.Work"
+                }
+              }
+            },
+            "required": ["paused", "waiting"],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Continuity.State": {
+        "type": "string",
+        "enum": ["running", "pausing", "paused"]
+      },
+      "Continuity.Status": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/Continuity.State"
+          },
+          "startedPaused": {
+            "type": "boolean"
+          },
+          "deadline": {
+            "type": "number"
+          },
+          "waiting": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Continuity.Work"
+            }
+          },
+          "rested": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session.ID"
+            }
+          },
+          "active": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session.ID"
+            }
+          }
+        },
+        "required": ["state", "startedPaused", "waiting", "rested", "active"],
+        "additionalProperties": false
+      },
+      "Continuity.Work": {
+        "type": "object",
+        "properties": {
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["step", "tool", "model"]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["kind", "name"],
         "additionalProperties": false
       },
       "Credential.CreateInput": {

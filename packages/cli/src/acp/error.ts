@@ -1,4 +1,5 @@
 import { RequestError } from "@agentclientprotocol/sdk"
+import { Product } from "@opencode/schema/product"
 import { Schema } from "effect"
 
 export class SessionNotFoundError extends Schema.TaggedError<SessionNotFoundError>()("ACPSessionNotFoundError", {
@@ -125,7 +126,7 @@ export function toRequestError(error: Error): RequestError {
         error.safeMessage,
       )
     case "ACPServerUnavailableError":
-      return RequestError.internalError({ errorName: "ServerUnavailable" }, "OpenCode server is unavailable")
+      return RequestError.internalError({ errorName: "ServerUnavailable" }, `${Product.name} server is unavailable`)
   }
   const exhaustive: never = error
   return exhaustive

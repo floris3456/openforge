@@ -3,6 +3,7 @@ import { EOL } from "os"
 import { Effect, Option, Schedule } from "effect"
 import { Service } from "@opencode/client/effect/service"
 import { OpenCode } from "@opencode/client/promise"
+import { Product } from "@opencode/schema/product"
 import { renderUnicodeCompact } from "@opencode/util/qr"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
@@ -70,9 +71,9 @@ export default Runtime.handler(
 )
 
 export const remoteWarning = [
-  "This will expose your OpenCode server to the internet.",
+  `This will expose your ${Product.name} server to the internet.`,
   "Traffic is end-to-end encrypted, and access requires your server password.",
-  "To pair locally instead, run `openforge pair` without the --remote flag.",
+  `To pair locally instead, run \`${Product.binary} pair\` without the --remote flag.`,
 ].join(EOL)
 
 export interface RemoteConsentPrompt {

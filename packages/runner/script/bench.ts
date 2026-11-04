@@ -7,8 +7,11 @@
 // Memory is the runner's whole resident set (rss) and the part that is its own (own: anonymous, not pages of the
 // executable), sampled every 20 ms from outside.
 // Usage: bun script/bench.ts [--binary <openforge>] [--runs <n>] [--output-bytes <n>] [--out <file.json>]
-// Memory is read from /proc on Linux; on macOS `ps` gives only rss (own is NaN). Everything is written in a fresh
-// folder under the temporary directory.
+//                             [--detail <dir>]
+// --detail writes the OS's own breakdown of the runner's memory after each step into <dir> (Linux:
+// /proc/<pid>/smaps_rollup, macOS: `footprint -j`).
+// Memory is read from /proc on Linux; on macOS rss from `ps` and own from `footprint` (phys_footprint), which samples
+// more slowly (about every 60 ms). Everything is written in a fresh folder under the temporary directory.
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -24,6 +27,7 @@ const { values } = parseArgs({
     runs: { type: "string", default: "200" },
     "output-bytes": { type: "string", default: String(1024 ** 3) },
     out: { type: "string" },
+    detail: { type: "string" },
   },
 })
 const runs = Number(values.runs)
@@ -64,18 +68,31 @@ const alive = (pid: number) => {
 
 type Memory = { rss: number; own: number }
 const memory = (pid: number): Memory => {
-  // macOS has no /proc: `ps` gives the resident set, not the part that is the runner's own.
+  // macOS has no /proc: `ps` gives the resident set, and `footprint` the part that is the runner's own (its
+  // phys_footprint: dirty and compressed memory, without the executable's clean pages or memory already given back).
   if (process.platform !== "linux") {
     const kb = Number(
       Bun.spawnSync(["ps", "-o", "rss=", "-p", String(pid)])
         .stdout.toString()
         .trim(),
     )
-    return { rss: round(kb / 1024), own: NaN }
+    const footprint = /phys_footprint: (\d+) B/.exec(
+      Bun.spawnSync(["footprint", "--noCategories", "-f", "bytes", String(pid)]).stdout.toString(),
+    )
+    return { rss: round(kb / 1024), own: footprint ? round(Number(footprint[1]) / 1024 / 1024) : NaN }
   }
   const status = fs.readFileSync(`/proc/${pid}/status`, "utf8")
   const field = (name: string) => Number(new RegExp(`^${name}:\\s+(\\d+) kB`, "m").exec(status)?.[1] ?? NaN) / 1024
   return { rss: round(field("VmRSS")), own: round(field("RssAnon")) }
+}
+
+const detail = (pid: number, name: string) => {
+  const dir = values.detail
+  if (!dir) return
+  fs.mkdirSync(dir, { recursive: true })
+  if (process.platform === "linux")
+    return fs.copyFileSync(`/proc/${pid}/smaps_rollup`, path.join(dir, `${name}.smaps_rollup.txt`))
+  Bun.spawnSync(["footprint", "-j", path.join(dir, `${name}.footprint.json`), String(pid)])
 }
 
 // Runs `effect` while sampling the runner's memory: before, at its most, and after.
@@ -103,6 +120,7 @@ const bench = Effect.gen(function* () {
   const connection = yield* RunnerClient.connectOrStart(directory, RunnerClient.launch(argv, directory))
   const runner = connection.pid
   const fresh = memory(runner)
+  detail(runner, "fresh")
   const settle = (id: string) =>
     connection.watch(id, { offset: 0, output: false }).pipe(
       Stream.filter((frame) => frame.type === "exit"),
@@ -129,6 +147,7 @@ const bench = Effect.gen(function* () {
     through.exited.push(performance.now() - start)
     yield* connection.signal(ours.id, "SIGKILL", { remove: true })
   }
+  detail(runner, "started")
   const start = {
     runs,
     medianMs: {
@@ -159,6 +178,7 @@ const bench = Effect.gen(function* () {
       const listed = (yield* connection.list).filter((item) => !item.exit).length
       yield* Effect.forEach(running, (started) => connection.signal(started.command.id, "SIGKILL", { remove: true }))
       yield* Effect.forEach(watches, Fiber.interrupt)
+      detail(runner, "load")
       return { steady, listed }
     }),
   )
@@ -190,8 +210,11 @@ const bench = Effect.gen(function* () {
   yield* connection.signal(big.id, "SIGKILL", { remove: true })
 
   yield* step("idle")
-  // Once nothing runs, the runner exits after its grace period.
+  // Once nothing runs, the runner gives its memory back while it waits out its grace period, then exits.
   const idleFrom = performance.now()
+  yield* Effect.sleep("5 seconds")
+  const settled = memory(runner)
+  detail(runner, "settled")
   const closed = yield* connection.closed
   while (alive(runner)) yield* Effect.sleep("20 millis")
 
@@ -214,7 +237,12 @@ const bench = Effect.gen(function* () {
       viewerBytes: output.value.seen,
       ...output.memory,
     },
-    idle: { closed, exitedAfterSeconds: round((performance.now() - idleFrom) / 1000), runnerAlive: alive(runner) },
+    idle: {
+      settledMB: settled,
+      closed,
+      exitedAfterSeconds: round((performance.now() - idleFrom) / 1000),
+      runnerAlive: alive(runner),
+    },
   }
 })
 

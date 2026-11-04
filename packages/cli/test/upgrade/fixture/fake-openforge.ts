@@ -136,6 +136,10 @@ const server = Bun.serve({
     }
     if (url.pathname === "/api/session/active")
       return Response.json({ data: busy ? { ses_fake: { type: "running" } } : {} })
+    // Chats the test names: `ses_a` is titled, `ses_untitled` has no title yet; any other is unknown.
+    const session = url.pathname.match(/^\/api\/session\/(ses_a|ses_untitled)$/)
+    if (session && request.method === "GET")
+      return Response.json({ data: { id: session[1], ...(session[1] === "ses_a" ? { title: "Fix the tests" } : {}) } })
     const prompt = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt$/)
     if (prompt) {
       const body = (await request.json()) as { id: string; text: string }

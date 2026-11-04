@@ -9,7 +9,7 @@
 // then waits until no chat is running, as those releases did.
 
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { ClientError, OpenCode, type ContinuityWork, type OpenCodeEvent } from "@opencode/client/promise"
+import { ClientError, describeWork, OpenCode, type ContinuityWork, type OpenCodeEvent } from "@opencode/client/promise"
 import { launchService, type ServiceProcess } from "@opencode/client/service-launch"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Logging } from "@opencode/util/observability/logging"
@@ -24,8 +24,11 @@ import { ReleaseVersion } from "./version"
 export const checkTimeout = Duration.seconds(10)
 export const pauseTimeout = Duration.minutes(2)
 
-/** Work a pause waits for: a step that has not reached a boundary, a running tool or a model call. */
-export type Work = ContinuityWork
+/**
+ * Work a pause waits for: a step that has not reached a boundary, a running tool or a model call, with the title of
+ * its chat once the switch has read it.
+ */
+export type Work = ContinuityWork & { readonly title?: string }
 
 export type Target = {
   readonly layout: ReleaseLayout.Layout
@@ -197,11 +200,12 @@ const hold = Effect.fnUntraced(function* (
   }
   const timeout = target.pause ?? pauseTimeout
   yield* log(`pausing the background service (at most ${Duration.format(timeout)})`)
+  const titled = titles(api)
   const live = yield* Deferred.make<void>()
   const watching = yield* Effect.tryPromise(async (signal) => {
     for await (const event of api.event.subscribe({ types: ["service.pausing"], signal })) {
       Deferred.doneUnsafe(live, Effect.void)
-      if (event.type === "service.pausing") onWaiting(event.data.waiting)
+      if (event.type === "service.pausing") onWaiting(await titled(event.data.waiting, signal))
     }
   }).pipe(Effect.ensuring(Deferred.done(live, Exit.void)), Effect.ignore, Effect.forkChild({ startImmediately: true }))
   // The first report of what it waits for comes right after the pause starts; listen before asking.
@@ -217,11 +221,35 @@ const hold = Effect.fnUntraced(function* (
     yield* log(`paused; ${result.rested.length} chat(s) rest`)
     return { type: "paused" as const, endpoint }
   }
+  const waiting = yield* Effect.promise((signal) => titled(result.waiting, signal))
   yield* log(
-    `the pause gave up after ${Duration.format(timeout)} and the service carries on; switching once this has finished: ${describe(result.waiting)}`,
+    `the pause gave up after ${Duration.format(timeout)} and the service carries on; switching once this has finished: ${describe(waiting)}`,
   )
-  return { type: "busy" as const, waiting: result.waiting }
+  return { type: "busy" as const, waiting }
 })
+
+/** Adds each chat's title to the work a pause waits for; a chat is read once, and one that can't be read has none. */
+function titles(api: ReturnType<typeof client>) {
+  const known = new Map<string, Promise<string | undefined>>()
+  const title = (sessionID: string, signal: AbortSignal) => {
+    const found =
+      known.get(sessionID) ??
+      api.session.get({ sessionID }, { signal }).then(
+        (session) => session.title || undefined,
+        () => undefined,
+      )
+    known.set(sessionID, found)
+    return found
+  }
+  return (waiting: ReadonlyArray<ContinuityWork>, signal: AbortSignal) =>
+    Promise.all(
+      waiting.map(async (work): Promise<Work> => {
+        if (!work.sessionID) return work
+        const name = await title(work.sessionID, signal)
+        return name ? { ...work, title: name } : work
+      }),
+    )
+}
 
 /** Lifts a pause; a service that is gone or never paused is left alone. */
 const reopen = (endpoint: Endpoint) =>
@@ -458,20 +486,10 @@ export const finished = Effect.fn("upgrade.switch.finished")(function* (target: 
   yield* wait.pipe(Effect.retry(Schedule.spaced("1 second")))
 })
 
-/** "a reply in ses_…, webfetch in ses_…": what a pause waits for, for logs and the command line. */
-export function describe(waiting: ReadonlyArray<Work>, title: (sessionID: string) => string = (id) => id) {
+/** `a reply in "Fix the tests", webfetch in "Docs"`: what a pause waits for, for logs and the command line. */
+export function describe(waiting: ReadonlyArray<Work>) {
   if (waiting.length === 0) return "nothing"
-  return waiting
-    .map((work) => {
-      const what =
-        work.kind === "step"
-          ? `a ${work.name === "reply" ? "reply" : "step"}`
-          : work.kind === "model"
-            ? `a model call (${work.name})`
-            : work.name
-      return work.sessionID ? `${what} in ${title(work.sessionID)}` : what
-    })
-    .join(", ")
+  return describeWork(waiting, (sessionID) => waiting.find((work) => work.sessionID === sessionID)?.title)
 }
 
 function same(left: Work, right: Work) {

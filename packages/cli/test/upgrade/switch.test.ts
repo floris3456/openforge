@@ -88,18 +88,18 @@ describe("pausable", () => {
     expect(ReleaseSwitch.pausable("not a version")).toBe(false)
   })
 
-  test("says what a pause waits for", () => {
+  test("says what a pause waits for, naming each chat by its title", () => {
     const waiting = [
-      { sessionID: "ses_a", kind: "step" as const, name: "reply" },
-      tool("ses_b"),
-      { sessionID: "ses_c", kind: "model" as const, name: "title" },
+      // A chat in the middle of a reply reports its model call and its step: one reply.
+      { sessionID: "ses_a", kind: "model" as const, name: "slow", title: "Fix the tests" },
+      { sessionID: "ses_a", kind: "step" as const, name: "reply", title: "Fix the tests" },
+      { ...tool("ses_b"), title: "Docs" },
+      { sessionID: "ses_c", kind: "model" as const, name: "slow" },
+      { kind: "model" as const, name: "slow" },
       { kind: "step" as const, name: "compaction" },
     ]
     expect(ReleaseSwitch.describe(waiting)).toBe(
-      "a reply in ses_a, webfetch in ses_b, a model call (title) in ses_c, a step",
-    )
-    expect(ReleaseSwitch.describe(waiting.slice(0, 2), (id) => `"${id.slice(4)}"`)).toBe(
-      'a reply in "a", webfetch in "b"',
+      'a reply in "Fix the tests", webfetch in "Docs", a reply in an untitled chat, a model call, a step',
     )
     expect(ReleaseSwitch.describe([])).toBe("nothing")
   })
@@ -218,17 +218,21 @@ describe("switch", () => {
   it.live("switches while a tool runs, once the tool has returned, reporting what it waits for", () =>
     Effect.gen(function* () {
       const test = yield* installed("0.1.0", { version: "0.1.1" })
-      yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
+      yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a"), tool("ses_untitled", "bash")]))
       const reports = yield* Deferred.make<ReadonlyArray<ReleaseSwitch.Work>>()
       const running = yield* ReleaseSwitch.run(test.switching, {
         from: "0.1.0",
         to: "0.1.1",
         onWaiting: (waiting) => Deferred.doneUnsafe(reports, Effect.succeed(waiting)),
       }).pipe(test.provide, Effect.forkChild({ startImmediately: true }))
-      expect(yield* Deferred.await(reports).pipe(Effect.timeout("5 seconds"))).toEqual([tool("ses_a")])
+      const reported = yield* Deferred.await(reports).pipe(Effect.timeout("5 seconds"))
+      // Each chat is read for its title.
+      expect(reported).toEqual([{ ...tool("ses_a"), title: "Fix the tests" }, tool("ses_untitled", "bash")])
+      expect(ReleaseSwitch.describe(reported)).toBe('webfetch in "Fix the tests", bash in an untitled chat')
       // Nothing has stopped while the tool runs.
       expect(yield* test.happened).toEqual([])
       yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
+      yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_untitled"))
       expect(yield* Fiber.join(running).pipe(Effect.timeout("10 seconds"))).toEqual({
         type: "switched",
         from: "0.1.0",
@@ -243,13 +247,13 @@ describe("switch", () => {
       const test = yield* installed("0.1.0", { version: "0.1.1" }, { pause: Duration.seconds(1) })
       yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
       const busy = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
-      expect(busy).toEqual({ type: "busy", waiting: [tool("ses_a")] })
+      expect(busy).toEqual({ type: "busy", waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] })
       expect(yield* test.happened).toEqual(["0.1.0 pause expired"])
       expect((yield* reported(test.switching))?.version).toBe("0.1.0")
       expect(yield* paused(test.switching)).toMatchObject({ state: "running" })
       const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
       expect(log).toContain(
-        "the pause gave up after 1s and the service carries on; switching once this has finished: webfetch in ses_a",
+        'the pause gave up after 1s and the service carries on; switching once this has finished: webfetch in "Fix the tests"',
       )
 
       const finished = yield* ReleaseSwitch.finished(test.switching, [tool("ses_a")]).pipe(

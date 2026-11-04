@@ -53,12 +53,17 @@ test("upgrade progress replaces checking, says what the switch waits for and rep
     await app.waitForFrame((frame) => frame.includes("Switching to openforge 0.1.1…"))
     const waiting = [
       { sessionID: "ses_a", kind: "tool" as const, name: "webfetch" },
+      // A chat mid-reply: its model call and its step are one reply, and the model's name is not shown.
+      { sessionID: "ses_b", kind: "model" as const, name: "slow" },
       { sessionID: "ses_b", kind: "step" as const, name: "reply" },
     ]
     setState({ type: "switching", version: "0.1.1", waiting })
     await app.waitForFrame((frame) =>
-      words(frame).includes('Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests", a reply in ses_b…'),
+      words(frame).includes(
+        'Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests", a reply in an untitled chat…',
+      ),
     )
+    expect(words(app.captureCharFrame())).not.toContain("slow")
     setState({ type: "waiting", version: "0.1.1", waiting: waiting.slice(0, 1) })
     await app.waitForFrame((frame) =>
       words(frame).includes(

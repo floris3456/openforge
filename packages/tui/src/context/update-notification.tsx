@@ -1,7 +1,7 @@
 // openforge's upgrade in the TUI: the CLI process installs a release and switches the background service to it
 // while chats run (see packages/cli/src/upgrade). This screen shows how far that got and, once the service runs the
 // new release, restarts itself on it once no other dialog is open, taking half-typed prompts along.
-import type { ContinuityWork } from "@opencode/client/promise"
+import { describeWork, type ContinuityWork } from "@opencode/client/promise"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
@@ -30,26 +30,6 @@ export type UpdateState =
 /** A chat's title, when this screen knows it. */
 export type TitleOf = (sessionID: string) => string | undefined
 
-/** What a release switch waits for: `a reply in "Fix the tests", webfetch in "Docs"`. */
-export function describeWork(waiting: ReadonlyArray<ContinuityWork>, title: TitleOf = () => undefined) {
-  if (waiting.length === 0) return "the work that was still running"
-  return waiting
-    .map((work) => {
-      const what =
-        work.kind === "step"
-          ? work.name === "reply"
-            ? "a reply"
-            : "a step"
-          : work.kind === "model"
-            ? `a model call (${work.name})`
-            : work.name
-      if (!work.sessionID) return what
-      const name = title(work.sessionID)
-      return `${what} in ${name ? `"${name}"` : work.sessionID}`
-    })
-    .join(", ")
-}
-
 /** `Switching to openforge 0.1.1…`, with what the pause waits for. Without a version, a switch another screen runs. */
 export function switchingMessage(version?: string, waiting?: ReadonlyArray<ContinuityWork>, title?: TitleOf) {
   const switching = version ? `Switching to openforge ${version}` : "Switching to a new openforge release"
@@ -58,7 +38,7 @@ export function switchingMessage(version?: string, waiting?: ReadonlyArray<Conti
 
 export function waitingMessage(state: Extract<UpdateState, { type: "waiting" }>, title?: TitleOf) {
   if (state.waiting)
-    return `openforge ${state.version} is installed. The chats did not pause within 2 minutes; it switches once this has finished: ${describeWork(state.waiting, title)}`
+    return `openforge ${state.version} is installed. The chats did not pause within 2 minutes; it switches once this has finished: ${describeWork(state.waiting, title) || "the work that was still running"}`
   return `openforge ${state.version} is installed. The running service cannot pause; it switches once no chat is running.`
 }
 
@@ -88,7 +68,12 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     const route = useRoute()
     const data = useData()
     const client = useClient()
-    const title: TitleOf = (sessionID) => data.session.get(sessionID)?.title || undefined
+    // A chat this screen has not loaded, such as one in another project, is read once so the switch can name it.
+    const title: TitleOf = (sessionID) => {
+      const session = data.session.get(sessionID)
+      if (!session && !data.session.missing(sessionID)) void data.session.sync(sessionID).catch(() => undefined)
+      return session?.title || undefined
+    }
     const [state, setState] = createSignal<UpdateState>()
     const [pending, setPending] = createSignal(false)
 

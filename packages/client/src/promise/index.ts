@@ -15,6 +15,7 @@ export {
   type Resender,
   type ResendOptions,
 } from "../resend.js"
+export { describeWork } from "../continuity.js"
 export type {
   AgentApi,
   CommandApi,

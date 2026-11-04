@@ -15,6 +15,19 @@ function service() {
         return json({
           data: { state: state.pause, startedPaused: state.pause === "paused", waiting: [], rested: [], active: [] },
         })
+      // A chat this screen has not opened: the notice reads it for its title.
+      if (url.pathname === "/api/session/ses_busy")
+        return json({
+          data: {
+            id: "ses_busy",
+            projectID: "proj_test",
+            title: "Fix the tests",
+            location: { directory: "/elsewhere" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: 0, updated: 0 },
+          },
+        })
     },
   }
 }
@@ -41,7 +54,7 @@ test("a switch shows what it waits for instead of the full-screen reconnect, unt
 
   setup.events.emit(event("service.pausing", { deadline: Date.now() + 120_000, waiting: work }))
   await shows(setup, (frame) =>
-    frame.includes("Switching to a new openforge release; waiting for webfetch in ses_busy…"),
+    frame.includes('Switching to a new openforge release; waiting for webfetch in "Fix the tests"…'),
   )
   setup.events.emit(event("service.paused", { rested: ["ses_busy"] }))
   await shows(setup, (frame) => frame.includes("Switching to a new openforge release…"))
@@ -91,13 +104,13 @@ test("the upgrade dialog shows the switch's steps, so the notice stays away whil
       return { type: "current" as const, version: "0.1.1" }
     },
   }
-  await using setup = await createAppFixture({ updater })
+  await using setup = await createAppFixture({ updater, fetch: service().fetch })
   await setup.ready
   await setup.waitForFrame((frame) => frame.includes("commands"))
   await setup.mockInput.typeText("/update")
   await setup.waitForFrame((frame) => frame.includes("Upgrade openforge"))
   setup.mockInput.pressKey("RETURN")
-  const message = "Switching to openforge 0.1.1; waiting for webfetch in ses_busy…"
+  const message = 'Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests"…'
   await shows(setup, (frame) => frame.includes(message))
   await Bun.sleep(100)
   expect(words(setup.captureCharFrame()).split(message).length - 1).toBe(1)
@@ -118,13 +131,15 @@ test("the screen that runs the switch names the release it switches to", async (
     },
     upgrade: async () => ({ type: "current" as const, version: "0.1.0" }),
   }
-  await using setup = await createAppFixture({ updater })
+  await using setup = await createAppFixture({ updater, fetch: service().fetch })
   await setup.ready
   await setup.waitForFrame((frame) => frame.includes("commands"))
   listeners.forEach((notify) => notify({ type: "switching", version: "0.1.1" }))
   await shows(setup, (frame) => frame.includes("Switching to openforge 0.1.1…"))
   setup.events.emit(event("service.pausing", { deadline: Date.now() + 120_000, waiting: work }))
-  await shows(setup, (frame) => frame.includes("Switching to openforge 0.1.1; waiting for webfetch in ses_busy…"))
+  await shows(setup, (frame) =>
+    frame.includes('Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests"…'),
+  )
   listeners.forEach((notify) => notify({ type: "waiting", version: "0.1.1", waiting: work }))
   setup.events.emit(event("service.pause.expired", { waiting: work }))
   await shows(setup, (frame) => !frame.includes("Switching to") && frame.includes("openforge 0.1.1 is installed"))

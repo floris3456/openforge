@@ -215,7 +215,8 @@ describe("upgrade", () => {
       expect(test.states).toEqual([
         { type: "installing", version: "0.1.1" },
         { type: "switching", version: "0.1.1" },
-        { type: "switching", version: "0.1.1", waiting: [tool("ses_a")] },
+        // The fake service's chat ses_a is titled, so the screens can name it.
+        { type: "switching", version: "0.1.1", waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] },
         { type: "switched", version: "0.1.1" },
       ])
       expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.1 started paused", "0.1.1 resumed"])
@@ -231,7 +232,11 @@ describe("upgrade", () => {
         .upgrade({ notify: test.notify })
         .pipe(Effect.forkChild({ startImmediately: true }))
       yield* test.reports("waiting")
-      expect(test.states.at(-1)).toEqual({ type: "waiting", version: "0.1.1", waiting: [tool("ses_a")] })
+      expect(test.states.at(-1)).toEqual({
+        type: "waiting",
+        version: "0.1.1",
+        waiting: [{ ...tool("ses_a"), title: "Fix the tests" }],
+      })
       expect(yield* test.reported).toBe("0.1.0")
       expect(yield* test.happened).toEqual(["0.1.0 pause expired"])
       yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))

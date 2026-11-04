@@ -340,7 +340,8 @@ export const scenarios: Scenario[] = [
         ...(process.platform !== "linux" || /SigIgn:\s+0+\n/.test(result.stdout)
           ? []
           : [`ignored signals passed on: ${result.stdout}`]),
-        ...(missing.code === 127 ? [] : [`a missing command exited ${missing.code}`]),
+        // Apple's sandbox-exec exits 71 for a program it can't find; ours exits 127, as a shell does.
+        ...(missing.code === (process.platform === "darwin" ? 71 : 127) ? [] : [`a missing command exited ${missing.code}`]),
       ]
     },
   },

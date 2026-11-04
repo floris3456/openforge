@@ -1,12 +1,14 @@
 // The sandbox proof as one program, so it also runs compiled where there is no Bun (the Mac):
 //   proof run <root> [openforge]   sets up a fixture in <root> (outside every temp folder) and runs every scenario
-//   proof bench [openforge]        the median start-up cost of a sandboxed command against an unsandboxed one
+//   proof bench <root> [openforge] the median start-up cost of a sandboxed command against an unsandboxed one, for a
+//                                  home in <root>; the folders on the way to it set how many Landlock rules there are
 //   proof client <tcp|udp|udp6|unix> <host|path> [port]   one connection or datagram; exits 1 when refused
 //   proof no-landlock <argv…>      runs argv where the kernel answers ENOSYS to every Landlock call
 //   proof detect                   prints available() for this machine
 import fs from "node:fs"
 import path from "node:path"
 import { installFilter } from "#native"
+import { Landlock } from "../../src/landlock.js"
 import { Sandbox } from "../../src/sandbox.js"
 import { runAll, setup, spawn, type Launch } from "./scenarios.js"
 
@@ -18,7 +20,7 @@ if (command === "client") process.exit(await client(args))
 if (command === "no-landlock") noLandlock(args)
 if (command === "detect") console.log(JSON.stringify(Sandbox.available()))
 if (command === "run") process.exit(await run(args[0]!, args.slice(1)))
-if (command === "bench") await bench(args)
+if (command === "bench") await bench(args[0]!, args.slice(1))
 
 function launch(self: string[]): Launch {
   return { self: self.length ? self : [process.execPath, path.join(import.meta.dir, "sandbox-exec.ts")], tool }
@@ -88,11 +90,11 @@ function noLandlock(argv: string[]) {
   process.execve!(argv[0]!, argv, process.env)
 }
 
-async function bench(self: string[]) {
+async function bench(folder: string, self: string[]) {
   const runs = 50
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "sandbox-bench-")))
-  const home = path.join(root, "home")
-  fs.mkdirSync(path.join(home, "project"), { recursive: true })
+  if (fs.existsSync(folder)) throw new Error(`${folder} exists`)
+  fs.mkdirSync(folder, { recursive: true })
+  const home = path.join(fs.realpathSync(folder), "home")
   const context = {
     directory: path.join(home, "project"),
     home,
@@ -100,16 +102,28 @@ async function bench(self: string[]) {
     state: path.join(home, ".local/state/openforge"),
     config: path.join(home, ".config/openforge"),
   }
+  for (const file of [path.join(context.data, "opencode.db"), path.join(context.state, "service.json")]) {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, "")
+  }
+  fs.mkdirSync(context.directory, { recursive: true })
+  const policy = Sandbox.resolve(undefined, context)
   const command = ["/bin/sh", "-c", "true"]
-  const variants: Record<string, string[]> = {
+  const variants = {
     unsandboxed: command,
-    sandboxed: wrapped(Sandbox.resolve(undefined, context), command, launch(self).self),
+    sandboxed: wrapped(policy, command, launch(self).self),
     "sandboxed, network off": wrapped(Sandbox.resolve({ network: false }, context), command, launch(self).self),
   }
   const medians: Record<string, number> = {}
   for (const [name, argv] of Object.entries(variants)) medians[name] = await median(argv, runs, home)
-  fs.rmSync(root, { recursive: true, force: true })
-  console.log(`platform ${process.platform} ${process.arch}, ${runs} runs each, ${launch(self).self.join(" ")}`)
+  fs.rmSync(folder, { recursive: true, force: true })
+  const rules = Landlock.rules({ write: policy.write, deny: policy.denyRead, network: true }).length
+  console.log(`platform ${process.platform} ${process.arch}, home ${home}, ${runs} runs each`)
+  console.log(
+    process.platform === "darwin"
+      ? "sandboxed with /usr/bin/sandbox-exec -p <profile>"
+      : `sandboxed with ${launch(self).self.join(" ")} sandbox-exec, ${rules} Landlock rules`,
+  )
   for (const [name, value] of Object.entries(medians))
     console.log(`${name.padEnd(24)} median ${value.toFixed(2)} ms  (+${(value - medians.unsandboxed!).toFixed(2)} ms)`)
 }

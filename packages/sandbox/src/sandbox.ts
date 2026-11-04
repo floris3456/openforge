@@ -101,7 +101,9 @@ let availability: Availability | undefined
 
 /** Whether this machine can sandbox, worked out once per process. */
 export function available() {
-  return (availability ??= detect(process.platform))
+  return (availability ??= process.versions.bun
+    ? detect(process.platform)
+    : { ok: false, reason: "the sandbox needs openforge's Bun build" })
 }
 
 export function detect(

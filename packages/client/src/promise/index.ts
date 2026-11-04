@@ -3,6 +3,14 @@ import type { OpenCode } from "./client.js"
 export * from "./generated/index.js"
 export { OpenCode } from "./client.js"
 export { mediaHashFromUri, withMediaRefs, type MediaRequestOptions } from "./media.js"
+export {
+  isResendTimeoutError,
+  resend,
+  resendable,
+  ResendTimeoutError,
+  unreachable,
+  type ResendOptions,
+} from "../resend.js"
 export type {
   AgentApi,
   CommandApi,

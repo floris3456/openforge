@@ -50,6 +50,8 @@ import {
   isMessageNotFoundError,
   isPermissionNotFoundError,
   isSessionNotFoundError,
+  resend,
+  unreachable,
   type SessionPromptInput,
 } from "../promise"
 import { createStore, produce, reconcile } from "solid-js/store"
@@ -82,6 +84,8 @@ export type CreateDataInput = {
   }
   /** Receives failed event-driven reads. Explicit reads still reject to their caller. */
   readonly onError?: (error: unknown) => void
+  /** Milliseconds a prompt, form answer or permission reply is resent before it fails; 2 minutes by default. */
+  readonly resendLimit?: number
   /**
    * Drops the payload of inline `data:` files in tool results before they enter the store. For clients that never
    * render tool-result files: a session full of screenshots otherwise keeps hundreds of MB of base64 alive.
@@ -420,6 +424,40 @@ export function createData(config: CreateDataInput) {
       if (map.get(key) === promise) map.delete(key)
     }
     void promise.then(settle, settle)
+  }
+
+  // Prompts, form answers and permission replies outlast a release switch: each is resent with the same id until the
+  // service takes it, as soon as the event stream reaches a service again or the paused new release opens.
+  const resends = new AbortController()
+  onCleanup(() => resends.abort())
+  const [resending, setResending] = createSignal(0)
+  function resent<Value>(send: () => Promise<Value>) {
+    let counted = false
+    return resend(send, {
+      signal: resends.signal,
+      limit: config.resendLimit,
+      ready: reachable,
+      onResend: () => {
+        counted = true
+        setResending((count) => count + 1)
+      },
+    }).finally(() => {
+      if (counted) setResending((count) => count - 1)
+    })
+  }
+  // The service asks to retry a refused write after 1 s; a connection error waits for the stream to reconnect.
+  function reachable(error: unknown, signal?: AbortSignal) {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(done, unreachable(error) ? 5_000 : 1_000)
+      const stops = [config.event.on("server.connected", done), config.event.on("service.resumed", done)]
+      signal?.addEventListener("abort", done, { once: true })
+      function done() {
+        clearTimeout(timer)
+        stops.forEach((stop) => stop())
+        signal?.removeEventListener("abort", done)
+        resolve()
+      }
+    })
   }
 
   // Capture creation before settlement clears its entry, so dependent RPCs still see a failed create.
@@ -1512,6 +1550,10 @@ export function createData(config: CreateDataInput) {
       creating(sessionID: string) {
         return creating.has(sessionID)
       },
+      /** Prompts, form answers and permission replies waiting to be resent, for example while openforge switches. */
+      resending() {
+        return resending()
+      },
       remember(info: SessionInfo) {
         batch(() => {
           clearDeleted(info.id)
@@ -1769,10 +1811,11 @@ export function createData(config: CreateDataInput) {
         }
         return sendAdmission(
           request.sessionID,
-          async () => {
-            await prepare?.()
-            return api().session.prompt({ ...request, id })
-          },
+          () =>
+            resent(async () => {
+              await prepare?.()
+              return api().session.prompt({ ...request, id })
+            }),
           gate,
         ).catch((error) => {
           // Roll back only rows this call admitted and the server has not
@@ -1944,11 +1987,9 @@ export function createData(config: CreateDataInput) {
           sync.invalidate(`session.permission:${sessionID}`)
         },
         async reply(input: PermissionReplyInput) {
-          await api()
-            .permission.reply(input)
-            .catch((error: unknown) => {
-              if (!isPermissionNotFoundError(error)) throw error
-            })
+          await resent(() => api().permission.reply(input)).catch((error: unknown) => {
+            if (!isPermissionNotFoundError(error)) throw error
+          })
           removePermission(input.sessionID, input.requestID)
         },
       },
@@ -1996,10 +2037,12 @@ export function createData(config: CreateDataInput) {
           )
         },
         reply(input: SessionFormReplyInput, ref?: LocationRef) {
-          return settleForm(input, ref, api().session.form.reply(input, formRequestOptions(input.sessionID, ref)))
+          const options = formRequestOptions(input.sessionID, ref)
+          return settleForm(input, ref, resent(() => api().session.form.reply(input, options)))
         },
         cancel(input: SessionFormCancelInput, ref?: LocationRef) {
-          return settleForm(input, ref, api().session.form.cancel(input, formRequestOptions(input.sessionID, ref)))
+          const options = formRequestOptions(input.sessionID, ref)
+          return settleForm(input, ref, resent(() => api().session.form.cancel(input, options)))
         },
       },
     },

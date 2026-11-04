@@ -20,12 +20,19 @@ export { UpgradeError } from "./release"
 
 export type Policy = "disable" | "notify" | "auto"
 
-/** What an upgrade in progress reports, in order: installing, ready (only while a chat runs), switching, then switched or failed. */
+/**
+ * What an upgrade in progress reports, in order: installing, switching (again with what the pause still waits for,
+ * as that changes), waiting (only when the switch has to try again later), then switched or failed.
+ */
 export type State =
   | { readonly type: "available"; readonly version: string }
   | { readonly type: "installing"; readonly version: string }
-  | { readonly type: "ready"; readonly version: string }
-  | { readonly type: "switching"; readonly version: string }
+  | { readonly type: "switching"; readonly version: string; readonly waiting?: ReadonlyArray<ReleaseSwitch.Work> }
+  /**
+   * Installed, not switched yet: the pause gave up while `waiting` ran, and the switch tries again once that has
+   * finished. Without `waiting`, the running service cannot pause and the switch waits until no chat is running.
+   */
+  | { readonly type: "waiting"; readonly version: string; readonly waiting?: ReadonlyArray<ReleaseSwitch.Work> }
   | { readonly type: "switched"; readonly version: string }
   | { readonly type: "failed"; readonly version?: string; readonly message: string }
 
@@ -47,7 +54,7 @@ export interface Interface {
   readonly current: () => Effect.Effect<string | undefined>
   /** Once at startup: tells about (`notify`) or switches to (`auto`) a newer release. Never fails. */
   readonly startup: (notify: (state: State) => void) => Effect.Effect<void>
-  /** Installs a release and switches to it once no chat is running, whatever the policy. */
+  /** Installs a release and switches to it while chats run, whatever the policy. */
   readonly upgrade: (input?: UpgradeInput) => Effect.Effect<Outcome, UpgradeError>
 }
 
@@ -68,6 +75,8 @@ export type Options = {
   readonly service: Effect.Effect<ReleaseSwitch.Target["service"], UpgradeError>
   /** How long a started service gets to answer; 10 s unless a test shortens it. */
   readonly timeout?: Duration.Duration
+  /** How long the running service gets to pause; 2 minutes unless a test shortens it. */
+  readonly pause?: Duration.Duration
 }
 
 export const make = Effect.fn("upgrade.updater.make")(function* (options: Options) {
@@ -116,6 +125,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       service: yield* options.service,
       log: path.join(options.log, "upgrade.log"),
       timeout: options.timeout,
+      pause: options.pause,
     } satisfies ReleaseSwitch.Target
   })
 
@@ -204,10 +214,19 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         Effect.mapError((error) => failed(error.message)),
       )
     }
+    // Switches at once; a pause that gave up, or a service that cannot pause, makes it try again later.
     const result = yield* Effect.gen(function* () {
-      yield* ReleaseSwitch.idle(switching, () => notify({ type: "ready", version: to }))
       notify({ type: "switching", version: to })
-      return yield* ReleaseSwitch.run(switching, { from, to, busy: ReleaseSwitch.busy(switching), restore })
+      const outcome = yield* ReleaseSwitch.run(switching, {
+        from,
+        to,
+        restore,
+        onWaiting: (waiting) => notify({ type: "switching", version: to, waiting }),
+      })
+      if (outcome.type !== "busy") return outcome
+      notify({ type: "waiting", version: to, ...(outcome.waiting ? { waiting: outcome.waiting } : {}) })
+      yield* outcome.waiting ? ReleaseSwitch.finished(switching, outcome.waiting) : ReleaseSwitch.idle(switching)
+      return outcome
     }).pipe(
       Effect.repeat({ until: (result) => result.type !== "busy" }),
       Effect.mapError((error) => failed(error.message)),

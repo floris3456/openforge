@@ -2,8 +2,8 @@ import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Database } from "bun:sqlite"
-import { describe, expect } from "bun:test"
-import { Deferred, Effect, Fiber } from "effect"
+import { describe, expect, test } from "bun:test"
+import { Deferred, Duration, Effect, Fiber } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { ancestors } from "../../../client/test/fixture/service-fixture"
@@ -12,20 +12,45 @@ import { ReleaseDatabase } from "../../src/upgrade/database"
 import { ReleaseLayout } from "../../src/upgrade/layout"
 import { ReleaseSwitch } from "../../src/upgrade/switch"
 import { SwitchLock } from "../../src/upgrade/switch-lock"
-import { keep, layer, migrations, root, target, writeMigrations, type Serve } from "./fixture/fixture"
+import {
+  fake,
+  happened,
+  history,
+  keep,
+  layer,
+  migrations,
+  root,
+  target,
+  writeMigrations,
+  type Serve,
+} from "./fixture/fixture"
 
 const it = testEffect(NodeServices.layer)
 
-// An install with `from` in use and its service running, plus `to` kept beside it.
-const installed = (from: string, to?: { readonly version: string; readonly serve?: Serve }) =>
+// An install with `from` in use and its service running, plus `to` kept beside it. What happened to the fake
+// services before the test starts is left out of `happened`.
+const installed = (
+  from: string,
+  to?: { readonly version: string; readonly serve?: Serve },
+  options: { readonly pause?: Duration.Duration } = {},
+) =>
   Effect.gen(function* () {
     const directory = yield* root
-    const switching = yield* target(directory)
+    const switching = { ...(yield* target(directory)), ...options }
     yield* Effect.promise(() => keep(switching.layout, from))
     if (to) yield* Effect.promise(() => keep(switching.layout, to.version, { serve: to.serve }))
     yield* ReleaseLayout.point(switching.layout, from).pipe(Effect.provide(layer(directory)))
-    yield* ReleaseSwitch.start(switching, from).pipe(Effect.provide(layer(directory)))
-    return { directory, switching, provide: Effect.provide(layer(directory)) }
+    const started = yield* ReleaseSwitch.start(switching, from).pipe(Effect.provide(layer(directory)))
+    const url = started.endpoint.url
+    if (started.paused) yield* Effect.promise(() => fake(url, "/api/experimental/service/resume"))
+    yield* Effect.promise(() => fs.rm(history(directory), { force: true }))
+    return {
+      directory,
+      switching,
+      url,
+      provide: Effect.provide(layer(directory)),
+      happened: Effect.promise(() => happened(directory)),
+    }
   })
 
 const reported = (switching: ReleaseSwitch.Target) =>
@@ -38,12 +63,54 @@ const reported = (switching: ReleaseSwitch.Target) =>
     return info as { version: string; switching?: string }
   })
 
+// What the running service says about its pause.
+const paused = (switching: ReleaseSwitch.Target) =>
+  Effect.gen(function* () {
+    const endpoint = yield* Service.discover({ file: switching.service.file })
+    if (!endpoint) return undefined
+    const body = yield* Effect.promise(() =>
+      fetch(new URL("/api/experimental/service/status", endpoint.url)).then((response) => response.json()),
+    )
+    return (body as { data: { state: string; startedPaused: boolean } }).data
+  })
+
+const tool = (sessionID: string, name = "webfetch") => ({ sessionID, kind: "tool" as const, name })
+
+describe("pausable", () => {
+  test("releases from 0.1.0 on can pause, earlier ones cannot", () => {
+    expect(ReleaseSwitch.pausable("0.1.0")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.1.0-beta.1")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.1.2")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.2.0")).toBe(true)
+    expect(ReleaseSwitch.pausable("1.0.0")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.0.9")).toBe(false)
+    expect(ReleaseSwitch.pausable("0.0.1")).toBe(false)
+    expect(ReleaseSwitch.pausable("not a version")).toBe(false)
+  })
+
+  test("says what a pause waits for", () => {
+    const waiting = [
+      { sessionID: "ses_a", kind: "step" as const, name: "reply" },
+      tool("ses_b"),
+      { sessionID: "ses_c", kind: "model" as const, name: "title" },
+      { kind: "step" as const, name: "compaction" },
+    ]
+    expect(ReleaseSwitch.describe(waiting)).toBe(
+      "a reply in ses_a, webfetch in ses_b, a model call (title) in ses_c, a step",
+    )
+    expect(ReleaseSwitch.describe(waiting.slice(0, 2), (id) => `"${id.slice(4)}"`)).toBe(
+      'a reply in "a", webfetch in "b"',
+    )
+    expect(ReleaseSwitch.describe([])).toBe("nothing")
+  })
+})
+
 describe("switch steps", () => {
   it.live("copies the database consistently with VACUUM INTO and restores the copy", () =>
     Effect.gen(function* () {
       const directory = yield* root
       const database = path.join(directory, "opencode.db")
-      const copy = path.join(directory, "releases", "0.0.1", "opencode.db")
+      const copy = path.join(directory, "releases", "0.1.0", "opencode.db")
       const db = new Database(database)
       db.run("PRAGMA journal_mode = WAL")
       db.run("CREATE TABLE note (text TEXT)")
@@ -76,25 +143,53 @@ describe("switch steps", () => {
     }),
   )
 
-  it.live("starts the service from current and requires it to report the version", () =>
+  it.live(
+    "starts the service from current paused and requires it to report the version",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* installed("0.1.0", { version: "0.1.1", serve: "wrong-version" })
+        const info = yield* reported(test.switching)
+        expect(info?.version).toBe("0.1.0")
+        // The service a switch starts skips the switch lock it would otherwise wait for.
+        expect(info?.switching).toBe("1")
+        yield* ReleaseSwitch.stop(test.switching).pipe(test.provide)
+        expect(yield* Service.discover({ file: test.switching.service.file })).toBeUndefined()
+        yield* ReleaseLayout.point(test.switching.layout, "0.1.1").pipe(test.provide)
+        const error = yield* ReleaseSwitch.start(test.switching, "0.1.1").pipe(test.provide, Effect.flip)
+        expect(error.message).toContain("did not answer with that version within 4s")
+        expect(yield* test.happened).toEqual(["0.1.0 stopped", "0.1.1 started paused", "0.1.1 stopped"])
+      }),
+    // The check waits its full 4 s for the version.
+    15_000,
+  )
+
+  it.live("starts a release from before 0.1.0 without pausing it, as it has no such flag", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2", serve: "wrong-version" })
-      const info = yield* reported(test.switching)
-      expect(info?.version).toBe("0.0.1")
-      // The service a switch starts skips the switch lock it would otherwise wait for.
-      expect(info?.switching).toBe("1")
+      const directory = yield* root
+      const switching = yield* target(directory)
+      yield* Effect.promise(() => keep(switching.layout, "0.0.1"))
+      yield* ReleaseLayout.point(switching.layout, "0.0.1").pipe(Effect.provide(layer(directory)))
+      const started = yield* ReleaseSwitch.start(switching, "0.0.1").pipe(Effect.provide(layer(directory)))
+      expect(started.paused).toBe(false)
+      expect(yield* Effect.promise(() => happened(directory))).toEqual(["0.0.1 started"])
+    }),
+  )
+
+  it.live("fails the check of a service that cannot read its database and stops it", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "unreadable" })
       yield* ReleaseSwitch.stop(test.switching).pipe(test.provide)
-      expect(yield* Service.discover({ file: test.switching.service.file })).toBeUndefined()
-      yield* ReleaseLayout.point(test.switching.layout, "0.0.2").pipe(test.provide)
-      const error = yield* ReleaseSwitch.start(test.switching, "0.0.2").pipe(test.provide, Effect.flip)
-      expect(error.message).toContain("did not answer with that version within 4s")
+      yield* ReleaseLayout.point(test.switching.layout, "0.1.1").pipe(test.provide)
+      const error = yield* ReleaseSwitch.start(test.switching, "0.1.1").pipe(test.provide, Effect.flip)
+      expect(error.message).toContain("failed its check: it could not read its database")
+      expect(yield* test.happened).toEqual(["0.1.0 stopped", "0.1.1 started paused", "0.1.1 stopped"])
     }),
   )
 
   // The TUI that switches replaces itself with the new release next and would never reap a child.
   it.live("starts the service outside the switching process", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1")
+      const test = yield* installed("0.1.0")
       const info = yield* Effect.promise(() => Bun.file(test.switching.service.file).json())
       expect(ancestors(info.pid)).not.toContain(process.pid)
     }),
@@ -102,123 +197,230 @@ describe("switch steps", () => {
 })
 
 describe("switch", () => {
-  it.live("switches to the new release and keeps a copy of the database next to the old one", () =>
+  it.live("pauses the old service, stops it, starts the new one paused, checks it and resumes it", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2" })
-      const result = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
-      expect(result).toEqual({ type: "switched", from: "0.0.1", to: "0.0.2" })
-      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.2")
-      expect((yield* reported(test.switching))?.version).toBe("0.0.2")
-      expect(migrations(ReleaseSwitch.copyOf(test.switching, "0.0.1"))).toEqual(["m-0.0.1"])
-      expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "m-0.0.2"])
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toEqual({ type: "switched", from: "0.1.0", to: "0.1.1" })
+      expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.1 started paused", "0.1.1 resumed"])
+      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.1")
+      expect((yield* reported(test.switching))?.version).toBe("0.1.1")
+      expect(yield* paused(test.switching)).toMatchObject({ state: "running", startedPaused: false })
+      expect(migrations(ReleaseSwitch.copyOf(test.switching, "0.1.0"))).toEqual(["m-0.1.0"])
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0", "m-0.1.1"])
       expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain("0.1.0 -> 0.1.1: pausing the background service (at most 2m)")
+      expect(log).toContain("0.1.0 -> 0.1.1: paused; 1 chat(s) rest")
+    }),
+  )
+
+  it.live("switches while a tool runs, once the tool has returned, reporting what it waits for", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
+      const reports = yield* Deferred.make<ReadonlyArray<ReleaseSwitch.Work>>()
+      const running = yield* ReleaseSwitch.run(test.switching, {
+        from: "0.1.0",
+        to: "0.1.1",
+        onWaiting: (waiting) => Deferred.doneUnsafe(reports, Effect.succeed(waiting)),
+      }).pipe(test.provide, Effect.forkChild({ startImmediately: true }))
+      expect(yield* Deferred.await(reports).pipe(Effect.timeout("5 seconds"))).toEqual([tool("ses_a")])
+      // Nothing has stopped while the tool runs.
+      expect(yield* test.happened).toEqual([])
+      yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
+      expect(yield* Fiber.join(running).pipe(Effect.timeout("10 seconds"))).toEqual({
+        type: "switched",
+        from: "0.1.0",
+        to: "0.1.1",
+      })
+      expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.1 started paused", "0.1.1 resumed"])
+    }),
+  )
+
+  it.live("leaves the service running when the pause gives up, and switches once the work it reported finished", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" }, { pause: Duration.seconds(1) })
+      yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
+      const busy = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(busy).toEqual({ type: "busy", waiting: [tool("ses_a")] })
+      expect(yield* test.happened).toEqual(["0.1.0 pause expired"])
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(yield* paused(test.switching)).toMatchObject({ state: "running" })
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain(
+        "the pause gave up after 1s and the service carries on; switching once this has finished: webfetch in ses_a",
+      )
+
+      const finished = yield* ReleaseSwitch.finished(test.switching, [tool("ses_a")]).pipe(
+        test.provide,
+        Effect.forkChild({ startImmediately: true }),
+      )
+      // The chat's step ends while its tool keeps running: the switch keeps waiting.
+      yield* Effect.promise(() => fake(test.url, "/fake/step?sessionID=ses_a"))
+      yield* Effect.sleep("300 millis")
+      expect(finished.pollUnsafe()).toBeUndefined()
+      yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
+      yield* Fiber.join(finished).pipe(Effect.timeout("5 seconds"))
+
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toEqual({ type: "switched", from: "0.1.0", to: "0.1.1" })
+      expect((yield* test.happened).slice(1)).toEqual([
+        "0.1.0 paused",
+        "0.1.0 stopped",
+        "0.1.1 started paused",
+        "0.1.1 resumed",
+      ])
+    }),
+  )
+
+  it.live("opens the old service again when the switch is dropped while it pauses", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
+      const reports = yield* Deferred.make<void>()
+      const running = yield* ReleaseSwitch.run(test.switching, {
+        from: "0.1.0",
+        to: "0.1.1",
+        onWaiting: () => Deferred.doneUnsafe(reports, Effect.void),
+      }).pipe(test.provide, Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.await(reports).pipe(Effect.timeout("5 seconds"))
+      yield* Fiber.interrupt(running)
+      expect(yield* test.happened).toEqual(["0.1.0 resumed"])
+      expect(yield* paused(test.switching)).toMatchObject({ state: "running" })
+      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.0")
+    }),
+  )
+
+  it.live("switches a service from before 0.1.0 once no chat runs on it, as those releases did", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.0.1", { version: "0.1.0" })
+      yield* Effect.promise(() => fake(test.url, "/fake/busy"))
+      const busy = yield* ReleaseSwitch.run(test.switching, { from: "0.0.1", to: "0.1.0" }).pipe(test.provide)
+      expect(busy).toEqual({ type: "busy" })
+      expect(yield* test.happened).toEqual([])
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain("0.0.1 -> 0.1.0: the running service cannot pause; switching once no chat is running")
+
+      const idle = yield* ReleaseSwitch.idle(test.switching).pipe(
+        test.provide,
+        Effect.forkChild({ startImmediately: true }),
+      )
+      yield* Effect.sleep("300 millis")
+      expect(idle.pollUnsafe()).toBeUndefined()
+      yield* Effect.promise(() => fake(test.url, "/fake/idle"))
+      yield* Fiber.join(idle).pipe(Effect.timeout("5 seconds"))
+
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.0.1", to: "0.1.0" }).pipe(test.provide)
+      expect(result).toEqual({ type: "switched", from: "0.0.1", to: "0.1.0" })
+      expect(yield* test.happened).toEqual(["0.0.1 stopped", "0.1.0 started paused", "0.1.0 resumed"])
     }),
   )
 
   it.live("rolls back the link, the database and the service when the new service crashes", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2", serve: "crash" })
-      const result = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
-      expect(result).toMatchObject({ type: "rolled-back", from: "0.0.1", to: "0.0.2", restored: true })
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "crash" })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toMatchObject({ type: "rolled-back", from: "0.1.0", to: "0.1.1", restored: true })
       if (result.type !== "rolled-back") return
       expect(result.reason).toContain("exited (code 3)")
-      expect(result.reason).toContain("fake openforge 0.0.2 crashed on start")
-      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.1")
-      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
+      expect(result.reason).toContain("fake openforge 0.1.1 crashed on start")
+      // The old release starts paused and resumes, so the chats that rested continue there.
+      expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.0 started paused", "0.1.0 resumed"])
+      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.0")
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(yield* paused(test.switching)).toMatchObject({ state: "running", startedPaused: false })
       // The crashed release had already migrated the database; the restored copy has no trace of it.
-      expect(migrations(test.switching.database)).toEqual(["m-0.0.1"])
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0"])
       const bad = yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)
-      expect(Object.keys(bad)).toEqual(["0.0.2"])
-      expect(bad["0.0.2"].log).toBe(test.switching.log)
+      expect(Object.keys(bad)).toEqual(["0.1.1"])
+      expect(bad["0.1.1"].log).toBe(test.switching.log)
       const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
-      expect(log).toContain("0.0.1 -> 0.0.2: failed: ")
-      expect(log).toContain("rolled back; the service reports 0.0.1")
+      expect(log).toContain("0.1.0 -> 0.1.1: failed: ")
+      expect(log).toContain("rolled back; the service reports 0.1.0")
     }),
   )
 
-  it.live("rolls back when the new service answers with another version", () =>
+  it.live("rolls back when the new service cannot read its database", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2", serve: "wrong-version" })
-      const result = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "unreadable" })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
       expect(result).toMatchObject({ type: "rolled-back", restored: true })
-      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.1")
-      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
-      expect(migrations(test.switching.database)).toEqual(["m-0.0.1"])
+      if (result.type !== "rolled-back") return
+      expect(result.reason).toContain("failed its check: it could not read its database")
+      expect(yield* test.happened).toEqual([
+        "0.1.0 paused",
+        "0.1.0 stopped",
+        "0.1.1 started paused",
+        "0.1.1 stopped",
+        "0.1.0 started paused",
+        "0.1.0 resumed",
+      ])
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0"])
+      expect(Object.keys(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))).toEqual(["0.1.1"])
     }),
+  )
+
+  it.live(
+    "rolls back when the new service answers with another version",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* installed("0.1.0", { version: "0.1.1", serve: "wrong-version" })
+        const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+        expect(result).toMatchObject({ type: "rolled-back", restored: true })
+        expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.0")
+        expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+        expect(yield* paused(test.switching)).toMatchObject({ state: "running" })
+        expect(migrations(test.switching.database)).toEqual(["m-0.1.0"])
+      }),
+    // The check waits its full 4 s for the version.
+    15_000,
   )
 
   it.live("restarts the old release, keeps its database and marks nothing bad when the copy fails", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2" })
-      const folder = ReleaseLayout.folder(test.switching.layout, "0.0.1")
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      const folder = ReleaseLayout.folder(test.switching.layout, "0.1.0")
       // Only the original database holds this row; a recreated one would not.
       writeMigrations(test.switching.database, ["user-data"])
-      // The copy goes beside 0.0.1's binary; a read-only folder makes VACUUM INTO fail.
+      // The copy goes beside 0.1.0's binary; a read-only folder makes VACUUM INTO fail.
       yield* Effect.acquireRelease(
         Effect.promise(() => fs.chmod(folder, 0o555)),
         () => Effect.promise(() => fs.chmod(folder, 0o755)),
       )
-      const result = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
       expect(result).toMatchObject({ type: "rolled-back", restored: true })
       if (result.type !== "rolled-back") return
       expect(result.reason).toStartWith("Could not use the database")
-      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.0.1")
-      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
-      expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "user-data"])
+      expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.0 started paused", "0.1.0 resumed"])
+      expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.0")
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0", "user-data"])
       expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
     }),
   )
 
   it.live("removes the database a failed release created when there was none before", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2", serve: "crash" })
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "crash" })
       yield* Effect.promise(() => fs.rm(test.switching.database))
-      const result = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
       expect(result).toMatchObject({ type: "rolled-back", restored: true })
-      // Only 0.0.1, started again, wrote to the database that is there now.
-      expect(migrations(test.switching.database)).toEqual(["m-0.0.1"])
+      // Only 0.1.0, started again, wrote to the database that is there now.
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0"])
     }),
   )
 
-  it.live("leaves everything alone when a chat started or another process already switched", () =>
+  it.live("leaves everything alone when another process already switched", () =>
     Effect.gen(function* () {
-      const test = yield* installed("0.0.1", { version: "0.0.2" })
-      const busy = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(true),
-      }).pipe(test.provide)
-      expect(busy).toEqual({ type: "busy" })
-      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
-      yield* ReleaseLayout.point(test.switching.layout, "0.0.2").pipe(test.provide)
-      const unchanged = yield* ReleaseSwitch.run(test.switching, {
-        from: "0.0.1",
-        to: "0.0.2",
-        busy: Effect.succeed(false),
-      }).pipe(test.provide)
-      expect(unchanged).toEqual({ type: "unchanged", version: "0.0.2" })
-      expect((yield* reported(test.switching))?.version).toBe("0.0.1")
-      expect(yield* Effect.promise(() => fs.exists(ReleaseSwitch.copyOf(test.switching, "0.0.1")))).toBe(false)
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      yield* ReleaseLayout.point(test.switching.layout, "0.1.1").pipe(test.provide)
+      const unchanged = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(unchanged).toEqual({ type: "unchanged", version: "0.1.1" })
+      expect(yield* test.happened).toEqual([])
+      expect((yield* reported(test.switching))?.version).toBe("0.1.0")
+      expect(yield* Effect.promise(() => fs.exists(ReleaseSwitch.copyOf(test.switching, "0.1.0")))).toBe(false)
     }),
   )
 })
@@ -259,27 +461,6 @@ describe("waiting", () => {
       yield* flock.acquire(SwitchLock.key, ReleaseLayout.at(path.join(directory, "data")).locks)
       yield* SwitchLock.wait().pipe(Effect.provide(layer(directory)), Effect.timeout("2 seconds"))
       expect(process.env[SwitchLock.variable]).toBeUndefined()
-    }),
-  )
-
-  it.live("waits for the running chat to end, listening to the service's events", () =>
-    Effect.gen(function* () {
-      const directory = yield* root
-      const base = yield* target(directory)
-      const switching = { ...base, service: { ...base.service, env: { ...base.service.env, FAKE_BUSY: "1" } } }
-      yield* Effect.promise(() => keep(switching.layout, "0.0.1"))
-      yield* ReleaseLayout.point(switching.layout, "0.0.1").pipe(Effect.provide(layer(directory)))
-      const endpoint = yield* ReleaseSwitch.start(switching, "0.0.1").pipe(Effect.provide(layer(directory)))
-      expect(yield* ReleaseSwitch.busy(switching).pipe(Effect.provide(layer(directory)))).toBe(true)
-      const announced = yield* Deferred.make<void>()
-      const idle = yield* ReleaseSwitch.idle(switching, () => Deferred.doneUnsafe(announced, Effect.void)).pipe(
-        Effect.provide(layer(directory)),
-        Effect.forkChild({ startImmediately: true }),
-      )
-      yield* Deferred.await(announced).pipe(Effect.timeout("5 seconds"))
-      yield* Effect.promise(() => fetch(new URL("/fake/idle", endpoint.url)).then((response) => response.text()))
-      yield* Fiber.join(idle).pipe(Effect.timeout("5 seconds"))
-      expect(yield* ReleaseSwitch.busy(switching).pipe(Effect.provide(layer(directory)))).toBe(false)
     }),
   )
 })

@@ -1,9 +1,11 @@
 // openforge's upgrade in the TUI: the CLI process installs a release and switches the background service to it
-// once no chat is running (see packages/cli/src/upgrade). This screen shows how far that got and, once the
-// service runs the new release, restarts itself on it when the user is not in the middle of something.
+// while chats run (see packages/cli/src/upgrade). This screen shows how far that got and, once the service runs the
+// new release, restarts itself on it when the user is not in the middle of something.
+import type { ContinuityWork } from "@opencode/client/promise"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
+import { useData } from "./data"
 import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
 import { usePromptRef } from "./prompt"
@@ -15,10 +17,50 @@ import { DialogUpdate } from "../component/dialog-update"
 export type UpdateState =
   | { readonly type: "available"; readonly version: string }
   | { readonly type: "installing"; readonly version: string }
-  | { readonly type: "ready"; readonly version: string }
-  | { readonly type: "switching"; readonly version: string }
+  /** `waiting` is what the running service's pause still waits for, as it changes. */
+  | { readonly type: "switching"; readonly version: string; readonly waiting?: ReadonlyArray<ContinuityWork> }
+  /**
+   * Installed, not switched yet: the pause gave up while `waiting` ran and the switch tries again once that has
+   * finished. Without `waiting` the running service cannot pause, and the switch waits until no chat is running.
+   */
+  | { readonly type: "waiting"; readonly version: string; readonly waiting?: ReadonlyArray<ContinuityWork> }
   | { readonly type: "switched"; readonly version: string }
   | { readonly type: "failed"; readonly version?: string; readonly message: string }
+
+/** A chat's title, when this screen knows it. */
+export type TitleOf = (sessionID: string) => string | undefined
+
+/** What a release switch waits for: `a reply in "Fix the tests", webfetch in "Docs"`. */
+export function describeWork(waiting: ReadonlyArray<ContinuityWork>, title: TitleOf = () => undefined) {
+  if (waiting.length === 0) return "the work that was still running"
+  return waiting
+    .map((work) => {
+      const what =
+        work.kind === "step"
+          ? work.name === "reply"
+            ? "a reply"
+            : "a step"
+          : work.kind === "model"
+            ? `a model call (${work.name})`
+            : work.name
+      if (!work.sessionID) return what
+      const name = title(work.sessionID)
+      return `${what} in ${name ? `"${name}"` : work.sessionID}`
+    })
+    .join(", ")
+}
+
+/** `Switching to openforge 0.1.1…`, with what the pause waits for. Without a version, a switch another screen runs. */
+export function switchingMessage(version?: string, waiting?: ReadonlyArray<ContinuityWork>, title?: TitleOf) {
+  const switching = version ? `Switching to openforge ${version}` : "Switching to a new openforge release"
+  return waiting?.length ? `${switching}; waiting for ${describeWork(waiting, title)}…` : `${switching}…`
+}
+
+export function waitingMessage(state: Extract<UpdateState, { type: "waiting" }>, title?: TitleOf) {
+  if (state.waiting)
+    return `openforge ${state.version} is installed. The chats did not pause within 2 minutes; it switches once this has finished: ${describeWork(state.waiting, title)}`
+  return `openforge ${state.version} is installed. The running service cannot pause; it switches once no chat is running.`
+}
 
 export type UpdateOutcome =
   | { readonly type: "current"; readonly version: string }
@@ -28,17 +70,13 @@ export type UpdateOutcome =
 export type UpdateSource = {
   readonly remote: boolean
   readonly subscribe: (notify: (state: UpdateState) => void) => () => void
-  /** Installs the latest release and switches to it once no chat is running. */
+  /** Installs the latest release and switches to it while chats run. */
   readonly upgrade: () => Promise<UpdateOutcome>
   /** Restarts this TUI on the release in use, back on `sessionID`. Absent when this TUI cannot restart itself. */
   readonly relaunch?: (sessionID?: string) => void
 }
 
 const updateDialog = Symbol("update dialog")
-
-export function readyMessage(version: string) {
-  return `openforge ${version} is ready; switches when no chat is running`
-}
 
 export const { use: useUpdateNotification, provider: UpdateNotificationProvider } = createSimpleContext({
   name: "UpdateNotification",
@@ -49,22 +87,23 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     const toast = useToast()
     const route = useRoute()
     const promptRef = usePromptRef()
+    const data = useData()
+    const title: TitleOf = (sessionID) => data.session.get(sessionID)?.title || undefined
     const [state, setState] = createSignal<UpdateState>()
     const [pending, setPending] = createSignal(false)
 
     const receive = (next: UpdateState) => {
-      const previous = state()
-      if (previous?.type === next.type && "version" in next && previous.version === next.version) return
+      if (JSON.stringify(state()) === JSON.stringify(next)) return
       setState(next)
       // Leaving a screen that cannot restart itself tells the user to start the new release.
       if (next.type === "switched" && !props.updater?.relaunch) epilogue.updatedVersion(next.version)
       // The dialog shows every step itself; without it, the steps that need attention become toasts.
       if (dialog.stack.length > 0) return
-      // Stays up while the chat runs; the switching toast replaces it.
-      if (next.type === "ready")
-        toast.show({ variant: "info", message: readyMessage(next.version), duration: 60 * 60_000 })
+      // Stays up while the switch waits; the switching toast replaces it.
+      if (next.type === "waiting")
+        toast.show({ variant: "info", message: waitingMessage(next, title), duration: 60 * 60_000 })
       if (next.type === "switching")
-        toast.show({ variant: "info", message: `Switching to openforge ${next.version}…`, duration: 30_000 })
+        toast.show({ variant: "info", message: switchingMessage(next.version, next.waiting, title), duration: 30_000 })
       if (next.type === "failed") toast.show({ variant: "error", message: next.message, duration: 60_000 })
       if (next.type === "switched" && !props.updater?.relaunch)
         toast.show({
@@ -125,7 +164,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       const updater = props.updater
       if (!updater) return
       const active = state()?.type
-      const running = active === "installing" || active === "ready" || active === "switching"
+      const running = active === "installing" || active === "switching" || active === "waiting"
       dialog.replace(
         () => (
           <DialogUpdate
@@ -133,6 +172,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
             state={state}
             restart={restart}
             held={updater.relaunch ? typed : undefined}
+            title={title}
           />
         ),
         undefined,
@@ -142,9 +182,10 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
 
     return {
       state,
+      title,
       notification: () => {
         const current = state()
-        if (current?.type === "available" || current?.type === "ready") return current
+        if (current?.type === "available" || current?.type === "waiting") return current
         if (current?.type === "switched" && !props.updater?.relaunch) return current
         return undefined
       },

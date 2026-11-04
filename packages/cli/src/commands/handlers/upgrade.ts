@@ -2,6 +2,7 @@ import { intro, log, outro, spinner } from "@clack/prompts"
 import { Effect, Option } from "effect"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
+import { ReleaseSwitch } from "../../upgrade/switch"
 import { Updater } from "../../upgrade/updater"
 import { handlePromptErrors } from "../../ui/prompt"
 
@@ -28,11 +29,19 @@ export default Runtime.handler(
         restoreDatabase: input.restoreDatabase,
         notify: (state) => {
           if (state.type === "installing") return step(`Installing openforge ${state.version}`)
-          if (state.type === "ready") {
-            stop(`openforge ${state.version} installed`)
-            return log.info(`openforge ${state.version} is ready; switches when no chat is running`)
-          }
+          if (state.type === "switching" && spinning && state.waiting)
+            return progress.message(
+              `Switching to openforge ${state.version}${state.waiting.length ? `; waiting for ${ReleaseSwitch.describe(state.waiting)}` : ""}`,
+            )
           if (state.type === "switching") return step(`Switching to openforge ${state.version}`)
+          if (state.type === "waiting") {
+            stop(`openforge ${state.version} installed`)
+            return log.info(
+              state.waiting
+                ? `The chats did not pause within 2 minutes; switching to openforge ${state.version} once this has finished: ${ReleaseSwitch.describe(state.waiting)}`
+                : `The running service cannot pause; switching to openforge ${state.version} once no chat is running`,
+            )
+          }
           if (state.type === "switched") return stop(`openforge ${state.version} is running`)
           if (state.type === "failed") return stop("Failed", 1)
         },

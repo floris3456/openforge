@@ -13,7 +13,10 @@ import { emptyThemeSource, tmpdir } from "../fixture/fixture"
 import { TestTuiContexts } from "../fixture/tui-environment"
 import { createTuiResolvedConfig } from "../fixture/tui-runtime"
 
-test("upgrade progress replaces checking, waits for running chats and reports a rollback", async () => {
+// The dialog wraps long lines; compare the words.
+const words = (frame: string) => frame.replace(/\s+/g, " ")
+
+test("upgrade progress replaces checking, says what the switch waits for and reports a rollback", async () => {
   await using temporary = await tmpdir()
   const [state, setState] = createSignal<UpdateState>()
   const pending = Promise.withResolvers<UpdateOutcome>()
@@ -25,7 +28,12 @@ test("upgrade progress replaces checking, waits for running chats and reports a 
             <Keymap.Provider>
               <ToastProvider>
                 <DialogProvider>
-                  <DialogUpdate start={() => pending.promise} state={state} restart={() => {}} />
+                  <DialogUpdate
+                    start={() => pending.promise}
+                    state={state}
+                    restart={() => {}}
+                    title={(sessionID) => (sessionID === "ses_a" ? "Fix the tests" : undefined)}
+                  />
                 </DialogProvider>
               </ToastProvider>
             </Keymap.Provider>
@@ -39,17 +47,33 @@ test("upgrade progress replaces checking, waits for running chats and reports a 
   try {
     app.renderer.start()
     await app.waitForFrame((frame) => frame.includes("Checking for a new openforge release"))
-    setState({ type: "installing", version: "0.0.1" })
-    await app.waitForFrame((frame) => frame.includes("Installing openforge 0.0.1") && !frame.includes("Checking"))
-    setState({ type: "ready", version: "0.0.1" })
-    await app.waitForFrame((frame) => frame.includes("openforge 0.0.1 is ready; switches when no chat is running"))
-    setState({ type: "switching", version: "0.0.1" })
-    await app.waitForFrame((frame) => frame.includes("Switching to openforge 0.0.1"))
-    const failure = "upgrade to 0.0.1 failed: boom; still on 0.0.0. Log: /data/log/upgrade.log"
-    setState({ type: "failed", version: "0.0.1", message: failure })
+    setState({ type: "installing", version: "0.1.1" })
+    await app.waitForFrame((frame) => frame.includes("Installing openforge 0.1.1") && !frame.includes("Checking"))
+    setState({ type: "switching", version: "0.1.1" })
+    await app.waitForFrame((frame) => frame.includes("Switching to openforge 0.1.1…"))
+    const waiting = [
+      { sessionID: "ses_a", kind: "tool" as const, name: "webfetch" },
+      { sessionID: "ses_b", kind: "step" as const, name: "reply" },
+    ]
+    setState({ type: "switching", version: "0.1.1", waiting })
+    await app.waitForFrame((frame) =>
+      words(frame).includes('Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests", a reply in ses_b…'),
+    )
+    setState({ type: "waiting", version: "0.1.1", waiting: waiting.slice(0, 1) })
+    await app.waitForFrame((frame) =>
+      words(frame).includes(
+        'openforge 0.1.1 is installed. The chats did not pause within 2 minutes; it switches once this has finished: webfetch in "Fix the tests"',
+      ),
+    )
+    setState({ type: "waiting", version: "0.1.1" })
+    await app.waitForFrame((frame) =>
+      words(frame).includes("The running service cannot pause; it switches once no chat is running."),
+    )
+    const failure = "upgrade to 0.1.1 failed: boom; still on 0.1.0. Log: /data/log/upgrade.log"
+    setState({ type: "failed", version: "0.1.1", message: failure })
     pending.reject(new Error(failure))
     await app.waitForFrame(
-      (frame) => frame.includes("upgrade to 0.0.1 failed: boom; still on 0.0.0") && !frame.includes("Switching"),
+      (frame) => frame.includes("upgrade to 0.1.1 failed: boom; still on 0.1.0") && !frame.includes("Switching"),
     )
     expect(app.captureCharFrame()).not.toContain("Restart")
   } finally {

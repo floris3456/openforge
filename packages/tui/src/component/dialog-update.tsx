@@ -2,7 +2,13 @@ import { createEffect, createMemo, createResource, createSignal, For, Match, onC
 import { Keymap } from "../context/keymap"
 import { useNewDesigns } from "../config"
 import { useTheme } from "../context/theme"
-import { readyMessage, type UpdateOutcome, type UpdateState } from "../context/update-notification"
+import {
+  switchingMessage,
+  waitingMessage,
+  type TitleOf,
+  type UpdateOutcome,
+  type UpdateState,
+} from "../context/update-notification"
 import { DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
 import { errorMessage } from "../util/error"
 import { Spinner } from "./spinner"
@@ -14,6 +20,8 @@ export function DialogUpdate(props: {
   restart: () => void
   /** Present when this screen restarts on its own once switched: whether a typed prompt holds that back. */
   held?: () => boolean
+  /** Names the chats a switch waits for. */
+  title?: TitleOf
 }) {
   const dialog = useDialog()
   const theme = useTheme().surface("dialog")
@@ -115,15 +123,19 @@ export function DialogUpdate(props: {
             <Match when={current.type === "installing" && current}>
               {(state) => <Spinner shimmer={theme.text.base}>{`Installing openforge ${state().version}…`}</Spinner>}
             </Match>
-            <Match when={current.type === "ready" && current}>
+            <Match when={current.type === "waiting" && current}>
               {(state) => (
                 <text fg={theme.text.muted} wrapMode="word">
-                  {readyMessage(state().version)}
+                  {waitingMessage(state(), props.title)}
                 </text>
               )}
             </Match>
             <Match when={current.type === "switching" && current}>
-              {(state) => <Spinner shimmer={theme.text.base}>{`Switching to openforge ${state().version}…`}</Spinner>}
+              {(state) => (
+                <Spinner shimmer={theme.text.base}>
+                  {switchingMessage(state().version, state().waiting, props.title)}
+                </Spinner>
+              )}
             </Match>
             <Match when={current.type === "switched" && props.held && !props.held() && current}>
               {(state) => (

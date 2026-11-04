@@ -12,7 +12,7 @@ import { FormPrompt } from "./session/form"
 import { Slot } from "../plugin/render"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
-import { readyMessage, useUpdateNotification } from "../context/update-notification"
+import { useUpdateNotification, waitingMessage } from "../context/update-notification"
 import { FadeInText } from "../component/fade-in-text"
 
 let once = false
@@ -147,13 +147,13 @@ function UpdateNotification(props: { width: number }) {
           onMouseUp={() => (state.type === "switched" ? update.restart() : update.open?.())}
         >
           <FadeInText fg={theme.text.muted} backdrop={backdrop()}>
-            <Show when={state.type !== "ready"}>
+            <Show when={state.type !== "waiting"}>
               <span style={{ fg: theme.text.action.primary.selected }}>
                 {state.type === "switched" ? "/exit" : "/update"}
               </span>
             </Show>
-            {state.type === "ready"
-              ? readyMessage(state.version)
+            {state.type === "waiting"
+              ? waitingMessage(state, update.title)
               : state.type === "switched"
                 ? ` restart to get the new screens of v${state.version}`
                 : ` to install v${state.version}`}

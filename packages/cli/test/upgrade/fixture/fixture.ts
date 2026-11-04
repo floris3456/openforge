@@ -13,7 +13,7 @@ import { ReleaseLayout } from "../../../src/upgrade/layout"
 import type { Release } from "../../../src/upgrade/release"
 import type { ReleaseSwitch } from "../../../src/upgrade/switch"
 
-export type Serve = "ok" | "crash" | "wrong-version"
+export type Serve = "ok" | "crash" | "wrong-version" | "unreadable"
 
 const program = path.join(import.meta.dir, "fake-openforge.ts")
 
@@ -72,11 +72,31 @@ export const target = Effect.fnUntraced(function* (directory: string) {
   return {
     layout: ReleaseLayout.at(dirs.data),
     database,
-    service: { file, env: { FAKE_REGISTRATION: file, FAKE_DATABASE: database } },
+    service: { file, env: { FAKE_REGISTRATION: file, FAKE_DATABASE: database, FAKE_LOG: history(directory) } },
     log: path.join(dirs.log, "upgrade.log"),
     timeout: Duration.seconds(4),
   } satisfies ReleaseSwitch.Target
 })
+
+/** Where the fake services under `directory` write what happened to them (see fake-openforge.ts). */
+export function history(directory: string) {
+  return path.join(paths(directory).state, "fake.log")
+}
+
+/** What happened to the fake services under `directory`, one line each: `0.1.0 started`, `0.1.0 paused`, … */
+export async function happened(directory: string) {
+  const text = await fs.readFile(history(directory), "utf8").catch(() => "")
+  return text.split("\n").filter(Boolean)
+}
+
+/** Asks the fake service at `url` something only tests ask: `/fake/work`, `/fake/finish`, `/fake/busy`, … */
+export async function fake(url: string, route: string, body?: unknown) {
+  const response = await fetch(new URL(route, url), {
+    method: "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  return response.text()
+}
 
 /** Puts a fake release straight into the layout, as an install would leave it. */
 export async function keep(layout: ReleaseLayout.Layout, version: string, options: { serve?: Serve } = {}) {

@@ -187,6 +187,16 @@ export interface RequestSource {
   readonly callID: string
 }
 
+/** Whether two JSON values are equal, whatever order their object keys were built in. */
+export const same = (left: unknown, right: unknown) => canonical(left) === canonical(right)
+
+const canonical = (value: unknown) =>
+  JSON.stringify(value, (_key, item: unknown) =>
+    item !== null && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  )
+
 const pendingRequest = (row: typeof PendingRequestTable.$inferSelect): PendingRequest => ({
   id: row.id,
   sessionID: row.session_id,
@@ -215,6 +225,7 @@ export interface Interface {
   readonly refusesWrites: () => boolean
   /** The process is shutting down: waits that survive a stop keep their records instead of settling. */
   readonly stopping: () => boolean
+  /** Marks the process stopping. The server calls it before closing anything; SessionExecution's shutdown too. */
   readonly stop: Effect.Effect<void>
   readonly awaitOpen: Effect.Effect<void>
   readonly activity: (sessionID: SessionSchema.ID) => Activity

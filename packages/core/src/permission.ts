@@ -106,9 +106,9 @@ export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
 function sameRequest(left: Request, right: Request) {
   return (
     left.action === right.action &&
-    JSON.stringify(left.resources) === JSON.stringify(right.resources) &&
-    JSON.stringify(left.save ?? []) === JSON.stringify(right.save ?? []) &&
-    JSON.stringify(left.metadata ?? {}) === JSON.stringify(right.metadata ?? {})
+    SessionContinuity.same(left.resources, right.resources) &&
+    SessionContinuity.same(left.save ?? [], right.save ?? []) &&
+    SessionContinuity.same(left.metadata ?? {}, right.metadata ?? {})
   )
 }
 

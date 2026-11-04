@@ -111,7 +111,7 @@ const toolSource = (metadata: unknown) => Option.getOrUndefined(Schema.decodeUnk
 const decodeInfo = Schema.decodeUnknownOption(Info)
 const decodeAnswer = Schema.decodeUnknownOption(Answer)
 const sameForm = (left: Info, right: Omit<Info, "id">) =>
-  left.title === right.title && JSON.stringify(left.fields) === JSON.stringify(right.fields)
+  left.title === right.title && SessionContinuity.same(left.fields, right.fields)
 
 export const layer = Layer.effect(
   Service,
@@ -236,7 +236,7 @@ export const layer = Layer.effect(
         const form = row?.kind === "form" ? Option.getOrUndefined(decodeInfo(row.request)) : undefined
         if (!row || !form) return yield* new NotFoundError({ id: input.id })
         if (row.reply !== undefined && row.reply !== null) {
-          if (JSON.stringify(row.reply) === JSON.stringify(input.answer)) return
+          if (SessionContinuity.same(row.reply, input.answer)) return
           return yield* new AlreadySettledError({ id: input.id })
         }
         const invalid = validateAnswer(form.fields, input.answer)
@@ -252,11 +252,7 @@ export const layer = Layer.effect(
           if (Option.isNone(cached)) return yield* restoring.withPermit(replyStored(input))
           const entry = cached.value
           // A client that resends the answer it already gave gets the same success.
-          if (
-            entry.state.status === "answered" &&
-            JSON.stringify(entry.state.answer) === JSON.stringify(input.answer)
-          )
-            return
+          if (entry.state.status === "answered" && SessionContinuity.same(entry.state.answer, input.answer)) return
           if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id: input.id })
           const invalid = validateAnswer(entry.form.fields, input.answer)
           if (invalid) return yield* new InvalidAnswerError({ id: input.id, message: invalid })

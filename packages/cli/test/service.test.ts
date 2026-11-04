@@ -21,27 +21,24 @@ import { testEffect } from "../../core/test/lib/effect"
 const it = testEffect(NodeFileSystem.layer)
 
 test("managed service ports are stable per installation channel", () => {
-  expect(ServiceConfig.defaultPort("latest", "linux")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("dev", "linux")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("beta", "linux")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("next", "linux")).toBe(0xc0de)
-  expect(ServiceConfig.defaultPort("local", "linux")).toBe(0xc0df)
-  expect(ServiceConfig.defaultPort("latest", "darwin")).toBe(0xc0de)
+  expect(ServiceConfig.defaultPort("latest", "linux")).toBe(3674)
+  expect(ServiceConfig.defaultPort("dev", "linux")).toBe(3674)
+  expect(ServiceConfig.defaultPort("beta", "linux")).toBe(3674)
+  expect(ServiceConfig.defaultPort("next", "linux")).toBe(3674)
+  expect(ServiceConfig.defaultPort("local", "linux")).toBe(3675)
+  expect(ServiceConfig.defaultPort("latest", "darwin")).toBe(3674)
   expect(ServiceConfig.defaultPort("preview-a", "linux")).toBe(ServiceConfig.defaultPort("preview-a", "linux"))
   expect(ServiceConfig.defaultPort("preview-a", "linux")).not.toBe(ServiceConfig.defaultPort("preview-b", "linux"))
 })
 
-test("managed service ports on Windows stay below the ranges Windows and WSL reserve", () => {
-  expect(ServiceConfig.defaultPort("latest", "win32")).toBe(0x70de)
-  expect(ServiceConfig.defaultPort("dev", "win32")).toBe(0x70de)
-  expect(ServiceConfig.defaultPort("local", "win32")).toBe(0x70df)
-  const ports = Array.from({ length: 200 }, (_, index) => ({
-    windows: ServiceConfig.defaultPort(`preview-${index}`, "win32"),
-    linux: ServiceConfig.defaultPort(`preview-${index}`, "linux"),
-  }))
-  expect(ports.some((port) => port.linux >= 0x8000)).toBe(true)
-  expect(ports.every((port) => port.windows >= 10_000 && port.windows < 0x8000)).toBe(true)
-  expect(ports.filter((port) => port.linux < 0x8000 && port.windows !== port.linux)).toEqual([])
+test("managed service ports stay clear of opencode, OpenCodePlus and the ranges Windows and WSL reserve", () => {
+  const ports = ["latest", "dev", "local", ...Array.from({ length: 200 }, (_, index) => `preview-${index}`)].flatMap(
+    (channel) => (["linux", "darwin", "win32"] as const).map((platform) => ServiceConfig.defaultPort(channel, platform)),
+  )
+  // opencode uses 49374 and 49375 and hashes its other channels into 10000-59999; OpenCodePlus uses 40375.
+  expect(ports.filter((port) => port >= 10_000)).toEqual([])
+  // Below 10000 is also below the Linux, macOS and Windows ephemeral ranges and WSL's reserved block.
+  expect(ports.every((port) => port >= 3674 && port <= 3685)).toBe(true)
 })
 
 test("service disabled accepts only booleans without changing configuration on invalid input", async () => {
@@ -434,7 +431,7 @@ test("concurrent service processes elect one server", async () => {
       hostname: os.hostname(),
       urls: [info.url],
       // The server reports the canonical tmp directory; Windows os.tmpdir() can be an 8.3 short name.
-      paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "opencode")) },
+      paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "openforge")) },
       capabilities: { persistentPty: true },
     })
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })

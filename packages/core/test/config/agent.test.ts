@@ -435,6 +435,48 @@ permissions:
     }),
   )
 
+  it.live("merges an agent's sandbox settings from config documents and reads them from Markdown", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "agents"), { recursive: true })
+            // A V1 field next to `sandbox` still reads as V2, which keeps `sandbox`.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "tester.md"),
+              "---\ntools:\n  shell: true\nsandbox:\n  mode: off\n---\nRun the tests.",
+            )
+          })
+          const agents = yield* Agent.Service
+          const entries = [
+            new Document({
+              type: "document",
+              info: decode({ agents: { reviewer: { sandbox: { mode: "read", write: ["~/a"], required: true } } } }),
+            }),
+            new Document({
+              type: "document",
+              info: decode({ agents: { reviewer: { sandbox: { network: false, write: ["~/b"], deny_read: ["~/c"] } } } }),
+            }),
+            directoryEntry(tmp.path),
+          ]
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provide(Config.testLayer(entries)),
+          )
+
+          expect((yield* agents.get(Agent.ID.make("reviewer")))?.sandbox).toEqual({
+            mode: "read",
+            network: false,
+            write: ["~/a", "~/b"],
+            deny_read: ["~/c"],
+            required: true,
+          })
+          expect((yield* agents.get(Agent.ID.make("tester")))?.sandbox).toEqual({ mode: "off" })
+        }),
+      ),
+    ),
+  )
+
   it.live("loads legacy file-based agents from config directories", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) =>

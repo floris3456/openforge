@@ -9,6 +9,7 @@ import { Project } from "@opencode/core/project"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { WebSearch } from "@opencode/core/websearch"
+import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import { Effect, Stream } from "effect"
 
 type EventSource = ReturnType<Plugin.Context["event"]["subscribe"]>
@@ -510,6 +511,7 @@ function agentInfo(value: Agent.Info) {
       body: { ...value.request.body },
     },
     permissions: value.permissions.map((permission) => ({ ...permission })),
+    sandbox: value.sandbox && ConfigSandbox.merge(value.sandbox),
   }
 }
 

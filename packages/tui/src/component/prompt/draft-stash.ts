@@ -1,5 +1,5 @@
 import type { WidthMethod } from "@opentui/core"
-import { appendPrompt, type PromptInfo } from "../../prompt/history"
+import { appendPrompt, parsePromptInfo, type PromptInfo } from "../../prompt/history"
 import type { PromptRef } from "./index"
 
 // Holds one in-progress draft per tab across Prompt remounts. A draft is
@@ -17,6 +17,35 @@ export function takeDraft(sessionID: string | undefined) {
 
 export function saveDraft(sessionID: string | undefined, entry: DraftEntry) {
   byTab.set(sessionID, entry)
+}
+
+/** A tab's draft as it outlives the process: no `sessionID` for the home screen's composer. */
+export type CarriedDraft = { readonly sessionID?: string; readonly prompt: PromptInfo; readonly cursor: number | null }
+
+/**
+ * Every stashed draft, for this screen to carry over when it restarts on a new release. Composers stash what they
+ * hold when they close, so read this once the screen has closed.
+ */
+export function stashedDrafts(): CarriedDraft[] {
+  return Array.from(byTab, ([sessionID, entry]) => ({
+    ...(sessionID === undefined ? {} : { sessionID }),
+    prompt: entry.prompt,
+    // JSON has no Infinity, which means "at the end".
+    cursor: Number.isFinite(entry.cursor) ? entry.cursor : null,
+  })).filter((draft) => draft.prompt.text !== "")
+}
+
+/** Stashes drafts carried over from before a restart, for their composers to take when they mount. */
+export function stashDrafts(drafts: unknown) {
+  if (!Array.isArray(drafts)) return
+  for (const draft of drafts) {
+    if (!draft || typeof draft !== "object") continue
+    const sessionID = "sessionID" in draft && typeof draft.sessionID === "string" ? draft.sessionID : undefined
+    const prompt = "prompt" in draft ? parsePromptInfo(draft.prompt) : undefined
+    if (!prompt?.text) continue
+    const cursor = "cursor" in draft && typeof draft.cursor === "number" ? draft.cursor : Infinity
+    byTab.set(sessionID, { prompt, cursor })
+  }
 }
 
 const composers = new Map<string | undefined, PromptRef>()

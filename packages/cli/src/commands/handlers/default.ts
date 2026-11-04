@@ -1,7 +1,7 @@
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { Product } from "@opencode/schema/product"
-import { run } from "@opencode/tui"
+import { run, stashDrafts, stashedDrafts } from "@opencode/tui"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Config } from "../../config"
@@ -19,6 +19,7 @@ import { Service, type Endpoint } from "@opencode/client/effect/service"
 import { OpenCode } from "@opencode/client/promise"
 import { findSession } from "../../session-target"
 import { errorMessage } from "../../util/error"
+import { TuiDrafts } from "../../tui-drafts"
 
 export default Runtime.handler(Commands, (input) =>
   Effect.gen(function* () {
@@ -95,6 +96,9 @@ export default Runtime.handler(Commands, (input) =>
     const runFork = Effect.runForkWith(context)
     const runPromise = Effect.runPromiseWith(context)
     const service = server.service
+    // Half-typed prompts the TUI carried over when it restarted on this release.
+    const drafts = path.join(global.state, "drafts")
+    stashDrafts(yield* TuiDrafts.take(drafts, process.env))
     // Another process may have switched the release while this TUI was connected; the service then comes back
     // on the release `current` points at.
     const noticeSwitch = async (endpoint: Endpoint) => {
@@ -182,12 +186,27 @@ export default Runtime.handler(Commands, (input) =>
     ]
     // The new image replaces this process at once, so let upgrade work release its lock and temporary files first.
     yield* Scope.close(upgrades, Exit.void)
-    yield* Effect.logInfo("restarting the TUI on the release in use", { binary: releaseBinary, args })
-    yield* Effect.try(() => process.execve?.(releaseBinary, [releaseBinary, ...args], process.env)).pipe(
+    // The new release puts each half-typed prompt back in its composer. The composers stashed them as the TUI closed.
+    const carry = stashedDrafts()
+    const kept = yield* TuiDrafts.keep(drafts, carry).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not keep the half-typed prompts for the restart", { error }).pipe(
+          Effect.as(undefined),
+        ),
+      ),
+    )
+    const env = kept ? { ...process.env, [TuiDrafts.variable]: kept } : process.env
+    yield* Effect.logInfo("restarting the TUI on the release in use", {
+      binary: releaseBinary,
+      args,
+      drafts: carry.length,
+    })
+    yield* Effect.try(() => process.execve?.(releaseBinary, [releaseBinary, ...args], env)).pipe(
       Effect.catch((error) =>
         Effect.sync(() =>
           process.stderr.write(
-            `Could not restart on the new openforge (${errorMessage(error)}); run openforge again to get the new screens.\n`,
+            `Could not restart on the new openforge (${errorMessage(error)}); run openforge again to get the new screens.\n` +
+              (kept ? `Your half-typed prompts are kept in ${kept}.\n` : ""),
           ),
         ),
       ),

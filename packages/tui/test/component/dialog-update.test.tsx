@@ -85,8 +85,7 @@ test("upgrade progress replaces checking, says what the switch waits for and rep
 test("a finished switch says whether this screen restarts on its own", async () => {
   await using temporary = await tmpdir()
   const [state] = createSignal<UpdateState>({ type: "switched", version: "0.0.1" })
-  // "manual": this screen cannot restart itself; "held": it waits for the typed prompt.
-  const [restarts, setRestarts] = createSignal<"manual" | "held" | "now">("manual")
+  const [restarts, setRestarts] = createSignal(false)
   const app = await testRender(
     () => (
       <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path, home: temporary.path }}>
@@ -95,11 +94,7 @@ test("a finished switch says whether this screen restarts on its own", async () 
             <Keymap.Provider>
               <ToastProvider>
                 <DialogProvider>
-                  <DialogUpdate
-                    state={state}
-                    restart={() => {}}
-                    held={restarts() === "manual" ? undefined : () => restarts() === "held"}
-                  />
+                  <DialogUpdate state={state} restart={() => {}} restarts={restarts()} />
                 </DialogProvider>
               </ToastProvider>
             </Keymap.Provider>
@@ -113,10 +108,8 @@ test("a finished switch says whether this screen restarts on its own", async () 
     app.renderer.start()
     await app.waitForFrame((frame) => frame.includes("openforge 0.0.1 is running. Restart closes this screen"))
     expect(app.captureCharFrame().toLowerCase()).toContain("restart")
-    setRestarts("now")
+    setRestarts(true)
     await app.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.1; restarting"))
-    setRestarts("held")
-    await app.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.1; this screen restarts on it once"))
   } finally {
     app.renderer.destroy()
   }

@@ -1,6 +1,6 @@
 // openforge's upgrade in the TUI: the CLI process installs a release and switches the background service to it
 // while chats run (see packages/cli/src/upgrade). This screen shows how far that got and, once the service runs the
-// new release, restarts itself on it when the user is not in the middle of something.
+// new release, restarts itself on it once no other dialog is open, taking half-typed prompts along.
 import type { ContinuityWork } from "@opencode/client/promise"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
@@ -8,7 +8,6 @@ import { createSimpleContext } from "./helper"
 import { useData } from "./data"
 import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
-import { usePromptRef } from "./prompt"
 import { useRoute } from "./route"
 import { useDialog } from "../ui/dialog"
 import { useToast } from "../ui/toast"
@@ -86,7 +85,6 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     const dialog = useDialog()
     const toast = useToast()
     const route = useRoute()
-    const promptRef = usePromptRef()
     const data = useData()
     const title: TitleOf = (sessionID) => data.session.get(sessionID)?.title || undefined
     const [state, setState] = createSignal<UpdateState>()
@@ -112,12 +110,9 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
         })
     }
 
-    // Restart only between tasks: a typed prompt or another open dialog would be lost. The upgrade dialog is not.
-    const typed = () => {
-      const prompt = promptRef.current?.current
-      return !!prompt && (prompt.text.trim() !== "" || !!prompt.files?.length || prompt.pasted.length > 0)
-    }
-    const settled = () => (dialog.stack.length === 0 || dialog.key === updateDialog) && !typed()
+    // Restart only while no other dialog is open, as it would be lost; the upgrade dialog is not. Half-typed prompts
+    // are carried over to the new release (see default.ts in the CLI).
+    const settled = () => dialog.stack.length === 0 || dialog.key === updateDialog
 
     const restart = () => {
       const relaunch = props.updater?.relaunch
@@ -133,7 +128,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       setPending(false)
       restart()
     }
-    // Restart after a pause: emptying the prompt or closing a dialog happens through keys still being handled.
+    // Restart after a pause in typing, so no key is lost, and after a dialog closed through keys still being handled.
     let quiet: ReturnType<typeof setTimeout> | undefined
     const schedule = () => {
       clearTimeout(quiet)
@@ -146,7 +141,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       if (current?.type !== "switched" || !props.updater?.relaunch) return
       setPending(true)
     })
-    // Tracks the dialog stack and the prompt's contents, so emptying either schedules the restart.
+    // Tracks the dialog stack, so closing the last dialog schedules the restart.
     createEffect(() => {
       if (pending() && settled()) schedule()
     })
@@ -170,7 +165,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
             start={running || active === "switched" ? undefined : () => updater.upgrade()}
             state={state}
             restart={restart}
-            held={updater.relaunch ? typed : undefined}
+            restarts={updater.relaunch !== undefined}
             title={title}
           />
         ),

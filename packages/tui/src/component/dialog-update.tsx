@@ -18,8 +18,8 @@ export function DialogUpdate(props: {
   start?: () => Promise<UpdateOutcome>
   state: () => UpdateState | undefined
   restart: () => void
-  /** Present when this screen restarts on its own once switched: whether a typed prompt holds that back. */
-  held?: () => boolean
+  /** Whether this screen restarts on the new release on its own once switched. */
+  restarts?: boolean
   /** Names the chats a switch waits for. */
   title?: TitleOf
 }) {
@@ -137,16 +137,9 @@ export function DialogUpdate(props: {
                 </Spinner>
               )}
             </Match>
-            <Match when={current.type === "switched" && props.held && !props.held() && current}>
+            <Match when={current.type === "switched" && props.restarts && current}>
               {(state) => (
                 <Spinner shimmer={theme.text.base}>{`Switched to openforge ${state().version}; restarting…`}</Spinner>
-              )}
-            </Match>
-            <Match when={current.type === "switched" && props.held && current}>
-              {(state) => (
-                <text fg={theme.text.muted} wrapMode="word">
-                  {`Switched to openforge ${state().version}; this screen restarts on it once the prompt is empty.`}
-                </text>
               )}
             </Match>
             <Match when={current.type === "switched" && current}>

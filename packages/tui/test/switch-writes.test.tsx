@@ -250,3 +250,33 @@ test("a screen told the switch finished restarts only once its waiting writes we
   expect(fake.taken("/shell")).toHaveLength(1)
   expect(relaunches).toEqual([fake.sessionID])
 }, 15_000)
+
+test("the switch notice leaves the first lines of a chat visible", async () => {
+  const fake = chat({ transcript: true })
+  fake.state.up = true
+  await using setup = await createAppFixture({
+    width: 100,
+    height: 30,
+    fetch: fake.fetch,
+    args: { sessionID: fake.sessionID },
+    config: { animations: false, tabs: { enabled: false } },
+  })
+  await setup.ready
+  await shows(setup, (frame) => frame.includes("The first line of this chat") && frame.includes("Here is the plan."))
+  const before = setup.captureCharFrame().split("\n")
+  const first = before.findIndex((line) => line.includes("The first line of this chat"))
+  setup.events.emit({
+    id: "evt_pausing",
+    created: Date.now(),
+    type: "service.pausing",
+    data: { deadline: Date.now() + 120_000, waiting: [{ sessionID: fake.sessionID, kind: "tool", name: "webfetch" }] },
+  } as OpenCodeEvent)
+  await shows(setup, (frame) => frame.includes('waiting for webfetch in "Switch writes"'))
+  const lines = setup.captureCharFrame().split("\n")
+  const notice = lines.findIndex((line) => line.includes("Switching to a new openforge release"))
+  const moved = lines.findIndex((line) => line.includes("The first line of this chat"))
+  // The transcript makes room below the notice instead of running under it.
+  expect(moved).toBeGreaterThan(notice)
+  expect(moved).toBeGreaterThanOrEqual(first)
+  expect(lines.join("\n")).toContain("Here is the plan.")
+}, 15_000)

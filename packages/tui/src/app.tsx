@@ -1471,6 +1471,10 @@ function App() {
               <Show when={tabsVisible() && !tabsVertical()}>
                 <SessionTabs />
               </Show>
+              {/* Above the screen's content, so it never covers the start of a transcript. */}
+              <Show when={!switchOverdue() && !updater.dialogOpen() && switching()}>
+                {(message) => <SwitchNotice message={message()} />}
+              </Show>
               <Switch>
                 <Match when={route.data.type === "home"}>
                   <Home />
@@ -1509,9 +1513,6 @@ function App() {
       </Show>
       <Show when={showReconnecting() && (!inSwitch() || switchOverdue())}>
         <Reconnecting managed={client.restart !== undefined} />
-      </Show>
-      <Show when={!switchOverdue() && !updater.dialogOpen() && switching()}>
-        {(message) => <SwitchNotice message={message()} />}
       </Show>
       <MigrationOverlay />
       <Toast />

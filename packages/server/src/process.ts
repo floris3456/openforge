@@ -2,6 +2,7 @@ export * as ServerProcess from "./process"
 
 import { NodeHttpServer } from "@effect/platform-node"
 import { Bus } from "@opencode/core/bus"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Schedule } from "@opencode/core/schedule"
 import { InstallationEvent } from "@opencode/schema/installation-event"
@@ -67,7 +68,16 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   }
   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
   const application = yield* Ref.make(Option.none<App>())
-  const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
+  const writable = yield* Ref.make<() => boolean>(() => true)
+  const app = dispatch(
+    password,
+    status,
+    application,
+    writable,
+    options.app?.version ?? "unknown",
+    urls,
+    Global.Path.tmp,
+  )
   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
   yield* bound.http
     .serve(
@@ -106,13 +116,19 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       ).pipe(Layer.provideMerge(NodeHttpServer.layerHttpServices)),
       applicationScope,
     )
+    const continuity = Context.get(context, SessionContinuity.Service)
     if (lifecycle) {
-      yield* installRestartContinuity(Context.get(context, SessionRestart.Service)).pipe(
+      yield* installRestartContinuity(Context.get(context, SessionRestart.Service), continuity).pipe(
         Effect.provideService(Scope.Scope, applicationScope),
       )
     }
     // Schedules fire from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
-    yield* Effect.forkIn(Context.get(context, Schedule.Service).run, applicationScope)
+    // A paused start fires nothing until it is resumed.
+    yield* Effect.forkIn(
+      continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Schedule.Service).run)),
+      applicationScope,
+    )
+    yield* Ref.set(writable, () => !continuity.refusesWrites())
     yield* Ref.set(application, Option.some(Context.get(context, HttpRouter.HttpRouter).asHttpEffect()))
     yield* status.ready
     const bus = Context.get(context, Bus.Service)
@@ -178,6 +194,7 @@ function dispatch(
   password: string,
   status: Status.Interface,
   application: Ref.Ref<Option.Option<App>>,
+  writable: Ref.Ref<() => boolean>,
   version: string,
   urls: () => ReadonlyArray<string>,
   tmp: string,
@@ -200,9 +217,22 @@ function dispatch(
       !(yield* authorizedRequest(request, auth))
     )
       return unauthorizedResponse(request)
+    if (ready && !READS.has(request.method) && !url.pathname.startsWith(SERVICE_PATH) && !(yield* Ref.get(writable))())
+      return switching()
     if (ready) return yield* app.value
     return unavailable(state)
   })
+}
+
+const READS = new Set(["GET", "HEAD", "OPTIONS"])
+const SERVICE_PATH = "/api/experimental/service/"
+
+/** A paused start answers reads but refuses writes, so a rollback to the previous release cannot lose one. */
+function switching() {
+  return HttpServerResponse.jsonUnsafe(
+    { code: "service_switching", message: "switching, try again in 1 s" },
+    { status: 503, headers: { "retry-after": "1" } },
+  )
 }
 
 const infoResponse = Effect.fnUntraced(function* (
@@ -242,6 +272,10 @@ function unavailable(status: Status.State) {
  * never released. Claims are written when execution starts (see SessionExecution), so recovery covers
  * graceful restarts and unclean deaths alike — no shutdown hook participates.
  */
-const installRestartContinuity = Effect.fnUntraced(function* (restart: SessionRestart.Interface) {
-  yield* Effect.forkScoped(restart.resumeSuspendedSessions)
+const installRestartContinuity = Effect.fnUntraced(function* (
+  restart: SessionRestart.Interface,
+  continuity: SessionContinuity.Interface,
+) {
+  // A paused start resumes nothing until it is resumed.
+  yield* Effect.forkScoped(continuity.awaitOpen.pipe(Effect.andThen(restart.resumeSuspendedSessions)))
 })

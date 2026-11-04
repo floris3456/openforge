@@ -76,9 +76,15 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission", 
       .handle(
         "session.permission.reply",
         Effect.fn(function* (ctx) {
-          const owned = yield* requireOwnedRequest(ctx.params.sessionID, ctx.params.requestID)
-          yield* owned.permission
-            .reply({ requestID: ctx.params.requestID, reply: ctx.payload.decision, message: ctx.payload.message })
+          // Ownership is checked by the reply itself, which also accepts a resent answer.
+          const permission = yield* Permission.Service
+          yield* permission
+            .reply({
+              requestID: ctx.params.requestID,
+              reply: ctx.payload.decision,
+              message: ctx.payload.message,
+              sessionID: ctx.params.sessionID,
+            })
             .pipe(Effect.catchTag("Permission.NotFoundError", () => missingRequest(ctx.params.requestID)))
           return HttpApiSchema.NoContent.make()
         }),

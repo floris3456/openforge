@@ -6,6 +6,7 @@ import { Node } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Bus } from "@opencode/core/bus"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { EventLogger } from "@opencode/core/event-logger"
 import { FileSystemSearch } from "@opencode/core/filesystem/search"
 import { Credential } from "@opencode/core/credential"
@@ -80,6 +81,7 @@ const applicationServiceNodes = [
   LocationServiceMap.node,
   LocationActivity.node,
   SessionRestart.node,
+  SessionContinuity.node,
   Schedule.node,
   Workspace.node,
   FileWatch.node,
@@ -125,6 +127,7 @@ function makeRoutes<AuthError, AuthServices>(
     Database.node.replace(Database.configured(options.database)),
     PersistentPty.node.replace(PersistentPty.configured(options.pty)),
     Bus.node.replace(Bus.configured({ persist: options.events?.persist })),
+    SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
     App.node.replace(App.configured(options.app)),
     ModelsDev.node.replace(ModelsDev.configured(options.models)),
     Watcher.node.replace(Watcher.configured({ enabled: options.fs?.filewatcher })),

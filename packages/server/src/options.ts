@@ -16,6 +16,8 @@ export const ServerOptions = Schema.Struct({
   password: Schema.optional(Schema.String),
   cors: Schema.optional(Schema.Array(Schema.String)),
   simulation: Schema.optional(Schema.Boolean),
+  /** Start with model calls and tools held and writes refused, until `POST /api/experimental/service/resume`. */
+  paused: Schema.optional(Schema.Boolean),
   database: Schema.optional(Database.Options),
   pty: Schema.optional(PersistentPty.Options),
   events: Schema.optional(

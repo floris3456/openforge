@@ -66,7 +66,7 @@ export const machine = Effect.gen(function* () {
       App.node.replace(App.configured({ version: options.version ?? "test" })),
       ShellRunner.node.replace(ShellRunner.configured({ launch: options.separate ? process_ : hosted })),
     ])
-  return { tmp: tmp.path, project, ref, runners, global, service, state: root("state") }
+  return { tmp: tmp.path, project, ref, runners, global, service, state: root("state"), launch: hosted }
 })
 
 export function alive(pid: number) {

@@ -6,7 +6,8 @@ import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import { Sandbox } from "@opencode/sandbox"
 import type { Tool } from "@opencode/schema/tool"
-import { Deferred, Effect, Schema, Scope } from "effect"
+import { Deferred, Effect, Option, Schema, Scope } from "effect"
+import { SessionContinuity } from "../../continuity.js"
 import { Environment } from "../../environment/index.js"
 import { Job } from "../../job.js"
 import { FileAccess } from "../../file-access.js"
@@ -66,6 +67,10 @@ export const Input = Schema.Struct({
   }),
 })
 
+/** What a foreground call stores while it waits for its command, so the next process waits for the same one. */
+const Attached = Schema.Struct({ shellID: Shell.ID, timeout: NonNegativeInt })
+const decodeAttached = Schema.decodeUnknownOption(Attached)
+
 const StructuredOutput = Schema.Struct({
   exit: Schema.optionalKey(Schema.Number),
   signal: Schema.optionalKey(Schema.String),
@@ -123,6 +128,7 @@ export const Plugin = {
     const shellSelect = yield* ShellSelect.Service
     const compatibleShell = shellSelect.resolve({ priority: "compat" })
     const permission = yield* Permission.Service
+    const continuity = yield* SessionContinuity.Service
 
     const prepare = Effect.fn("ShellTool.prepare")(function* (
       invocation: ShellCreateBefore,
@@ -218,29 +224,33 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              // A call a restart continues finds the command it started still running, or finished, in the runner.
+              const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
               const timeout = input.background === true ? (input.timeout ?? 0) : (input.timeout ?? DEFAULT_TIMEOUT_MS)
-              let finalTimeout = timeout
-              const info = yield* shell.create(
-                {
-                  command: input.command,
-                  cwd: input.workdir,
-                  timeout,
-                  shell: yield* compatibleShell,
-                  metadata: {
-                    sessionID: context.sessionID,
-                    agent: context.agent,
-                    ...(input.sandbox === false ? { sandbox: false } : {}),
-                  },
-                },
-                (invocation) =>
-                  Effect.gen(function* () {
-                    invocation.env.AGENT = "1"
-                    invocation.env.OPENCODE = "1"
-                    invocation.env.AI_AGENT ||= "opencode"
-                    invocation.env.OPENCODE_SESSION_ID = context.sessionID
-                    finalTimeout = yield* prepare(invocation, context, input.sandbox === false)
-                  }),
-              )
+              let finalTimeout = attached?.timeout ?? timeout
+              const info = attached
+                ? yield* shell.get(attached.shellID)
+                : yield* shell.create(
+                    {
+                      command: input.command,
+                      cwd: input.workdir,
+                      timeout,
+                      shell: yield* compatibleShell,
+                      metadata: {
+                        sessionID: context.sessionID,
+                        agent: context.agent,
+                        ...(input.sandbox === false ? { sandbox: false } : {}),
+                      },
+                    },
+                    (invocation) =>
+                      Effect.gen(function* () {
+                        invocation.env.AGENT = "1"
+                        invocation.env.OPENCODE = "1"
+                        invocation.env.AI_AGENT ||= "opencode"
+                        invocation.env.OPENCODE_SESSION_ID = context.sessionID
+                        finalTimeout = yield* prepare(invocation, context, input.sandbox === false)
+                      }),
+                  )
               yield* context.progress({ shellID: info.id })
 
               const settled = yield* Deferred.make<Output>()
@@ -283,9 +293,28 @@ export const Plugin = {
                 return backgroundResult(info.id, info.file)
               }
 
-              const result = yield* jobs
-                .block({ id: job.id, sessionID: context.sessionID })
-                .pipe(Effect.onInterrupt(() => jobs.cancel(job.id).pipe(Effect.ignore)))
+              // The wait survives a stop: the command keeps running in the runner, and the next process waits for it
+              // again. A stop ends the job with its command still running; anything else that interrupts the wait
+              // ends the command.
+              const result = yield* continuity
+                .wait(
+                  context.id,
+                  jobs
+                    .block({ id: job.id, sessionID: context.sessionID })
+                    .pipe(
+                      Effect.flatMap((result) =>
+                        result?.type === "finished" && result.info.status === "running"
+                          ? Effect.interrupt
+                          : Effect.succeed(result),
+                      ),
+                    ),
+                  { shellID: info.id, timeout: finalTimeout },
+                )
+                .pipe(
+                  Effect.onInterrupt(() =>
+                    continuity.stopping() ? Effect.void : jobs.cancel(job.id).pipe(Effect.ignore),
+                  ),
+                )
               if (result?.type === "backgrounded") {
                 yield* shell.timeout(info.id, 0)
                 yield* notifyWhenDone(context.sessionID, job.id, info.id, info.command, settled)

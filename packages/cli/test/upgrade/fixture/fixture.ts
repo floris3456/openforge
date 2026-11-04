@@ -18,13 +18,19 @@ export type Serve = "ok" | "crash" | "wrong-version" | "unreadable"
 const program = path.join(import.meta.dir, "fake-openforge.ts")
 
 /** Writes a small `openforge` that reports `version` and runs a fake service (see fake-openforge.ts). */
-export async function fakeBinary(file: string, version: string, options: { serve?: Serve; print?: string } = {}) {
+export async function fakeBinary(
+  file: string,
+  version: string,
+  options: { serve?: Serve; print?: string; runs?: string } = {},
+) {
   await fs.mkdir(path.dirname(file), { recursive: true })
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
   await fs.writeFile(
     file,
     [
       "#!/bin/sh",
+      // Where it ran from, and with what: `<path> --version`.
+      ...(options.runs === undefined ? [] : [`echo "$0 $*" >> ${quote(options.runs)}`]),
       `export FAKE_VERSION=${quote(version)}`,
       `export FAKE_SERVE=${quote(options.serve ?? "ok")}`,
       ...(options.print === undefined ? [] : [`export FAKE_PRINT=${quote(options.print)}`]),
@@ -124,6 +130,7 @@ export async function publish(
   options: {
     readonly serve?: Serve
     readonly print?: string
+    readonly runs?: string
     readonly extra?: boolean
     readonly sums?: (sha256: string) => string
     readonly manifestSha?: (sha256: string) => string

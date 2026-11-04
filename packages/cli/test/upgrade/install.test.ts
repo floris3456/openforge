@@ -92,6 +92,24 @@ describe("install", () => {
     }),
   )
 
+  // macOS checks a binary on its first run from a path, again after it moved; a switch then starts it from where it
+  // is kept, while the chats are held.
+  it.live("runs the new binary once from where it is kept, after checking it where it was unpacked", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const runs = path.join(directory, "runs.log")
+      const server = yield* releaseServer({
+        "0.0.2": yield* Effect.promise(() => publish(directory, "0.0.2", { runs })),
+      })
+      const binary = yield* install(directory, server.url, "0.0.2")
+      const lines = (yield* Effect.promise(() => fs.readFile(runs, "utf8"))).split("\n").filter(Boolean)
+      expect(lines).toHaveLength(2)
+      expect(lines[0]).toContain(path.join(path.dirname(path.dirname(binary)), ".install-"))
+      expect(lines[0]).toEndWith(" --version")
+      expect(lines[1]).toBe(`${binary} --version`)
+    }),
+  )
+
   it.live("refuses an archive whose SHA-256 differs from release.json and SHA256SUMS", () =>
     Effect.gen(function* () {
       const directory = yield* root

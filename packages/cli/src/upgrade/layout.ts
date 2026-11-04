@@ -143,6 +143,9 @@ export const install = Effect.fn("upgrade.layout.install")(function* (input: {
         : new UpgradeError({ reason: `Could not install openforge ${version}: ${cause.message}` }),
     ),
   )
+  // macOS checks a binary the first time it runs from a path, again once it has moved: about 1.5 s for openforge.
+  // Running it once from where it stays does that now, not while a switch holds the chats for its service to start.
+  yield* verify(target, version)
   return target
 })
 

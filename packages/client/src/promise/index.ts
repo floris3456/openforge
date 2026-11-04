@@ -4,11 +4,15 @@ export * from "./generated/index.js"
 export { OpenCode } from "./client.js"
 export { mediaHashFromUri, withMediaRefs, type MediaRequestOptions } from "./media.js"
 export {
+  createResender,
   isResendTimeoutError,
+  refused,
+  repeats,
   resend,
   resendable,
   ResendTimeoutError,
   unreachable,
+  type Resender,
   type ResendOptions,
 } from "../resend.js"
 export type {

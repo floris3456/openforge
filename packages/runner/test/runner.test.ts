@@ -274,6 +274,25 @@ describe("runner", () => {
     expect(fs.readdirSync(directory.path).filter((name) => name !== "runner")).toEqual([])
   })
 
+  test("a command whose leader exited ends a moment later, even while its background process holds the pipes", async () => {
+    await using directory = await folder()
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await run(
+      Effect.gen(function* () {
+        const connection = yield* RunnerClient.connect(runner.directory)
+        const input = command(directory.path, "sleep 30 & printf leader")
+        const started = yield* connection.start(input)
+        const begun = Date.now()
+        const events = yield* collect(connection, input.id)
+        expect(Date.now() - begun).toBeLessThan(5_000)
+        expect(exitOf(events)).toMatchObject({ status: "exited", code: 0, size: 6 })
+        expect(text(events)).toBe("leader")
+        process.kill(-started.command.pgid, "SIGKILL")
+      }),
+    )
+    await runner.closed
+  })
+
   test("removing a command stops it and deletes its files", async () => {
     await using directory = await folder()
     await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
@@ -347,7 +366,7 @@ describe("runner output", () => {
     await runner.closed
   })
 
-  test("a command printing about 1 GB leaves an 8 MiB file", async () => {
+  test("a command printing about 1 GB leaves an 8 MiB file, and the runner's memory stays flat meanwhile", async () => {
     await using directory = await folder()
     await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
     await run(
@@ -355,8 +374,15 @@ describe("runner output", () => {
         const connection = yield* RunnerClient.connect(runner.directory)
         const bytes = 1_000_000_000
         const input = command(directory.path, `printf START; head -c ${bytes} /dev/zero | tr '\\0' x; printf END`)
+        Bun.gc(true)
+        const before = process.memoryUsage.rss()
+        let most = before
+        const sampler = setInterval(() => (most = Math.max(most, process.memoryUsage.rss())), 20)
         yield* connection.start(input)
         const exit = exitOf(yield* collect(connection, input.id, 0, false))
+        clearInterval(sampler)
+        // Each chunk is freed once it is in the file, so 1 GB passes through a few MB (left to the collector: over 20 MB).
+        expect((most - before) / 1024 / 1024).toBeLessThan(16)
         expect(exit).toMatchObject({ status: "exited", code: 0, size: bytes + 8 })
         const size = fs.statSync(input.output).size
         expect(size).toBeLessThanOrEqual(RunnerOutput.LIMIT)

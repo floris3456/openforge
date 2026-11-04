@@ -1,6 +1,5 @@
 export * as RunnerServer from "./server.js"
 
-import { spawn, type ChildProcess } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import net from "node:net"
@@ -44,16 +43,15 @@ const PACE = 50
 const DRAIN = 1_000
 // Ended commands stay listed while the runner lives; their exit files outlast it.
 const ENDED_LIMIT = 256
-// Each chunk read from a pipe is garbage at once, and so is an ended command's process and pipes, yet a collection
-// waits for heap pressure that a flood of output or of short commands outruns. One runs after this much of either,
-// so the runner's memory stays flat (1 GB: +25 MB instead of +140 MB).
-const COLLECT = 16 * 1024 * 1024
-// What an ended command counts as (it leaves about 40 KB).
-const ENDED_GARBAGE = 64 * 1024
+// An ended command leaves its process, its pipes and its requests behind as garbage, which the collector leaves
+// lying until heap pressure. One collection (about 1 ms) after every this many keeps a stream of short commands from
+// growing the runner (5000 commands: 62 instead of 73 MB on Linux, 74 instead of 83 MB on macOS).
+const COLLECT_ENDED = 64
 
 type Entry = {
   readonly id: string
-  readonly start: RunnerProtocol.Start
+  readonly output: string
+  readonly meta: RunnerProtocol.Start["meta"]
   readonly pid: number
   readonly started: number
   readonly writer: RunnerOutput.Writer
@@ -103,7 +101,7 @@ export async function serve(options: Options): Promise<Runner> {
 
   const entries = new Map<string, Entry>()
   const connections = new Set<Connection>()
-  let unswept = 0
+  let ended = 0
   let closing = false
   let resolveClosed = () => {}
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve))
@@ -206,11 +204,13 @@ export async function serve(options: Options): Promise<Runner> {
       rest()
     }
     let writer: RunnerOutput.Writer | undefined
-    let child: ChildProcess
+    let child: Bun.Subprocess<"ignore", "pipe", "pipe">
     try {
       fs.mkdirSync(path.dirname(input.output), { recursive: true })
       writer = new RunnerOutput.Writer(input.output, options.bounds)
-      child = spawn(input.argv[0], input.argv.slice(1), {
+      // Not node:child_process: in Bun it backs every chunk read from a pipe with a fresh 256 KiB buffer, and an
+      // ended command leaves several times the garbage.
+      child = Bun.spawn([...input.argv], {
         cwd: input.cwd,
         env: input.env,
         detached: true,
@@ -220,62 +220,53 @@ export async function serve(options: Options): Promise<Runner> {
       return failed(cause)
     }
     const output = writer
-    child.once("error", (cause) => {
-      if (child.pid === undefined) failed(cause)
-    })
-    child.once("spawn", () => {
-      const pid = child.pid
-      if (pid === undefined) return failed(new Error("no pid"))
-      const entry: Entry = {
-        id: input.id,
-        start: input,
-        pid,
-        started: Date.now(),
-        writer: output,
-        watches: new Set(),
-        deadline: null,
-        removed: false,
-        ended: false,
+    const entry: Entry = {
+      id: input.id,
+      output: input.output,
+      meta: input.meta,
+      pid: child.pid,
+      started: Date.now(),
+      writer: output,
+      watches: new Set(),
+      deadline: null,
+      removed: false,
+      ended: false,
+    }
+    entries.set(input.id, entry)
+    arm(entry, input.deadline)
+    const append = (chunk: Uint8Array) => {
+      if (entry.ended) return
+      // A full disk loses output, not the runner.
+      try {
+        output.append(chunk)
+      } catch {}
+      // The chunk is in the file now. Detaching its buffer frees it at once; left to the collector, a flood of output
+      // piles up tens of MB of buffers before a collection runs. Only a buffer the chunk has to itself.
+      if (chunk.buffer instanceof ArrayBuffer && chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength)
+        chunk.buffer.transfer(0)
+      entry.watches.forEach((watch) => watch.output && !watch.paced && pump(watch))
+    }
+    const readers = [child.stdout.getReader(), child.stderr.getReader()]
+    const drained = readers.map(async (reader) => {
+      while (true) {
+        const next = await reader.read().catch(() => ({ done: true as const, value: undefined }))
+        if (next.done) return
+        append(next.value)
       }
-      entries.set(input.id, entry)
-      arm(entry, input.deadline)
-      const append = (chunk: Buffer) => {
-        if (entry.ended) return
-        // A full disk loses output, not the runner.
-        try {
-          output.append(chunk)
-        } catch {}
-        sweep(chunk.length)
-        entry.watches.forEach((watch) => watch.output && !watch.paced && pump(watch))
-      }
-      child.stdout?.on("data", append)
-      child.stderr?.on("data", append)
-      let status: { code: number | null; signal: NodeJS.Signals | null } | undefined
-      let drain: ReturnType<typeof setTimeout> | undefined
-      child.once("exit", (code, signal) => {
-        status = { code, signal }
-        clearTimeout(entry.deadlineTimer)
-        // Pipes still held by the group's other processes are closed after a moment, so the command still ends.
-        drain = setTimeout(() => {
-          child.stdout?.destroy()
-          child.stderr?.destroy()
-        }, DRAIN)
-        drain.unref()
-      })
-      child.once("close", () => {
-        clearTimeout(drain)
-        end(entry, status ?? { code: child.exitCode, signal: child.signalCode })
-        sweep(ENDED_GARBAGE)
-      })
-      send(connection, { id, type: "started", command: describe(entry), existing: false })
     })
-  }
-
-  function sweep(garbage: number) {
-    unswept += garbage
-    if (unswept < COLLECT) return
-    unswept = 0
-    Bun.gc(true)
+    let drain: ReturnType<typeof setTimeout> | undefined
+    void child.exited.then(() => {
+      clearTimeout(entry.deadlineTimer)
+      // Pipes still held by the group's other processes are closed after a moment, so the command still ends.
+      drain = setTimeout(() => readers.forEach((reader) => void reader.cancel().catch(() => {})), DRAIN)
+      drain.unref()
+    })
+    void Promise.all([child.exited, ...drained]).then(() => {
+      clearTimeout(drain)
+      end(entry, { code: child.exitCode, signal: child.signalCode === null ? null : String(child.signalCode) })
+      if (++ended % COLLECT_ENDED === 0) Bun.gc(true)
+    })
+    send(connection, { id, type: "started", command: describe(entry), existing: false })
   }
 
   function arm(entry: Entry, deadline: number | null) {
@@ -300,7 +291,7 @@ export async function serve(options: Options): Promise<Runner> {
     entry.killTimer.unref()
   }
 
-  function end(entry: Entry, status: { code: number | null; signal: NodeJS.Signals | null }) {
+  function end(entry: Entry, status: { code: number | null; signal: string | null }) {
     clearTimeout(entry.deadlineTimer)
     entry.ended = true
     const layout = finalize(entry.writer)
@@ -315,12 +306,12 @@ export async function serve(options: Options): Promise<Runner> {
       size: entry.writer.size,
       lines: entry.writer.lines,
       ...(layout ? { layout } : {}),
-      meta: entry.start.meta,
+      meta: entry.meta,
     }
     // Told only once its exit file is written, so whoever hears of the end can rely on the file.
     const written = entry.removed
       ? Promise.resolve()
-      : RunnerOutput.writeAtomic(RunnerPaths.exit(entry.start.output), JSON.stringify(exit))
+      : RunnerOutput.writeAtomic(RunnerPaths.exit(entry.output), JSON.stringify(exit))
     void written
       .catch(() => {})
       .then(() => {
@@ -338,8 +329,8 @@ export async function serve(options: Options): Promise<Runner> {
 
   function discard(entry: Entry) {
     entry.writer.close()
-    fs.rmSync(entry.start.output, { force: true })
-    fs.rmSync(RunnerPaths.exit(entry.start.output), { force: true })
+    fs.rmSync(entry.output, { force: true })
+    fs.rmSync(RunnerPaths.exit(entry.output), { force: true })
   }
 
   function watch(connection: Connection, request: Extract<RunnerProtocol.Request, { op: "watch" }>, entry: Entry) {
@@ -402,9 +393,9 @@ export async function serve(options: Options): Promise<Runner> {
       pgid: entry.pid,
       started: entry.started,
       deadline: entry.deadline,
-      output: entry.start.output,
+      output: entry.output,
       size: entry.writer.size,
-      meta: entry.start.meta,
+      meta: entry.meta,
       ...(entry.removed ? { removed: true } : {}),
       ...(entry.exit ? { exit: entry.exit } : {}),
     }

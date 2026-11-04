@@ -1,0 +1,71 @@
+# Gitleaks rules for the pre-push secret scan (script/secret-scan.sh).
+# Targets Gitleaks v8.28.0; the plural allowlist tables need v8.25.0 or newer.
+# A finding that is not a secret goes in .gitleaksignore by its fingerprint, or gets a
+# `gitleaks:allow` comment on its line. Never weaken a rule to get a push through.
+
+title = "OpenForge"
+minVersion = "v8.28.0"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "forge-anthropic-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{8,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "forge-openai-style-key"
+description = "OpenAI-style secret key (sk- followed by 20+ base62 characters)"
+regex = '''\bsk-[A-Za-z0-9]{20,}'''
+keywords = ["sk-"]
+
+[[rules]]
+id = "forge-github-token"
+description = "GitHub personal access, OAuth, user-to-server or server-to-server token"
+regex = '''\b(?:ghp|gho|ghu|ghs)_[A-Za-z0-9]{16,}'''
+keywords = ["ghp_", "gho_", "ghu_", "ghs_"]
+
+[[rules]]
+id = "forge-github-pat"
+description = "GitHub fine-grained personal access token"
+regex = '''\bgithub_pat_[A-Za-z0-9_]{20,}'''
+keywords = ["github_pat_"]
+
+[[rules]]
+id = "forge-private-key-block"
+description = "PEM private key block"
+regex = '''-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----'''
+keywords = ["private key"]
+
+[[rules]]
+id = "forge-high-entropy-assignment"
+description = "Credential assignment with a 20+ character high-entropy value"
+regex = '''(?i)(api[_-]?key|apikey|token|secret|password)["']?\s*[:=]\s*["'`]?([A-Za-z0-9+/=_.-]{20,})'''
+secretGroup = 2
+entropy = 3.5
+keywords = ["api_key", "api-key", "apikey", "token", "secret", "password"]
+
+  [[rules.allowlists]]
+  description = "environment indirection and obvious placeholders"
+  condition = "OR"
+  regexes = [
+    '''^\{env:[A-Za-z0-9_]+\}$''',
+    '''^\$\{?[A-Za-z0-9_]+\}?$''',
+    '''^<[^>]+>$''',
+    '''^[a-zA-Z_.-]+$''',
+  ]
+
+[[rules]]
+id = "forge-credential-file"
+description = "Credential file committed by name"
+path = '''(?i)(?:^|/)(?:\.env(?:\.[^/]+)?|[^/]+\.(?:key|pem|p12|pfx)|id_rsa|id_ed25519|\.netrc|auth\.json|credentials[^/]*\.db)$'''
+
+  [[rules.allowlists]]
+  description = "templates are documentation examples"
+  paths = ['''(?:^|/)\.env\.example$''']
+
+[[allowlists]]
+description = "this file defines the patterns"
+paths = ['''^\.gitleaks\.toml$''']

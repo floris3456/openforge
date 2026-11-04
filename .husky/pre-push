@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+# OpenForge: secret scan of the pushed commits first; it needs git's pre-push lines on stdin.
+sh script/secret-scan.sh
 # Check if bun version matches package.json
 # keep in sync with packages/script/src/index.ts semver qualifier
 bun -e '

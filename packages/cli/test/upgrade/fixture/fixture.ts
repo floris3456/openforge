@@ -146,6 +146,7 @@ export const releaseServer = Effect.fnUntraced(function* (
   latest?: string,
 ) {
   const requests: string[] = []
+  const state = { latest }
   const server = yield* Effect.acquireRelease(
     Effect.sync(() =>
       Bun.serve({
@@ -156,8 +157,8 @@ export const releaseServer = Effect.fnUntraced(function* (
           requests.push(pathname)
           const match =
             pathname.match(/^\/releases\/download\/v([^/]+)\/([^/]+)$/) ??
-            (latest ? pathname.match(/^\/releases\/latest\/download\/([^/]+)$/) : null)
-          const version = match?.length === 3 ? match[1] : latest
+            (state.latest ? pathname.match(/^\/releases\/latest\/download\/([^/]+)$/) : null)
+          const version = match?.length === 3 ? match[1] : state.latest
           const name = match?.at(-1)
           const body = version && name ? releases[version]?.[name] : undefined
           if (body === undefined) return new Response("not found", { status: 404 })
@@ -167,5 +168,12 @@ export const releaseServer = Effect.fnUntraced(function* (
     ),
     (server) => Effect.promise(() => server.stop(true)),
   )
-  return { url: `http://127.0.0.1:${server.port}/releases`, requests }
+  return {
+    url: `http://127.0.0.1:${server.port}/releases`,
+    requests,
+    /** Marks another release as GitHub's Latest. */
+    latest: (version: string) => {
+      state.latest = version
+    },
+  }
 })

@@ -1,0 +1,280 @@
+import { NodeServices } from "@effect/platform-node"
+import { Service } from "@opencode/client/effect/service"
+import { describe, expect, test } from "bun:test"
+import { Effect } from "effect"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { testEffect } from "../../../core/test/lib/effect"
+import { ReleaseLayout } from "../../src/upgrade/layout"
+import { ReleaseSwitch } from "../../src/upgrade/switch"
+import { Updater } from "../../src/upgrade/updater"
+import {
+  keep,
+  layer,
+  migrations,
+  paths,
+  publish,
+  releaseServer,
+  root,
+  target,
+  writeMigrations,
+} from "./fixture/fixture"
+
+const it = testEffect(NodeServices.layer)
+
+type Releases = Record<string, Record<string, string | Uint8Array>>
+
+// openforge 0.0.1 installed by install.sh and its service running; `releases` is what the fake GitHub serves.
+const install = (options: { readonly releases?: Releases; readonly latest?: string; readonly policy?: string } = {}) =>
+  Effect.gen(function* () {
+    const directory = yield* root
+    const dirs = paths(directory)
+    const switching = yield* target(directory)
+    const releases: Releases = { ...options.releases }
+    const server = yield* releaseServer(releases, options.latest)
+    const provide = Effect.provide(layer(directory))
+    yield* Effect.promise(() => keep(switching.layout, "0.0.1"))
+    yield* ReleaseLayout.point(switching.layout, "0.0.1").pipe(provide)
+    yield* ReleaseSwitch.start(switching, "0.0.1").pipe(provide)
+    if (options.policy !== undefined)
+      yield* Effect.promise(async () => {
+        await fs.mkdir(dirs.config, { recursive: true })
+        await fs.writeFile(path.join(dirs.config, "opencode.json"), options.policy ?? "")
+      })
+    const make = (version = "0.0.1") =>
+      Effect.gen(function* () {
+        return yield* Updater.make({
+          data: dirs.data,
+          config: dirs.config,
+          log: dirs.log,
+          version,
+          local: false,
+          disabled: false,
+          executable: yield* Effect.promise(() => fs.realpath(ReleaseLayout.binary(switching.layout, version))),
+          platform: "linux-x64",
+          base: server.url,
+          database: switching.database,
+          service: Effect.succeed(switching.service),
+          timeout: switching.timeout,
+        })
+      }).pipe(provide)
+    const states: Updater.State[] = []
+    const notify = (state: Updater.State) => states.push(state)
+    const reported = Effect.gen(function* () {
+      const endpoint = yield* Service.discover({ file: switching.service.file })
+      if (!endpoint) return undefined
+      const info = yield* Effect.promise(() =>
+        fetch(new URL("/api/info", endpoint.url)).then((response) => response.json()),
+      )
+      return (info as { version: string }).version
+    })
+    return {
+      directory,
+      switching,
+      server,
+      releases,
+      provide,
+      make,
+      states,
+      notify,
+      reported,
+      current: ReleaseLayout.current(switching.layout).pipe(provide),
+      publish: (version: string, serve?: "ok" | "crash") =>
+        Effect.promise(async () => {
+          releases[version] = await publish(directory, version, { serve })
+        }),
+      downloads: () => server.requests.filter((request) => request.endsWith(".tar.gz")),
+    }
+  })
+
+describe("policy", () => {
+  test("reads the update policy from JSONC config", () => {
+    expect(Updater.decodePolicy('{ // preference\n "update": "notify",\n}')).toBe("notify")
+    expect(Updater.decodePolicy('{ "update": "disable" }')).toBe("disable")
+    expect(Updater.decodePolicy('{ "update": "auto" }')).toBe("auto")
+    expect(Updater.decodePolicy('{ "update": "invalid" }')).toBeUndefined()
+    expect(Updater.decodePolicy('{ "autoupdate": false }')).toBe("disable")
+    expect(Updater.decodePolicy('{ "autoupdate": "notify" }')).toBe("notify")
+    expect(Updater.decodePolicy('{ "autoupdate": true }')).toBe("auto")
+    expect(Updater.decodePolicy("{}")).toBeUndefined()
+  })
+
+  it.live("notify (the default) tells about a newer release at startup and installs nothing", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2" })
+      yield* test.publish("0.0.2")
+      const updater = yield* test.make()
+      yield* updater.startup(test.notify)
+      expect(test.states).toEqual([{ type: "available", version: "0.0.2" }])
+      expect(test.downloads()).toEqual([])
+      expect(yield* test.current).toBe("0.0.1")
+    }),
+  )
+
+  it.live("false never checks on its own", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": false }' })
+      yield* test.publish("0.0.2")
+      yield* (yield* test.make()).startup(test.notify)
+      expect(test.states).toEqual([])
+      expect(test.server.requests).toEqual([])
+    }),
+  )
+
+  it.live("true installs and switches at startup", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": true }' })
+      yield* test.publish("0.0.2")
+      yield* (yield* test.make()).startup(test.notify)
+      expect(test.states.map((state) => state.type)).toEqual(["installing", "switching", "switched"])
+      expect(yield* test.current).toBe("0.0.2")
+      expect(yield* test.reported).toBe("0.0.2")
+    }),
+  )
+})
+
+describe("upgrade", () => {
+  it.live("installs the latest release and switches to it whatever the policy", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": false }' })
+      yield* test.publish("0.0.2")
+      const updater = yield* test.make()
+      expect(yield* updater.upgrade({ notify: test.notify })).toEqual({ type: "switched", from: "0.0.1", to: "0.0.2" })
+      expect(test.states).toEqual([
+        { type: "installing", version: "0.0.2" },
+        { type: "switching", version: "0.0.2" },
+        { type: "switched", version: "0.0.2" },
+      ])
+      expect(yield* test.reported).toBe("0.0.2")
+      // The process that switched still runs 0.0.1's binary; it sees the new release as current.
+      expect(yield* updater.upgrade()).toEqual({ type: "current", version: "0.0.2" })
+    }),
+  )
+
+  it.live("says why it cannot upgrade an openforge that was not installed into the layout", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2" })
+      const updater = yield* Updater.make({
+        data: paths(test.directory).data,
+        config: paths(test.directory).config,
+        log: paths(test.directory).log,
+        version: "0.0.1",
+        local: false,
+        disabled: false,
+        executable: "/usr/local/bin/openforge",
+        platform: "linux-x64",
+        base: test.server.url,
+        database: test.switching.database,
+        service: Effect.succeed(test.switching.service),
+      }).pipe(test.provide)
+      const outcome = yield* updater.upgrade()
+      expect(outcome).toMatchObject({ type: "unavailable" })
+      if (outcome.type === "unavailable") expect(outcome.message).toContain("installed with install.sh")
+      expect(test.server.requests).toEqual([])
+    }),
+  )
+
+  it.live("stays on the current release when the download is broken, and says why", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2" })
+      yield* test.publish("0.0.2")
+      test.releases["0.0.2"].SHA256SUMS = `${"0".repeat(64)}  openforge-linux-x64.tar.gz\n`
+      const error = yield* (yield* test.make()).upgrade({ notify: test.notify }).pipe(Effect.flip)
+      expect(error.message).toContain("disagree")
+      expect(test.states.at(-1)).toEqual({ type: "failed", message: error.message })
+      expect(yield* test.current).toBe("0.0.1")
+      expect(yield* test.reported).toBe("0.0.1")
+    }),
+  )
+
+  it.live("rolls back a release that fails to start and does not retry it on its own until a newer one is out", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.0.2", policy: '{ "autoupdate": true }' })
+      yield* test.publish("0.0.2", "crash")
+      const updater = yield* test.make()
+      const error = yield* updater.upgrade({ notify: test.notify }).pipe(Effect.flip)
+      expect(error.message).toStartWith("upgrade to 0.0.2 failed, back on 0.0.1: ")
+      expect(error.message).toEndWith(`. Log: ${test.switching.log}`)
+      expect(yield* test.current).toBe("0.0.1")
+      expect(yield* test.reported).toBe("0.0.1")
+
+      // Neither the startup check nor /update tries it again.
+      test.states.length = 0
+      yield* updater.startup(test.notify)
+      expect(test.states).toEqual([])
+      const again = yield* updater.upgrade().pipe(Effect.flip)
+      expect(again.message).toContain("failed to start before and was rolled back")
+      expect(again.message).toContain('Run "openforge upgrade 0.0.2" to try it again')
+      expect(test.downloads()).toHaveLength(1)
+
+      // By hand it is tried again (and rolls back again).
+      expect((yield* updater.upgrade({ target: "0.0.2" }).pipe(Effect.flip)).message).toStartWith(
+        "upgrade to 0.0.2 failed, back on 0.0.1",
+      )
+
+      // A newer release is tried on its own.
+      yield* test.publish("0.0.3")
+      test.server.latest("0.0.3")
+      yield* updater.startup(test.notify)
+      expect(yield* test.current).toBe("0.0.3")
+      expect(Object.keys(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))).toEqual(["0.0.2"])
+    }),
+  )
+})
+
+describe("going back by hand", () => {
+  // 0.0.1 -> 0.0.2, where 0.0.2 added migration m-0.0.2 to the database.
+  const upgraded = Effect.gen(function* () {
+    const test = yield* install({ latest: "0.0.2" })
+    yield* test.publish("0.0.2")
+    yield* (yield* test.make()).upgrade()
+    expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "m-0.0.2"])
+    return { ...test, updater: yield* test.make("0.0.2") }
+  })
+
+  it.live("switches to a kept release that knows every migration of the database", () =>
+    Effect.gen(function* () {
+      const test = yield* upgraded
+      // Pretend 0.0.1 knew 0.0.2's database change when it was left.
+      writeMigrations(ReleaseSwitch.copyOf(test.switching, "0.0.1"), ["m-0.0.2"])
+      expect(yield* test.updater.upgrade({ target: "0.0.1" })).toEqual({ type: "switched", from: "0.0.2", to: "0.0.1" })
+      expect(yield* test.reported).toBe("0.0.1")
+      expect(migrations(test.switching.database)).toEqual(["m-0.0.1", "m-0.0.2"])
+      // No download: the release was kept.
+      expect(test.downloads()).toHaveLength(1)
+    }),
+  )
+
+  it.live("refuses a kept release that cannot read the database and offers the copy made when it was left", () =>
+    Effect.gen(function* () {
+      const test = yield* upgraded
+      const error = yield* test.updater.upgrade({ target: "0.0.1" }).pipe(Effect.flip)
+      expect(error.message).toContain("openforge 0.0.1 can't read the current database")
+      expect(error.message).toContain("(m-0.0.2)")
+      expect(error.message).toContain("lacks everything stored since then")
+      expect(error.message).toContain("openforge upgrade 0.0.1 --restore-database")
+      expect(yield* test.current).toBe("0.0.2")
+      expect(yield* test.reported).toBe("0.0.2")
+
+      expect(yield* test.updater.upgrade({ target: "0.0.1", restoreDatabase: true })).toEqual({
+        type: "switched",
+        from: "0.0.2",
+        to: "0.0.1",
+      })
+      expect(yield* test.reported).toBe("0.0.1")
+      expect(migrations(test.switching.database)).toEqual(["m-0.0.1"])
+      // The newer database stays beside 0.0.2, so going forward again can take it back.
+      expect(migrations(ReleaseSwitch.copyOf(test.switching, "0.0.2"))).toEqual(["m-0.0.1", "m-0.0.2"])
+    }),
+  )
+
+  it.live("refuses an older release that was never in use, since nothing shows what it can read", () =>
+    Effect.gen(function* () {
+      const test = yield* upgraded
+      yield* Effect.promise(() => keep(test.switching.layout, "0.0.0"))
+      const error = yield* test.updater.upgrade({ target: "0.0.0" }).pipe(Effect.flip)
+      expect(error.message).toContain("openforge 0.0.0 was never left on this machine")
+      expect(yield* test.reported).toBe("0.0.2")
+    }),
+  )
+})

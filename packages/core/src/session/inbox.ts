@@ -236,6 +236,22 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
           if (exact.type === "compaction" && exact.sessionID === input.sessionID) return exact
           return yield* new LifecycleConflict({ id: input.id })
         }
+        // Already started: the same id again, as a client resends it after the connection dropped, is that compaction.
+        const started = yield* db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.id, input.id))
+          .get()
+          .pipe(Effect.orDie)
+        if (started?.session_id === input.sessionID && started.type === "compaction")
+          return Compaction.make({
+            id: input.id,
+            sessionID: input.sessionID,
+            time: { created: DateTime.makeUnsafe(started.time_created) },
+            type: "compaction",
+            payload: {},
+            delivery: input.delivery,
+          })
         if (yield* promotedFromMessage(db, input.sessionID, input.id, input.delivery))
           return yield* new LifecycleConflict({ id: input.id })
         const pending = (yield* list(db, input.sessionID)).find((item) => item.type === "compaction")

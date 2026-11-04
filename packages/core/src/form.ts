@@ -80,6 +80,8 @@ export interface ReplyInput {
 
 export interface CancelOptions {
   readonly message?: string
+  /** The Session the form is for; a question of another Session is not found. */
+  readonly sessionID?: string
 }
 
 export interface ListInput {
@@ -112,6 +114,17 @@ const ToolSource = Schema.Struct({ tool: Schema.Struct({ messageID: Schema.Strin
 const toolSource = (metadata: unknown) => Option.getOrUndefined(Schema.decodeUnknownOption(ToolSource)(metadata))?.tool
 const decodeInfo = Schema.decodeUnknownOption(Info)
 const decodeAnswer = Schema.decodeUnknownOption(Answer)
+/**
+ * A stored question that was dismissed, kept in its reply where an answer would be. No answer has this shape (an
+ * answer's values are never objects), so a release that only knows answers asks the question again.
+ */
+const Dismissed = Schema.Struct({ cancelled: Schema.Struct({ message: Schema.optional(Schema.String) }) })
+const decodeDismissed = Schema.decodeUnknownOption(Dismissed)
+const dismissed = (reply: unknown): Extract<TerminalState, { status: "cancelled" }> | undefined => {
+  const value = Option.getOrUndefined(decodeDismissed(reply))
+  if (!value) return undefined
+  return { status: "cancelled", ...(value.cancelled.message === undefined ? {} : { message: value.cancelled.message }) }
+}
 const sameForm = (left: Info, right: Omit<Info, "id">) =>
   left.title === right.title && SessionContinuity.same(left.fields, right.fields)
 
@@ -160,6 +173,8 @@ export const layer = Layer.effect(
             const same = before && previous && sameForm(previous, input)
             if (before && !same) yield* continuity.requests.remove(before.id)
             const answered = same ? Option.getOrUndefined(decodeAnswer(before.reply)) : undefined
+            // Dismissed while no process asked it, as a dismissal resent through a release switch arrives.
+            const cancelled = same ? dismissed(before.reply) : undefined
             const id = same ? previous.id : (input.id ?? ID.create())
             const existing = yield* Cache.getSuccess(forms, id)
             if (Option.isSome(existing)) return yield* new AlreadyExistsError({ id })
@@ -172,11 +187,13 @@ export const layer = Layer.effect(
               ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
               fields: input.fields,
             }
-            const state: State = answered ? { status: "answered", answer: answered } : { status: "pending" }
+            const state: State = answered
+              ? { status: "answered", answer: answered }
+              : (cancelled ?? { status: "pending" })
             const deferred = yield* Deferred.make<TerminalState>()
-            if (state.status === "answered") yield* Deferred.succeed(deferred, state)
+            if (state.status !== "pending") yield* Deferred.succeed(deferred, state)
             yield* Cache.set(forms, id, { form, state, deferred, durable })
-            if (answered) return form
+            if (state.status !== "pending") return form
             const source = durable && !same ? toolSource(input.metadata) : undefined
             if (source)
               yield* continuity.requests.add({
@@ -286,19 +303,55 @@ export const layer = Layer.effect(
       ),
     )
 
+    const cancelled = (options?: CancelOptions): Extract<TerminalState, { status: "cancelled" }> => ({
+      status: "cancelled",
+      ...(options?.message === undefined ? {} : { message: options.message }),
+    })
+
+    // A question asked before a restart whose tool has not run again yet: the rerun finds it dismissed.
+    const cancelStored = (id: ID, options?: CancelOptions) =>
+      Effect.gen(function* () {
+        const row = yield* continuity.requests.get(id)
+        const form = row?.kind === "form" ? Option.getOrUndefined(decodeInfo(row.request)) : undefined
+        if (!row || !form || (options?.sessionID !== undefined && form.sessionID !== options.sessionID))
+          return yield* new NotFoundError({ id })
+        if (row.reply !== undefined && row.reply !== null) {
+          if (dismissed(row.reply)) return
+          return yield* new AlreadySettledError({ id })
+        }
+        yield* continuity.requests.reply(id, {
+          cancelled: options?.message === undefined ? {} : { message: options.message },
+        })
+        yield* bus.publish(Form.Event.Cancelled, { id, sessionID: form.sessionID })
+      })
+
+    const cancelLive = (id: ID, entry: Entry, options?: CancelOptions) =>
+      Effect.gen(function* () {
+        if (options?.sessionID !== undefined && entry.form.sessionID !== options.sessionID)
+          return yield* new NotFoundError({ id })
+        // A client that resends the dismissal it already gave gets the same success.
+        if (entry.state.status === "cancelled") return
+        if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id })
+        const next = cancelled(options)
+        yield* bus.publish(Form.Event.Cancelled, { id, sessionID: entry.form.sessionID })
+        if (entry.durable) yield* continuity.requests.remove(id)
+        yield* Cache.set(forms, id, { ...entry, state: next })
+        yield* Deferred.succeed(entry.deferred, next)
+      })
+
     const cancel = Effect.fn("Form.cancel")((id: ID, options?: CancelOptions) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          const entry = yield* requireEntry(id)
-          if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id })
-          const next: TerminalState = {
-            status: "cancelled",
-            ...(options?.message === undefined ? {} : { message: options.message }),
-          }
-          yield* bus.publish(Form.Event.Cancelled, { id, sessionID: entry.form.sessionID })
-          if (entry.durable) yield* continuity.requests.remove(id)
-          yield* Cache.set(forms, id, { ...entry, state: next })
-          yield* Deferred.succeed(entry.deferred, next)
+          const cached = yield* Cache.getSuccess(forms, id)
+          if (Option.isSome(cached)) return yield* cancelLive(id, cached.value, options)
+          return yield* restoring.withPermit(
+            Effect.gen(function* () {
+              // The rerun may have asked it again while this waited for it.
+              const asked = yield* Cache.getSuccess(forms, id)
+              if (Option.isSome(asked)) return yield* cancelLive(id, asked.value, options)
+              return yield* cancelStored(id, options)
+            }),
+          )
         }),
       ),
     )

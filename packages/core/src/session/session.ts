@@ -196,6 +196,10 @@ export const make = Effect.fn("Session.make")(function* () {
     input: { id?: SessionMessage.ID; command: string },
   ) {
     const session = yield* get(sessionID)
+    // Its message exists once it started: the same id again, as a client resends it when the connection dropped
+    // (a release switch stops the service while the command runs), is not started a second time. Whichever service
+    // follows the command reports its end once.
+    if (input.id && (yield* message(sessionID, input.id))) return
     // The server owns completion recording even if the submitting client disconnects.
     const running = yield* Effect.gen(function* () {
       const started = yield* SessionShell.start({ session, command: input.command }).pipe(

@@ -116,6 +116,28 @@ describe("Session.compact", () => {
     }),
   )
 
+  // As a client resends it with its id after the connection dropped, once the service had started it.
+  it.effect("a compaction sent again with its id after it started is that compaction", () =>
+    Effect.gen(function* () {
+      requests = []
+      const session = yield* Session.Service
+      const bus = yield* Bus.Service
+      const created = yield* session.create({ location })
+      const id = SessionMessage.ID.create()
+      expect((yield* session.compact({ id, sessionID: created.id })).id).toBe(id)
+      yield* bus.publish(SessionEvent.InboxDelivered, { sessionID: created.id, inboxID: id })
+      yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: created.id, reason: "manual", inputID: id })
+
+      expect(yield* session.compact({ id, sessionID: created.id })).toMatchObject({
+        id,
+        sessionID: created.id,
+        type: "compaction",
+      })
+      expect(yield* session.inbox(created.id)).toEqual([])
+      expect(requests).toHaveLength(0)
+    }),
+  )
+
   it.effect("coalesces concurrent manual compaction", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service

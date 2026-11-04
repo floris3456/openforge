@@ -2419,6 +2419,17 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Message.ID"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Identifies this run of the command: a command already run with the same id is not run again."
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -2756,7 +2767,7 @@
             }
           }
         },
-        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after. With an id that already started a command, returns at once without starting it again.",
         "summary": "Run shell command",
         "requestBody": {
           "content": {
@@ -2772,7 +2783,8 @@
                       {
                         "type": "null"
                       }
-                    ]
+                    ],
+                    "description": "The id of the command's message: a command already started with the same id is not started again."
                   },
                   "command": {
                     "type": "string"

@@ -31,6 +31,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionShell } from "@opencode/core/session/shell"
@@ -337,6 +338,36 @@ describe("a `!` command across a stop", () => {
         }),
       { timeout: 30_000 },
     )
+
+  // As a client resends it when the connection dropped as the old service stopped.
+  it.live(
+    "the same command sent again with its id after the stop is not run again, and reported once",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* machine
+        const first = yield* start(host)
+        const chat = yield* setup(host, first)
+        const id = SessionMessage.ID.create()
+        const running = yield* first.sessions
+          .shell({ sessionID: chat.session.id, id, command: chat.command.command })
+          .pipe(Effect.forkChild({ startImmediately: true }))
+        yield* until("the command's start", () => chat.command.runs() === 1)
+        yield* first.stop
+        yield* Fiber.interrupt(running)
+
+        const second = yield* start(host)
+        // Returns at once: the command is the one the runner still runs.
+        yield* second.sessions.shell({ sessionID: chat.session.id, id, command: chat.command.command })
+        expect(second.of(SessionEvent.Shell.Started)).toEqual([])
+        chat.command.release()
+        yield* until("the command's end", () => second.of(SessionEvent.Shell.Ended).length > 0)
+        expect(chat.command.runs()).toBe(1)
+        expect(yield* reported(second, chat.session.id)).toHaveLength(1)
+        const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
+        expect(messages.filter((message) => message.type === "shell")).toMatchObject([{ id, status: "exited" }])
+      }),
+    { timeout: 30_000 },
+  )
 })
 
 const reported = (generation: Generation, sessionID: Session.ID) =>

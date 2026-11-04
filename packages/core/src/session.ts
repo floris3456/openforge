@@ -219,6 +219,8 @@ export interface Interface {
   }) => Effect.Effect<string, NotFoundError | SessionGenerate.Error>
   readonly command: (input: {
     sessionID: SessionSchema.ID
+    /** Runs the command once: a command already run with this id is not run again. */
+    id?: SessionMessage.ID
     command: string
     text: string
     files?: PromptInput.Prompt["files"]
@@ -285,6 +287,7 @@ const layer = Layer.effect(
     const jobs = yield* Job.Service
     const environments = yield* SessionEnvironment.Service
     const locations = yield* LocationServiceMap.Service
+    const kv = yield* KV.Service
     const sessions = yield* Session.make()
     const mediaBlob = (session: SessionSchema.Info) => SessionBlob.enabledFor(instances, session)
     const isDurableSessionEvent = (item: Bus.LogItem): item is SessionEvent.DurableEvent =>
@@ -495,9 +498,10 @@ const layer = Layer.effect(
       }),
       command: Effect.fn("Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
-        return yield* SessionCommand.execute({ ...input, session }).pipe(
-          Effect.provideService(Instance.Service, instances),
-        )
+        return yield* SessionCommand.once(
+          input.id,
+          SessionCommand.execute({ ...input, session }).pipe(Effect.provideService(Instance.Service, instances)),
+        ).pipe(Effect.provideService(KV.Service, kv))
       }),
       shell: (input) => sessions.forSession(input.sessionID).shell(input),
       recoverShells: sessions.recoverShells,

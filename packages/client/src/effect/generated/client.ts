@@ -556,6 +556,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
     raw["session.command"]({
       params: { sessionID: input["sessionID"] },
       payload: {
+        id: input["id"],
         name: input["name"],
         text: input["text"],
         files: input["files"],

@@ -772,6 +772,7 @@ export function make(options: ClientOptions) {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/command`,
             body: {
+              id: input["id"],
               name: input["name"],
               text: input["text"],
               files: input["files"],

@@ -3446,6 +3446,7 @@ export type SessionPromptOutput = { data: SessionInboxUser }["data"]
 
 export type SessionCommandInput = {
   readonly sessionID: string
+  readonly id?: string | null | undefined
   readonly name: string
   readonly text: string
   readonly files?:

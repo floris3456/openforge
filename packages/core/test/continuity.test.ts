@@ -580,6 +580,69 @@ describe("SessionContinuity", () => {
     }),
   )
 
+  // As a dismissal resent through a release switch arrives: the new release runs, its tool has not asked again yet.
+  it.effect("a question dismissed before its tool asks again is not asked again", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_question", "question", question)])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "ask me" })
+      const before = yield* first.events.waitFor(Form.Event.Created)
+      yield* pausedAndStopped(first)
+
+      const second = yield* start({ paused: true })
+      const form = yield* second.form(session.location)
+      const id = before.data.form.id
+      expect((yield* form.cancel(id, { sessionID: "ses_someone_else" }).pipe(Effect.flip))._tag).toBe(
+        "Form.NotFoundError",
+      )
+      yield* form.cancel(id, { sessionID: session.id })
+      // The same dismissal again, as a client resends it, gets the same success; an answer after it is too late.
+      yield* form.cancel(id, { sessionID: session.id })
+      expect((yield* form.reply({ id, answer: { q0: "Yes" }, sessionID: session.id }).pipe(Effect.flip))._tag).toBe(
+        "Form.AlreadySettledError",
+      )
+      expect(second.events.of(Form.Event.Cancelled).map((event) => event.data)).toEqual([{ id, sessionID: session.id }])
+      yield* second.continuity.resume
+      yield* second.events.waitFor(SessionEvent.Execution.Interrupted, (event) => event.data.sessionID === session.id)
+
+      // The rerun found it dismissed: nothing was asked, and the turn ends as a dismissal does.
+      expect(second.events.of(Form.Event.Created)).toEqual([])
+      expect(yield* form.list()).toEqual([])
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
+      expect(yield* transcript(second, session.id)).toContain("The user dismissed this question")
+      // Cancelled once the rerun took it: the same dismissal still succeeds.
+      yield* form.cancel(id, { sessionID: session.id })
+    }),
+  )
+
+  it.effect("a question dismissed after its tool asked again is dismissed once", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_question", "question", question)])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "ask me" })
+      const before = yield* first.events.waitFor(Form.Event.Created)
+      yield* pausedAndStopped(first)
+
+      const second = yield* start({ paused: true })
+      yield* second.continuity.resume
+      yield* second.events.waitFor(Form.Event.Created)
+      const form = yield* second.form(session.location)
+      yield* form.cancel(before.data.form.id, { sessionID: session.id })
+      yield* form.cancel(before.data.form.id, { sessionID: session.id })
+      yield* second.events.waitFor(SessionEvent.Execution.Interrupted, (event) => event.data.sessionID === session.id)
+      expect(second.events.of(Form.Event.Cancelled)).toHaveLength(1)
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
+    }),
+  )
+
   it.effect("a foreground subagent call waits for the same child again after the stop", () =>
     Effect.gen(function* () {
       reset()

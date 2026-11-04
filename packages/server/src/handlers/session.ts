@@ -329,6 +329,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           yield* session
             .command({
               sessionID: ctx.params.sessionID,
+              id: ctx.payload.id,
               command: ctx.payload.name,
               text: ctx.payload.text,
               files: ctx.payload.files,
@@ -701,8 +702,10 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.form.cancel",
         Effect.fn(function* (ctx) {
-          const owned = yield* requireOwnedForm(ctx.params.sessionID, ctx.params.formID)
-          yield* owned.form.cancel(ctx.params.formID, { message: ctx.query.message }).pipe(
+          // As with a reply, the cancel checks ownership itself and also takes the dismissal of a question asked
+          // before a restart whose tool has not asked it again yet.
+          const form = yield* Form.Service
+          yield* form.cancel(ctx.params.formID, { message: ctx.query.message, sessionID: ctx.params.sessionID }).pipe(
             Effect.catchTags({
               "Form.AlreadySettledError": (error) =>
                 new FormAlreadySettledError({ id: error.id, message: error.message }),

@@ -111,11 +111,10 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
   }),
 )
 
-// An answer resent through a switch can reach the new release before the question's tool asks again: it is kept for
-// the rerun, not refused as an unknown question.
-it.live("an answer to a question asked before the switch is taken before its tool asks again", () =>
+/** A chat whose question the release before the switch asked, as its question tool stored it; no tool asks it yet. */
+const storedQuestion = (prefix: string) =>
   Effect.gen(function* () {
-    const directory = yield* tmpdirScoped("openforge-pause-answer-")
+    const directory = yield* tmpdirScoped(prefix)
     const database = { path: path.join(directory.path, "opencode.db") }
     const options = {
       hostname: "127.0.0.1",
@@ -168,24 +167,47 @@ it.live("an answer to a question asked before the switch is taken before its too
         ],
       )
     })
-
     const server = yield* ServerProcess.start<never, never>(options)
-    const reply = (session: string) =>
+    const send = (method: string, session: string, path: string, body?: unknown) =>
       Effect.promise(() =>
-        fetch(new URL(`/api/session/${session}/form/${formID}/reply`, HttpServer.formatAddress(server.address)), {
-          method: "POST",
+        fetch(new URL(`/api/session/${session}/form/${formID}${path}`, HttpServer.formatAddress(server.address)), {
+          method,
           headers: { authorization, "content-type": "application/json" },
-          body: JSON.stringify({ answer: { q0: "Yes" } }),
+          body: body === undefined ? undefined : JSON.stringify(body),
         }),
       )
-    expect((yield* reply(Session.ID.create())).status).toBe(404)
-    expect((yield* reply(sessionID)).status).toBe(204)
-    // Resent, it gets the same success.
-    expect((yield* reply(sessionID)).status).toBe(204)
-    const stored = yield* Effect.sync(() => {
+    const stored = Effect.sync(() => {
       using db = new Database(database.path, { readonly: true })
-      return db.query<{ reply: string }, [string]>("SELECT reply FROM pending_request WHERE id = ?").get(formID)
+      const row = db.query<{ reply: string }, [string]>("SELECT reply FROM pending_request WHERE id = ?").get(formID)
+      return JSON.parse(row?.reply ?? "null") as unknown
     })
-    expect(JSON.parse(stored?.reply ?? "null")).toEqual({ q0: "Yes" })
+    return { sessionID, send, stored }
+  })
+
+// An answer resent through a switch can reach the new release before the question's tool asks again: it is kept for
+// the rerun, not refused as an unknown question.
+it.live("an answer to a question asked before the switch is taken before its tool asks again", () =>
+  Effect.gen(function* () {
+    const question = yield* storedQuestion("openforge-pause-answer-")
+    const reply = (session: string) => question.send("POST", session, "/reply", { answer: { q0: "Yes" } })
+    expect((yield* reply(Session.ID.create())).status).toBe(404)
+    expect((yield* reply(question.sessionID)).status).toBe(204)
+    // Resent, it gets the same success.
+    expect((yield* reply(question.sessionID)).status).toBe(204)
+    expect(yield* question.stored).toEqual({ q0: "Yes" })
+  }),
+)
+
+// So is a dismissal: the rerun of the question tool finds the question dismissed and does not ask it again.
+it.live("a dismissal of a question asked before the switch is taken before its tool asks again", () =>
+  Effect.gen(function* () {
+    const question = yield* storedQuestion("openforge-pause-dismiss-")
+    const dismiss = (session: string) => question.send("DELETE", session, "")
+    expect((yield* dismiss(Session.ID.create())).status).toBe(404)
+    expect((yield* dismiss(question.sessionID)).status).toBe(204)
+    // Resent, it gets the same success; an answer after it is too late.
+    expect((yield* dismiss(question.sessionID)).status).toBe(204)
+    expect((yield* question.send("POST", question.sessionID, "/reply", { answer: { q0: "Yes" } })).status).toBe(409)
+    expect(yield* question.stored).toEqual({ cancelled: {} })
   }),
 )

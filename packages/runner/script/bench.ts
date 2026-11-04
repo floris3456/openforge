@@ -6,7 +6,7 @@
 // - idle: once nothing runs, the runner exits after its grace period, so there is no runner process.
 // Memory is the runner's whole resident set (rss) and the part that is its own (own: anonymous, not pages of the
 // executable), sampled every 20 ms from outside.
-// Usage: bun script/bench.ts [--binary <openforge>] [--runs <n>] [--out <file.json>]
+// Usage: bun script/bench.ts [--binary <openforge>] [--runs <n>] [--output-bytes <n>] [--out <file.json>]
 // Memory is read from /proc on Linux; on macOS `ps` gives only rss (own is NaN). Everything is written in a fresh
 // folder under the temporary directory.
 import fs from "node:fs"
@@ -19,7 +19,12 @@ import { RunnerOutput } from "../src/output.js"
 import type { RunnerProtocol } from "../src/protocol.js"
 
 const { values } = parseArgs({
-  options: { binary: { type: "string" }, runs: { type: "string", default: "200" }, out: { type: "string" } },
+  options: {
+    binary: { type: "string" },
+    runs: { type: "string", default: "200" },
+    "output-bytes": { type: "string", default: String(1024 ** 3) },
+    out: { type: "string" },
+  },
 })
 const runs = Number(values.runs)
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "runner-bench-")))
@@ -159,8 +164,8 @@ const bench = Effect.gen(function* () {
   )
 
   yield* step("output")
-  // 1 GB through one command while a viewer follows it.
-  const big = command("yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c 1073741824")
+  // 1 GB (or --output-bytes) through one command while a viewer follows it.
+  const big = command(`yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c ${Number(values["output-bytes"])}`)
   const output = yield* sampled(
     runner,
     Effect.gen(function* () {

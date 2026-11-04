@@ -80,6 +80,19 @@ export const Output = Schema.Struct({
   cursor: NonNegativeInt,
   // Total bytes captured so far. A consumer has more to page while `cursor < size`.
   size: NonNegativeInt,
+  // Bytes before this page's output were skipped: dropped from a large output, or passed over by a live view.
   truncated: Schema.Boolean,
 })
 export interface Output extends Schema.Schema.Type<typeof Output> {}
+
+export const WatchInput = Schema.Struct({
+  cursor: optional(NonNegativeInt),
+})
+export interface WatchInput extends Schema.Schema.Type<typeof WatchInput> {}
+
+// Live output as it arrives, then the terminal Info. A reader that falls behind skips ahead (`truncated`).
+export const WatchEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("output"), ...Output.fields }),
+  Schema.Struct({ type: Schema.Literal("exited"), info: Info }),
+]).annotate({ identifier: "Shell.WatchEvent" })
+export type WatchEvent = typeof WatchEvent.Type

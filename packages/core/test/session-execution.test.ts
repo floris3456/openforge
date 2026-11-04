@@ -22,6 +22,7 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionInboxTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { ShellRunner } from "@opencode/core/shell/runner"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Scope } from "effect"
 import { eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -1421,6 +1422,9 @@ function buildExecution(
         Layer.provide(Layer.succeed(Bus.Service, bus)),
         Layer.provide(Layer.succeed(SessionStore.Service, store)),
         Layer.provide(Layer.succeed(Job.Service, jobs)),
+        Layer.provide(
+          AppNodeBuilder.build(ShellRunner.node, [Bus.node.replace(Layer.succeed(Bus.Service, bus))]).pipe(Layer.fresh),
+        ),
         // Do not reuse the outer harness's selector with its already-captured Location map.
         Layer.provide(
           AppNodeBuilder.build(Instance.node, [LocationServiceMap.node.replace(locations)]).pipe(Layer.fresh),

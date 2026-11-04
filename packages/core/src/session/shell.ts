@@ -19,7 +19,14 @@ export const start = Effect.fn("SessionShell.start")(function* (input: { session
   // Keep completion tied to the original shell even if the Session moves.
   return {
     info,
-    result: shell.result(info),
+    result: shell.result(info).pipe(
+      Effect.catchTag("Shell.RunnerStoppedError", (error) =>
+        Effect.succeed({
+          info: { ...info, status: "killed" as const, time: { ...info.time, completed: Date.now() } },
+          capture: { output: error.message, truncated: false },
+        }),
+      ),
+    ),
     output: shell
       .output(info.id, { limit: 1024 * 1024 })
       .pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(ShellResult.unavailable))),

@@ -125,7 +125,8 @@ async function buildTarget(version: string, target: Target, install: boolean) {
   return { target, seconds, archive: await pack(binary, target) }
 }
 
-// The built binary must report the release's version. It runs in a throwaway home, since starting creates its folders.
+// The built binary must report the release's version ("openforge v1.2.3"). It runs in a throwaway home, since starting
+// creates its folders.
 async function checkVersion(binary: string, version: string) {
   const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "openforge-release-check-")))
   const result = Bun.spawnSync([binary, "--version"], {
@@ -144,8 +145,10 @@ async function checkVersion(binary: string, version: string) {
   })
   await fs.rm(home, { recursive: true, force: true })
   const printed = result.stdout.toString().trim()
-  if (printed !== version)
-    throw new Error(`${binary} --version printed "${printed}" instead of ${version}: ${result.stderr.toString()}`)
+  if (printed !== `${Product.binary} v${version}`)
+    throw new Error(
+      `${binary} --version printed "${printed}" instead of "${Product.binary} v${version}": ${result.stderr.toString()}`,
+    )
 }
 
 // Each archive holds the binary alone, at its top level.

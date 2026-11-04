@@ -113,6 +113,7 @@ currently use these actions and resources:
 | `glob`               | Requested glob pattern                                                      |
 | `grep`               | Requested regular expression, not the search path                           |
 | `shell`              | Scanner-produced command string; compound commands may produce several      |
+| `unsandboxed`        | A shell command run outside the [sandbox](/config#sandbox) (`sandbox: false`) |
 | `subagent`           | Target agent ID                                                             |
 | `skill`              | Skill ID                                                                    |
 | `question`           | `*`                                                                         |
@@ -219,6 +220,7 @@ Every agent, including custom agents, starts with this ordered base policy:
   { "action": "read", "resource": "*.env", "effect": "ask" },
   { "action": "read", "resource": "*.env.*", "effect": "ask" },
   { "action": "read", "resource": "*.env.example", "effect": "allow" },
+  { "action": "unsandboxed", "resource": "*", "effect": "ask" },
 ]
 ```
 

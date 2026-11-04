@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import type { DatabaseMigration } from "../migration.js"
 
 const migration: DatabaseMigration.Migration = {
-  id: "20261104154843_continuity",
+  id: "20261104162813_continuity",
   up(tx) {
     return Effect.gen(function* () {
       yield* tx.run(`
@@ -25,7 +25,7 @@ const migration: DatabaseMigration.Migration = {
           \`session_id\` text NOT NULL,
           \`call_id\` text NOT NULL,
           \`message_id\` text,
-          \`data\` text NOT NULL,
+          \`data\` text,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           CONSTRAINT \`session_rest_pk\` PRIMARY KEY(\`session_id\`, \`call_id\`),

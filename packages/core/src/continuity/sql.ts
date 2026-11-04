@@ -17,7 +17,7 @@ export const SessionRestTable = sqliteTable(
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     call_id: text().notNull(),
     message_id: text().$type<SessionMessage.ID>(),
-    data: text({ mode: "json" }).$type<unknown>().notNull(),
+    data: text({ mode: "json" }).$type<unknown>(),
     ...Timestamps,
   },
   (table) => [primaryKey({ columns: [table.session_id, table.call_id] })],

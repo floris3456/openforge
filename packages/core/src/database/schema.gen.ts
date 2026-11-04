@@ -57,7 +57,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`session_id\` text NOT NULL,
           \`call_id\` text NOT NULL,
           \`message_id\` text,
-          \`data\` text NOT NULL,
+          \`data\` text,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           CONSTRAINT \`session_rest_pk\` PRIMARY KEY(\`session_id\`, \`call_id\`),

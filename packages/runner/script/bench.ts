@@ -7,7 +7,8 @@
 // Memory is the runner's whole resident set (rss) and the part that is its own (own: anonymous, not pages of the
 // executable), sampled every 20 ms from outside.
 // Usage: bun script/bench.ts [--binary <openforge>] [--runs <n>] [--out <file.json>]
-// Linux only: memory is read from /proc. Everything is written in a fresh folder under the temporary directory.
+// Memory is read from /proc on Linux; on macOS `ps` gives only rss (own is NaN). Everything is written in a fresh
+// folder under the temporary directory.
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -58,6 +59,15 @@ const alive = (pid: number) => {
 
 type Memory = { rss: number; own: number }
 const memory = (pid: number): Memory => {
+  // macOS has no /proc: `ps` gives the resident set, not the part that is the runner's own.
+  if (process.platform !== "linux") {
+    const kb = Number(
+      Bun.spawnSync(["ps", "-o", "rss=", "-p", String(pid)])
+        .stdout.toString()
+        .trim(),
+    )
+    return { rss: round(kb / 1024), own: NaN }
+  }
   const status = fs.readFileSync(`/proc/${pid}/status`, "utf8")
   const field = (name: string) => Number(new RegExp(`^${name}:\\s+(\\d+) kB`, "m").exec(status)?.[1] ?? NaN) / 1024
   return { rss: round(field("VmRSS")), own: round(field("RssAnon")) }

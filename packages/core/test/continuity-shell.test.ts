@@ -1,11 +1,12 @@
 import { describe, expect } from "bun:test"
 import fs from "fs"
 import path from "path"
-import { Context, Effect, Exit, Layer, Scope, Stream } from "effect"
+import { Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
 import { TestLLM } from "@opencode/ai/testing"
+import { RunnerPaths } from "@opencode/runner/paths"
 import type { Event } from "@opencode/schema/event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -32,6 +33,7 @@ import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
+import { SessionShell } from "@opencode/core/session/shell"
 import { Shell } from "@opencode/core/shell"
 import { ShellRunner } from "@opencode/core/shell/runner"
 import { ShellSelect } from "@opencode/core/shell/select"
@@ -147,6 +149,7 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
       of,
       continuity,
       sessions: Context.get(context, Session.Service),
+      kv: Context.get(context, KV.Service),
       // The server marks the stop and leaves its shells to the runner before anything closes.
       stop: continuity.stop.pipe(
         Effect.andThen(Context.get(context, ShellRunner.Service).detach),
@@ -278,3 +281,69 @@ describe("a foreground shell tool call across a stop", () => {
     }),
   )
 })
+
+describe("a `!` command across a stop", () => {
+  for (const finished of [false, true])
+    it.live(
+      finished
+        ? "one that finished while no service ran is reported by the next one, once"
+        : "one still running is reported by the next service when it ends, once",
+      () =>
+        Effect.gen(function* () {
+          const host = yield* machine
+          const first = yield* start(host)
+          const chat = yield* setup(host, first)
+          const running = yield* first.sessions
+            .shell({ sessionID: chat.session.id, command: chat.command.command })
+            .pipe(Effect.forkChild({ startImmediately: true }))
+          yield* until("the command's start", () => chat.command.runs() === 1)
+          yield* first.stop
+          yield* Fiber.interrupt(running)
+          const started = first.of(SessionEvent.Shell.Started).map((event) => event.data.shell.id)
+          expect(started).toHaveLength(1)
+          expect(first.of(SessionEvent.Shell.Ended)).toEqual([])
+          if (finished) {
+            chat.command.release()
+            const file = created(first)[0]?.file ?? ""
+            yield* until("the command's exit file", () => fs.existsSync(RunnerPaths.exit(file)))
+          }
+
+          const second = yield* start(host)
+          if (!finished) {
+            yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)))
+            expect(second.of(SessionEvent.Shell.Ended)).toEqual([])
+            chat.command.release()
+          }
+          yield* until("the command's end", () => second.of(SessionEvent.Shell.Ended).length > 0)
+          const notices = yield* reported(second, chat.session.id)
+          expect(notices).toHaveLength(1)
+          expect(notices[0]).toContain("The following shell command was executed by the user")
+          expect(notices[0]).toContain("done")
+          expect(yield* second.kv.get(SessionShell.key(started[0]))).toBeUndefined()
+          const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
+          expect(messages.filter((message) => message.type === "shell")).toMatchObject([
+            { shellID: started[0], status: "exited", exit: 0 },
+          ])
+          yield* second.stop
+
+          // Reported: a later service does not report it again.
+          const third = yield* start(host)
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 200)))
+          expect(third.of(SessionEvent.Shell.Ended)).toEqual([])
+          expect(yield* reported(third, chat.session.id)).toHaveLength(1)
+          expect(chat.command.runs()).toBe(1)
+        }),
+      { timeout: 30_000 },
+    )
+})
+
+const reported = (generation: Generation, sessionID: Session.ID) =>
+  generation.sessions
+    .inbox(sessionID)
+    .pipe(
+      Effect.map((items) =>
+        items.flatMap((item) =>
+          item.type === "synthetic" && item.payload.metadata?.source === "shell" ? [item.payload.text] : [],
+        ),
+      ),
+    )

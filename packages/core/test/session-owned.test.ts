@@ -16,6 +16,7 @@ import { Database } from "../src/database/database.js"
 import { EventTable } from "../src/event/sql.js"
 import { Image } from "../src/image.js"
 import { Instance } from "../src/instance/service.js"
+import { KV } from "../src/kv.js"
 import { Location } from "../src/location.js"
 import { Plugin } from "../src/plugin.js"
 import { PluginHooks } from "../src/plugin/hooks.js"
@@ -50,6 +51,7 @@ const it = testEffect(
       SessionStore.node,
       SessionInbox.node,
       FSUtil.node,
+      KV.node,
     ]),
     {
       replacements: [Bus.node.replace(Bus.configured({ persist: true })), Global.node.replace(tempGlobalLayer)],
@@ -153,6 +155,7 @@ const setup = Effect.fnUntraced(function* (options?: {
       | Bus.Service
       | Database.Service
       | FSUtil.Service
+      | KV.Service
       | SessionStore.Service
       | Instance.Service
       | SessionExecution.Service

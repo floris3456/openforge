@@ -331,6 +331,7 @@ export const layer = (options?: Options) =>
             }),
             { discard: true },
           )
+          yield* sessions.recoverShells()
 
           // Background completion can wake a parent, so inspect local ownership only after recovery.
           const resumed = yield* execution.active

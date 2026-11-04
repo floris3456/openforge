@@ -202,7 +202,8 @@ describe("the agent's shell commands in the sandbox", () => {
           expect(fs.existsSync(target)).toBe(false)
           expect(text(refused)).toContain("Permission denied")
           expect(text(refused)).toContain(`Exited with code 1\n\n${NOTE}`)
-          expect(text(refused)).toContain(chat)
+          // The chat's folder is in the write list, shortened when it is under the home folder.
+        expect(text(refused)).toContain(path.basename(chat))
           expect(text(refused)).toContain("`sandbox: false`")
         }),
       ),

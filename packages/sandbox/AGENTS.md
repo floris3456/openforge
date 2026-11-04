@@ -14,6 +14,8 @@ workspace, section 2). It depends on `@opencode/schema` only, never on the runne
   sandbox and `sandbox.required` is set, or an unsandboxed argv whose `warning` is set once per process.
 - `Sandbox.note(policy)` is the text added to a failed sandboxed command's result.
 - `Sandbox.permission` (`unsandboxed`, default ask in `Agent.Info.default`) guards `sandbox: false`.
+- Core uses it in `ShellWrap.configured` (`packages/core/src/shell/wrap.ts`), for the shell tool's commands only (not
+  `!` or the shell API). The server turns it on when the CLI passes `sandbox.command` (`selfCommand()`).
 
 ## How
 

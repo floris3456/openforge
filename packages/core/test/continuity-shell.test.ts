@@ -108,7 +108,9 @@ const nodes = LayerNode.group([
   LocationServiceMap.node,
 ])
 
-const it = testEffect(Layer.mergeAll(AppNodeBuilder.build(Database.node), TestLLM.testLayer()))
+const harness = testEffect(Layer.mergeAll(AppNodeBuilder.build(Database.node), TestLLM.testLayer()))
+// Windows has no tool runner: its commands run in the service and end with it.
+const it = { live: process.platform === "win32" ? harness.live.skip : harness.live }
 
 type Host = Effect.Success<typeof machine>
 

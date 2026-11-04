@@ -208,7 +208,8 @@ See the [permissions guide](/permissions) for rule matching and available action
 
 ### Sandbox
 
-Shell commands run in a sandbox. By default they read everywhere except
+The agent's shell commands run in a sandbox; the ones you type yourself (`!`)
+don't. By default they read everywhere except
 openforge's own credentials and service password, and write only to the chat's
 folder, its git folders, the temp folders, the usual package caches (`~/.cache`,
 `~/.bun`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go`, …) and `/dev`.
@@ -232,7 +233,8 @@ folder, its git folders, the temp folders, the usual package caches (`~/.cache`,
 | `required`  | `false`   | Refuse commands when the machine can't sandbox, instead of running them unsandboxed                 |
 
 Agents take the same `sandbox` object; its `mode`, `network` and `required` win
-over the top level, and its paths add to it. A single command can leave the
+over the top level, and its paths add to it. When a sandboxed command fails, its
+result tells the agent where it may write. A single command can leave the
 sandbox with the shell tool's `sandbox: false`, which needs the `unsandboxed`
 [permission](/permissions) (asked by default).
 

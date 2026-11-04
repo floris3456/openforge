@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { expect } from "bun:test"
 import { OpenCode, resend } from "@opencode/client"
 import { Session } from "@opencode/schema/session"
@@ -43,7 +44,9 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
 
     const resumed = yield* request("/api/experimental/service/resume", { method: "POST" })
     expect(resumed.status).toBe(200)
-    expect(yield* Effect.promise(() => resumed.json())).toMatchObject({ data: { state: "running", startedPaused: false } })
+    expect(yield* Effect.promise(() => resumed.json())).toMatchObject({
+      data: { state: "running", startedPaused: false },
+    })
     expect((yield* request("/api/session", { method: "POST", body: "{}" })).status).not.toBe(503)
   }),
 )
@@ -105,5 +108,84 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
     yield* Effect.promise(() => api.session.prompt(prompt))
     const inbox = yield* Effect.promise(() => api.session.inbox.list({ sessionID }))
     expect(inbox.map((item) => item.id)).toEqual(["msg_switch_once"])
+  }),
+)
+
+// An answer resent through a switch can reach the new release before the question's tool asks again: it is kept for
+// the rerun, not refused as an unknown question.
+it.live("an answer to a question asked before the switch is taken before its tool asks again", () =>
+  Effect.gen(function* () {
+    const directory = yield* tmpdirScoped("openforge-pause-answer-")
+    const database = { path: path.join(directory.path, "opencode.db") }
+    const options = {
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      app: { version: "test-version" },
+      database,
+      config: { project: false },
+      models: { fetch: false },
+      fs: { filewatcher: false },
+    }
+    const authorization = `Basic ${btoa("opencode:secret")}`
+    const sessionID = Session.ID.create()
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* ServerProcess.start<never, never>(options)
+        const api = OpenCode.make({ baseUrl: HttpServer.formatAddress(server.address), headers: { authorization } })
+        yield* Effect.promise(() => api.session.create({ id: sessionID, title: "asking" }))
+      }),
+    )
+    // What the question tool of the release before the switch stored when it asked.
+    const formID = "frm_1a7cd5f840018NKKqEQn7PUjh2"
+    const form = {
+      id: formID,
+      sessionID,
+      title: "Questions",
+      metadata: { kind: "question", tool: { messageID: "msg_1a7cd5f5a00161M4H4ckI1qsFH", id: "call_question" } },
+      fields: [
+        {
+          key: "q0",
+          title: "Continue",
+          description: "Continue?",
+          type: "string",
+          options: [{ value: "Yes", label: "Yes" }],
+        },
+      ],
+    }
+    yield* Effect.sync(() => {
+      using db = new Database(database.path)
+      db.run(
+        "INSERT INTO pending_request (id, session_id, kind, message_id, call_id, request, time_created, time_updated) VALUES (?, ?, 'form', ?, ?, ?, ?, ?)",
+        [
+          formID,
+          sessionID,
+          form.metadata.tool.messageID,
+          form.metadata.tool.id,
+          JSON.stringify(form),
+          Date.now(),
+          Date.now(),
+        ],
+      )
+    })
+
+    const server = yield* ServerProcess.start<never, never>(options)
+    const reply = (session: string) =>
+      Effect.promise(() =>
+        fetch(new URL(`/api/session/${session}/form/${formID}/reply`, HttpServer.formatAddress(server.address)), {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({ answer: { q0: "Yes" } }),
+        }),
+      )
+    expect((yield* reply(Session.ID.create())).status).toBe(404)
+    expect((yield* reply(sessionID)).status).toBe(204)
+    // Resent, it gets the same success.
+    expect((yield* reply(sessionID)).status).toBe(204)
+    const stored = yield* Effect.sync(() => {
+      using db = new Database(database.path, { readonly: true })
+      return db.query<{ reply: string }, [string]>("SELECT reply FROM pending_request WHERE id = ?").get(formID)
+    })
+    expect(JSON.parse(stored?.reply ?? "null")).toEqual({ q0: "Yes" })
   }),
 )

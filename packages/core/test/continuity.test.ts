@@ -144,7 +144,10 @@ const plugins = makeLocationNode({
             execute: (_input, context) =>
               Effect.gen(function* () {
                 const resumed = yield* continuity.resumed(context.id)
-                const token = resumed === undefined ? `token-${++world.phase1}` : Schema.decodeUnknownSync(Checkpoint)(resumed).token
+                const token =
+                  resumed === undefined
+                    ? `token-${++world.phase1}`
+                    : Schema.decodeUnknownSync(Checkpoint)(resumed).token
                 const result = yield* continuity.wait(context.id, Deferred.await(world.external), { token })
                 world.phase2++
                 return { output: {}, content: `${token} ${result}` }
@@ -157,10 +160,7 @@ const plugins = makeLocationNode({
             input: Schema.Struct({}),
             output: Schema.Struct({}),
             execute: () =>
-              Effect.sync(() => world.holds++).pipe(
-                Effect.andThen(Effect.never),
-                Effect.as({ output: {} }),
-              ),
+              Effect.sync(() => world.holds++).pipe(Effect.andThen(Effect.never), Effect.as({ output: {} })),
           })
         })
         .pipe(Effect.orDie)
@@ -327,7 +327,9 @@ const asked = (generation: Generation, sessionID: Session.ID) =>
   generation.events.waitFor(Permission.Event.Asked, (event) => event.data.sessionID === sessionID)
 
 const transportError = () =>
-  new AIError({ reason: new TransportError({ message: "Provider unavailable", transport: "http", operation: "request" }) })
+  new AIError({
+    reason: new TransportError({ message: "Provider unavailable", transport: "http", operation: "request" }),
+  })
 
 /** Lets pub/sub delivery and fiber hops finish on a real macrotask between TestClock steps. */
 const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1)))
@@ -545,6 +547,39 @@ describe("SessionContinuity", () => {
     }),
   )
 
+  // As an answer resent through a release switch arrives: the new release runs, its tool has not asked again yet.
+  it.effect("an answer to a question that arrives before its tool asks again reaches the rerun", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_question", "question", question), TestLLM.text("thanks", "t1")])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "ask me" })
+      const before = yield* first.events.waitFor(Form.Event.Created)
+      yield* pausedAndStopped(first)
+
+      const second = yield* start({ paused: true })
+      const form = yield* second.form(session.location)
+      expect(yield* form.list()).toEqual([])
+      const elsewhere = yield* form
+        .reply({ id: before.data.form.id, answer: { q0: "Yes" }, sessionID: "ses_someone_else" })
+        .pipe(Effect.flip)
+      expect(elsewhere._tag).toBe("Form.NotFoundError")
+      yield* form.reply({ id: before.data.form.id, answer: { q0: "Yes" }, sessionID: session.id })
+      // The same answer again, as a client resends it, gets the same success.
+      yield* form.reply({ id: before.data.form.id, answer: { q0: "Yes" }, sessionID: session.id })
+      yield* second.continuity.resume
+      yield* succeeded(second, session.id)
+
+      // The rerun found its answer and asked nothing.
+      expect(second.events.of(Form.Event.Created)).toEqual([])
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
+      expect(yield* transcript(second, session.id)).toContain(`\\"Continue?\\"=\\"Yes\\"`)
+    }),
+  )
+
   it.effect("a foreground subagent call waits for the same child again after the stop", () =>
     Effect.gen(function* () {
       reset()
@@ -680,7 +715,9 @@ describe("SessionContinuity", () => {
       yield* second.sessions.prompt({ sessionID: session.id, id, text: "hello" })
       yield* second.sessions.wait(session.id)
       expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
-      const users = (yield* second.sessions.messages({ sessionID: session.id })).filter((message) => message.type === "user")
+      const users = (yield* second.sessions.messages({ sessionID: session.id })).filter(
+        (message) => message.type === "user",
+      )
       expect(users).toHaveLength(1)
     }),
   )

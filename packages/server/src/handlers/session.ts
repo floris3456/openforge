@@ -681,16 +681,20 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       .handle(
         "session.form.reply",
         Effect.fn(function* (ctx) {
-          const owned = yield* requireOwnedForm(ctx.params.sessionID, ctx.params.formID)
-          yield* owned.form.reply({ id: ctx.params.formID, answer: ctx.payload.answer }).pipe(
-            Effect.catchTags({
-              "Form.AlreadySettledError": (error) =>
-                new FormAlreadySettledError({ id: error.id, message: error.message }),
-              "Form.InvalidAnswerError": (error) =>
-                new FormInvalidAnswerError({ id: error.id, message: error.message }),
-              "Form.NotFoundError": () => missingForm(ctx.params.formID),
-            }),
-          )
+          // Ownership is checked by the reply itself, which also takes the answer to a question asked before a
+          // restart whose tool has not asked it again yet, as an answer resent through a release switch is.
+          const form = yield* Form.Service
+          yield* form
+            .reply({ id: ctx.params.formID, answer: ctx.payload.answer, sessionID: ctx.params.sessionID })
+            .pipe(
+              Effect.catchTags({
+                "Form.AlreadySettledError": (error) =>
+                  new FormAlreadySettledError({ id: error.id, message: error.message }),
+                "Form.InvalidAnswerError": (error) =>
+                  new FormInvalidAnswerError({ id: error.id, message: error.message }),
+                "Form.NotFoundError": () => missingForm(ctx.params.formID),
+              }),
+            )
           return HttpApiSchema.NoContent.make()
         }),
       )

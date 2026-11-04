@@ -74,6 +74,8 @@ export type CreateInput = Omit<Form.Info, "id"> & { readonly id?: ID }
 export interface ReplyInput {
   readonly id: ID
   readonly answer: Answer
+  /** The Session the answer is for; a question of another Session is not found. */
+  readonly sessionID?: string
 }
 
 export interface CancelOptions {
@@ -234,7 +236,8 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const row = yield* continuity.requests.get(input.id)
         const form = row?.kind === "form" ? Option.getOrUndefined(decodeInfo(row.request)) : undefined
-        if (!row || !form) return yield* new NotFoundError({ id: input.id })
+        if (!row || !form || (input.sessionID !== undefined && form.sessionID !== input.sessionID))
+          return yield* new NotFoundError({ id: input.id })
         if (row.reply !== undefined && row.reply !== null) {
           if (SessionContinuity.same(row.reply, input.answer)) return
           return yield* new AlreadySettledError({ id: input.id })
@@ -245,27 +248,40 @@ export const layer = Layer.effect(
         yield* bus.publish(Form.Event.Replied, { id: input.id, sessionID: form.sessionID, answer: input.answer })
       })
 
+    const replyLive = (input: ReplyInput, entry: Entry) =>
+      Effect.gen(function* () {
+        if (input.sessionID !== undefined && entry.form.sessionID !== input.sessionID)
+          return yield* new NotFoundError({ id: input.id })
+        // A client that resends the answer it already gave gets the same success.
+        if (entry.state.status === "answered" && SessionContinuity.same(entry.state.answer, input.answer)) return
+        if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id: input.id })
+        const invalid = validateAnswer(entry.form.fields, input.answer)
+        if (invalid) return yield* new InvalidAnswerError({ id: input.id, message: invalid })
+        const next: TerminalState = { status: "answered", answer: input.answer }
+        // Stored before it reaches the tool, so a stop in between still delivers it to the rerun.
+        if (entry.durable) yield* continuity.requests.reply(input.id, input.answer)
+        yield* bus.publish(Form.Event.Replied, {
+          id: input.id,
+          sessionID: entry.form.sessionID,
+          answer: input.answer,
+        })
+        yield* Cache.set(forms, input.id, { ...entry, state: next })
+        yield* Deferred.succeed(entry.deferred, next)
+      })
+
     const reply = Effect.fn("Form.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const cached = yield* Cache.getSuccess(forms, input.id)
-          if (Option.isNone(cached)) return yield* restoring.withPermit(replyStored(input))
-          const entry = cached.value
-          // A client that resends the answer it already gave gets the same success.
-          if (entry.state.status === "answered" && SessionContinuity.same(entry.state.answer, input.answer)) return
-          if (entry.state.status !== "pending") return yield* new AlreadySettledError({ id: input.id })
-          const invalid = validateAnswer(entry.form.fields, input.answer)
-          if (invalid) return yield* new InvalidAnswerError({ id: input.id, message: invalid })
-          const next: TerminalState = { status: "answered", answer: input.answer }
-          // Stored before it reaches the tool, so a stop in between still delivers it to the rerun.
-          if (entry.durable) yield* continuity.requests.reply(input.id, input.answer)
-          yield* bus.publish(Form.Event.Replied, {
-            id: input.id,
-            sessionID: entry.form.sessionID,
-            answer: input.answer,
-          })
-          yield* Cache.set(forms, input.id, { ...entry, state: next })
-          yield* Deferred.succeed(entry.deferred, next)
+          if (Option.isSome(cached)) return yield* replyLive(input, cached.value)
+          return yield* restoring.withPermit(
+            Effect.gen(function* () {
+              // The rerun may have asked it again while this waited for it.
+              const asked = yield* Cache.getSuccess(forms, input.id)
+              if (Option.isSome(asked)) return yield* replyLive(input, asked.value)
+              return yield* replyStored(input)
+            }),
+          )
         }),
       ),
     )

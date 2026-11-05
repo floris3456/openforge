@@ -186,8 +186,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       outfile: path.join(outdir, name, "bin", binary),
       execArgv: [
         "--smol",
-        // The upstream release it is built on, as App.useragent sends: Zen's free tier wants OpenCode 1.18.0 or newer.
-        `--user-agent=opencode/${Script.channel}/${pkg.version}/openforge`,
+        // Upstream's, with the upstream release it is built on, as App.useragent: Zen wants OpenCode 1.18.0 or newer.
+        `--user-agent=opencode/${Script.channel}/${pkg.version}/cli`,
         "--use-system-ca",
         "--no-warnings",
         "--",

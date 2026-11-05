@@ -148,6 +148,27 @@ describe("resolve", () => {
     )
   })
 
+  // A command keeps running through a switch, and its policy is made when it starts.
+  test("denies reading the database files a switch writes later, before they exist", () => {
+    const fixture = layout()
+    const { data } = fixture.context
+    touch(path.join(data, "releases/0.2.0/openforge"))
+    const result = Sandbox.resolve(undefined, fixture.context)
+    expect(result.denyRead).toEqual(
+      expect.arrayContaining([
+        path.join(data, "releases/0.2.0/opencode.db"),
+        path.join(data, "releases/0.2.0/opencode.db.partial"),
+        path.join(data, "opencode.db.restore"),
+      ]),
+    )
+    expect(result.denyRead).not.toContain(path.join(data, "releases/0.2.0/openforge"))
+
+    const moved = path.join(fixture.base, "elsewhere.db")
+    expect(Sandbox.resolve(undefined, { ...fixture.context, database: moved }).denyRead).toEqual(
+      expect.arrayContaining([path.join(data, "releases/0.2.0/elsewhere.db"), `${moved}.restore`]),
+    )
+  })
+
   test("read mode writes only to the temp folders and /dev; off mode has no lists", () => {
     const fixture = layout()
     fs.mkdirSync(path.join(fixture.home, ".cache"))

@@ -252,14 +252,23 @@ function temporary(home: string, env: Env) {
   return unique([...named, ...["/tmp", "/var/tmp"].map(real)].filter((item) => fs.existsSync(item)))
 }
 
-/** openforge's credentials (the database holds them, also the copies a switch keeps) and service passwords. */
+/**
+ * openforge's credentials (the database holds them, also the copies a switch keeps) and service passwords. A command
+ * outlives a switch, so the database files a switch writes later (the copy in the folder of the release it leaves,
+ * and the temporary files of a copy and a restore) are named before they exist.
+ */
 function secrets(context: Context) {
   const database = context.database ?? path.join(context.data, "opencode.db")
+  const files = (base: string) =>
+    ["", "-wal", "-shm", "-journal", ".partial", ".restore"].map((suffix) => base + suffix)
   return [
-    ...["", "-wal", "-shm", "-journal"].map((suffix) => database + suffix),
+    ...files(database),
     path.join(context.data, "auth.json"),
     ...matching(context.data, databaseFile),
-    ...folders(path.join(context.data, "releases")).flatMap((folder) => matching(folder, databaseFile)),
+    ...folders(path.join(context.data, "releases")).flatMap((folder) => [
+      ...files(path.join(folder, path.basename(database))),
+      ...matching(folder, databaseFile),
+    ]),
     path.join(context.state, "service.json"),
     path.join(context.state, "service.json.pty-handoff"),
     ...matching(context.state, serviceFile),
@@ -271,7 +280,7 @@ function secrets(context: Context) {
   ].map(real)
 }
 
-const databaseFile = /\.db(-wal|-shm|-journal|\.restore)?$/
+const databaseFile = /\.db(-wal|-shm|-journal|\.partial|\.restore)?$/
 const serviceFile = /^service.*\.json/
 
 function git(directory: string) {

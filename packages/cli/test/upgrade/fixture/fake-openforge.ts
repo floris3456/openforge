@@ -12,8 +12,8 @@
 //   FAKE_PRINT                what --version prints instead of the version
 // The service records `m-<version>` in the database's migration journal, as a release migrating it would, and appends
 // what happens to it to FAKE_LOG: `<version> started [paused]`, `paused`, `resumed`, `stopped`, `prompt <id>`.
-// Like the real releases, one before 0.1.0 has no pause, refuses `--paused` and answers 404 under
-// /api/experimental/service/. From 0.1.0 on it pauses at once unless the test gave it work (POST /fake/work), which
+// Like the real releases, one before 0.0.2 has no pause, refuses `--paused` and answers 404 under
+// /api/experimental/service/. From 0.0.2 on it pauses at once unless the test gave it work (POST /fake/work), which
 // holds the pause until POST /fake/finish ends it or the pause gives up. Started paused it refuses writes with 503,
 // except those a paused start answers (`ServiceSwitch.answers`), the terminals' handoff among them.
 // It counts the reads of its status and of its running chats, so a test can tell that a wait has read them again
@@ -30,8 +30,8 @@ type Work = { sessionID?: string; kind: "step" | "tool" | "model"; name: string 
 
 const version = process.env.FAKE_VERSION ?? "0.0.0"
 const args = process.argv.slice(2)
-const [major, minor] = version.split(".").map(Number)
-const pausable = major > 0 || minor >= 1
+const [major = 0, minor = 0, patch = 0] = version.split(".").map((part) => Number.parseInt(part, 10))
+const pausable = major > 0 || minor > 0 || patch >= 2
 const record = (line: string) => {
   if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, `${version} ${line}\n`)
 }

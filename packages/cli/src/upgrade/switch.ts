@@ -1,6 +1,6 @@
 // Switching the release in use, one switch at a time across every openforge process, through a lock in the data
 // folder:
-//   1. Pause the running service (0.1.0 and later): it stops starting model calls and tools, and every chat rests at
+//   1. Pause the running service (0.0.2 and later): it stops starting model calls and tools, and every chat rests at
 //      a step boundary recorded in the database.
 //   2. If that takes longer than 2 minutes the service opens again by itself, and the switch tries again once the work
 //      it reported has finished.
@@ -9,7 +9,7 @@
 //   5. Check within 10 s that it answers with the new version, reads its database and reaches the tool runners.
 //   6. Resume it: every chat continues where it rested.
 // If anything fails after the stop it points `current` back, restores the copy, and starts and resumes the old
-// release, so the chats continue there. A service from before 0.1.0 cannot pause; the switch then waits until no chat
+// release, so the chats continue there. A service from before 0.0.2 cannot pause; the switch then waits until no chat
 // is running, as those releases did.
 
 import { Service, type Endpoint, type ServiceContender } from "@opencode/client/effect/service"
@@ -90,9 +90,9 @@ export function copyOf(target: Target, version: string) {
   return path.join(ReleaseLayout.folder(target.layout, version), path.basename(target.database))
 }
 
-/** Whether `version`'s service can pause, start paused (`serve --paused`) and resume: 0.1.0 and later. */
+/** Whether `version`'s service can pause, start paused (`serve --paused`) and resume: 0.0.2 and later. */
 export function pausable(version: string) {
-  return ReleaseVersion.parse(version) !== undefined && !ReleaseVersion.newer("0.1.0-0", version)
+  return ReleaseVersion.parse(version) !== undefined && !ReleaseVersion.newer("0.0.2-0", version)
 }
 
 /**
@@ -218,7 +218,7 @@ const hold = Effect.fnUntraced(function* (
     catch: (cause) => cause,
   }).pipe(Effect.exit)
   if (Exit.isFailure(status)) {
-    // A service without the pause routes is from before 0.1.0. One that does not answer them cannot pause either;
+    // A service without the pause routes is from before 0.0.2. One that does not answer them cannot pause either;
     // both are switched as those releases were, once no chat runs, rather than cutting a chat short.
     const error = Option.getOrUndefined(Exit.findErrorOption(status))
     if (!(yield* busy(target))) return { type: "legacy" as const }
@@ -353,7 +353,7 @@ const check = Effect.fnUntraced(function* (endpoint: Endpoint, paused: boolean) 
     try: (signal) => client(endpoint).session.list({ limit: 1 }, { signal }),
     catch: (cause) => new Error(`it could not read its database: ${errorMessage(cause)}`),
   })
-  // The tool runner came with the pause, in 0.1.0; an earlier release has neither. Every runner holding commands must
+  // The tool runner came with the pause, in 0.0.2; an earlier release has neither. Every runner holding commands must
   // answer the new service, so those commands reach the same tool calls after the resume.
   if (!paused) return
   const status = yield* Effect.tryPromise({
@@ -490,7 +490,7 @@ function same(left: ContinuityWork, right: ContinuityWork) {
   return left.sessionID === right.sessionID && left.kind === right.kind && left.name === right.name
 }
 
-/** The service has no such route: a release from before 0.1.0, which cannot pause. */
+/** The service has no such route: a release from before 0.0.2, which cannot pause. */
 function missing(error: unknown) {
   return (
     error instanceof ClientError &&

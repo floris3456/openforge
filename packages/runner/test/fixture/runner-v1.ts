@@ -1,4 +1,4 @@
-// A runner of protocol version 1, frozen as it went out with openforge 0.1.0: literal JSON lines, independent of
+// A runner of protocol version 1, frozen as it went out with openforge 0.0.2: literal JSON lines, independent of
 // src/protocol.ts. A later release that speaks a newer version still has to talk to this one, so this file and the
 // test using it are never changed to follow the current protocol.
 import fs from "node:fs"
@@ -35,7 +35,7 @@ export async function serveV1(directory: string, protocols: number[] = [1]) {
   let deadline: number | null = null
   const server = net.createServer((socket) => {
     const write = (value: unknown) => socket.write(JSON.stringify(value) + "\n")
-    write({ type: "hello", protocols, version: "0.1.0", pid: 4242 })
+    write({ type: "hello", protocols, version: "0.0.2", pid: 4242 })
     let pending = ""
     socket.setEncoding("utf8")
     socket.on("error", () => {})

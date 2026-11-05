@@ -7,13 +7,13 @@ import { folder, run } from "./fixture/runner.js"
 import { serveV1 } from "./fixture/runner-v1.js"
 
 describe("runner protocol", () => {
-  test("this release's client speaks protocol 1, as the runner of 0.1.0 does", async () => {
+  test("this release's client speaks protocol 1, as the runner of 0.0.2 does", async () => {
     await using directory = await folder()
     await using runner = await serveV1(path.join(directory.path, "runner"))
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(path.join(directory.path, "runner"))
-        expect(connection).toMatchObject({ protocol: 1, version: "0.1.0", pid: 4242 })
+        expect(connection).toMatchObject({ protocol: 1, version: "0.0.2", pid: 4242 })
         const started = yield* connection.start({
           id: "sh_0123456789abFIXTURE00000",
           argv: ["/bin/sh", "-c", "printf 'hello world'"],

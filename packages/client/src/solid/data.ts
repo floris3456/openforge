@@ -454,7 +454,7 @@ export function createData(config: CreateDataInput) {
                 ? { state: "pausing", waiting: status.waiting }
                 : { state: "paused" },
           ),
-        // A release from before 0.1.0 has no pause.
+        // A release from before 0.0.2 has no pause.
         () => settle(undefined),
       )
   }

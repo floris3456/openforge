@@ -86,14 +86,15 @@ const paused = (switching: ReleaseSwitch.Target) =>
 const tool = (sessionID: string, name = "webfetch") => ({ sessionID, kind: "tool" as const, name })
 
 describe("pausable", () => {
-  test("releases from 0.1.0 on can pause, earlier ones cannot", () => {
+  test("releases from 0.0.2 on can pause, 0.0.0 and 0.0.1 cannot", () => {
+    expect(ReleaseSwitch.pausable("0.0.2")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.0.2-beta.1")).toBe(true)
+    expect(ReleaseSwitch.pausable("0.0.3")).toBe(true)
     expect(ReleaseSwitch.pausable("0.1.0")).toBe(true)
-    expect(ReleaseSwitch.pausable("0.1.0-beta.1")).toBe(true)
-    expect(ReleaseSwitch.pausable("0.1.2")).toBe(true)
-    expect(ReleaseSwitch.pausable("0.2.0")).toBe(true)
     expect(ReleaseSwitch.pausable("1.0.0")).toBe(true)
-    expect(ReleaseSwitch.pausable("0.0.9")).toBe(false)
     expect(ReleaseSwitch.pausable("0.0.1")).toBe(false)
+    expect(ReleaseSwitch.pausable("0.0.1-beta.2")).toBe(false)
+    expect(ReleaseSwitch.pausable("0.0.0")).toBe(false)
     expect(ReleaseSwitch.pausable("not a version")).toBe(false)
   })
 })

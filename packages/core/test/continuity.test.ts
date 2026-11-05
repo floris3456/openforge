@@ -238,20 +238,38 @@ const record = (bus: Bus.Interface) =>
     return { events, of, waitFor }
   })
 
-/** Starts a service generation over the shared database; `stop` is the SIGTERM. */
-const start = (options: { readonly paused?: boolean } = {}) =>
+/**
+ * Starts a service generation over the shared database; `stop` is the SIGTERM. `wrap` stands between the services and
+ * continuity, to hold one of its steps.
+ */
+const start = (
+  options: {
+    readonly paused?: boolean
+    readonly wrap?: (continuity: SessionContinuity.Interface) => SessionContinuity.Interface
+  } = {},
+) =>
   Effect.gen(function* () {
     const database = yield* Database.Service
     const llm = yield* TestLLM.Test
     const global = yield* Global.Service
     const scope = yield* Scope.make()
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+    const wrap = options.wrap
+    const continuityNode = SessionContinuity.configured({ paused: options.paused })
     const context = yield* Layer.buildWithScope(
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
         Global.node.replace(Layer.succeed(Global.Service, global)),
         LayerNodePlatform.llmClient.replace(Layer.succeed(LLMClient.Service, llm)),
-        SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
+        SessionContinuity.node.replace(
+          wrap
+            ? continuityNode.mapLayer((layer) =>
+                Layer.effect(SessionContinuity.Service, Effect.map(SessionContinuity.Service, wrap)).pipe(
+                  Layer.provide(layer),
+                ),
+              )
+            : continuityNode,
+        ),
         PluginSupervisor.node.replace(plugins),
         offlineModels,
         fixedModel,
@@ -349,6 +367,21 @@ const pausedAndStopped = (generation: Generation) =>
     expect(result.paused).toBe(true)
     yield* generation.stop
     return result
+  })
+
+/** Holds a generation's first lookup of a stored request until `release`, once it has signalled `lookup`. */
+const holdLookup =
+  (lookup: Deferred.Deferred<void>, release: Deferred.Deferred<void>) =>
+  (continuity: SessionContinuity.Interface): SessionContinuity.Interface => ({
+    ...continuity,
+    requests: {
+      ...continuity.requests,
+      find: (kind, source) =>
+        Deferred.succeed(lookup, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(continuity.requests.find(kind, source)),
+        ),
+    },
   })
 
 const question = {
@@ -487,6 +520,37 @@ describe("SessionContinuity", () => {
       const second = yield* start()
       yield* succeeded(second, session.id)
       expect(second.events.of(Permission.Event.Asked)).toEqual([])
+      expect(world.deploys).toBe(1)
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
+    }),
+  )
+
+  // As an answer resent through a release switch can arrive: just as the rerun takes the stored request.
+  it.effect("an answer that arrives while the rerun takes its stored request reaches the tool", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_deploy", "deploy", {}), TestLLM.text("deployed", "t1")])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "deploy" })
+      const before = yield* asked(first, session.id)
+      yield* pausedAndStopped(first)
+
+      const lookup = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const second = yield* start({ wrap: holdLookup(lookup, release) })
+      const permission = yield* second.permission(session.location)
+      yield* Deferred.await(lookup)
+      const reply = yield* permission
+        .reply({ requestID: before.data.id, reply: "once" })
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(reply)
+      // The answer went to the request the rerun asked again, not only to the stored one.
+      expect(yield* permission.list()).toEqual([])
+      yield* succeeded(second, session.id)
       expect(world.deploys).toBe(1)
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),

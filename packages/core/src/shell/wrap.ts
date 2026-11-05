@@ -24,13 +24,8 @@ export type Wrapped = Command & {
   readonly sandboxNote?: string
 }
 
-/** How an agent's commands run here; the shell tool tells the model. */
-export type Confinement =
-  /** As they are: no sandbox here, it is off, or this machine can't sandbox and the config doesn't require it. */
-  | { readonly type: "none" }
-  | { readonly type: "sandbox"; readonly mode: "write" | "read"; readonly network: boolean }
-  /** Not at all: this machine can't sandbox, and the config requires the sandbox. */
-  | { readonly type: "refused"; readonly reason: string }
+/** How an agent's commands run here; the shell tool tells the model. A workspace's commands are never confined. */
+export type Confinement = Sandbox.Decision
 
 export interface Interface {
   /** How the commands of `agent` are confined, worked out once per change of the config or the agent. */
@@ -60,7 +55,7 @@ export const node = makeLocationNode({
 
 export type Options = {
   /** Starts this openforge, whose hidden `sandbox-exec` command confines a command on Linux. */
-  readonly self: readonly string[]
+  readonly self: Sandbox.Argv
   /** The live database, when it isn't `<data>/opencode.db`. */
   readonly database?: string
   /** Whether this machine can sandbox, instead of its own answer; tests act out a machine that can't. */
@@ -117,7 +112,7 @@ const sandboxed = (options: Options) =>
           const agent = yield* agents.get(id)
           const known = confined.get(id)
           if (known?.entries === entries && known.agent === agent) return known.confinement
-          const confinement = confine(resolve(entries, agent), options.machine ?? Sandbox.available())
+          const confinement = Sandbox.decide(resolve(entries, agent), options.machine)
           confined.set(id, { entries, agent, confinement })
           return confinement
         }),
@@ -141,22 +136,11 @@ const sandboxed = (options: Options) =>
           }
           if (!wrapped.sandboxed) return command
           const sandboxNote = Sandbox.note(policy)
-          return {
-            ...command,
-            argv: [wrapped.argv[0], ...wrapped.argv.slice(1)],
-            ...(sandboxNote ? { sandboxNote } : {}),
-          }
+          return { ...command, argv: wrapped.argv, ...(sandboxNote ? { sandboxNote } : {}) }
         }),
       })
     }),
   )
-
-// What Sandbox.wrap decides for a command, without spending the warning it gives once per process.
-function confine(policy: Sandbox.Policy, machine: Sandbox.Availability): Confinement {
-  if (policy.mode === "off") return unconfined
-  if (!machine.ok) return policy.required ? { type: "refused", reason: machine.reason } : unconfined
-  return { type: "sandbox", mode: policy.mode, network: policy.network }
-}
 
 export const configured = (options: Options) =>
   makeLocationNode({

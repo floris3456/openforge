@@ -67,7 +67,7 @@ import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
-import { SessionContinuity } from "./continuity.js"
+import { ContinuityCommand } from "./continuity/command.js"
 import { KV } from "./kv.js"
 
 // get project -> project.locations
@@ -277,9 +277,7 @@ const layer = Layer.effect(
     const bus = yield* Bus.Service
     const projects = yield* Project.Service
     const execution = yield* SessionExecution.Service
-    const continuity = yield* SessionContinuity.Service
-    const client = yield* LLMClient.Service
-    const llm = continuity.client(client)
+    const llm = yield* LLMClient.Service
     const transport = yield* SessionModelTransport.Service
     const store = yield* SessionStore.Service
     const instances = yield* Instance.Service
@@ -498,10 +496,10 @@ const layer = Layer.effect(
       }),
       command: Effect.fn("Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
-        return yield* SessionCommand.once(
-          input.id,
-          SessionCommand.execute({ ...input, session }).pipe(Effect.provideService(Instance.Service, instances)),
-        ).pipe(Effect.provideService(KV.Service, kv))
+        return yield* SessionCommand.execute({ ...input, session }).pipe(
+          Effect.provideService(Instance.Service, instances),
+          ContinuityCommand.once(kv, input.id),
+        )
       }),
       shell: (input) => sessions.forSession(input.sessionID).shell(input),
       recoverShells: sessions.recoverShells,
@@ -562,7 +560,6 @@ export const node: LayerNode.Provider<Service, never, typeof Node.tags.values.gl
     SessionExecution.node,
     SessionModelTransport.node,
     llmClient,
-    SessionContinuity.node,
     SessionStore.node,
     Instance.node,
     SessionInbox.node,

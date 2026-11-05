@@ -31,7 +31,7 @@ describe("sandbox-exec", () => {
   test.skipIf(!Sandbox.available().ok)("confines the command, then runs it", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "openforge-sandbox-exec-"))
     try {
-      const policy = Landlock.encode({ write: ["/dev"], deny: [], network: true })
+      const policy = Landlock.encode({ write: ["/dev"], denyRead: [], network: true })
       const child = Bun.spawn(
         [
           process.execPath,

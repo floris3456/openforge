@@ -61,7 +61,7 @@ export const ServerOptions = Schema.Struct({
        * Starts this openforge, whose hidden `sandbox-exec` command confines the agents' shell commands on Linux.
        * Without it they run unsandboxed.
        */
-      command: Schema.optional(Schema.Array(Schema.String)),
+      command: Schema.optional(Schema.NonEmptyArray(Schema.String)),
     }),
   ),
 })

@@ -5,7 +5,10 @@ export * as Product from "./product.js"
 
 /** The command users type. */
 export const binary = "openforge"
-/** The folder under each XDG base directory (config, data, cache, state, tmp) and the system config directory. */
+/**
+ * The folder under each XDG base directory (config, data, cache, state, tmp) and the system config directory, and,
+ * with a dot, the one in the home folder that holds the plan agent's plans (`~/.openforge/plan`).
+ */
 export const folder = "openforge"
 /** The name on screen. */
 export const name = "openforge"

@@ -6,17 +6,18 @@ import { optional } from "./schema.js"
 import { SessionID } from "./session-id.js"
 
 /** Work a pause waits for: a step that has not reached a boundary, a running tool or a model call. */
+export interface Work extends Schema.Schema.Type<typeof Work> {}
 export const Work = Schema.Struct({
   sessionID: SessionID.pipe(optional),
   kind: Schema.Literals(["step", "tool", "model"]),
   name: Schema.String,
 }).annotate({ identifier: "Continuity.Work" })
-export type Work = typeof Work.Type
 
 export const State = Schema.Literals(["running", "pausing", "paused"]).annotate({ identifier: "Continuity.State" })
 export type State = typeof State.Type
 
 /** A tool runner of this or an earlier release that held commands when the service started. */
+export interface Runner extends Schema.Schema.Type<typeof Runner> {}
 export const Runner = Schema.Struct({
   version: Schema.String,
   /** The service talks to it, so its commands reach their tool calls. */
@@ -24,8 +25,8 @@ export const Runner = Schema.Struct({
   /** Why the service can't reach it. */
   reason: Schema.String.pipe(optional),
 }).annotate({ identifier: "Continuity.Runner" })
-export type Runner = typeof Runner.Type
 
+export interface Status extends Schema.Schema.Type<typeof Status> {}
 export const Status = Schema.Struct({
   state: State,
   /** The service started paused; writes are refused until it is resumed. */
@@ -41,7 +42,6 @@ export const Status = Schema.Struct({
   /** Tool runners found at start, once the service has tried each; only `status` reports them. */
   runners: Schema.Array(Runner).pipe(optional),
 }).annotate({ identifier: "Continuity.Status" })
-export type Status = typeof Status.Type
 
 export const PauseResult = Schema.Union([
   Schema.Struct({ paused: Schema.Literal(true), rested: Schema.Array(SessionID) }),

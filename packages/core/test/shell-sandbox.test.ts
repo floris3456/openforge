@@ -46,7 +46,7 @@ import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "
 
 const sessionID = Session.ID.make("ses_shell_sandbox")
 const NOTE = "This command ran in the sandbox, which lets it write only to "
-const self = [process.execPath, path.join(import.meta.dir, "fixture/sandbox-exec.ts")]
+const self: Sandbox.Argv = [process.execPath, path.join(import.meta.dir, "fixture/sandbox-exec.ts")]
 const state = { root: "" }
 
 beforeAll(() => {

@@ -37,7 +37,8 @@ function fail(message: string) {
 
 /** The default registration file. */
 export function fallback() {
-  // openforge's state folder (Product.folder in @opencode/schema, which this module must not import).
+  // Product.folder, written out: the Promise client's service entry loads nothing from @opencode/schema
+  // (test/import-boundaries.test.ts).
   return join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), "openforge", "service.json")
 }
 

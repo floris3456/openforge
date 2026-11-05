@@ -1,13 +1,12 @@
 import { describe, expect } from "bun:test"
 import fs from "fs"
 import path from "path"
-import { Context, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
+import { Context, Effect, Exit, Fiber, Layer, Schedule, Scope } from "effect"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
 import { TestLLM } from "@opencode/ai/testing"
 import { RunnerPaths } from "@opencode/runner/paths"
-import type { Event } from "@opencode/schema/event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Agent } from "@opencode/core/agent"
@@ -41,6 +40,7 @@ import { ShellSelect } from "@opencode/core/shell/select"
 import { Tool } from "@opencode/core/tool"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { App } from "@opencode/core/app"
+import { record, succeeded, transcript } from "./fixture/continuity"
 import { offlineModels } from "./fixture/models"
 import { alive, eventually, machine } from "./fixture/runner"
 import { testEffect } from "./lib/effect"
@@ -125,7 +125,7 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
     const context = yield* Layer.buildWithScope(
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
-        LayerNodePlatform.llmClient.replace(Layer.succeed(LLMClient.Service, llm)),
+        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
         SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
         ShellRunner.node.replace(ShellRunner.configured({ launch: host.launch })),
         App.node.replace(App.configured({ version: "test" })),
@@ -135,13 +135,7 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
       ]).pipe(Layer.provide(host.global)),
       scope,
     )
-    const events: Event.Payload[] = []
-    yield* Context.get(context, Bus.Service)
-      .subscribe()
-      .pipe(
-        Stream.runForEach((event) => Effect.sync(() => events.push(event))),
-        Effect.forkIn(scope, { startImmediately: true }),
-      )
+    const events = yield* record(Context.get(context, Bus.Service)).pipe(Scope.provide(scope))
     const continuity = Context.get(context, SessionContinuity.Service)
     const restart = Context.get(context, SessionRestart.Service)
     // As the server does: the restart sweep runs once the gate is open.
@@ -149,10 +143,9 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
       Effect.andThen(restart.resumeSuspendedSessions),
       Effect.forkIn(scope),
     )
-    const of = <D extends Event.Definition>(definition: D) =>
-      events.filter((event): event is Event.Payload<D> => event.type === definition.type)
     return {
-      of,
+      events,
+      of: events.of,
       continuity,
       /** Settles once the restart sweep has picked up what the previous generation left. */
       recovered: Fiber.join(sweep),
@@ -167,15 +160,6 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
   })
 
 type Generation = Effect.Success<ReturnType<typeof start>>
-
-const succeeded = (generation: Generation, sessionID: Session.ID) =>
-  eventually(
-    () => generation.of(SessionEvent.Execution.Succeeded).some((event) => event.data.sessionID === sessionID),
-    "the turn's success",
-  )
-
-const transcript = (generation: Generation, sessionID: Session.ID) =>
-  generation.sessions.messages({ sessionID }).pipe(Effect.map((messages) => JSON.stringify(messages)))
 
 /** A command that counts its runs, then waits for the test before it prints `done`. */
 const gated = (directory: string) => {
@@ -249,13 +233,13 @@ describe("a foreground shell tool call across a stop", () => {
           yield* second.recovered
           expect(chat.command.runs()).toBe(1)
           chat.command.release()
-          yield* succeeded(second, chat.session.id)
+          yield* succeeded(second.events, chat.session.id)
 
           expect(chat.command.runs()).toBe(1)
           expect(yield* shellCalls(second, chat.session.id)).toMatchObject([
             { status: "completed", content: [{ type: "text", text: "done\n" }] },
           ])
-          const text = yield* transcript(second, chat.session.id)
+          const text = yield* transcript(second.sessions, chat.session.id)
           expect(text).toContain("all done")
           // The same requests as without the stop: the call, then the step after its result.
           expect((yield* llm.requests()).length).toBe(2)
@@ -315,12 +299,12 @@ describe("a `!` command across a stop", () => {
             expect(second.of(SessionEvent.Shell.Ended)).toEqual([])
             chat.command.release()
           }
-          yield* eventually(() => second.of(SessionEvent.Shell.Ended).length > 0, "the command's end")
+          yield* noticed(second, chat.session.id)
           const notices = yield* reported(second, chat.session.id)
           expect(notices).toHaveLength(1)
           expect(notices[0]).toContain("The following shell command was executed by the user")
           expect(notices[0]).toContain("done")
-          expect(yield* second.kv.get(SessionShell.key(started[0]))).toBeUndefined()
+          yield* forgotten(second, started[0])
           const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
           expect(messages.filter((message) => message.type === "shell")).toMatchObject([
             { shellID: started[0], status: "exited", exit: 0 },
@@ -358,7 +342,7 @@ describe("a `!` command across a stop", () => {
         yield* second.sessions.shell({ sessionID: chat.session.id, id, command: chat.command.command })
         expect(second.of(SessionEvent.Shell.Started)).toEqual([])
         chat.command.release()
-        yield* eventually(() => second.of(SessionEvent.Shell.Ended).length > 0, "the command's end")
+        yield* noticed(second, chat.session.id)
         expect(chat.command.runs()).toBe(1)
         expect(yield* reported(second, chat.session.id)).toHaveLength(1)
         const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
@@ -367,6 +351,24 @@ describe("a `!` command across a stop", () => {
     { timeout: 30_000 },
   )
 })
+
+/** Resolves once a reported `!` command's record is gone; it goes just after its notice, and no event marks it. */
+const forgotten = (generation: Generation, id: Shell.ID) =>
+  generation.kv.get(SessionShell.key(id)).pipe(
+    Effect.flatMap((record) => (record === undefined ? Effect.void : Effect.fail("the command's record is kept"))),
+    Effect.retry(Schedule.spaced("20 millis")),
+    Effect.timeout("10 seconds"),
+  )
+
+/** Resolves once a shell notice reaches the Session's inbox. */
+const noticed = (generation: Generation, sessionID: Session.ID) =>
+  generation.events.waitFor(
+    SessionEvent.InboxEnqueued,
+    (event) =>
+      event.data.sessionID === sessionID &&
+      event.data.item.type === "synthetic" &&
+      event.data.item.payload.metadata?.source === "shell",
+  )
 
 const reported = (generation: Generation, sessionID: Session.ID) =>
   generation.sessions

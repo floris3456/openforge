@@ -10,8 +10,7 @@ import { Product } from "@opencode/schema/product"
 import { Flock } from "./flock.js"
 import { makeGlobalNode } from "./effect/app-node.js"
 
-const app = Product.folder
-const { data, cache, config, state, tmp } = roots(app)
+const { data, cache, config, state, tmp } = roots(Product.folder)
 
 const paths = {
   get home() {

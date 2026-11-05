@@ -11,6 +11,7 @@ import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
 import { hasMcpClientTicketURL } from "@opencode/protocol/groups/mcp"
 import { isPairingConnectURL } from "@opencode/protocol/groups/server"
+import { SERVICE_SWITCHING } from "@opencode/protocol/groups/service"
 import { Global } from "@opencode/util/global"
 import { Cause, Context, Effect, Exit, Latch, Layer, Option, Ref, Scope } from "effect"
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
@@ -69,17 +70,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   }
   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
   const application = yield* Ref.make(Option.none<App>())
-  const writable = yield* Ref.make<() => boolean>(() => true)
-  const stopping = yield* Ref.make<Effect.Effect<void>>(Effect.void)
-  const app = dispatch(
-    password,
-    status,
-    application,
-    writable,
-    options.app?.version ?? "unknown",
-    urls,
-    Global.Path.tmp,
-  )
+  const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
   yield* bound.http
     .serve(
@@ -102,8 +93,6 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   const applicationScope = yield* Scope.fork(parentScope)
   yield* Effect.addFinalizer(() =>
     status.beginStopping.pipe(
-      // Before any Location closes, so waits that survive a stop keep their records instead of being cancelled.
-      Effect.andThen(Effect.flatten(Ref.get(stopping))),
       Effect.andThen(Ref.set(application, Option.none())),
       Effect.andThen(Effect.sync(() => bound.server.closeAllConnections())),
     ),
@@ -121,6 +110,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       applicationScope,
     )
     const continuity = Context.get(context, SessionContinuity.Service)
+    // Runs before the application scope closes any Location, so waits that survive a stop keep their records.
+    yield* Effect.addFinalizer(() => continuity.stop)
     if (lifecycle) {
       yield* installRestartContinuity(
         Context.get(context, SessionRestart.Service),
@@ -134,9 +125,10 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Schedule.Service).run)),
       applicationScope,
     )
-    yield* Ref.set(writable, () => !continuity.refusesWrites())
-    yield* Ref.set(stopping, continuity.stop)
-    yield* Ref.set(application, Option.some(Context.get(context, HttpRouter.HttpRouter).asHttpEffect()))
+    yield* Ref.set(
+      application,
+      Option.some(refusingWrites(continuity, Context.get(context, HttpRouter.HttpRouter).asHttpEffect())),
+    )
     yield* status.ready
     const bus = Context.get(context, Bus.Service)
     return {
@@ -201,7 +193,6 @@ function dispatch(
   password: string,
   status: Status.Interface,
   application: Ref.Ref<Option.Option<App>>,
-  writable: Ref.Ref<() => boolean>,
   version: string,
   urls: () => ReadonlyArray<string>,
   tmp: string,
@@ -224,8 +215,6 @@ function dispatch(
       !(yield* authorizedRequest(request, auth))
     )
       return unauthorizedResponse(request)
-    if (ready && !READS.has(request.method) && !url.pathname.startsWith(SERVICE_PATH) && !(yield* Ref.get(writable))())
-      return switching()
     if (ready) return yield* app.value
     return unavailable(state)
   })
@@ -234,12 +223,18 @@ function dispatch(
 const READS = new Set(["GET", "HEAD", "OPTIONS"])
 const SERVICE_PATH = "/api/experimental/service/"
 
-/** A paused start answers reads but refuses writes, so a rollback to the previous release cannot lose one. */
-function switching() {
-  return HttpServerResponse.jsonUnsafe(
-    { code: "service_switching", message: "switching, try again in 1 s" },
-    { status: 503, headers: { "retry-after": "1" } },
-  )
+/** A paused start answers reads, and the service routes that resume it, but refuses writes until it is resumed. */
+function refusingWrites(continuity: SessionContinuity.Interface, app: App): App {
+  return Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    if (
+      !continuity.refusesWrites() ||
+      READS.has(request.method) ||
+      new URL(request.url, "http://localhost").pathname.startsWith(SERVICE_PATH)
+    )
+      return yield* app
+    return HttpServerResponse.jsonUnsafe(SERVICE_SWITCHING, { status: 503, headers: { "retry-after": "1" } })
+  })
 }
 
 const infoResponse = Effect.fnUntraced(function* (

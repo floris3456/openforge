@@ -1,13 +1,12 @@
 import { describe, expect } from "bun:test"
-import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { eq } from "drizzle-orm"
-import { AIError, LanguageModel, LLMEvent, ToolFailure, TransportError, type LLMRequest } from "@opencode/ai/effect"
+import { ai, AIError, LanguageModel, LLMEvent, ToolFailure, TransportError, type LLMRequest } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
 import { TestLLM } from "@opencode/ai/testing"
 import { Continuity } from "@opencode/schema/continuity"
-import type { Event } from "@opencode/schema/event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Agent } from "@opencode/core/agent"
@@ -43,6 +42,7 @@ import { Global } from "@opencode/util/global"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
 import { tmpdirScoped } from "./fixture/tmpdir"
+import { record, succeeded, transcript } from "./fixture/continuity"
 import { testEffect } from "./lib/effect"
 import { registerToolPlugin } from "./lib/tool"
 
@@ -60,8 +60,11 @@ const world = {
   deploys: 0,
   phase1: 0,
   phase2: 0,
+  /** The checkpoint tool has done its first phase. */
+  checkpointed: Deferred.makeUnsafe<void>(),
   external: Deferred.makeUnsafe<string>(),
-  holds: 0,
+  /** The hold tool runs. */
+  holding: Deferred.makeUnsafe<void>(),
 }
 const reset = () => {
   world.echoes = 0
@@ -70,8 +73,9 @@ const reset = () => {
   world.deploys = 0
   world.phase1 = 0
   world.phase2 = 0
+  world.checkpointed = Deferred.makeUnsafe<void>()
   world.external = Deferred.makeUnsafe<string>()
-  world.holds = 0
+  world.holding = Deferred.makeUnsafe<void>()
 }
 
 const Checkpoint = Schema.Struct({ token: Schema.String })
@@ -148,6 +152,7 @@ const plugins = makeLocationNode({
                   resumed === undefined
                     ? `token-${++world.phase1}`
                     : Schema.decodeUnknownSync(Checkpoint)(resumed).token
+                yield* Deferred.succeed(world.checkpointed, undefined)
                 const result = yield* continuity.wait(context.id, Deferred.await(world.external), { token })
                 world.phase2++
                 return { output: {}, content: `${token} ${result}` }
@@ -160,7 +165,7 @@ const plugins = makeLocationNode({
             input: Schema.Struct({}),
             output: Schema.Struct({}),
             execute: () =>
-              Effect.sync(() => world.holds++).pipe(Effect.andThen(Effect.never), Effect.as({ output: {} })),
+              Deferred.succeed(world.holding, undefined).pipe(Effect.andThen(Effect.never), Effect.as({ output: {} })),
           })
         })
         .pipe(Effect.orDie)
@@ -204,54 +209,43 @@ const nodes = LayerNode.group([
   SessionRestart.node,
   SessionContinuity.node,
   LocationServiceMap.node,
+  LayerNodePlatform.llmClient,
 ])
 
 const it = testEffect(Layer.mergeAll(AppNodeBuilder.build(Database.node), TestLLM.testLayer(), tempGlobalLayer))
 
-/** Every event a generation published, and a way to wait for one. */
-const record = (bus: Bus.Interface) =>
-  Effect.gen(function* () {
-    const events: Event.Payload[] = []
-    let signal = Deferred.makeUnsafe<void>()
-    yield* bus.subscribe().pipe(
-      Stream.runForEach((event) =>
-        Effect.sync(() => {
-          events.push(event)
-          const previous = signal
-          signal = Deferred.makeUnsafe()
-          Deferred.doneUnsafe(previous, Exit.void)
-        }),
-      ),
-      Effect.forkScoped({ startImmediately: true }),
-    )
-    const of = <D extends Event.Definition>(definition: D) =>
-      events.filter((event): event is Event.Payload<D> => event.type === definition.type)
-    const waitFor = <D extends Event.Definition>(
-      definition: D,
-      predicate: (event: Event.Payload<D>) => boolean = () => true,
-    ): Effect.Effect<Event.Payload<D>> =>
-      Effect.suspend(() => {
-        const found = of(definition).find(predicate)
-        if (found) return Effect.succeed(found)
-        return Deferred.await(signal).pipe(Effect.andThen(waitFor(definition, predicate)))
-      })
-    return { events, of, waitFor }
-  })
-
-/** Starts a service generation over the shared database; `stop` is the SIGTERM. */
-const start = (options: { readonly paused?: boolean } = {}) =>
+/**
+ * Starts a service generation over the shared database; `stop` is the SIGTERM. `wrap` stands between the services and
+ * continuity, to hold one of its steps.
+ */
+const start = (
+  options: {
+    readonly paused?: boolean
+    readonly wrap?: (continuity: SessionContinuity.Interface) => SessionContinuity.Interface
+  } = {},
+) =>
   Effect.gen(function* () {
     const database = yield* Database.Service
     const llm = yield* TestLLM.Test
     const global = yield* Global.Service
     const scope = yield* Scope.make()
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+    const wrap = options.wrap
+    const continuityNode = SessionContinuity.configured({ paused: options.paused })
     const context = yield* Layer.buildWithScope(
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
         Global.node.replace(Layer.succeed(Global.Service, global)),
-        LayerNodePlatform.llmClient.replace(Layer.succeed(LLMClient.Service, llm)),
-        SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
+        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
+        SessionContinuity.node.replace(
+          wrap
+            ? continuityNode.mapLayer((layer) =>
+                Layer.effect(SessionContinuity.Service, Effect.map(SessionContinuity.Service, wrap)).pipe(
+                  Layer.provide(layer),
+                ),
+              )
+            : continuityNode,
+        ),
         PluginSupervisor.node.replace(plugins),
         offlineModels,
         fixedModel,
@@ -292,12 +286,6 @@ const createSession = (generation: Generation) =>
     })
   })
 
-const succeeded = (generation: Generation, sessionID: Session.ID) =>
-  generation.events.waitFor(SessionEvent.Execution.Succeeded, (event) => event.data.sessionID === sessionID)
-
-const transcript = (generation: Generation, sessionID: Session.ID) =>
-  generation.sessions.messages({ sessionID }).pipe(Effect.map((messages) => JSON.stringify(messages)))
-
 /** A reply that streams its first events, then waits for `release` before the rest. */
 const held = (release: Deferred.Deferred<void>, events: ReadonlyArray<LLMEvent>) =>
   Stream.concat(
@@ -307,12 +295,18 @@ const held = (release: Deferred.Deferred<void>, events: ReadonlyArray<LLMEvent>)
 
 const isChild = (request: LLMRequest) => request.http?.headers?.["x-opencode-parent-session-id"] !== undefined
 
-/** Answers the parent Session's requests and its subagent's from separate scripts. */
+/** Answers the parent Session's requests and its subagent's from separate scripts; gives when each came, in clock time. */
 const script = (llm: TestLLM.TestInterface, parent: TestLLM.Response[], child: TestLLM.Response[] = []) =>
-  llm.serve((request) => {
-    const next = (isChild(request) ? child : parent).shift()
-    if (next === undefined) throw new Error(`unexpected ${isChild(request) ? "child" : "parent"} model request`)
-    return next
+  TestClock.testClockWith((clock) => {
+    const times: number[] = []
+    return llm
+      .serve((request) => {
+        times.push(clock.currentTimeMillisUnsafe())
+        const next = (isChild(request) ? child : parent).shift()
+        if (next === undefined) throw new Error(`unexpected ${isChild(request) ? "child" : "parent"} model request`)
+        return next
+      })
+      .pipe(Effect.as(times))
   })
 
 const counts = (llm: TestLLM.TestInterface) =>
@@ -331,24 +325,27 @@ const transportError = () =>
     reason: new TransportError({ message: "Provider unavailable", transport: "http", operation: "request" }),
   })
 
-/** Lets pub/sub delivery and fiber hops finish on a real macrotask between TestClock steps. */
-const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 1)))
-
-/** Settles real work until `condition` holds, bounded by real time. */
-const until = Effect.fnUntraced(function* (condition: () => boolean) {
-  const deadline = performance.now() + 10_000
-  while (!condition()) {
-    if (performance.now() > deadline) return yield* Effect.die(new Error("condition never held within 10s"))
-    yield* settle
-  }
-})
-
 const pausedAndStopped = (generation: Generation) =>
   Effect.gen(function* () {
     const result = yield* generation.continuity.pause()
     expect(result.paused).toBe(true)
     yield* generation.stop
     return result
+  })
+
+/** Holds a generation's first lookup of a stored request until `release`, once it has signalled `lookup`. */
+const holdLookup =
+  (lookup: Deferred.Deferred<void>, release: Deferred.Deferred<void>) =>
+  (continuity: SessionContinuity.Interface): SessionContinuity.Interface => ({
+    ...continuity,
+    requests: {
+      ...continuity.requests,
+      find: (kind, source) =>
+        Deferred.succeed(lookup, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(continuity.requests.find(kind, source)),
+        ),
+    },
   })
 
 const question = {
@@ -385,12 +382,12 @@ describe("SessionContinuity", () => {
       expect((yield* second.continuity.status).startedPaused).toBe(true)
       yield* second.continuity.resume
       expect(second.continuity.refusesWrites()).toBe(false)
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
 
       expect(world.echoes).toBe(1)
       // The same requests as without the stop.
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
-      const text = yield* transcript(second, session.id)
+      const text = yield* transcript(second.sessions, session.id)
       expect(text).not.toContain(RESTART_NOTICE)
       expect(text).toContain("all done")
     }),
@@ -400,7 +397,7 @@ describe("SessionContinuity", () => {
     Effect.gen(function* () {
       reset()
       const llm = yield* TestLLM.Test
-      yield* script(llm, [
+      const requested = yield* script(llm, [
         TestLLM.failAfter(transportError()),
         TestLLM.failAfter(transportError()),
         TestLLM.text("recovered", "t1"),
@@ -419,22 +416,18 @@ describe("SessionContinuity", () => {
       const second = yield* start()
       const shown = yield* second.events.waitFor(SessionEvent.RetryScheduled)
       expect(shown.data).toMatchObject({ attempt: 2, at: scheduled.data.at })
-      yield* settle
-      const now = yield* Clock.currentTimeMillis
-      yield* TestClock.adjust(scheduled.data.at - now - 1)
-      yield* settle
-      expect((yield* counts(llm)).parent).toBe(1)
-      yield* TestClock.adjust(1)
+      yield* TestClock.setTime(scheduled.data.at)
       yield* llm.wait(2)
+      // At the stored deadline, not a whole delay after the restart.
+      expect(requested[1]).toBe(scheduled.data.at)
 
       // The count goes on from the stored attempt.
       const next = yield* second.events.waitFor(SessionEvent.RetryScheduled, (event) => event.data.attempt !== 2)
       expect(next.data.attempt).toBe(3)
-      yield* settle
-      yield* TestClock.adjust(next.data.at - (yield* Clock.currentTimeMillis))
-      yield* succeeded(second, session.id)
+      yield* TestClock.setTime(next.data.at)
+      yield* succeeded(second.events, session.id)
       expect(yield* counts(llm)).toEqual({ parent: 3, child: 0 })
-      expect(yield* transcript(second, session.id)).not.toContain(RESTART_NOTICE)
+      expect(yield* transcript(second.sessions, session.id)).not.toContain(RESTART_NOTICE)
     }),
   )
 
@@ -460,11 +453,11 @@ describe("SessionContinuity", () => {
       yield* permission.reply({ requestID: before.data.id, reply: "once" })
       // A client resending its answer gets the same success.
       yield* permission.reply({ requestID: before.data.id, reply: "once" })
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
 
       expect(world.deploys).toBe(1)
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
-      expect(yield* transcript(second, session.id)).not.toContain(RESTART_NOTICE)
+      expect(yield* transcript(second.sessions, session.id)).not.toContain(RESTART_NOTICE)
     }),
   )
 
@@ -479,14 +472,46 @@ describe("SessionContinuity", () => {
       yield* first.sessions.prompt({ sessionID: session.id, text: "deploy" })
       const before = yield* asked(first, session.id)
       expect((yield* first.continuity.pause()).paused).toBe(true)
-      yield* (yield* first.permission(session.location)).reply({ requestID: before.data.id, reply: "once" })
+      const permission = yield* first.permission(session.location)
+      yield* permission.reply({ requestID: before.data.id, reply: "once" })
       // The tool holds the answer until the gate opens.
       expect(world.deploys).toBe(0)
       yield* first.stop
 
       const second = yield* start()
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
       expect(second.events.of(Permission.Event.Asked)).toEqual([])
+      expect(world.deploys).toBe(1)
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
+    }),
+  )
+
+  // As an answer resent through a release switch can arrive: just as the rerun takes the stored request.
+  it.effect("an answer that arrives while the rerun takes its stored request reaches the tool", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_deploy", "deploy", {}), TestLLM.text("deployed", "t1")])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "deploy" })
+      const before = yield* asked(first, session.id)
+      yield* pausedAndStopped(first)
+
+      const lookup = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const second = yield* start({ wrap: holdLookup(lookup, release) })
+      const permission = yield* second.permission(session.location)
+      yield* Deferred.await(lookup)
+      const reply = yield* permission
+        .reply({ requestID: before.data.id, reply: "once" })
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(reply)
+      // The answer went to the request the rerun asked again, not only to the stored one.
+      expect(yield* permission.list()).toEqual([])
+      yield* succeeded(second.events, session.id)
       expect(world.deploys).toBe(1)
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),
@@ -513,7 +538,7 @@ describe("SessionContinuity", () => {
       const stale = yield* permission.reply({ requestID: before.data.id, reply: "once" }).pipe(Effect.flip)
       expect(stale._tag).toBe("Permission.NotFoundError")
       yield* permission.reply({ requestID: again.data.id, reply: "once" })
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
       expect(world.deploys).toBe(1)
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),
@@ -538,12 +563,39 @@ describe("SessionContinuity", () => {
       const form = yield* second.form(session.location)
       yield* form.reply({ id: before.data.form.id, answer: { q0: "Yes" } })
       yield* form.reply({ id: before.data.form.id, answer: { q0: "Yes" } })
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
 
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
-      const text = yield* transcript(second, session.id)
+      const text = yield* transcript(second.sessions, session.id)
       expect(text).toContain(`\\"Continue?\\"=\\"Yes\\"`)
       expect(text).not.toContain(RESTART_NOTICE)
+    }),
+  )
+
+  it.effect("a question dismissed while paused stays dismissed for the rerun after the stop", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_question", "question", question)])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "ask me" })
+      const before = yield* first.events.waitFor(Form.Event.Created)
+      expect((yield* first.continuity.pause()).paused).toBe(true)
+      const form = yield* first.form(session.location)
+      yield* form.cancel(before.data.form.id)
+      yield* first.stop
+
+      const second = yield* start()
+      yield* Effect.raceFirst(
+        second.events.waitFor(Form.Event.Created),
+        second.events.waitFor(SessionEvent.Execution.Interrupted, (event) => event.data.sessionID === session.id),
+      )
+      // The rerun found it dismissed: nothing was asked, and the turn ends as a dismissal does.
+      expect(second.events.of(Form.Event.Created)).toEqual([])
+      expect(yield* transcript(second.sessions, session.id)).toContain("The user dismissed this question")
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
     }),
   )
 
@@ -571,12 +623,12 @@ describe("SessionContinuity", () => {
       // The same answer again, as a client resends it, gets the same success.
       yield* form.reply({ id: before.data.form.id, answer: { q0: "Yes" }, sessionID: session.id })
       yield* second.continuity.resume
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
 
       // The rerun found its answer and asked nothing.
       expect(second.events.of(Form.Event.Created)).toEqual([])
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
-      expect(yield* transcript(second, session.id)).toContain(`\\"Continue?\\"=\\"Yes\\"`)
+      expect(yield* transcript(second.sessions, session.id)).toContain(`\\"Continue?\\"=\\"Yes\\"`)
     }),
   )
 
@@ -613,7 +665,7 @@ describe("SessionContinuity", () => {
       expect(second.events.of(Form.Event.Created)).toEqual([])
       expect(yield* form.list()).toEqual([])
       expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
-      expect(yield* transcript(second, session.id)).toContain("The user dismissed this question")
+      expect(yield* transcript(second.sessions, session.id)).toContain("The user dismissed this question")
       // Cancelled once the rerun took it: the same dismissal still succeeds.
       yield* form.cancel(id, { sessionID: session.id })
     }),
@@ -669,17 +721,18 @@ describe("SessionContinuity", () => {
       yield* second.continuity.resume
       const again = yield* asked(second, child)
       expect(again.data.id).toBe(before.data.id)
-      yield* (yield* second.permission(parent.location)).reply({ requestID: before.data.id, reply: "once" })
-      yield* succeeded(second, parent.id)
+      const permission = yield* second.permission(parent.location)
+      yield* permission.reply({ requestID: before.data.id, reply: "once" })
+      yield* succeeded(second.events, parent.id)
 
       const children = yield* db.select().from(SessionTable).where(eq(SessionTable.parent_id, parent.id)).all()
       expect(children.map((row) => row.id)).toEqual([child])
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 2 })
-      const text = yield* transcript(second, parent.id)
+      const text = yield* transcript(second.sessions, parent.id)
       expect(text).toContain("child done")
       expect(text).toContain("parent done")
       expect(text).not.toContain(RESTART_NOTICE)
-      expect(yield* transcript(second, child)).not.toContain(RESTART_NOTICE)
+      expect(yield* transcript(second.sessions, child)).not.toContain(RESTART_NOTICE)
     }),
   )
 
@@ -707,20 +760,21 @@ describe("SessionContinuity", () => {
       yield* first.sessions.prompt({ sessionID: parent.id, text: "delegate" })
       const before = yield* first.events.waitFor(Permission.Event.Asked)
       const child = before.data.sessionID
-      yield* succeeded(first, parent.id)
+      yield* succeeded(first.events, parent.id)
       yield* pausedAndStopped(first)
-      expect(yield* transcript(first, parent.id)).not.toContain("cancelled")
+      expect(yield* transcript(first.sessions, parent.id)).not.toContain("cancelled")
 
       const second = yield* start({ paused: true })
       yield* second.continuity.resume
       const again = yield* asked(second, child)
       expect(again.data.id).toBe(before.data.id)
-      yield* (yield* second.permission(parent.location)).reply({ requestID: before.data.id, reply: "once" })
+      const permission = yield* second.permission(parent.location)
+      yield* permission.reply({ requestID: before.data.id, reply: "once" })
       yield* second.events.waitFor(SessionEvent.Execution.Succeeded, (event) => event.data.sessionID === child)
-      yield* succeeded(second, parent.id)
+      yield* succeeded(second.events, parent.id)
 
       expect(yield* counts(llm)).toEqual({ parent: 3, child: 2 })
-      const text = yield* transcript(second, parent.id)
+      const text = yield* transcript(second.sessions, parent.id)
       expect(text).toContain(`state=\\"completed\\"`)
       expect(text).toContain("child done")
       expect(text).not.toContain("cancelled")
@@ -751,13 +805,13 @@ describe("SessionContinuity", () => {
       yield* first.stop
 
       const second = yield* start()
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
       const requests = (yield* llm.requests()).map((request) => JSON.stringify(request.messages))
       expect(requests).toHaveLength(3)
       expect(requests[1]).toContain("prompt B")
       expect(requests[1]).not.toContain("prompt C")
       expect(requests[2]).toContain("prompt C")
-      expect(yield* transcript(second, session.id)).not.toContain(RESTART_NOTICE)
+      expect(yield* transcript(second.sessions, session.id)).not.toContain(RESTART_NOTICE)
     }),
   )
 
@@ -771,7 +825,7 @@ describe("SessionContinuity", () => {
       const first = yield* start()
       const session = yield* createSession(first)
       yield* first.sessions.prompt({ sessionID: session.id, id, text: "hello" })
-      yield* succeeded(first, session.id)
+      yield* succeeded(first.events, session.id)
       yield* pausedAndStopped(first)
 
       const second = yield* start()
@@ -794,17 +848,16 @@ describe("SessionContinuity", () => {
       const first = yield* start()
       const session = yield* createSession(first)
       yield* first.sessions.prompt({ sessionID: session.id, text: "work" })
-      yield* until(() => world.phase1 === 1)
+      yield* Deferred.await(world.checkpointed)
       yield* pausedAndStopped(first)
 
       const second = yield* start()
-      yield* settle
       yield* Deferred.succeed(world.external, "resumed")
-      yield* succeeded(second, session.id)
+      yield* succeeded(second.events, session.id)
       // Phase one ran once; the rerun took its token from the checkpoint.
       expect(world.phase1).toBe(1)
       expect(world.phase2).toBe(1)
-      expect(yield* transcript(second, session.id)).toContain("token-1 resumed")
+      expect(yield* transcript(second.sessions, session.id)).toContain("token-1 resumed")
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),
   )
@@ -818,7 +871,7 @@ describe("SessionContinuity", () => {
       const first = yield* start()
       const session = yield* createSession(first)
       yield* first.sessions.prompt({ sessionID: session.id, text: "work" })
-      yield* until(() => world.holds === 1)
+      yield* Deferred.await(world.holding)
 
       const pause = yield* first.continuity.pause({ timeout: 1_000 }).pipe(Effect.forkChild({ startImmediately: true }))
       expect((yield* first.continuity.status).waiting).toEqual([{ sessionID: session.id, kind: "tool", name: "hold" }])
@@ -831,6 +884,88 @@ describe("SessionContinuity", () => {
       expect(first.events.of(Continuity.Event.Expired)).toHaveLength(1)
       // Open again: work that waits for the gate passes.
       yield* first.continuity.awaitOpen
+    }),
+  )
+
+  // When a resume and a new pause both land before the earlier pause's loop runs again.
+  it.effect("a pause asked again right after a resume keeps its own limit", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const services = yield* Layer.build(
+        LayerNode.compile(LayerNode.group([Bus.node, KV.node]), {
+          replacements: [Database.node.replace(Layer.succeed(Database.Service, database))],
+        }),
+      )
+      const bus = Context.get(services, Bus.Service)
+      const publishing = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let held = false
+      // The earlier pause's loop stays in its first notice until the resume and the later pause are in.
+      const holding: Bus.Interface = {
+        ...bus,
+        publish: (definition, data, options) =>
+          (definition.type !== Continuity.Event.Pausing.type || held
+            ? Effect.void
+            : Effect.sync(() => {
+                held = true
+              }).pipe(Effect.andThen(Deferred.succeed(publishing, undefined)), Effect.andThen(Deferred.await(release)))
+          ).pipe(Effect.andThen(bus.publish(definition, data, options))),
+      }
+      const continuity = Context.get(
+        yield* Layer.build(
+          SessionContinuity.layer().pipe(
+            Layer.provide(Layer.succeed(Bus.Service, holding)),
+            Layer.provide(Layer.succeedContext(services)),
+          ),
+        ),
+        SessionContinuity.Service,
+      )
+      const sessionID = Session.ID.create()
+      const activity = continuity.activity(sessionID)
+      activity.attempt()
+      activity.register({ id: "call_hold", name: "hold", messageID: SessionMessage.ID.create(), survives: true })
+
+      const earlier = yield* continuity.pause({ timeout: 1_000 }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.await(publishing)
+      yield* continuity.resume
+      const later = yield* continuity.pause({ timeout: 5_000 }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      // The earlier pause ended with the resume; its limit does not end the later one.
+      yield* TestClock.adjust("1 second")
+      expect((yield* continuity.status).state).toBe("pausing")
+      expect(yield* Fiber.join(earlier)).toMatchObject({ paused: false })
+      yield* TestClock.adjust("4 seconds")
+      expect(yield* Fiber.join(later)).toEqual({ paused: false, waiting: [{ sessionID, kind: "tool", name: "hold" }] })
+    }),
+  )
+
+  // Such as a title, a plugin's own call, or a compaction that runs on its own.
+  it.effect("a model call outside a turn holds a pause until it ends, and waits while paused", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      const release = yield* Deferred.make<void>()
+      yield* script(llm, [held(release, TestLLM.text("first", "t1")), TestLLM.text("second", "t2")])
+      const request = ai.request({
+        model: LanguageModel.make({ id: "model", provider: "test", route: OpenAIChat.route }),
+        prompt: "name this chat",
+      })
+
+      const first = yield* start()
+      const client = Context.get(first.context, LLMClient.Service)
+      const running = yield* client.generate(request).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* llm.wait(1)
+      const pause = yield* first.continuity.pause().pipe(Effect.forkChild({ startImmediately: true }))
+      expect((yield* first.continuity.status).waiting).toEqual([{ kind: "model", name: "model" }])
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(running)
+      expect(yield* Fiber.join(pause)).toEqual({ paused: true, rested: [] })
+
+      const waiting = yield* client.generate(request).pipe(Effect.forkChild({ startImmediately: true }))
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
+      yield* first.continuity.resume
+      yield* Fiber.join(waiting)
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),
   )
 
@@ -849,11 +984,12 @@ describe("SessionContinuity", () => {
       const second = yield* start()
       const again = yield* asked(second, session.id)
       expect(again.data.id).toBe(before.data.id)
-      yield* (yield* second.permission(session.location)).reply({ requestID: before.data.id, reply: "once" })
-      yield* succeeded(second, session.id)
+      const permission = yield* second.permission(session.location)
+      yield* permission.reply({ requestID: before.data.id, reply: "once" })
+      yield* succeeded(second.events, session.id)
       expect(world.deploys).toBe(1)
       expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
-      expect(yield* transcript(second, session.id)).toContain(RESTART_NOTICE)
+      expect(yield* transcript(second.sessions, session.id)).toContain(RESTART_NOTICE)
     }),
   )
 })

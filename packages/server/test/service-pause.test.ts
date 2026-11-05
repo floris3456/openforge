@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { expect } from "bun:test"
-import { OpenCode, resend } from "@opencode/client"
-import { SERVICE_SWITCHING } from "@opencode/protocol/groups/service"
+import { createResender, OpenCode } from "@opencode/client"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { Session } from "@opencode/schema/session"
 import { Effect } from "effect"
 import path from "node:path"
@@ -51,7 +51,7 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
     const refused = yield* request("/api/session", { method: "POST", body: "{}" })
     expect(refused.status).toBe(503)
     expect(refused.headers.get("retry-after")).toBe("1")
-    expect(yield* Effect.promise(() => refused.json())).toEqual(SERVICE_SWITCHING)
+    expect(yield* Effect.promise(() => refused.json())).toEqual(ServiceSwitch.refused)
 
     const resumed = yield* request("/api/experimental/service/resume", { method: "POST" })
     expect(resumed.status).toBe(200)
@@ -81,25 +81,28 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
     // The new release starts paused.
     const server = yield* ServerProcess.start<never, never>({ ...options, paused: true })
     const refused = Promise.withResolvers<string>()
+    const resender = createResender()
     const api = OpenCode.make({
       baseUrl: HttpServer.formatAddress(server.address),
       headers: { authorization },
-      fetch: Object.assign(
-        async (input: string | URL | Request, init?: RequestInit) => {
-          const response = await fetch(input, init)
-          if (response.status === 503) refused.resolve(new URL(input instanceof Request ? input.url : input).pathname)
-          return response
-        },
-        { preconnect: fetch.preconnect },
+      fetch: resender.fetch(
+        Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const response = await fetch(input, init)
+            if (response.status === 503) refused.resolve(new URL(input instanceof Request ? input.url : input).pathname)
+            return response
+          },
+          { preconnect: fetch.preconnect },
+        ),
       ),
     })
-    const opened = Promise.withResolvers<void>()
     const prompt = { sessionID, id: "msg_switch_once", text: "Carry on", resume: false }
-    const sent = resend(() => api.session.prompt(prompt), { ready: () => opened.promise })
+    const sent = api.session.prompt(prompt)
     expect(yield* Effect.promise(() => refused.promise)).toBe(`/api/session/${sessionID}/prompt`)
 
     yield* Effect.promise(() => api.experimental.service.resume())
-    opened.resolve()
+    // What the client's event stream reports once the new release resumed.
+    resender.observe({ type: "service.resumed" })
     expect((yield* Effect.promise(() => sent)).id).toBe("msg_switch_once")
     // The same prompt again, as a client that never saw the answer would send it: still one item.
     yield* Effect.promise(() => api.session.prompt(prompt))

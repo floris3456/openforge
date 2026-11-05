@@ -42,7 +42,9 @@ const installed = (
     const switching = {
       ...base,
       pause: options.pause,
-      service: options.terminals ? { ...base.service, env: { ...base.service.env, FAKE_TERMINALS: "1" } } : base.service,
+      service: options.terminals
+        ? { ...base.service, env: { ...base.service.env, FAKE_TERMINALS: "1" } }
+        : base.service,
     }
     yield* Effect.promise(() => keep(switching.layout, from))
     if (to) yield* Effect.promise(() => keep(switching.layout, to.version, { serve: to.serve }))
@@ -373,22 +375,24 @@ describe("switch", () => {
     }),
   )
 
-  it.live("gives the persistent terminals back to the old release when the new service crashed before it registered", () =>
-    Effect.gen(function* () {
-      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "crash" }, { terminals: true })
-      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
-      expect(result).toMatchObject({ type: "rolled-back", restored: true })
-      // 0.1.1 crashed before it took the terminals over, so the ticket 0.1.0 handed them on with is still good.
-      expect(yield* test.happened).toEqual([
-        "0.1.0 paused",
-        "0.1.0 handoff ticket-0.1.0",
-        "0.1.0 stopped",
-        "0.1.1 adopts ticket-0.1.0",
-        "0.1.0 adopts ticket-0.1.0",
-        "0.1.0 started paused",
-        "0.1.0 resumed",
-      ])
-    }),
+  it.live(
+    "gives the persistent terminals back to the old release when the new service crashed before it registered",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* installed("0.1.0", { version: "0.1.1", serve: "crash" }, { terminals: true })
+        const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+        expect(result).toMatchObject({ type: "rolled-back", restored: true })
+        // 0.1.1 crashed before it took the terminals over, so the ticket 0.1.0 handed them on with is still good.
+        expect(yield* test.happened).toEqual([
+          "0.1.0 paused",
+          "0.1.0 handoff ticket-0.1.0",
+          "0.1.0 stopped",
+          "0.1.1 adopts ticket-0.1.0",
+          "0.1.0 adopts ticket-0.1.0",
+          "0.1.0 started paused",
+          "0.1.0 resumed",
+        ])
+      }),
   )
 
   it.live("rolls back when the new service can't reach a tool runner that holds commands", () =>
@@ -530,23 +534,26 @@ describe("waiting", () => {
     }),
   )
 
-  it.live("tells whether a switch holds its lock, and shows none where the lock can't be written", () =>
-    Effect.gen(function* () {
-      const directory = yield* root
-      const provide = Effect.provide(layer(directory))
-      const locks = ReleaseLayout.at(path.join(directory, "data")).locks
-      expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(false)
-      // Asking took the lock and let it go again.
-      const flock = yield* EffectFlock.Service.pipe(provide)
-      yield* flock.acquire(SwitchLock.key, locks, { timeoutMs: 1_000 })
-      expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(true)
-      const sealed = path.join(directory, "sealed")
-      yield* Effect.acquireRelease(
-        Effect.promise(() => fs.mkdir(sealed, { mode: 0o555 })),
-        () => Effect.promise(() => fs.chmod(sealed, 0o755)),
-      )
-      expect(yield* SwitchLock.held(path.join(sealed, "locks")).pipe(provide)).toBe(false)
-    }),
+  it.live(
+    "tells whether a switch holds its lock, and shows none where the lock folder is missing or can't be read",
+    () =>
+      Effect.gen(function* () {
+        const directory = yield* root
+        const provide = Effect.provide(layer(directory))
+        const locks = ReleaseLayout.at(path.join(directory, "data")).locks
+        expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(false)
+        // Asking wrote nothing.
+        expect(yield* Effect.promise(() => fs.exists(locks))).toBe(false)
+        const flock = yield* EffectFlock.Service.pipe(provide)
+        yield* flock.acquire(SwitchLock.key, locks, { timeoutMs: 1_000 })
+        expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(true)
+        const sealed = path.join(directory, "sealed")
+        yield* Effect.acquireRelease(
+          Effect.promise(() => fs.mkdir(sealed, { mode: 0o000 })),
+          () => Effect.promise(() => fs.chmod(sealed, 0o755)),
+        )
+        expect(yield* SwitchLock.held(sealed).pipe(provide)).toBe(false)
+      }),
   )
 
   it.live("the service a switch starts does not wait for the switch's lock", () =>

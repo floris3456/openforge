@@ -294,7 +294,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       Effect.gen(function* () {
         // A switch may still roll back: the new service, paused until it passes its checks, may be stopped again and
         // `current` point back. Once no switch runs, the service at `endpoint` is the one the switch left, or gone.
-        yield* SwitchLock.wait(layout.locks)
+        if (yield* SwitchLock.held(layout.locks)) yield* SwitchLock.wait(layout.locks)
         const info = yield* Effect.tryPromise((signal) =>
           OpenCode.make({ baseUrl: endpoint.url, headers: headers(endpoint) }).server.info({ signal }),
         ).pipe(Effect.option)

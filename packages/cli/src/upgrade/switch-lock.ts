@@ -9,8 +9,6 @@ export const key = "openforge-release-switch"
 // Set only for the service a switch starts itself, so it does not wait for the switch's own lock.
 export const variable = "OPENFORGE_UPGRADE_SWITCH"
 export const timeout = Duration.minutes(10)
-// How long `held` tries for a lock that is free; a held one is never let go that quickly.
-const probe = Duration.millis(100)
 
 export function directory(data: string) {
   return path.join(data, "locks")
@@ -32,16 +30,11 @@ export const wait = Effect.fn("upgrade.switch-lock.wait")(function* (locks: stri
   )
 })
 
-/** Whether another process is switching releases now: it holds the lock, which `held` takes and lets go when free. */
+/** Whether a process is switching releases now: it holds the lock. Only reads the lock folder. */
 export const held = Effect.fn("upgrade.switch-lock.held")(function* (locks: string) {
   const flock = yield* EffectFlock.Service
-  return yield* Effect.scoped(flock.acquire(key, locks, { timeoutMs: Duration.toMillis(probe) })).pipe(
-    Effect.as(false),
-    Effect.catchTag("LockTimeoutError", () => Effect.succeed(true)),
-    // A lock folder this process can't write to shows no switch, and must not stop it from connecting.
-    Effect.orElseSucceed(() => false),
-    Effect.catchDefect(() => Effect.succeed(false)),
-  )
+  // A lock folder this process can't read shows no switch, and must not stop it from connecting.
+  return yield* flock.held(key, locks).pipe(Effect.catchDefect(() => Effect.succeed(false)))
 })
 
 export * as SwitchLock from "./switch-lock"

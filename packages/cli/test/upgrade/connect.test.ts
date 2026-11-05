@@ -3,10 +3,12 @@ import { Service } from "@opencode/client/effect/service"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { describe, expect } from "bun:test"
 import { Deferred, Effect, Exit, Fiber } from "effect"
+import fs from "node:fs/promises"
 import path from "node:path"
 import { testEffect } from "../../../core/test/lib/effect"
 import { ServerConnection } from "../../src/services/server-connection"
 import { ServiceConfig } from "../../src/services/service-config"
+import { OPENCODE_VERSION } from "../../src/version"
 import { ReleaseLayout } from "../../src/upgrade/layout"
 import { ReleaseSwitch } from "../../src/upgrade/switch"
 import { SwitchLock } from "../../src/upgrade/switch-lock"
@@ -23,16 +25,20 @@ const install = Effect.gen(function* () {
   const base = yield* target(directory)
   // Where a client of this channel looks for the service.
   const file = path.join(paths(directory).state, ServiceConfig.filename())
-  const switching = { ...base, service: { ...base.service, file, env: { ...base.service.env, FAKE_REGISTRATION: file } } }
+  const switching = {
+    ...base,
+    service: { ...base.service, file, env: { ...base.service.env, FAKE_REGISTRATION: file } },
+  }
   yield* Effect.addFinalizer(() => Service.stop({ file }).pipe(Effect.ignore))
   const provide = Effect.provide(layer(directory))
   yield* Effect.promise(() => keep(switching.layout, "0.1.1"))
   yield* ReleaseLayout.point(switching.layout, "0.1.1").pipe(provide)
+  // The client's own, as a TUI's.
   const updater = yield* Updater.make({
     data: paths(directory).data,
     config: paths(directory).config,
     log: paths(directory).log,
-    version: "0.1.0",
+    version: OPENCODE_VERSION,
     local: false,
     disabled: false,
     executable: "/nowhere/openforge",
@@ -46,6 +52,7 @@ const install = Effect.gen(function* () {
   return {
     switching,
     provide,
+    updater,
     starts,
     happened: Effect.promise(() => happened(directory)),
     // As a process that switches releases holds it, until the test ends.
@@ -97,13 +104,31 @@ describe("a client that starts during a release switch", () => {
       expect(yield* test.happened).toEqual(["0.1.1 started paused"])
     }),
   )
+})
 
-  it.live("still replaces a service of another version when no switch runs", () =>
+describe("a client that starts while no switch runs", () => {
+  it.live("still replaces a service of another version", () =>
     Effect.gen(function* () {
       const test = yield* install
       yield* ReleaseSwitch.start(test.switching, "0.1.1").pipe(test.provide)
       expect(Exit.isFailure(yield* test.connect.pipe(Effect.exit))).toBe(true)
       expect(test.starts).toEqual(["version-mismatch"])
+    }),
+  )
+
+  it.live("connects to the service of its own release and leaves no lock folder behind", () =>
+    Effect.gen(function* () {
+      const test = yield* install
+      yield* Effect.promise(() => keep(test.switching.layout, OPENCODE_VERSION))
+      yield* ReleaseLayout.point(test.switching.layout, OPENCODE_VERSION).pipe(test.provide)
+      const started = yield* ReleaseSwitch.start(test.switching, OPENCODE_VERSION).pipe(test.provide)
+      const connected = yield* test.connect
+      expect(connected.endpoint.url).toBe(started.endpoint.url)
+      // What a TUI asks once it is connected (see default.ts): no other release to restart on.
+      expect(yield* test.updater.switchedTo(connected.endpoint)).toBeUndefined()
+      expect(test.starts).toEqual([])
+      // Neither looked at the switch lock by taking it.
+      expect(yield* Effect.promise(() => fs.exists(test.switching.layout.locks))).toBe(false)
     }),
   )
 })

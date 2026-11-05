@@ -271,6 +271,12 @@ import type {
   ExperimentalServicePauseInput,
   ExperimentalServicePauseOutput,
   ExperimentalServiceResumeOutput,
+  ExperimentalAttentionOccurrenceInput,
+  ExperimentalAttentionOccurrenceOutput,
+  ExperimentalAttentionFollowInput,
+  ExperimentalAttentionFollowOutput,
+  ExperimentalAttentionTestInput,
+  ExperimentalAttentionTestOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1730,6 +1736,45 @@ const EndpointExperimentalServiceResume = (raw: RawClient["server.experimental"]
     ),
   )
 
+const EndpointExperimentalAttentionOccurrence =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalAttentionOccurrenceInput) =>
+    preserveEffect<ExperimentalAttentionOccurrenceOutput>()(
+      raw["attention.occurrence"]({
+        payload: {
+          kind: input["kind"],
+          sessionID: input["sessionID"],
+          title: input["title"],
+          message: input["message"],
+          notify: input["notify"],
+          sound: input["sound"],
+          focused: input["focused"],
+        },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalAttentionFollow =
+  (raw: RawClient["server.experimental"]) => (input?: ExperimentalAttentionFollowInput) =>
+    preserveStream<ExperimentalAttentionFollowOutput>()(
+      Stream.unwrap(
+        raw["attention.follow"]({ query: { desktop: input?.["desktop"] } }).pipe(
+          Effect.mapError(mapClientError),
+          Effect.map((stream) => stream.pipe(Stream.mapError(mapClientError))),
+        ),
+      ),
+    )
+
+const EndpointExperimentalAttentionTest =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalAttentionTestInput) =>
+    preserveEffect<ExperimentalAttentionTestOutput>()(
+      raw["attention.test"]({ payload: { kind: input["kind"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1763,6 +1808,11 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     status: EndpointExperimentalServiceStatus(raw),
     pause: EndpointExperimentalServicePause(raw),
     resume: EndpointExperimentalServiceResume(raw),
+  },
+  attention: {
+    occurrence: EndpointExperimentalAttentionOccurrence(raw),
+    follow: EndpointExperimentalAttentionFollow(raw),
+    test: EndpointExperimentalAttentionTest(raw),
   },
 })
 

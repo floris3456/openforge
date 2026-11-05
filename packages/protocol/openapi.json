@@ -14172,6 +14172,264 @@
         "summary": "Resume the service"
       }
     },
+    "/api/experimental/attention/occurrence": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.attention.occurrence",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Attention.Players"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "A TUI reports a notification it shows. The service passes it on to the players that follow it and answers which kinds of player are connected, so the TUI leaves the sound, or also the desktop notification, to them. Experimental: may change without compatibility guarantees.",
+        "summary": "Report a notification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Attention.Occurrence"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/attention/follow": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.attention.follow",
+        "parameters": [
+          {
+            "name": "desktop",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": ["true", "false"]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Attention.FollowEventEncoded"
+                    }
+                  },
+                  "required": ["event", "data"],
+                  "additionalProperties": false
+                },
+                "x-effect-stream": {
+                  "encoding": "sse",
+                  "causeSchema": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": ["Fail"]
+                            },
+                            "error": {
+                              "not": {}
+                            }
+                          },
+                          "required": ["_tag", "error"],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": ["Die"]
+                            },
+                            "defect": {}
+                          },
+                          "required": ["_tag", "defect"],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": ["Interrupt"]
+                            },
+                            "fiberId": {
+                              "anyOf": [
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": ["_tag", "fiberId"],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "errorSchema": {
+                    "not": {}
+                  },
+                  "failureEvent": "effect/http-api/stream/failure"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "A player (`openforge notify`) follows the notifications this service's TUIs report. It counts as connected for as long as the stream is open. Experimental: may change without compatibility guarantees.",
+        "summary": "Follow notifications"
+      }
+    },
+    "/api/experimental/attention/test": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.attention.test",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Attention.Players"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Pass a test notification of this kind on to the connected players, and answer which kinds of player are connected. Experimental: may change without compatibility guarantees.",
+        "summary": "Send a test notification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Attention.TestPayload"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/shell": {
       "get": {
         "tags": ["shell"],
@@ -17080,6 +17338,82 @@
           }
         },
         "required": ["_tag", "artifactID", "message"],
+        "additionalProperties": false
+      },
+      "Attention.FollowEventEncoded": {
+        "type": "string",
+        "contentMediaType": "application/json"
+      },
+      "Attention.Kind": {
+        "type": "string",
+        "enum": ["done", "subagent_done", "question", "permission", "error", "default"]
+      },
+      "Attention.Occurrence": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/Attention.Kind"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "notify": {
+            "type": "boolean"
+          },
+          "sound": {
+            "$ref": "#/components/schemas/Attention.Sound"
+          },
+          "focused": {
+            "type": "boolean"
+          }
+        },
+        "required": ["kind", "title", "message", "notify", "focused"],
+        "additionalProperties": false
+      },
+      "Attention.Players": {
+        "type": "object",
+        "properties": {
+          "sound": {
+            "type": "boolean"
+          },
+          "desktop": {
+            "type": "boolean"
+          }
+        },
+        "required": ["sound", "desktop"],
+        "additionalProperties": false
+      },
+      "Attention.Sound": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Attention.Kind"
+          },
+          "file": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
+      "Attention.TestPayload": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["done", "subagent_done", "question", "permission", "error"]
+          }
+        },
+        "required": ["kind"],
         "additionalProperties": false
       },
       "Command.Info": {
@@ -23826,6 +24160,9 @@
           },
           "retry": {
             "$ref": "#/components/schemas/Session.Message.Assistant.Retry"
+          },
+          "proxyRequestID": {
+            "type": "string"
           }
         },
         "required": ["id", "time", "type", "agent", "model", "content"],

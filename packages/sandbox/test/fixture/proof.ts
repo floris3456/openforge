@@ -14,6 +14,11 @@ import { Sandbox } from "../../src/sandbox.js"
 import { Seccomp } from "../../src/seccomp.js"
 import { runAll, setup, spawn, type Launch } from "./scenarios.js"
 
+// The benchmark's rounds, the rounds before them that aren't counted, and how often it times the policy's work.
+const ROUNDS = 200
+const WARMUP = 5
+const PREPARATIONS = 200
+
 // Compiled, argv[1] is the program inside the binary; from source, the script.
 const [command, ...args] = process.argv.slice(2)
 const tool = process.argv[1]?.endsWith(".ts") ? [process.execPath, process.argv[1]] : [process.execPath]
@@ -90,10 +95,6 @@ function noLandlock(argv: string[]) {
   )
   process.execve!(argv[0], argv, process.env)
 }
-
-const ROUNDS = 200
-const WARMUP = 5
-const PREPARATIONS = 200
 
 /**
  * Starts `/bin/sh -c true` unsandboxed and in each sandbox variant, one of each per round with the order turning, so

@@ -32,7 +32,6 @@ import { parseSlashHead } from "../../prompt/parse"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } from "../../prompt/history"
 import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
-import { isResendTimeoutError } from "@opencode/client/promise"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
@@ -42,7 +41,8 @@ import { DialogStash } from "../dialog-stash"
 import { type AutocompleteOption, type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Locale } from "../../util/locale"
-import { errorMessage } from "../../util/error"
+import { errorMessage, notSentToast } from "../../util/error"
+import { Product } from "@opencode/schema/product"
 import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogIntegration } from "../dialog-integration"
@@ -1202,26 +1202,22 @@ export function Prompt(props: PromptProps) {
       input.cursorOffset = measure(entry.text)
       return true
     }
-    // Resent for 2 minutes while openforge switched releases or could not be reached. The text goes back in the
-    // composer; when something new was typed meanwhile, it stays in the prompt history. A prompt, a `!` command and a
-    // slash command are reported alike, also when a write that goes before them (the agent, a revert, editor context)
-    // was the one not taken.
+    // A failure puts the text back in the composer, unless something new was typed meanwhile. A write the client
+    // resent while openforge switched releases or could not be reached, until its limit passed, is reported as not
+    // sent: a prompt, a `!` command and a slash command alike, also when a write that goes before them (the agent, a
+    // revert, editor context) was the one not taken.
     const sent = currentMode === "shell" ? "shell command" : slashHead && isCommand ? "command" : "prompt"
-    const unsent = () => {
-      const restored = restoreEntry()
-      toast.show({
-        title: `${sent[0].toUpperCase()}${sent.slice(1)} not sent`,
-        message: restored
-          ? "openforge did not take it within 2 minutes, so it is back in the composer. Send it again once openforge answers."
-          : `openforge did not take it within 2 minutes. What you typed since stays in the composer; the ${sent} is in the prompt history (↑).`,
-        variant: "error",
-        duration: 60_000,
-      })
-    }
     const fail = (title: string, error: unknown) => {
-      if (isResendTimeoutError(error)) return unsent()
-      toast.show({ title, message: errorMessage(error), variant: "error" })
-      restoreEntry()
+      const restored = restoreEntry()
+      toast.show(
+        notSentToast(
+          error,
+          `${sent[0].toUpperCase()}${sent.slice(1)} not sent`,
+          restored
+            ? `It is back in the composer; send it again once ${Product.name} answers.`
+            : `What you typed since stays in the composer; the ${sent} is in the prompt history (↑).`,
+        ) ?? { title, message: errorMessage(error), variant: "error" },
+      )
     }
     const attempt = async (title: string, run: () => Promise<unknown>) => {
       return run().then(
@@ -1272,8 +1268,7 @@ export function Prompt(props: PromptProps) {
       newSession = {
         gate: created.request.then(async (info) => {
           if (terminalEnvironment.variables !== undefined) {
-            const variables = terminalEnvironment.variables
-            await data.session.resend(() => client.api.session.environment({ sessionID: created.id, variables }))
+            await client.api.session.environment({ sessionID: created.id, variables: terminalEnvironment.variables })
           }
         }),
         recover: (error) => {
@@ -1362,8 +1357,7 @@ export function Prompt(props: PromptProps) {
       )
     } else {
       move.startSubmit()
-      // Selecting the agent is a write as well; it outlasts a release switch with the prompt.
-      if (!(await attempt("Failed to prepare session", () => data.session.resend(prepareAgent)))) return true
+      if (!(await attempt("Failed to prepare session", prepareAgent))) return true
       // Revert must settle before optimistic admission: its committed echo
       // splices every local row at or after the boundary, which would include
       // a freshly admitted prompt.
@@ -1405,10 +1399,7 @@ export function Prompt(props: PromptProps) {
           // the server makes an unchanged selection a no-op.
           prepare: commitModel,
         })
-        .catch((error) => {
-          if (newSession) return newSession.recover(error)
-          fail("Failed to send prompt", error)
-        })
+        .catch((error) => (newSession ? newSession.recover(error) : fail("Failed to send prompt", error)))
       if (pendingEditorSelection) editor.markSelectionSent()
     }
 

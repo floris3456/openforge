@@ -11,7 +11,7 @@ import {
 } from "@opentui/core"
 import { openUrl } from "@opencode/util/open"
 import { useTheme } from "../../context/theme"
-import { isResendTimeoutError, type FormAnswer, type FormField, type FormValue } from "@opencode/client"
+import type { FormAnswer, FormField, FormValue } from "@opencode/client"
 import { useData, type FormWithLocation } from "../../context/data"
 import { useClipboard } from "../../context/clipboard"
 import { SplitBorder } from "../../ui/border"
@@ -19,7 +19,8 @@ import { useToast } from "../../ui/toast"
 import { Keymap } from "../../context/keymap"
 import { useInteractivity } from "../../context/interactivity"
 import { useCursorStyle } from "../../config"
-import { errorMessage } from "../../util/error"
+import { errorMessage, notSentToast } from "../../util/error"
+import { Product } from "@opencode/schema/product"
 import {
   formCustom,
   formDisplayValue,
@@ -470,11 +471,11 @@ export function FormPrompt(props: { form: FormWithLocation }) {
       .catch((error: unknown) => showError(error, "Question not dismissed"))
   }
 
-  // Resent for 2 minutes while openforge switched releases: reported as a prompt not sent is, and the question stays.
-  function showError(error: unknown, unsent: string) {
+  // An answer or dismissal not sent within the resend limit is reported as a prompt not sent is.
+  function showError(error: unknown, notSent: string) {
     setStore("error", errorMessage(error))
-    if (isResendTimeoutError(error))
-      toast.show({ title: unsent, message: errorMessage(error), variant: "error", duration: 60_000 })
+    const report = notSentToast(error, notSent, `The question stays open; try again once ${Product.name} answers.`)
+    if (report) toast.show(report)
   }
 
   function openExternal() {
@@ -801,11 +802,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
               {(item, index) => {
                 const isTab = () => index() === store.tab
                 const color = () =>
-                  isTab()
-                    ? theme.text.base
-                    : tabHover() === index()
-                      ? theme.text.formfield.focused
-                      : theme.text.muted
+                  isTab() ? theme.text.base : tabHover() === index() ? theme.text.formfield.focused : theme.text.muted
                 return (
                   <box
                     paddingRight={2}
@@ -867,9 +864,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
               >
                 {external().url}
               </text>
-              <text
-                fg={store.answers[external().key] === true ? theme.text.feedback.success.base : theme.text.muted}
-              >
+              <text fg={store.answers[external().key] === true ? theme.text.feedback.success.base : theme.text.muted}>
                 {store.answers[external().key] === true
                   ? "✓ Acknowledged"
                   : store.externalReady[external().key]
@@ -931,18 +926,10 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                         }}
                       >
                         <box flexDirection="row">
-                          <box
-                            backgroundColor={theme.background.raised.base}
-                            paddingRight={1}
-                          >
-                            <text
-                              fg={active() ? theme.text.formfield.focused : theme.text.muted}
-                            >{`${i() + 1}.`}</text>
+                          <box backgroundColor={theme.background.raised.base} paddingRight={1}>
+                            <text fg={active() ? theme.text.formfield.focused : theme.text.muted}>{`${i() + 1}.`}</text>
                           </box>
-                          <box
-                            backgroundColor={theme.background.raised.base}
-                            flexDirection="row"
-                          >
+                          <box backgroundColor={theme.background.raised.base} flexDirection="row">
                             <Show when={multi()}>
                               <text
                                 width={4}
@@ -985,19 +972,12 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                     }}
                   >
                     <box flexDirection="row">
-                      <box
-                        backgroundColor={theme.background.raised.base}
-                        paddingRight={1}
-                      >
+                      <box backgroundColor={theme.background.raised.base} paddingRight={1}>
                         <text fg={other() ? theme.text.formfield.focused : theme.text.muted}>
                           {`${rows().length + 1}.`}
                         </text>
                       </box>
-                      <box
-                        flexDirection="row"
-                        flexGrow={1}
-                        backgroundColor={theme.background.raised.base}
-                      >
+                      <box flexDirection="row" flexGrow={1} backgroundColor={theme.background.raised.base}>
                         <Show when={multi()}>
                           <text
                             width={4}
@@ -1085,9 +1065,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                           <span style={{ fg: theme.text.muted }}>{truncate(formLabel(item), 40)}:</span>{" "}
                           <span
                             style={{
-                              fg: acknowledged()
-                                ? theme.text.feedback.success.base
-                                : theme.text.feedback.error.base,
+                              fg: acknowledged() ? theme.text.feedback.success.base : theme.text.feedback.error.base,
                             }}
                           >
                             {acknowledged() ? "Acknowledged" : "(acknowledgement required)"}

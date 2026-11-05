@@ -51,8 +51,7 @@ export const {
           }
         : undefined,
       onEvent(event) {
-        // A write waiting to be resent tries again as soon as a service answers or the new release resumes.
-        if (event.type === "server.connected" || event.type === "service.resumed") resender?.wake()
+        resender?.observe(event)
         events.emit(event.type, event)
       },
       log,

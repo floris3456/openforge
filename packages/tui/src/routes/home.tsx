@@ -12,7 +12,9 @@ import { FormPrompt } from "./session/form"
 import { Slot } from "../plugin/render"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
-import { useUpdateNotification, waitingMessage } from "../context/update-notification"
+import { waitingMessage } from "@opencode/client/promise"
+import { Product } from "@opencode/schema/product"
+import { useUpdateNotification } from "../context/update-notification"
 import { FadeInText } from "../component/fade-in-text"
 
 let once = false
@@ -155,7 +157,7 @@ function UpdateNotification(props: { width: number }) {
             {state.type === "waiting"
               ? waitingMessage(state, update.title)
               : state.type === "switched"
-                ? ` restart to get the new screens of v${state.version}`
+                ? ` and run ${Product.binary} to use v${state.version}`
                 : ` to install v${state.version}`}
           </FadeInText>
         </box>

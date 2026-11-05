@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
-import { createResender, isResendTimeoutError, OpenCode, repeats, resendable } from "../src/promise"
+import { createResender, findResendTimeout, OpenCode } from "../src/promise"
+import { waiting } from "./fixture/wait"
 
 type Phase = "down" | "drop" | "paused" | "running"
 
@@ -9,6 +10,7 @@ type Phase = "down" | "drop" | "paused" | "running"
 // while openforge switches releases.
 async function service() {
   const requests: { phase: Phase; method: string; path: string; body: unknown }[] = []
+  const hearing = new Set<() => void>()
   let phase: Phase = "running"
   const server: Server = createServer((request, response) => {
     let raw = ""
@@ -16,6 +18,7 @@ async function service() {
     request.on("end", () => {
       const path = new URL(request.url ?? "/", "http://openforge.local").pathname
       requests.push({ phase, method: request.method ?? "GET", path, body: raw ? JSON.parse(raw) : undefined })
+      hearing.forEach((heard) => heard())
       // The old service stops with the request read but not answered.
       if (phase === "drop") return request.socket.destroy()
       // Each request on its own connection, so a dropped one is never a reused socket the runtime retries itself.
@@ -34,7 +37,9 @@ async function service() {
   })
   const listen = (port: number) => new Promise<void>((resolve) => server.listen(port, "127.0.0.1", () => resolve()))
   await listen(0)
-  const port = (server.address() as AddressInfo).port
+  const address = server.address()
+  if (address === null || typeof address === "string") throw new Error("the fake service has no port")
+  const port = (address satisfies AddressInfo).port
   const stop = () =>
     new Promise<void>((resolve) => {
       server.close(() => resolve())
@@ -43,6 +48,17 @@ async function service() {
   const fake = {
     url: `http://127.0.0.1:${port}`,
     requests,
+    /** Resolves once the service has read `count` requests in all. */
+    heard: (count: number) =>
+      new Promise<void>((resolve) => {
+        const heard = () => {
+          if (requests.length < count) return
+          hearing.delete(heard)
+          resolve()
+        }
+        hearing.add(heard)
+        heard()
+      }),
     async set(next: Phase) {
       if (next === "down" && phase !== "down") await stop()
       if (next !== "down" && phase === "down") await listen(port)
@@ -58,33 +74,28 @@ afterEach(async () => {
   await Promise.all(services.splice(0).map((fake) => fake.stop()))
 })
 
-async function until(condition: () => boolean, timeout = 3_000) {
-  const deadline = Date.now() + timeout
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`condition not reached within ${timeout} ms`)
-    await Bun.sleep(5)
-  }
-}
+// The events after which a waiting write tries again: the stream reached a service, and the new release resumed.
+const connected = { type: "server.connected" }
+const resumed = { type: "service.resumed" }
 
 function client(url: string, limit?: number) {
   const resender = createResender({ limit })
   return { resender, api: OpenCode.make({ baseUrl: url, fetch: resender.fetch(globalThis.fetch) }) }
 }
 
-test("a write the paused new release refuses is resent until it takes it, at once when woken", async () => {
+test("a write the paused new release refuses is resent once it resumes", async () => {
   const fake = await service()
   const { resender, api } = client(fake.url)
   const counts: number[] = []
   resender.subscribe((pending) => counts.push(pending))
   await fake.set("paused")
   const sent = api.session.switchAgent({ sessionID: "ses_a", agent: "plan" })
-  await until(() => resender.pending() === 1)
+  await waiting(resender, 1)
   await fake.set("running")
-  const woken = Date.now()
-  resender.wake()
+  // Another event does not end the wait.
+  resender.observe({ type: "session.status" })
+  resender.observe(resumed)
   await sent
-  // The service advised 1 s; the wake did not wait for that.
-  expect(Date.now() - woken).toBeLessThan(500)
   expect(resender.pending()).toBe(0)
   expect(counts).toEqual([1, 0])
   expect(fake.requests.map((request) => `${request.phase} ${request.path}`)).toEqual([
@@ -97,31 +108,36 @@ test("a write is unanswered from its first attempt until the service answers it,
   const fake = await service()
   const resender = createResender()
   // The service holds its answer to the command until the test lets it go.
-  let answer: (() => void) | undefined
-  const held = (input: string | URL | Request, init?: RequestInit) =>
-    new URL(String(input)).pathname.endsWith("/command")
-      ? new Promise<void>((resolve) => (answer = resolve)).then(() => globalThis.fetch(input, init))
-      : globalThis.fetch(input, init)
-  const api = OpenCode.make({ baseUrl: fake.url, fetch: resender.fetch(held as typeof globalThis.fetch) })
+  const held = Promise.withResolvers<void>()
+  const reached = Promise.withResolvers<void>()
+  const fetch = (input: string | URL | Request, init?: RequestInit) => {
+    if (!new URL(String(input)).pathname.endsWith("/command")) return globalThis.fetch(input, init)
+    reached.resolve()
+    return held.promise.then(() => globalThis.fetch(input, init))
+  }
+  const api = OpenCode.make({
+    baseUrl: fake.url,
+    fetch: resender.fetch(Object.assign(fetch, { preconnect: () => {} })),
+  })
   const counts: number[] = []
   resender.watchUnanswered((unanswered) => counts.push(unanswered))
   const command = api.session.command({ sessionID: "ses_a", id: "msg_command", name: "review" })
-  await until(() => answer !== undefined)
+  await reached.promise
   // On its way, not waiting to be resent; a read is neither.
   expect(resender.unanswered()).toBe(1)
   expect(resender.pending()).toBe(0)
   await resender.fetch(globalThis.fetch)(new URL("/api/session/ses_a", fake.url))
   expect(resender.unanswered()).toBe(1)
-  answer!()
+  held.resolve()
   await command
   expect(resender.unanswered()).toBe(0)
 
   await fake.set("paused")
   const agent = api.session.switchAgent({ sessionID: "ses_a", agent: "plan" })
-  await until(() => resender.pending() === 1)
+  await waiting(resender, 1)
   expect(resender.unanswered()).toBe(1)
   await fake.set("running")
-  resender.wake()
+  resender.observe(resumed)
   await agent
   expect(resender.unanswered()).toBe(0)
   expect(counts).toEqual([1, 0, 1, 0])
@@ -138,12 +154,14 @@ test("every kind of write is resent while the service cannot be reached", async 
     api.session.form.cancel({ sessionID: "ses_a", formID: "frm_a" }),
     api.session.revert.stage({ sessionID: "ses_a", messageID: "msg_a" }),
   ]
-  await until(() => resender.pending() === 4)
+  await waiting(resender, 4)
+  // The new release registers paused: the event stream connects, and it refuses them until it resumes.
   await fake.set("paused")
-  resender.wake()
-  await until(() => fake.requests.length >= 4)
+  resender.observe(connected)
+  await fake.heard(4)
+  await waiting(resender, 4)
   await fake.set("running")
-  resender.wake()
+  resender.observe(resumed)
   await Promise.all(writes)
   const taken = fake.requests
     .filter((request) => request.phase === "running")
@@ -174,9 +192,9 @@ test("after a dropped connection only a write the service may get twice is resen
   const shell = api.session.shell({ sessionID: "ses_a", id: "msg_shell", command: "sleep 5" })
   const dismissal = api.session.form.cancel({ sessionID: "ses_a", formID: "frm_a" })
   const agent = api.session.switchAgent({ sessionID: "ses_a", agent: "plan" })
-  await until(() => resender.pending() === 4)
+  await waiting(resender, 4)
   await fake.set("running")
-  resender.wake()
+  resender.observe(connected)
   await Promise.all([command, shell, dismissal, agent])
   const resent = fake.requests.filter((request) => request.phase === "running")
   expect(resent.map((request) => request.path).toSorted()).toEqual([
@@ -189,7 +207,7 @@ test("after a dropped connection only a write the service may get twice is resen
   expect(resent.find((request) => request.path.endsWith("/shell"))?.body).toMatchObject({ id: "msg_shell" })
 })
 
-test("a write the service does not take within the limit is reported as not sent", async () => {
+test("a write the service does not take within the limit is reported as not sent, naming the limit", async () => {
   const fake = await service()
   const { resender, api } = client(fake.url, 300)
   await fake.set("paused")
@@ -197,11 +215,14 @@ test("a write the service does not take within the limit is reported as not sent
     () => undefined,
     (cause: unknown) => cause,
   )
-  // The generated client wraps it as a transport failure; it is still known as given up, and not resent again.
+  // The generated client wraps it as a transport failure; it is still known as given up.
   expect(error).toMatchObject({ reason: "Transport" })
-  expect(isResendTimeoutError(error)).toBe(true)
-  expect(resendable(error)).toBe(false)
+  expect(findResendTimeout(error)?.message).toBe(
+    "openforge did not take it within 300 ms; it was switching releases or could not be reached",
+  )
   expect(resender.pending()).toBe(0)
+  // Sent at once and, with no event in between, a last time at the limit.
+  expect(fake.requests).toHaveLength(2)
 })
 
 test("reads, the switch's own pause and a write the caller aborts are not held back", async () => {
@@ -217,7 +238,7 @@ test("reads, the switch's own pause and a write the caller aborts are not held b
     () => undefined,
     (error: unknown) => error,
   )
-  await until(() => resender.pending() === 1)
+  await waiting(resender, 1)
   abort.abort()
   expect(await aborted).toBeDefined()
   expect(resender.pending()).toBe(0)
@@ -227,29 +248,69 @@ test("reads, the switch's own pause and a write the caller aborts are not held b
     () => undefined,
     (error: unknown) => error,
   )
-  await until(() => resender.pending() === 1)
+  await waiting(resender, 1)
   resender.close()
   expect(await closed).toBeDefined()
   expect(resender.pending()).toBe(0)
 })
 
-test("the writes resent after a dropped connection are the ones the protocol has", async () => {
-  const spec = (await Bun.file(new URL("../../protocol/openapi.json", import.meta.url)).json()) as {
-    paths: Record<string, Record<string, unknown>>
+// Sends one write whose first attempt loses its connection after it went out, as when the old service stops with the
+// request read; the next attempt is answered.
+async function afterDrop(write: { readonly method: string; readonly path: string; readonly body?: string }) {
+  const resender = createResender()
+  let attempts = 0
+  const fetch = async () => {
+    attempts++
+    if (attempts === 1) throw new TypeError("The socket connection was closed unexpectedly")
+    return new Response(null, { status: 204 })
   }
+  // Once it waits, the stream reaches the next service.
+  resender.subscribe((pending) => {
+    if (pending === 1) resender.observe(connected)
+  })
+  return resender
+    .fetch(Object.assign(fetch, { preconnect: () => {} }))(`http://openforge.local/openforge${write.path}`, {
+      method: write.method,
+      body: write.body,
+    })
+    .then(
+      () => "resent",
+      () => "reported",
+    )
+}
+
+test("the writes resent after a dropped connection are the ones the protocol has", async () => {
+  const spec: unknown = await Bun.file(new URL("../../protocol/openapi.json", import.meta.url)).json()
+  if (typeof spec !== "object" || spec === null || !("paths" in spec) || typeof spec.paths !== "object" || !spec.paths)
+    throw new Error("openapi.json has no paths")
   const writes = Object.entries(spec.paths).flatMap(([path, operations]) =>
-    Object.keys(operations)
+    Object.keys(operations ?? {})
       .map((method) => method.toUpperCase())
       .filter((method) => !["GET", "HEAD", "OPTIONS"].includes(method))
       .map((method) => ({ method, path: path.replace(/\{[^}]+\}/g, "x") })),
   )
-  const posts = (body?: unknown) =>
+  // The writes resent, by method; sent under a base URL with a path prefix.
+  const resent = async (body?: string) => {
+    const outcomes = await Promise.all(
+      writes.map(async (write) => ({ ...write, outcome: await afterDrop({ ...write, body }) })),
+    )
+    const paths = (post: boolean) =>
+      outcomes
+        .filter((write) => write.outcome === "resent" && (write.method === "POST") === post)
+        .map((write) => write.path)
+        .toSorted()
+    return { posts: paths(true), others: paths(false) }
+  }
+  // Without an id: every PUT, PATCH and DELETE, and the POSTs that set something or settle a request named in the
+  // path.
+  const plain = await resent()
+  expect(plain.others).toEqual(
     writes
-      .filter((write) => write.method === "POST" && repeats({ ...write, body }))
+      .filter((write) => write.method !== "POST")
       .map((write) => write.path)
-      .toSorted()
-  // Without an id: those that set something or settle a request named in the path.
-  expect(posts()).toEqual([
+      .toSorted(),
+  )
+  expect(plain.posts).toEqual([
     "/api/session/x/agent",
     "/api/session/x/form/x/reply",
     "/api/session/x/model",
@@ -259,7 +320,7 @@ test("the writes resent after a dropped connection are the ones the protocol has
     "/api/session/x/view",
   ])
   // With an id, also those the service runs once per id.
-  expect(posts(JSON.stringify({ id: "msg_a" }))).toEqual([
+  expect((await resent(JSON.stringify({ id: "msg_a" }))).posts).toEqual([
     "/api/session",
     "/api/session/x/agent",
     "/api/session/x/command",
@@ -274,7 +335,4 @@ test("the writes resent after a dropped connection are the ones the protocol has
     "/api/session/x/synthetic",
     "/api/session/x/view",
   ])
-  expect(writes.filter((write) => write.method !== "POST").every((write) => repeats(write))).toBe(true)
-  // A base URL with a path prefix matches too.
-  expect(repeats({ method: "POST", path: "/openforge/api/session/x/agent" })).toBe(true)
 })

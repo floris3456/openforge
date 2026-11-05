@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { createAppFixture } from "./fixture/app"
 import { directory, json } from "./fixture/tui-client"
+import { shows, until } from "./fixture/wait"
 
 // An open chat on a service that refuses writes as a paused new release does, or takes them once `up`.
 function chat() {
@@ -60,22 +61,6 @@ function chat() {
   return { sessionID, state, fetch }
 }
 
-async function until(condition: () => boolean, timeout = 5_000) {
-  const deadline = Date.now() + timeout
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error("condition did not hold in time")
-    await Bun.sleep(10)
-  }
-}
-
-async function shows(setup: { captureCharFrame: () => string }, match: (frame: string) => boolean, timeout = 5_000) {
-  const deadline = Date.now() + timeout
-  while (!match(setup.captureCharFrame().replace(/[┃│]/g, " ").replace(/\s+/g, " "))) {
-    if (Date.now() > deadline) throw new Error(`frame did not match in time:\n${setup.captureCharFrame()}`)
-    await Bun.sleep(20)
-  }
-}
-
 test("a prompt sent while the new release is paused goes in once it resumes, with its model selection", async () => {
   const fake = chat()
   await using setup = await createAppFixture({ fetch: fake.fetch, args: { sessionID: fake.sessionID } })
@@ -91,7 +76,7 @@ test("a prompt sent while the new release is paused goes in once it resumes, wit
   await until(() => fake.state.prompts.length > 0)
   expect(fake.state.models).toBeGreaterThan(1)
   expect(fake.state.prompts.map((prompt) => prompt.text)).toEqual(["carry on after the switch"])
-  await Bun.sleep(300)
+  // The refused model selection was resent, not reported.
   expect(setup.captureCharFrame()).not.toContain("Failed to")
 }, 15_000)
 
@@ -108,7 +93,9 @@ test("a prompt the service does not take within the limit goes back in the compo
   setup.mockInput.pressEnter()
   await shows(setup, (frame) => frame.includes("Prompt not sent"))
   await shows(setup, (frame) =>
-    frame.includes("openforge did not take it within 2 minutes, so it is back in the composer"),
+    frame.includes(
+      "openforge did not take it within 300 ms; it was switching releases or could not be reached. It is back in the composer",
+    ),
   )
   // The text is back in the composer, not in the transcript.
   const frame = setup.captureCharFrame()

@@ -1,4 +1,4 @@
-import { isResendTimeoutError, ResendTimeoutError } from "@opencode/client/promise"
+import { findResendTimeout } from "@opencode/client/promise"
 import { isRecord } from "./record"
 
 type ConfigIssue = { message: string; path: string[] }
@@ -119,9 +119,23 @@ export function errorFormat(error: unknown): string {
   return String(error)
 }
 
+/** How long a toast about a write that was not sent stays up. */
+const NOT_SENT_DURATION = 60_000
+
+/**
+ * The toast for a write the client resent while openforge switched releases or could not be reached, until its limit
+ * passed: `title` names what was not sent, `next` what became of it. Undefined for any other failure.
+ */
+export function notSentToast(error: unknown, title: string, next: string) {
+  const timeout = findResendTimeout(error)
+  if (!timeout) return
+  return { title, message: `${timeout.message}. ${next}`, variant: "error" as const, duration: NOT_SENT_DURATION }
+}
+
 export function errorMessage(error: unknown): string {
-  // A write the client resent while openforge switched releases, until it gave up: say that, not the transport's word.
-  if (isResendTimeoutError(error)) return new ResendTimeoutError().message
+  // The transport's own error wraps a write given up after the resend limit; say why it was not sent instead.
+  const timeout = findResendTimeout(error)
+  if (timeout) return timeout.message
   if (error instanceof Error) {
     if (error.message) return error.message
     if (error.name) return error.name

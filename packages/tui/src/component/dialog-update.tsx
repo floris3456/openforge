@@ -6,17 +6,23 @@ import {
   switchingMessage,
   waitingMessage,
   type TitleOf,
-  type UpdateOutcome,
-  type UpdateState,
-} from "../context/update-notification"
+  type UpgradeOutcome,
+  type UpgradeState,
+} from "@opencode/client/promise"
+import { Product } from "@opencode/schema/product"
 import { DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
 import { errorMessage } from "../util/error"
 import { Spinner } from "./spinner"
 
+/** What a screen that cannot restart itself says once the service runs `version`. */
+export function runningMessage(version: string) {
+  return `${Product.name} ${version} is running; exit and run ${Product.binary} to use it.`
+}
+
 export function DialogUpdate(props: {
   /** Starts an upgrade; absent while one is already under way. */
-  start?: () => Promise<UpdateOutcome>
-  state: () => UpdateState | undefined
+  start?: () => Promise<UpgradeOutcome>
+  state: () => UpgradeState | undefined
   restart: () => void
   /** Whether this screen restarts on the new release on its own once switched. */
   restarts?: boolean
@@ -56,7 +62,7 @@ export function DialogUpdate(props: {
   const buttons = createMemo(() => {
     const type = view().type
     const close = { label: "Close", run: () => dialog.clear() }
-    if (type === "switched") return [close, { label: "Restart", run: props.restart }]
+    if (type === "switched") return [close, { label: props.restarts ? "Restart" : "Exit", run: props.restart }]
     return [close]
   })
 
@@ -85,7 +91,7 @@ export function DialogUpdate(props: {
 
   return (
     <DialogLayout
-      header={<DialogHeader title="Upgrade openforge" />}
+      header={<DialogHeader title={`Upgrade ${Product.name}`} />}
       footer={{
         actions: {
           primary: buttons().map((button, index) => ({
@@ -118,10 +124,12 @@ export function DialogUpdate(props: {
         {(current) => (
           <Switch>
             <Match when={current.type === "checking"}>
-              <Spinner shimmer={theme.text.base}>Checking for a new openforge release…</Spinner>
+              <Spinner shimmer={theme.text.base}>{`Checking for a new ${Product.name} release…`}</Spinner>
             </Match>
             <Match when={current.type === "installing" && current}>
-              {(state) => <Spinner shimmer={theme.text.base}>{`Installing openforge ${state().version}…`}</Spinner>}
+              {(state) => (
+                <Spinner shimmer={theme.text.base}>{`Installing ${Product.name} ${state().version}…`}</Spinner>
+              )}
             </Match>
             <Match when={current.type === "waiting" && current}>
               {(state) => (
@@ -133,24 +141,26 @@ export function DialogUpdate(props: {
             <Match when={current.type === "switching" && current}>
               {(state) => (
                 <Spinner shimmer={theme.text.base}>
-                  {switchingMessage(state().version, state().waiting, props.title)}
+                  {`${switchingMessage(state().version, state().waiting, props.title)}…`}
                 </Spinner>
               )}
             </Match>
             <Match when={current.type === "switched" && props.restarts && current}>
               {(state) => (
-                <Spinner shimmer={theme.text.base}>{`Switched to openforge ${state().version}; restarting…`}</Spinner>
+                <Spinner
+                  shimmer={theme.text.base}
+                >{`Switched to ${Product.name} ${state().version}; restarting…`}</Spinner>
               )}
             </Match>
             <Match when={current.type === "switched" && current}>
               {(state) => (
                 <text fg={theme.text.muted} wrapMode="word">
-                  {`openforge ${state().version} is running. Restart closes this screen; start openforge again to use it.`}
+                  {runningMessage(state().version)}
                 </text>
               )}
             </Match>
             <Match when={current.type === "current" && current}>
-              {(state) => <text fg={theme.text.muted}>{`openforge ${state().version} is up to date.`}</text>}
+              {(state) => <text fg={theme.text.muted}>{`${Product.name} ${state().version} is up to date.`}</text>}
             </Match>
             <Match when={current.type === "unavailable" && current}>
               {(state) => (

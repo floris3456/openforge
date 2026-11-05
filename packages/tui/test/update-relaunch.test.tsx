@@ -1,32 +1,31 @@
 import { expect, test } from "bun:test"
 import { stashDrafts, stashedDrafts, takeDraft } from "../src/component/prompt/draft-stash"
-import type { UpdateState } from "../src/context/update-notification"
+import type { UpgradeState } from "@opencode/client"
 import { createAppFixture } from "./fixture/app"
 import { directory, json } from "./fixture/tui-client"
+import { until } from "./fixture/wait"
 
 // A source whose updater reports a finished switch whenever the test says so, and records restarts.
 function source() {
-  const listeners = new Set<(state: UpdateState) => void>()
+  const listeners = new Set<(state: UpgradeState) => void>()
   const relaunches: Array<string | undefined> = []
+  const relaunched: number[] = []
   return {
     relaunches,
+    /** When each restart was asked for, by `performance.now()`. */
+    relaunched,
     switched: (version: string) => listeners.forEach((notify) => notify({ type: "switched", version })),
     updater: {
-      subscribe: (notify: (state: UpdateState) => void) => {
+      subscribe: (notify: (state: UpgradeState) => void) => {
         listeners.add(notify)
         return () => listeners.delete(notify)
       },
       upgrade: async () => ({ type: "current" as const, version: "0.0.1" }),
-      relaunch: (sessionID?: string) => void relaunches.push(sessionID),
+      relaunch: (sessionID?: string) => {
+        relaunches.push(sessionID)
+        relaunched.push(performance.now())
+      },
     },
-  }
-}
-
-async function until(condition: () => boolean, timeout = 5_000) {
-  const deadline = Date.now() + timeout
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error("condition did not hold in time")
-    await Bun.sleep(10)
   }
 }
 
@@ -76,14 +75,19 @@ test("waits with the restart while keys are coming in", async () => {
   await setup.ready
   await setup.waitForFrame((frame) => frame.includes("commands"))
   fake.switched("0.0.1")
-  // The restart runs 300 ms after the last key.
+  // The restart runs 300 ms after the last key. Each key goes once the screen shows the one before, so the keys take
+  // several frames, and a restart that ignored them would come sooner after the last one.
+  let last = 0
+  let typed = ""
   for (const key of "typing on") {
+    typed += key
+    last = performance.now()
     await setup.mockInput.typeText(key)
-    await Bun.sleep(100)
+    await setup.waitForFrame((frame) => frame.includes(typed))
   }
-  expect(fake.relaunches).toEqual([])
   await until(() => fake.relaunches.length > 0)
   expect(fake.relaunches).toEqual([undefined])
+  expect(fake.relaunched[0] - last).toBeGreaterThanOrEqual(295)
   takeDraft(undefined)
 })
 

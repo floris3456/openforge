@@ -7,6 +7,7 @@ import { PtyHandoff } from "../pty-handoff.js"
 import { decide, fallback, headers, probeResult, same } from "../service-probe.js"
 
 export * from "../service.js"
+export type { ServiceContender } from "../service-contender.js"
 export { headers }
 /** Contents of the local service registration file. */
 export type Info = typeof Info.Type
@@ -57,16 +58,10 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
       announced = true
       options.onStart?.(reason, previousVersion)
     })
-  const spawnContender = Effect.gen(function* () {
-    const [command, ...args] = options.command ?? ["openforge", "serve", "--service"]
-    if (command === undefined) return yield* Effect.fail(new Error("Missing service command"))
-    const env = yield* Effect.tryPromise(() => PtyHandoff.environment(options.file ?? fallback(), options.env))
-    return yield* Effect.try({
-      try: () => {
-        return spawnServiceContender(command, args, env)
-      },
-      catch: (cause) => new Error("Failed to start server", { cause }),
-    })
+  const spawnContender = launch({
+    file: options.file,
+    command: options.command ?? ["openforge", "serve", "--service"],
+    env: options.env,
   })
   const found = yield* Effect.gen(function* () {
     const registration = yield* registered(options.file, timing.requestTimeout)
@@ -124,6 +119,24 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
   if (Option.isNone(found))
     return yield* Effect.fail(pool.failure() ?? new Error("Timed out waiting for the background service to start"))
   return found.value.endpoint
+})
+
+/**
+ * Start a service process outside this one, adopting the persistent terminals the last stop handed off. The caller
+ * waits for it to register; `release` stops collecting its stderr once it no longer needs that.
+ */
+export const launch = Effect.fn("service.launch")(function* (options: {
+  readonly file?: string
+  readonly command: ReadonlyArray<string>
+  readonly env?: Readonly<Record<string, string>>
+}) {
+  const [command, ...args] = options.command
+  if (command === undefined) return yield* Effect.fail(new Error("Missing service command"))
+  const env = yield* Effect.tryPromise(() => PtyHandoff.environment(options.file ?? fallback(), options.env))
+  return yield* Effect.try({
+    try: () => spawnServiceContender(command, args, env),
+    catch: (cause) => new Error("Failed to start server", { cause }),
+  })
 })
 
 /** Stop the registered local service. */
@@ -196,4 +209,4 @@ const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly f
 })
 
 /** Effect-based local service lifecycle operations. */
-export const Service = { discover, incumbent, ensure, stop, headers, Info }
+export const Service = { discover, incumbent, ensure, launch, stop, headers, Info }

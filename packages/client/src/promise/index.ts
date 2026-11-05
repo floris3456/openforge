@@ -3,19 +3,16 @@ import type { OpenCode } from "./client.js"
 export * from "./generated/index.js"
 export { OpenCode } from "./client.js"
 export { mediaHashFromUri, withMediaRefs, type MediaRequestOptions } from "./media.js"
+export { createResender, findResendTimeout, type Resender } from "../resend.js"
 export {
-  createResender,
-  isResendTimeoutError,
-  refused,
-  repeats,
-  resend,
-  resendable,
-  ResendTimeoutError,
-  unreachable,
-  type Resender,
-  type ResendOptions,
-} from "../resend.js"
-export { describeWork } from "../continuity.js"
+  describeWork,
+  switchingMessage,
+  waitingMessage,
+  type SwitchWork,
+  type TitleOf,
+  type UpgradeOutcome,
+  type UpgradeState,
+} from "../continuity.js"
 export type {
   AgentApi,
   CommandApi,

@@ -6,6 +6,8 @@ import { join, resolve, sep } from "node:path"
 const directory = resolve(import.meta.dir, "..")
 const effect = realpathSync(resolve(import.meta.dir, "../node_modules/effect"))
 const schema = resolve(import.meta.dir, "../../schema")
+// The product's names, which the switch messages show. Plain constants that import nothing.
+const product = resolve(schema, "src/product.ts")
 const protocol = resolve(import.meta.dir, "../../protocol")
 const core = resolve(import.meta.dir, "../../core")
 const server = resolve(import.meta.dir, "../../server")
@@ -15,7 +17,7 @@ describe("public import boundaries", () => {
     const root = await bundleInputs("@opencode/client", "browser")
 
     expect(within(root.all, effect)).toEqual([])
-    expect(within(root.all, schema)).toEqual([])
+    expect(within(root.all, schema)).toEqual([product])
     expect(within(root.all, protocol)).toEqual([])
     expect(within(root.all, core)).toEqual([])
     expect(within(root.all, server)).toEqual([])
@@ -31,7 +33,7 @@ describe("public import boundaries", () => {
     const promiseService = await bundleInputs("@opencode/client/service", "bun")
 
     expect(within(promiseService.all, effect)).toEqual([])
-    expect(within(promiseService.all, schema)).toEqual([])
+    expect(within(promiseService.all, schema)).toEqual([product])
     expect(within(promiseService.all, protocol)).toEqual([])
     expect(within(promiseService.all, core)).toEqual([])
     expect(within(promiseService.all, server)).toEqual([])

@@ -4,7 +4,7 @@ import { render, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import "./component/spinner-renderable"
 import { Effect, Latch } from "effect"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { createResender, OpenCode, type SessionInfo } from "@opencode/client"
+import { createResender, OpenCode, switchingMessage, type SessionInfo } from "@opencode/client"
 import { Global } from "@opencode/util/global"
 import { Product } from "@opencode/schema/product"
 import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
@@ -98,12 +98,7 @@ import { openUrl } from "@opencode/util/open"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { Config, ConfigProvider, useConfig } from "./config"
 import { newSessionLocation } from "./config/new-session-location"
-import {
-  switchingMessage,
-  UpdateNotificationProvider,
-  useUpdateNotification,
-  type UpdateSource,
-} from "./context/update-notification"
+import { UpdateNotificationProvider, useUpdateNotification, type UpdateSource } from "./context/update-notification"
 import { PluginProvider, usePlugin, type PackageSource } from "./plugin/context"
 import { localPluginDirectories } from "./plugin/discovery"
 import { PluginRoute, Slot } from "./plugin/render"
@@ -122,6 +117,9 @@ import { SessionFrame } from "./component/session-frame"
 import { createTuiClipboard } from "./clipboard"
 
 const appGlobalBindingCommands = ["session.list", "session.new", "open.menu"] as const
+// Longer than a release switch takes, a rollback included: a switch whose service stays away this long gets the
+// full-screen reconnect overlay back.
+const SWITCH_OVERDUE = 60_000
 
 const sessionTabBindingCommands = [
   "session.tab.next",
@@ -216,7 +214,7 @@ export type TuiInput = {
     | undefined
   >
   log?: LogSink
-  /** Milliseconds a prompt is resent while openforge switches before it is reported; 2 minutes unless a test shortens it. */
+  /** Milliseconds a write is resent while openforge switches before it is reported; 2 minutes unless a test shortens it. */
   resendLimit?: number
 }
 
@@ -423,7 +421,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               resender={resender}
                                             >
                                               <PermissionProvider>
-                                                <DataProvider directory={directory} resendLimit={input.resendLimit}>
+                                                <DataProvider directory={directory}>
                                                   <LocationProvider>
                                                     <SessionTabsProvider>
                                                       <SessionTerminalsProvider>
@@ -1415,21 +1413,20 @@ function App() {
   })
 
   // A release switch under way, started from this screen or seen in the service's pause events. Its notice says what
-  // the switch waits for and the screen stays usable; the full-screen overlay comes back only when the service stays
-  // away longer than a switch takes, a rollback included.
+  // the switch waits for and the screen stays usable; the full-screen overlay comes back once the switch is overdue.
   const switching = createMemo(() => {
     const pause = data.service.pause()
     const current = updater.state()
     const own = current?.type === "switching" ? current : undefined
     if (!pause && !own) return undefined
-    return switchingMessage(own?.version, pause?.state === "pausing" ? pause.waiting : own?.waiting, updater.title)
+    return `${switchingMessage(own?.version, pause?.state === "pausing" ? pause.waiting : own?.waiting, updater.title)}…`
   })
   const inSwitch = createMemo(() => switching() !== undefined)
   const [switchOverdue, setSwitchOverdue] = createSignal(false)
   createEffect(() => {
     setSwitchOverdue(false)
     if (!inSwitch() || client.connection.status() === "connected") return
-    const timer = setTimeout(() => setSwitchOverdue(true), 60_000)
+    const timer = setTimeout(() => setSwitchOverdue(true), SWITCH_OVERDUE)
     onCleanup(() => clearTimeout(timer))
   })
 

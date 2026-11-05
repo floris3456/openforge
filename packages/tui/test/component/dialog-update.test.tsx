@@ -1,10 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
 import { expect, test } from "bun:test"
+import type { UpgradeOutcome, UpgradeState } from "@opencode/client/promise"
 import { createSignal } from "solid-js"
 import { DialogUpdate } from "../../src/component/dialog-update"
 import { ConfigProvider } from "../../src/config"
-import type { UpdateOutcome, UpdateState } from "../../src/context/update-notification"
 import { Keymap } from "../../src/context/keymap"
 import { ThemeProvider } from "../../src/context/theme"
 import { DialogProvider } from "../../src/ui/dialog"
@@ -18,8 +18,8 @@ const words = (frame: string) => frame.replace(/\s+/g, " ")
 
 test("upgrade progress replaces checking, says what the switch waits for and reports a rollback", async () => {
   await using temporary = await tmpdir()
-  const [state, setState] = createSignal<UpdateState>()
-  const pending = Promise.withResolvers<UpdateOutcome>()
+  const [state, setState] = createSignal<UpgradeState>()
+  const pending = Promise.withResolvers<UpgradeOutcome>()
   const app = await testRender(
     () => (
       <TestTuiContexts directory={temporary.path} paths={{ state: temporary.path, home: temporary.path }}>
@@ -64,10 +64,10 @@ test("upgrade progress replaces checking, says what the switch waits for and rep
       ),
     )
     expect(words(app.captureCharFrame())).not.toContain("slow")
-    setState({ type: "waiting", version: "0.1.1", waiting: waiting.slice(0, 1) })
+    setState({ type: "waiting", version: "0.1.1", expired: { limit: 90_000, waiting: waiting.slice(0, 1) } })
     await app.waitForFrame((frame) =>
       words(frame).includes(
-        'openforge 0.1.1 is installed. The chats did not pause within 2 minutes; it switches once this has finished: webfetch in "Fix the tests"',
+        'openforge 0.1.1 is installed. The chats did not pause within 90 seconds; it switches once this has finished: webfetch in "Fix the tests".',
       ),
     )
     setState({ type: "waiting", version: "0.1.1" })
@@ -89,7 +89,7 @@ test("upgrade progress replaces checking, says what the switch waits for and rep
 
 test("a finished switch says whether this screen restarts on its own", async () => {
   await using temporary = await tmpdir()
-  const [state] = createSignal<UpdateState>({ type: "switched", version: "0.0.1" })
+  const [state] = createSignal<UpgradeState>({ type: "switched", version: "0.0.1" })
   const [restarts, setRestarts] = createSignal(false)
   const app = await testRender(
     () => (
@@ -111,10 +111,15 @@ test("a finished switch says whether this screen restarts on its own", async () 
   )
   try {
     app.renderer.start()
-    await app.waitForFrame((frame) => frame.includes("openforge 0.0.1 is running. Restart closes this screen"))
-    expect(app.captureCharFrame().toLowerCase()).toContain("restart")
+    await app.waitForFrame((frame) =>
+      words(frame).includes("openforge 0.0.1 is running; exit and run openforge to use it."),
+    )
+    expect(app.captureCharFrame()).toContain("Exit")
+    expect(app.captureCharFrame()).not.toContain("Restart")
     setRestarts(true)
-    await app.waitForFrame((frame) => frame.includes("Switched to openforge 0.0.1; restarting"))
+    await app.waitForFrame(
+      (frame) => frame.includes("Switched to openforge 0.0.1; restarting") && frame.includes("Restart"),
+    )
   } finally {
     app.renderer.destroy()
   }

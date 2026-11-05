@@ -1,15 +1,29 @@
 import { expect, test } from "bun:test"
-import type { OpenCodeEvent } from "@opencode/client"
-import type { UpdateState } from "../src/context/update-notification"
+import type { OpenCodeEvent, UpgradeState } from "@opencode/client"
 import { createAppFixture } from "./fixture/app"
 import { json } from "./fixture/tui-client"
+import { shows, words } from "./fixture/wait"
 
-// A service that can go away and come back paused, as during a release switch.
+// A service that can go away and come back paused, as during a release switch. `next` resolves at its next request
+// for `path`.
 function service() {
   const state = { down: false, pause: "running" as "running" | "paused" }
+  const waiting = new Set<{ readonly path: string; readonly heard: () => void }>()
   return {
     state,
+    next: (path: string) =>
+      new Promise<void>((resolve) => {
+        const entry = {
+          path,
+          heard: () => {
+            waiting.delete(entry)
+            resolve()
+          },
+        }
+        waiting.add(entry)
+      }),
     fetch: (url: URL) => {
+      for (const entry of Array.from(waiting)) if (entry.path === url.pathname) entry.heard()
       if (url.pathname === "/api/event" && state.down) return new Response(null, { status: 503 })
       if (url.pathname === "/api/experimental/service/status")
         return json({
@@ -35,16 +49,6 @@ function service() {
 const event = (type: string, data: unknown) => ({ id: `evt_${type}`, created: Date.now(), type, data }) as OpenCodeEvent
 const work = [{ sessionID: "ses_busy", kind: "tool" as const, name: "webfetch" }]
 const overlay = (frame: string) => frame.includes("Connection lost") || frame.includes("Restarting service")
-// The screen's words, without the lines that wrap them or the borders around them.
-const words = (frame: string) => frame.replace(/[┃│]/g, " ").replace(/\s+/g, " ")
-// Waits until the screen shows a frame that matches, re-rendering on its own as the app's timers fire.
-async function shows(setup: { captureCharFrame: () => string }, match: (frame: string) => boolean, timeout = 5_000) {
-  const deadline = Date.now() + timeout
-  while (!match(words(setup.captureCharFrame()))) {
-    if (Date.now() > deadline) throw new Error(`frame did not match in time:\n${setup.captureCharFrame()}`)
-    await Bun.sleep(20)
-  }
-}
 
 test("a switch shows what it waits for instead of the full-screen reconnect, until the new release resumes", async () => {
   const fake = service()
@@ -59,19 +63,24 @@ test("a switch shows what it waits for instead of the full-screen reconnect, unt
   setup.events.emit(event("service.paused", { rested: ["ses_busy"] }))
   await shows(setup, (frame) => frame.includes("Switching to a new openforge release…"))
 
-  // The old service stops; the overlay would show after 1 s of reconnecting.
+  // The old service stops. The overlay would show 1 s into reconnecting, which is before the stream, 1 s later, tries
+  // again.
   fake.state.down = true
   fake.state.pause = "paused"
+  const retried = fake.next("/api/event")
   setup.events.disconnect()
-  await Bun.sleep(1_500)
-  const during = words(setup.captureCharFrame())
+  await retried
+  await setup.renderOnce()
+  const during = words(setup)
   expect(during).toContain("Switching to a new openforge release…")
   expect(overlay(during)).toBe(false)
 
-  // The new release comes up paused, then resumes.
+  // The new release comes up paused, then resumes. The stream reaches it and the screen reads its pause.
+  const read = fake.next("/api/experimental/service/status")
   fake.state.down = false
-  await Bun.sleep(1_000)
-  expect(words(setup.captureCharFrame())).toContain("Switching to a new openforge release…")
+  await read
+  await setup.renderOnce()
+  expect(words(setup)).toContain("Switching to a new openforge release…")
   fake.state.pause = "running"
   setup.events.emit(event("service.resumed", {}))
   await shows(setup, (frame) => !frame.includes("Switching to"))
@@ -90,10 +99,10 @@ test("without a switch, losing the service still shows the full-screen reconnect
 }, 15_000)
 
 test("the upgrade dialog shows the switch's steps, so the notice stays away while it is open", async () => {
-  const listeners = new Set<(state: UpdateState) => void>()
+  const listeners = new Set<(state: UpgradeState) => void>()
   const switched = Promise.withResolvers<void>()
   const updater = {
-    subscribe: (notify: (state: UpdateState) => void) => {
+    subscribe: (notify: (state: UpgradeState) => void) => {
       listeners.add(notify)
       return () => listeners.delete(notify)
     },
@@ -110,9 +119,9 @@ test("the upgrade dialog shows the switch's steps, so the notice stays away whil
   await setup.waitForFrame((frame) => frame.includes("Upgrade openforge"))
   setup.mockInput.pressKey("RETURN")
   const message = 'Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests"…'
+  // The dialog and a notice would show the same report, so the frame that has the dialog's line would have both.
   await shows(setup, (frame) => frame.includes(message))
-  await Bun.sleep(100)
-  expect(words(setup.captureCharFrame()).split(message).length - 1).toBe(1)
+  expect(words(setup).split(message).length - 1).toBe(1)
 
   // Closed, the dialog leaves the notice to say it.
   setup.mockInput.pressEscape()
@@ -121,9 +130,9 @@ test("the upgrade dialog shows the switch's steps, so the notice stays away whil
 }, 15_000)
 
 test("the screen that runs the switch names the release it switches to", async () => {
-  const listeners = new Set<(state: UpdateState) => void>()
+  const listeners = new Set<(state: UpgradeState) => void>()
   const updater = {
-    subscribe: (notify: (state: UpdateState) => void) => {
+    subscribe: (notify: (state: UpgradeState) => void) => {
       listeners.add(notify)
       return () => listeners.delete(notify)
     },
@@ -138,7 +147,9 @@ test("the screen that runs the switch names the release it switches to", async (
   await shows(setup, (frame) =>
     frame.includes('Switching to openforge 0.1.1; waiting for webfetch in "Fix the tests"…'),
   )
-  listeners.forEach((notify) => notify({ type: "waiting", version: "0.1.1", waiting: work }))
+  listeners.forEach((notify) =>
+    notify({ type: "waiting", version: "0.1.1", expired: { limit: 120_000, waiting: work } }),
+  )
   setup.events.emit(event("service.pause.expired", { waiting: work }))
   await shows(setup, (frame) => !frame.includes("Switching to") && frame.includes("openforge 0.1.1 is installed"))
 }, 15_000)

@@ -11,7 +11,7 @@ const annotations = (identifier: string, summary: string, description: string) =
     transform: (operation) => ({ ...operation, tags: ["experimental"] }),
   })
 
-export const PausePayload = Schema.Struct({
+const PausePayload = Schema.Struct({
   /** Milliseconds to wait for every execution to rest before giving up; 2 minutes by default. */
   timeout: Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.optional),
 }).annotate({ identifier: "Continuity.PausePayload" })

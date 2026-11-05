@@ -54,7 +54,9 @@ export const ShellHandler = HttpApiBuilder.group(Api, "server.shell", (handlers)
           const shell = yield* Shell.Service
           yield* shell.get(ctx.params.id).pipe(Effect.catchTag("Shell.NotFoundError", () => missing(ctx.params.id)))
           // Removed while watched: the stream just ends.
-          return shell.watch(ctx.params.id, { cursor: ctx.query.cursor }).pipe(Stream.catch(() => Stream.empty))
+          return shell
+            .watch(ctx.params.id, { cursor: ctx.query.cursor })
+            .pipe(Stream.catchTag("Shell.NotFoundError", () => Stream.empty))
         }),
       )
       .handle(

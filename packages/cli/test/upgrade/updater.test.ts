@@ -60,7 +60,7 @@ const install = (
         await fs.mkdir(dirs.config, { recursive: true })
         await fs.writeFile(path.join(dirs.config, "opencode.json"), options.policy ?? "")
       })
-    const make = (version = "0.1.0") =>
+    const make = (version = "0.1.0", overrides: Partial<Updater.Options> = {}) =>
       Effect.gen(function* () {
         return yield* Updater.make({
           data: dirs.data,
@@ -74,8 +74,10 @@ const install = (
           base: server.url,
           database: switching.database,
           service: Effect.succeed(switching.service),
+          serviceDisabled: Effect.succeed(false),
           timeout: switching.timeout,
           pause: options.pause,
+          ...overrides,
         })
       }).pipe(provide)
     const states: UpgradeState[] = []
@@ -296,11 +298,33 @@ describe("upgrade", () => {
         base: test.server.url,
         database: test.switching.database,
         service: Effect.succeed(test.switching.service),
+        serviceDisabled: Effect.succeed(false),
       }).pipe(test.provide)
       const outcome = yield* updater.upgrade()
       expect(outcome).toMatchObject({ type: "unavailable" })
       if (outcome.type === "unavailable") expect(outcome.message).toContain("installed with install.sh")
       expect(test.server.requests).toEqual([])
+    }),
+  )
+
+  it.live("neither checks nor upgrades while the background service is turned off", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1", policy: '{ "autoupdate": true }' })
+      yield* test.publish("0.1.1")
+      // With the service turned off (`openforge service set disabled true`) each TUI runs its own server on the
+      // database instead.
+      yield* Service.stop({ file: test.switching.service.file })
+      const updater = yield* test.make("0.1.0", { serviceDisabled: Effect.succeed(true) })
+      yield* updater.startup(test.notify)
+      expect(test.states).toEqual([])
+      const outcome = yield* updater.upgrade({ notify: test.notify })
+      expect(outcome).toMatchObject({ type: "unavailable" })
+      if (outcome.type === "unavailable") expect(outcome.message).toContain('"openforge service unset disabled"')
+      // No managed service of the new release was started beside those servers.
+      expect(yield* test.happened).toEqual(["0.1.0 stopped"])
+      expect(yield* Service.discover({ file: test.switching.service.file })).toBeUndefined()
+      expect(yield* test.current).toBe("0.1.0")
+      expect(test.downloads()).toEqual([])
     }),
   )
 

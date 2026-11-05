@@ -61,6 +61,11 @@ export type Options = {
   readonly base: string
   readonly database: string
   readonly service: Effect.Effect<ReleaseSwitch.Target["service"], UpgradeError>
+  /**
+   * Whether the background service is turned off (`openforge service set disabled true`). Each TUI then runs its own
+   * server on the database, which a switch can't pause, and a switch would start a service beside them.
+   */
+  readonly serviceDisabled: Effect.Effect<boolean>
   /** How long a started service gets to answer; 10 s unless a test shortens it. */
   readonly timeout?: Duration.Duration
   /** How long the running service gets to pause; 2 minutes unless a test shortens it. */
@@ -102,6 +107,11 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       return {
         type: "unavailable" as const,
         message: `${Product.name} upgrades itself only when installed with install.sh into ${layout.releases}; this one runs from ${options.executable}.`,
+      }
+    if (yield* options.serviceDisabled)
+      return {
+        type: "unavailable" as const,
+        message: `The background service is turned off, so every ${Product.name} runs its own server on the database and none can be switched. Turn it on with "${Product.binary} service unset disabled" to upgrade.`,
       }
     return { type: "installed" as const, from, platform: options.platform }
   })
@@ -314,6 +324,11 @@ export const layer = Layer.effect(
         Effect.mapError(
           (cause) => new UpgradeError({ reason: `could not read the service configuration: ${cause.message}` }),
         ),
+        Effect.provide(context),
+      ),
+      serviceDisabled: ServiceConfig.read().pipe(
+        Effect.map((config) => config.disabled === true),
+        Effect.orElseSucceed(() => false),
         Effect.provide(context),
       ),
     })

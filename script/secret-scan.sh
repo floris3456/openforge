@@ -5,7 +5,7 @@
 set -eu
 
 if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "secret scan: gitleaks not found. Install v8.28.0 (see .gitleaks.toml), or push with --no-verify to skip every pre-push check." >&2
+  echo "secret scan: gitleaks not found, push stopped. Install gitleaks v8.28.0 or newer (see .gitleaks.toml)." >&2
   exit 1
 fi
 

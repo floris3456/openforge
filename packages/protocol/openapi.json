@@ -14907,7 +14907,7 @@
             }
           }
         },
-        "description": "Experimental. Streams combined output from an absolute byte cursor as it arrives, then the final command info once it has ended. A reader that falls behind skips ahead and is told so (truncated).",
+        "description": "Stream combined output from an absolute byte cursor as it arrives, then the final command info once it has ended. A reader that falls behind skips ahead and is told so (truncated). Experimental: may change without compatibility guarantees.",
         "summary": "Watch shell output"
       }
     },

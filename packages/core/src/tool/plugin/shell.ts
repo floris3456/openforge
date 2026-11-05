@@ -19,6 +19,7 @@ import { Shell } from "../../shell.js"
 import { ShellParse } from "../../shell/parse.js"
 import { ShellSelect } from "../../shell/select.js"
 import { ShellResult } from "../../shell/result.js"
+import type { ShellWrap } from "../../shell/wrap.js"
 
 export const name = "shell"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -33,7 +34,8 @@ const OS =
       : process.platform === "linux"
         ? "Linux"
         : process.platform
-const description = (shell?: string) =>
+// The same for every request until the settings change, so the prompt cache holds.
+const description = (shell?: string, confinement: ShellWrap.Confinement = { type: "none" }) =>
   [
     "Execute a shell command and return its output.",
     ...(shell ? [`Commands run on ${OS} using ${shell}.`] : []),
@@ -43,10 +45,27 @@ const description = (shell?: string) =>
     "Rely on automatic truncation unless filtering the output is more useful.",
     "Commands accept an optional timeout, background commands have no timeout by default.",
     "Background commands return immediately, and you will be notified when they complete.",
-    "Commands run in a sandbox that lets them write only to the chat's folder, its git folders, the temp folder and the package caches, unless the config allows more.",
-    "When a sandboxed command fails, its result says where it may write.",
-    "If the sandbox stopped a command that has to write elsewhere, run it again with `sandbox: false`, which asks the user for permission first.",
+    ...sandboxDescription(confinement),
   ].join(" ")
+
+const sandboxDescription = (confinement: ShellWrap.Confinement) => {
+  if (confinement.type === "none") return []
+  const leave = "run it again with `sandbox: false`, which asks the user for permission first."
+  if (confinement.type === "refused")
+    return [
+      `This machine can't sandbox commands: ${confinement.reason}.`,
+      `The config requires the sandbox, so to run a command, ${leave}`,
+    ]
+  const places =
+    confinement.mode === "write"
+      ? "the chat's folder, its git folders, the temp folder and the package caches, unless the config allows more"
+      : "the temp folder"
+  return [
+    `Commands run in a sandbox that lets them write only to ${places}${confinement.network ? "" : ", and gives them no network"}.`,
+    "When a sandboxed command fails, its result says where it may write.",
+    `If the sandbox stopped a command that has to ${confinement.network ? "write elsewhere" : "write elsewhere or use the network"}, ${leave}`,
+  ]
+}
 
 export const Input = Schema.Struct({
   command: Schema.String.annotate({ description: "Shell command string to execute" }),
@@ -83,19 +102,102 @@ const Output = Schema.Struct({
   ...StructuredOutput.fields,
   output: Schema.String,
   status: Schema.optionalKey(Schema.Literals(["completed", "running"])),
-  sandbox: Schema.optionalKey(Schema.String),
+  /** Where a sandboxed command that failed may write, and how to go outside. */
+  sandboxNote: Schema.optionalKey(Schema.String),
 })
 
-type Output = typeof Output.Type
+export type Output = typeof Output.Type
 
 const resultMessages = (output: Output) => {
   const notice = output.status === "running" ? BACKGROUND_INSTRUCTION : ShellResult.notice(output)
   return [
     ...(output.output ? [output.output] : []),
     ...(notice ? [notice] : []),
-    ...(output.sandbox ? [output.sandbox] : []),
+    ...(output.sandboxNote ? [output.sandboxNote] : []),
   ]
 }
+
+/** What the model reads of a command's end, in a tool result or a notice. */
+const resultText = (output: Output) => resultMessages(output).join("\n\n")
+
+/** A finished command as the tool reports it. `timeout` is unknown for a command a restart picked up. */
+const completed = (result: ShellResult.Result, timeout: number | undefined): Output => {
+  const output = ShellResult.output(result)
+  const sandboxNote = ShellResult.sandboxNote(result)
+  const exceeded =
+    timeout === undefined ? "Command exceeded its timeout." : `Command exceeded timeout of ${timeout} ms.`
+  return {
+    ...output,
+    output: output.timeout
+      ? `${output.output}\n\n${exceeded} Retry with a larger timeout if the command is expected to take longer.`
+      : output.output,
+    status: "completed",
+    ...(sandboxNote ? { sandboxNote } : {}),
+  }
+}
+
+/**
+ * A shell job's work: the command's result, also kept in `settled` for its notice, as the text the job reports. An
+ * interrupted job ends the command.
+ */
+export const follow = (
+  shell: Shell.Interface,
+  info: Shell.Info,
+  settled: Deferred.Deferred<Output>,
+  timeout: number | undefined,
+) =>
+  Effect.gen(function* () {
+    const result = yield* shell.result(info)
+    if (!result.capture) return yield* new Shell.NotFoundError({ id: info.id })
+    return completed(result, timeout)
+  }).pipe(
+    Effect.tap((output) => Deferred.succeed(settled, output)),
+    Effect.map(resultText),
+    Effect.onInterrupt(() => shell.remove(info.id).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.void))),
+  )
+
+/**
+ * Admits a background command's end into its Session once its job has settled, then marks the notice delivered.
+ * `resume` is asked as the notice is admitted: whether it wakes the Session (by default it does).
+ */
+export const notifyWhenDone = (
+  jobs: Job.Interface,
+  sessions: Session.Interface,
+  input: {
+    readonly sessionID: SessionSchema.ID
+    readonly jobID: string
+    readonly shellID: string
+    readonly command: string
+    readonly settled: Deferred.Deferred<Output>
+    readonly resume?: () => boolean
+  },
+) =>
+  Effect.gen(function* () {
+    const info = (yield* jobs.wait({ id: input.jobID })).info
+    if (!info || info.status === "running") return
+    const output = info.status === "completed" ? yield* Deferred.await(input.settled) : undefined
+    const text = output ? resultText(output) : info.status === "error" ? (info.error ?? "Command failed") : "Cancelled"
+    yield* sessions
+      .synthetic({
+        ...(info.notificationID ? { id: info.notificationID } : {}),
+        sessionID: input.sessionID,
+        description: input.command,
+        ...ShellResult.notification({
+          jobID: input.jobID,
+          shellID: input.shellID,
+          command: input.command,
+          state: info.status,
+          text,
+          output,
+        }),
+        ...(input.resume?.() === false ? { resume: false } : {}),
+      })
+      .pipe(
+        Effect.catchTag("Session.NotFoundError", () => Effect.void),
+        Effect.orDie,
+      )
+    if (info.notificationID) yield* jobs.completeBackground(info.notificationID)
+  })
 
 const toolResult = (output: Output) => {
   return {
@@ -160,7 +262,8 @@ export const Plugin = {
           agent: context.agent,
           source,
         })
-      if (unsandboxed)
+      // Leaving a sandbox needs the permission; with none to leave there is nothing to ask.
+      if (unsandboxed && (yield* shell.confinement(context.agent)).type !== "none")
         yield* permission.assert({
           action: Sandbox.permission,
           resources: [invocation.command],
@@ -180,39 +283,10 @@ export const Plugin = {
       return timeout
     })
 
-    const notifyWhenDone = Effect.fn("ShellTool.notifyWhenDone")(
-      function* (
-        sessionID: SessionSchema.ID,
-        id: string,
-        shellID: string,
-        command: string,
-        settled: Deferred.Deferred<Output>,
-      ) {
-        const info = (yield* jobs.wait({ id })).info
-        if (!info || info.status === "running") return
-        const output = info.status === "completed" ? yield* Deferred.await(settled) : undefined
-        const text = output
-          ? resultMessages(output).join("\n\n")
-          : info.status === "error"
-            ? (info.error ?? "Command failed")
-            : "Cancelled"
-        yield* sessions.synthetic({
-          ...(info.notificationID ? { id: info.notificationID } : {}),
-          sessionID,
-          description: command,
-          ...ShellResult.notification({
-            jobID: id,
-            shellID,
-            command,
-            state: info.status,
-            text,
-            output,
-          }),
-        })
-        if (info.notificationID) yield* jobs.completeBackground(info.notificationID)
-      },
-      Effect.forkIn(scope, { startImmediately: true }),
-    )
+    const notify = (sessionID: SessionSchema.ID, info: Shell.Info, jobID: string, settled: Deferred.Deferred<Output>) =>
+      notifyWhenDone(jobs, sessions, { sessionID, jobID, shellID: info.id, command: info.command, settled }).pipe(
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
 
     yield* ctx.tool
       .transform((editor) =>
@@ -236,11 +310,9 @@ export const Plugin = {
                       cwd: input.workdir,
                       timeout,
                       shell: yield* compatibleShell,
-                      metadata: {
-                        sessionID: context.sessionID,
-                        agent: context.agent,
-                        ...(input.sandbox === false ? { sandbox: false } : {}),
-                      },
+                      metadata: { sessionID: context.sessionID },
+                      agent: context.agent,
+                      unsandboxed: input.sandbox === false,
                     },
                     (invocation) =>
                       Effect.gen(function* () {
@@ -254,24 +326,7 @@ export const Plugin = {
               yield* context.progress({ shellID: info.id })
 
               const settled = yield* Deferred.make<Output>()
-              const run = Effect.gen(function* () {
-                const result = yield* shell.result(info)
-                if (!result.capture) return yield* new Shell.NotFoundError({ id: info.id })
-                const output = ShellResult.output(result)
-                const note = ShellResult.sandbox(result.info)
-                return {
-                  ...output,
-                  output: output.timeout
-                    ? `${output.output}\n\nCommand exceeded timeout of ${finalTimeout} ms. Retry with a larger timeout if the command is expected to take longer.`
-                    : output.output,
-                  status: "completed" as const,
-                  ...(note ? { sandbox: note } : {}),
-                }
-              }).pipe(
-                Effect.tap((output) => Deferred.succeed(settled, output)),
-                Effect.map((output) => resultMessages(output).join("\n\n")),
-                Effect.onInterrupt(() => shell.remove(info.id).pipe(Effect.ignore)),
-              )
+              const run = follow(shell, info, settled, finalTimeout)
               const job = yield* jobs.start({
                 // CodeMode children share a tool-call ID, but each shell must own its job.
                 id: info.id,
@@ -289,7 +344,7 @@ export const Plugin = {
 
               if (input.background === true) {
                 yield* jobs.background(job.id)
-                yield* notifyWhenDone(context.sessionID, job.id, info.id, info.command, settled)
+                yield* notify(context.sessionID, info, job.id, settled)
                 return backgroundResult(info.id, info.file)
               }
 
@@ -317,7 +372,7 @@ export const Plugin = {
                 )
               if (result?.type === "backgrounded") {
                 yield* shell.timeout(info.id, 0)
-                yield* notifyWhenDone(context.sessionID, job.id, info.id, info.command, settled)
+                yield* notify(context.sessionID, info, job.id, settled)
                 return backgroundResult(info.id, info.file)
               }
               if (result?.info.status === "error")
@@ -339,7 +394,15 @@ export const Plugin = {
       Effect.gen(function* () {
         const tool = event.tools[name]
         if (!tool) return
-        tool.description = description(ShellSelect.name(yield* compatibleShell))
+        const confinement = yield* shell.confinement(event.agent)
+        tool.description = description(ShellSelect.name(yield* compatibleShell), confinement)
+        // With no sandbox to leave, the model is not offered the way out.
+        const properties = tool.input.properties
+        if (confinement.type === "none" && typeof properties === "object" && properties !== null)
+          tool.input = {
+            ...tool.input,
+            properties: Object.fromEntries(Object.entries(properties).filter(([key]) => key !== "sandbox")),
+          }
       })
     yield* ctx.session.hook("context", hook)
     yield* ctx.session.hook("compaction", hook)

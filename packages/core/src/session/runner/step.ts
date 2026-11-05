@@ -13,6 +13,7 @@ import type { Agent } from "@opencode/schema/agent"
 import { Cause, Clock, Data, Effect, Exit, Fiber, Option, Stream } from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
+import { CodeModeTool } from "../../codemode/tool.js"
 import { SessionContinuity } from "../../continuity.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
@@ -59,7 +60,7 @@ interface Input {
   /** The runner owns compaction policy; the attempt invokes it only before durable output. */
   readonly recoverOverflow: Effect.Effect<boolean>
   /** The logical step, recorded with the step's checkpoint so a restart continues the turn's count. */
-  readonly step?: number
+  readonly step: number
   /** Finishes a step whose reply streamed before a restart, instead of calling the model. */
   readonly resume?: Resume
 }
@@ -78,9 +79,6 @@ export interface Resume {
   }>
 }
 
-// Code Mode runs other tools, so a wait inside it cannot rerun the call from its beginning.
-const RUNS_TOOLS = "execute"
-
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
 const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not return a tool result" } as const
@@ -89,8 +87,7 @@ const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not
 export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
   const continuity = yield* SessionContinuity.Service
-  const client = yield* LLMClient.Service
-  const llm = continuity.client(client)
+  const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
   const toolOutput = yield* ToolOutput.Service
 
@@ -148,7 +145,8 @@ export const make = Effect.gen(function* () {
           id: call.id,
           name: call.name,
           messageID: input.assistantMessageID,
-          survives: call.name !== RUNS_TOOLS,
+          // Code Mode runs other tools, so a wait inside it cannot rerun the call from its beginning.
+          survives: call.name !== CodeModeTool.name,
           ...(checkpoint ? { rerun: true, resume: checkpoint.data } : {}),
         })
         const execute = executeTool(call)
@@ -226,7 +224,7 @@ export const make = Effect.gen(function* () {
                   commit: () =>
                     continuity.save(input.sessionID, {
                       kind: "tools",
-                      step: input.step ?? 1,
+                      step: input.step,
                       assistantMessageID: input.assistantMessageID,
                       ...(snapshot === undefined ? {} : { snapshot }),
                       finish,

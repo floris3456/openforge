@@ -6,6 +6,9 @@ import { optional } from "../schema.js"
 export const Mode = Schema.Literals(["write", "read", "off"]).annotate({ identifier: "Config.Sandbox.Mode" })
 export type Mode = typeof Mode.Type
 
+/** The permission a shell command needs to run outside the sandbox (`sandbox: false`). */
+export const permission = "unsandboxed"
+
 export const Info = Schema.Struct({
   mode: Mode.pipe(optional).annotate({
     description:

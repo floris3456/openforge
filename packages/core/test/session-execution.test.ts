@@ -321,6 +321,48 @@ describe("SessionExecution lifecycle", () => {
     }),
   )
 
+  it.effect("a turn that exhausts its resume budget leaves nothing to resume, so the next prompt starts afresh", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const kv = yield* KV.Service
+      const sessionID = Session.ID.make("ses_resume_exhausted_rest")
+      yield* seedSessions(database, [sessionID], { time_suspended: Date.now(), resume_attempts: 2 })
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const continuity = Context.get(
+        yield* Layer.buildWithScope(
+          SessionContinuity.layer().pipe(
+            Layer.provide(Layer.succeed(Database.Service, database)),
+            Layer.provide(Layer.succeed(Bus.Service, bus)),
+            Layer.provide(Layer.succeed(KV.Service, kv)),
+          ),
+          scope,
+        ),
+        SessionContinuity.Service,
+      )
+      // The step the turn kept dying in rested with its tools: a resume would run it again.
+      yield* continuity.save(sessionID, {
+        kind: "tools",
+        step: 3,
+        assistantMessageID: SessionMessage.ID.create(),
+        finish: { finish: "tool-calls" },
+      })
+      const restored: Effect.Success<ReturnType<SessionContinuity.Interface["restored"]>>[] = []
+      const context = yield* buildExecution(
+        scope,
+        ({ sessionID: id }) => continuity.restored(id).pipe(Effect.map((found) => void restored.push(found))),
+        { maxAttempts: 2 },
+      )
+      yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
+      expect(restored).toEqual([])
+
+      // The next prompt's drain finds no step to resume.
+      yield* Context.get(context, SessionExecution.Service).resume(sessionID)
+      expect(restored).toEqual([{ tools: new Map() }])
+    }),
+  )
+
   it.effect("counts every resume durably and never consumes the claim it recovers", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service
@@ -705,7 +747,7 @@ describe("SessionRestart background recovery", () => {
         yield* seedSessions(database, [sessionID])
         // The server that started them stopped and left them in its tool runner: one still runs, one finishes before
         // the next server starts.
-        const [running, finished] = yield* Effect.gen(function* () {
+        const [running, finished, timed] = yield* Effect.gen(function* () {
           const shell = yield* Shell.Service
           const running = yield* shell.create({
             shell: "/bin/sh",
@@ -713,13 +755,17 @@ describe("SessionRestart background recovery", () => {
             timeout: 0,
           })
           const finished = yield* shell.create({ shell: "/bin/sh", command: "printf done; exit 3", timeout: 0 })
+          const timed = yield* shell.create({ shell: "/bin/sh", command: "printf slow; sleep 30", timeout: 200 })
           yield* shell.wait(finished.id)
-          yield* (yield* ShellRunner.Service).detach
-          return [running, finished]
+          yield* shell.wait(timed.id)
+          const runner = yield* ShellRunner.Service
+          yield* runner.detach
+          return [running, finished, timed]
         }).pipe(Effect.scoped, Effect.provide(host.service()))
         yield* seedBackground(jobs, sessionID, [
           { id: "call-runner-running", shellID: running.id, command: running.command },
           { id: "call-runner-finished", shellID: finished.id, command: finished.command },
+          { id: "call-runner-timed", shellID: timed.id, command: timed.command },
         ])
 
         const observed = yield* Deferred.make<string[]>()
@@ -735,7 +781,7 @@ describe("SessionRestart background recovery", () => {
               Effect.orDie,
               Effect.map((messages) => messages.filter((message) => message.type === "synthetic")),
               Effect.flatMap((notices) =>
-                notices.length === 2
+                notices.length === 3
                   ? Deferred.succeed(
                       observed,
                       notices.map((notice) => notice.text),
@@ -755,6 +801,8 @@ describe("SessionRestart background recovery", () => {
         fs.writeFileSync(release, "")
         expect(yield* Deferred.await(observed)).toEqual([
           `<shell id="call-runner-finished" state="completed" command="printf done; exit 3">\ndone\n\nExited with code 3\n</shell>`,
+          // As the shell tool reports it; the timeout the call gave is not kept with its job.
+          `<shell id="call-runner-timed" state="completed" command="${timed.command}">\nslow\n\nCommand exceeded its timeout. Retry with a larger timeout if the command is expected to take longer.\n\nTimed out before completion\n</shell>`,
           `<shell id="call-runner-running" state="completed" command="${running.command}">\nbeforeafter\n</shell>`,
         ])
         yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)

@@ -1,5 +1,6 @@
 import { ClientError, OpenCode, type SessionStatsInfo } from "@opencode/client"
 import { Service } from "@opencode/client/effect/service"
+import { Product } from "@opencode/schema/product"
 import { TokenUsage } from "@opencode/schema/token-usage"
 import { activityCalendar } from "@opencode/util/activity-calendar"
 import { Effect, Option } from "effect"
@@ -108,17 +109,12 @@ export function renderStats(stats: SessionStatsInfo, options: RenderOptions) {
       : `${style(formatPercent(toolRate), primary, options.color)} tool success`
   const details = options.models || options.tools || options.cost
   const empty = stats.sessions === 0 && stats.prompts === 0 && stats.steps === 0
-  const heading = `${style("openforge stats", primary, options.color)} ${style(`· ${options.label} · ${options.scope}`, "2", options.color)}`
+  const heading = `${style(`${Product.name} stats`, primary, options.color)} ${style(`· ${options.label} · ${options.scope}`, "2", options.color)}`
+  const footer = style(`github.com/${Product.repository}`, "2", options.color)
   const lines = details
     ? [style(`${options.label} · ${options.scope}`, "2", options.color)]
     : empty
-      ? [
-          heading,
-          "",
-          style("no activity in this range", "2", options.color),
-          "",
-          style("opencode.ai", "2", options.color),
-        ]
+      ? [heading, "", style("no activity in this range", "2", options.color), "", footer]
       : [
           heading,
           "",
@@ -128,7 +124,7 @@ export function renderStats(stats: SessionStatsInfo, options: RenderOptions) {
           `${metricCount(stats.prompts, "prompt", options.color)} · ${metricCount(stats.steps, "step", options.color)} · ${metricCount(totalTokens, "token", options.color)}`,
           `${toolSummary} · ${metricCount(stats.activeDays, "active day", options.color)} · best streak ${style(stats.streak.toString(), primary, options.color)} day${stats.streak === 1 ? "" : "s"}`,
           "",
-          style("opencode.ai", "2", options.color),
+          footer,
         ]
 
   if (options.cost) lines.push(...(lines.length > 0 ? [""] : []), ...renderCost(stats))

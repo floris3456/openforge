@@ -16,7 +16,7 @@ export default Runtime.handler(
     const config = yield* ServiceConfig.read()
     if (config.disabled === true)
       return yield* Effect.fail(
-        new Error("Pairing requires the background service; run `openforge service unset disabled` first"),
+        new Error(`Pairing requires the background service; run \`${Product.binary} service unset disabled\` first`),
       )
     if (input.remote && Option.isSome(input.url))
       return yield* Effect.fail(new Error("--remote cannot be combined with --url"))
@@ -63,7 +63,7 @@ export default Runtime.handler(
         `  ssh -L ${url.port}:${url.hostname}:${url.port} <host>`,
         `  If port ${url.port} is busy locally, forward another port and use it in the link.`,
         "",
-        "  To connect from other devices, run `openforge service set hostname 0.0.0.0`.",
+        `  To connect from other devices, run \`${Product.binary} service set hostname 0.0.0.0\`.`,
         "",
       ].join(EOL) + EOL,
     )
@@ -103,12 +103,12 @@ export const remoteConsent = Effect.fn("cli.pair.remote-consent")(function* (
   if (!input.yes) {
     const accepted = yield* Effect.promise(terminal.confirm)
     if (isCancel(accepted)) {
-      cancel("Remote access was not enabled. To pair locally, run `openforge pair`.")
+      cancel(`Remote access was not enabled. To pair locally, run \`${Product.binary} pair\`.`)
       process.exitCode = 130
       return false
     }
     if (accepted !== true) {
-      log.info("Remote access was not enabled. To pair locally, run `openforge pair`.")
+      log.info(`Remote access was not enabled. To pair locally, run \`${Product.binary} pair\`.`)
       return false
     }
   }
@@ -143,9 +143,9 @@ const remoteURL = Effect.fnUntraced(function* (client: ReturnType<typeof OpenCod
         Effect.fail(
           new Error(
             [
-              "Timed out waiting for the remote tunnel; run `openforge pair --remote` again to retry.",
+              `Timed out waiting for the remote tunnel; run \`${Product.binary} pair --remote\` again to retry.`,
               // The service may not inherit the shell's environment, and Bun ignores the Windows system (WinINET) proxy.
-              "Behind an HTTP proxy, give the background service its address with `openforge service set env HTTPS_PROXY <url>` (and `NO_PROXY` for hosts to reach directly).",
+              `Behind an HTTP proxy, give the background service its address with \`${Product.binary} service set env HTTPS_PROXY <url>\` (and \`NO_PROXY\` for hosts to reach directly).`,
             ].join(EOL),
           ),
         ),

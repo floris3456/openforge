@@ -21,7 +21,7 @@ export const Pending = Schema.Struct({
 export type Pending = typeof Pending.Type
 export const PREFIX = "session.shell/"
 export const key = (id: Shell.ID) => PREFIX + id
-export const encode = (pending: Pending) => JSON.stringify(Schema.encodeSync(Pending)(pending))
+export const encode = Schema.encodeSync(Schema.fromJsonString(Pending))
 export const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Pending))
 
 export const start = Effect.fn("SessionShell.start")(function* (input: { session: Session.Info; command: string }) {

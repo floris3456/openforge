@@ -105,6 +105,7 @@ for (const fixture of [
           isLocationClosed: () => false,
           sessionID,
           assistantMessageID,
+          step: 1,
           agent: Agent.defaultID,
           model,
           prepared: {
@@ -207,6 +208,7 @@ it.effect("records the cost the endpoint reports instead of the catalog price", 
       isLocationClosed: () => false,
       sessionID,
       assistantMessageID,
+      step: 1,
       agent: Agent.defaultID,
       model,
       prepared: {

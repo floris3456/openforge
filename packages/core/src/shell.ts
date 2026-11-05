@@ -1,20 +1,15 @@
 export * as Shell from "./shell.js"
 
-import { mkdir, rm } from "fs/promises"
+import { mkdir } from "fs/promises"
 import path from "path"
-import { Context, Deferred, Duration, Effect, Fiber, Layer, Queue, Schedule, Schema, Stream } from "effect"
-import { ChildProcess } from "effect/process"
-import type { RunnerClient } from "@opencode/runner/client"
-import { RunnerOutput } from "@opencode/runner/output"
-import { RunnerPaths } from "@opencode/runner/paths"
-import type { RunnerProtocol } from "@opencode/runner/protocol"
+import { Context, Duration, Effect, Layer, Schedule, Schema, Stream } from "effect"
 import { Shell } from "@opencode/schema/shell"
 import { AppProcess } from "@opencode/util/process"
-import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
+import type { Agent } from "./agent.js"
 import { Environment } from "./environment/index.js"
 import { FileRetention } from "./file-retention.js"
 import { Location } from "./location.js"
@@ -24,6 +19,7 @@ import { SessionEnvironment } from "./session/environment.js"
 import { SessionSchema } from "./session/schema.js"
 import { Config } from "./config.js"
 import { ToolOutput } from "./tool-output.js"
+import { ShellInProcess } from "./shell/in-process.js"
 import { ShellResult } from "./shell/result.js"
 import { ShellRunner } from "./shell/runner.js"
 import { ShellWrap } from "./shell/wrap.js"
@@ -40,6 +36,10 @@ export const DIRECTORY = ShellRunner.DIRECTORY
 
 type CreateInput = Shell.CreateInput & {
   shell?: string
+  /** The agent whose sandbox confines the command; a command without one (the user's) runs as it is. */
+  agent?: Agent.ID
+  /** Runs an agent's command outside its sandbox; the shell tool asks the user first. */
+  unsandboxed?: boolean
 }
 
 /**
@@ -68,6 +68,8 @@ export interface Interface {
   // Output as it arrives from `cursor` on, then the terminal Info.
   readonly watch: (id: Shell.ID, input?: Shell.WatchInput) => Stream.Stream<Shell.WatchEvent, ShellRunner.NotFoundError>
   readonly remove: (id: Shell.ID) => Effect.Effect<void, ShellRunner.NotFoundError>
+  // How the commands of an agent are confined here, worked out once per change of the config or the agent.
+  readonly confinement: (agent: Agent.ID) => Effect.Effect<ShellWrap.Confinement>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Shell") {}
@@ -121,7 +123,6 @@ const layer = () =>
       const hooks = yield* PluginHooks.Service
       const environments = yield* SessionEnvironment.Service
       const config = yield* Config.Service
-      const runFork = Effect.runForkWith(yield* Effect.context())
       const ref = Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID })
 
       const outputDir = path.join(global.data, DIRECTORY, location.project.id)
@@ -155,177 +156,10 @@ const layer = () =>
             : ""
           return { output: `${text || "(no output)"}${notice}`, truncated }
         }).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(undefined)))
-        return { info, capture }
-      })
-
-      // A workspace-backed Location runs its commands in the workspace's own environment, and Windows has no tool
-      // runner: these commands run from this service, and do not outlive it.
-      const inProcess = Effect.fnUntraced(function* (info: Shell.Info, command: ShellWrap.Command, deadline?: number) {
-        const ready = Deferred.makeUnsafe<Shell.Info, AppProcess.AppProcessError>()
-        runFork(
-          Effect.scoped(
-            Effect.gen(function* () {
-              const handle = yield* environment.spawner
-                .spawn(
-                  ChildProcess.make(command.argv[0], command.argv.slice(1), {
-                    cwd: command.cwd,
-                    env: command.env,
-                    stdin: "ignore",
-                    detached: process.platform !== "win32",
-                    forceKillAfter: Duration.seconds(3),
-                  }),
-                )
-                .pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: info.command, cause })))
-              const writer = new RunnerOutput.Writer(info.file)
-              const state: {
-                reason?: "timeout" | "killed"
-                remove: boolean
-                timer?: Fiber.Fiber<void>
-                ended: boolean
-                // Bumped by every append and by the end, so a watch never misses one between its read and its wait.
-                version: number
-              } = { remove: false, ended: false, version: 0 }
-              const wakes = new Set<() => void>()
-              const wake = () => {
-                state.version++
-                // Taken out first: a resumed watch may wait again at once, and must not be resumed again here.
-                const waiting = [...wakes]
-                wakes.clear()
-                waiting.forEach((resume) => resume())
-              }
-              const changed = (seen: number) =>
-                Effect.callback<void>((resume) => {
-                  if (state.version !== seen) return resume(Effect.void)
-                  const done = () => resume(Effect.void)
-                  wakes.add(done)
-                  return Effect.sync(() => wakes.delete(done))
-                })
-              // Live output until the command ends; ShellRunner reads what is left from the finished file.
-              const follow = (offset: number) =>
-                Stream.callback<RunnerClient.WatchEvent>((queue) =>
-                  Effect.gen(function* () {
-                    let cursor = offset
-                    while (!state.ended) {
-                      const seen = state.version
-                      const chunk = writer.read(cursor)
-                      if (chunk && chunk.data.length > 0) {
-                        cursor = chunk.offset + chunk.data.length
-                        yield* Queue.offer(queue, {
-                          type: "output",
-                          offset: chunk.offset,
-                          data: chunk.data,
-                          size: writer.size,
-                        })
-                        continue
-                      }
-                      yield* changed(seen)
-                    }
-                    yield* Queue.end(queue)
-                  }),
-                )
-              const kill = () => runFork(handle.kill({ forceKillAfter: Duration.seconds(3) }).pipe(Effect.ignore))
-              const arm = (at: number | null) =>
-                Effect.gen(function* () {
-                  if (state.timer) yield* Fiber.interrupt(state.timer)
-                  state.timer = undefined
-                  if (at === null) return
-                  state.timer = runFork(
-                    Effect.sleep(Duration.millis(Math.max(0, at - Date.now()))).pipe(
-                      Effect.andThen(
-                        Effect.sync(() => {
-                          state.reason ??= "timeout"
-                          kill()
-                        }),
-                      ),
-                    ),
-                  )
-                })
-              const started = { ...info, pid: handle.pid }
-              const finish = yield* runner.attach({
-                info: started,
-                location: ref,
-                control: {
-                  signal: (_signal, remove) =>
-                    Effect.sync(() => {
-                      state.reason ??= "killed"
-                      state.remove ||= remove
-                      kill()
-                    }),
-                  deadline: arm,
-                  read: (offset, limit) =>
-                    Effect.sync(() => {
-                      const chunk = writer.read(offset, limit)
-                      return chunk
-                        ? { offset: chunk.offset, data: chunk.data, size: writer.size }
-                        : { offset: Math.min(offset, writer.size), data: Buffer.alloc(0), size: writer.size }
-                    }),
-                  watch: follow,
-                },
-              })
-              yield* arm(deadline ?? null)
-              yield* Deferred.succeed(ready, started)
-              const [status] = yield* Effect.all(
-                [
-                  handle.exitCode.pipe(
-                    Effect.map((code): { code?: number; signal?: string } => ({ code })),
-                    Effect.catch((error) =>
-                      Effect.succeed<{ code?: number; signal?: string }>({
-                        signal:
-                          error.cause instanceof CrossSpawnSpawner.KilledBySignal ? error.cause.signal : undefined,
-                      }),
-                    ),
-                  ),
-                  handle.all.pipe(
-                    Stream.runForEach((chunk: Uint8Array) =>
-                      Effect.sync(() => {
-                        writer.append(chunk)
-                        wake()
-                      }),
-                    ),
-                    Effect.ignore,
-                  ),
-                ],
-                { concurrency: 2 },
-              )
-              if (state.timer) yield* Fiber.interrupt(state.timer)
-              state.ended = true
-              wake()
-              const layout = writer.finish()
-              writer.close()
-              const exit: RunnerProtocol.Exit = {
-                id: info.id,
-                status: state.reason ?? "exited",
-                ...(status.code !== undefined ? { code: status.code } : {}),
-                ...(status.signal !== undefined ? { signal: status.signal } : {}),
-                pid: started.pid,
-                started: info.time.started,
-                ended: Date.now(),
-                size: writer.size,
-                lines: writer.lines,
-                ...(layout ? { layout } : {}),
-                meta: {
-                  command: info.command,
-                  cwd: info.cwd,
-                  shell: info.shell,
-                  file: info.file,
-                  metadata: info.metadata,
-                  started: info.time.started,
-                  location: ref,
-                },
-              }
-              yield* Effect.promise(() =>
-                state.remove
-                  ? Promise.all([
-                      rm(info.file, { force: true }),
-                      rm(RunnerPaths.exit(info.file), { force: true }),
-                    ]).then(() => undefined)
-                  : RunnerOutput.writeAtomic(RunnerPaths.exit(info.file), JSON.stringify(exit)),
-              )
-              yield* finish(exit)
-            }),
-          ).pipe(Effect.catchTag("AppProcessError", (error) => Deferred.fail(ready, error))),
-        )
-        return yield* Deferred.await(ready)
+        const sandboxNote = yield* runner
+          .sandboxNote(info.id)
+          .pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(undefined)))
+        return { info, capture, ...(sandboxNote ? { sandboxNote } : {}) }
       })
 
       const create = Effect.fn("Shell.create")(function* <E = never, R = never>(
@@ -351,7 +185,6 @@ const layer = () =>
         yield* hooks.trigger("shell", "create.before", invocation)
         if (before) yield* before(invocation)
 
-        const metadata = input.metadata ?? {}
         const command = yield* wrap.wrap(
           {
             argv: [invocation.shell, ...ShellSelect.args(invocation.shell, invocation.command)],
@@ -360,7 +193,7 @@ const layer = () =>
               Object.entries(invocation.env).flatMap(([name, value]) => (value === undefined ? [] : [[name, value]])),
             ),
           },
-          { metadata },
+          { agent: input.agent, unsandboxed: input.unsandboxed },
         )
         const id = Shell.ID.ascending()
         // Wall-clock time: the runner holds the deadline as a point in time, outside this service's clock.
@@ -372,16 +205,25 @@ const layer = () =>
           cwd: invocation.cwd,
           shell: invocation.shell,
           file: path.join(outputDir, `${id}.out`),
-          // A sandboxed command keeps its note with it, so a later service still has it for the command's result.
-          metadata: command.note ? { ...metadata, sandbox: command.note } : metadata,
+          metadata: input.metadata ?? {},
           time: { started },
         }
         const deadline = invocation.timeout > 0 ? started + invocation.timeout : undefined
         if (location.workspaceID !== undefined || process.platform === "win32")
-          return yield* inProcess(info, command, deadline)
+          return yield* ShellInProcess.start({
+            info,
+            location: ref,
+            command,
+            deadline,
+            sandboxNote: command.sandboxNote,
+          }).pipe(
+            Effect.provideService(Environment.Service, environment),
+            Effect.provideService(ShellRunner.Service, runner),
+          )
         return yield* runner.start({
           info,
           location: ref,
+          sandboxNote: command.sandboxNote,
           argv: command.argv,
           cwd: command.cwd,
           env: command.env,
@@ -399,6 +241,7 @@ const layer = () =>
         output: runner.output,
         watch: runner.watch,
         remove: runner.remove,
+        confinement: wrap.confinement,
       })
     }),
   )

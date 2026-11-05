@@ -46,6 +46,8 @@ describe("stats rendering", () => {
     expect(output).toContain("80.0% tool success · 2 active days · best streak 2 days")
     expect(output).not.toContain("private_tool")
     expect(output).not.toContain("$12.34")
+    expect(output.split(/\r?\n/).at(-1)).toBe("github.com/floris3456/openforge")
+    expect(output).not.toContain("opencode")
   })
 
   test("renders shared intensity levels and partial month labels", () => {
@@ -119,6 +121,7 @@ describe("stats rendering", () => {
     )
     expect(output).toContain("no activity in this range")
     expect(output).not.toContain("less ·░▒▓█ more")
+    expect(output.split(/\r?\n/).at(-1)).toBe("github.com/floris3456/openforge")
   })
 
   test("does not present uncollected tools as zero calls", () => {

@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import { landlock, seccomp } from "#native"
+import { entries, inside, real, text } from "./files.js"
 import { Landlock } from "./landlock.js"
 import { Seatbelt } from "./seatbelt.js"
 
@@ -12,12 +13,10 @@ import { Seatbelt } from "./seatbelt.js"
 // Landlock and seccomp in `openforge sandbox-exec`; macOS runs `/usr/bin/sandbox-exec` with a Seatbelt profile.
 // It guards against mistakes, not against a hostile model: local services, sockets and signals are not blocked.
 
-export type Mode = ConfigSandbox.Mode
-/** The `sandbox` settings of the config and of an agent. */
-export type Settings = ConfigSandbox.Info
 export const merge = ConfigSandbox.merge
-/** The permission a command needs to run outside the sandbox (`sandbox: false`). */
-export const permission = "unsandboxed"
+export const permission = ConfigSandbox.permission
+
+type Env = Readonly<Record<string, string | undefined>>
 
 export interface Context {
   /** The chat's folder. */
@@ -31,16 +30,13 @@ export interface Context {
   readonly config: string
   /** The live database, when it isn't `<data>/opencode.db`. */
   readonly database?: string
-  /** A temp folder of the command's own. */
-  readonly tmp?: string
   /** The command's environment: its TMPDIR and cache variables add writable folders. Default: this process's. */
-  readonly env?: Readonly<Record<string, string | undefined>>
-  readonly platform?: NodeJS.Platform
+  readonly env?: Env
 }
 
-/** A concrete policy: resolved absolute paths. Plain data, so it can travel to the tool runner as JSON. */
+/** A concrete policy, of resolved absolute paths. */
 export interface Policy {
-  readonly mode: Mode
+  readonly mode: ConfigSandbox.Mode
   readonly network: boolean
   readonly required: boolean
   readonly write: readonly string[]
@@ -49,33 +45,46 @@ export interface Policy {
   readonly home: string
 }
 
-export type Availability =
-  | { readonly ok: true; readonly landlock?: number }
-  | { readonly ok: false; readonly reason: string }
+/** The part of a policy that Landlock and Seatbelt enforce. */
+export type Confinement = Pick<Policy, "write" | "denyRead" | "network">
+
+export type Availability = { readonly ok: true } | { readonly ok: false; readonly reason: string }
+
+/** How a policy confines commands on a machine. */
+export type Decision =
+  /** Not at all: the policy is off, or the machine can't sandbox and the policy doesn't require it. */
+  | { readonly type: "none" }
+  | { readonly type: "sandbox"; readonly mode: "write" | "read"; readonly network: boolean }
+  /** Commands are refused: the machine can't sandbox, and the policy requires it. */
+  | { readonly type: "refused"; readonly reason: string }
+
+export type Argv = readonly [string, ...string[]]
 
 export type Wrapped =
   | {
       readonly type: "run"
-      readonly argv: string[]
+      readonly argv: Argv
       readonly sandboxed: boolean
       /** Set on the first command of this process that runs unsandboxed because the machine can't sandbox. */
       readonly warning?: string
     }
   | { readonly type: "refuse"; readonly reason: string }
 
-export function resolve(settings: Settings | undefined, context: Context): Policy {
-  const platform = context.platform ?? process.platform
+const SEATBELT = "/usr/bin/sandbox-exec"
+
+export function resolve(settings: ConfigSandbox.Info | undefined, context: Context): Policy {
   const env = context.env ?? process.env
   const mode = settings?.mode ?? "write"
+  const home = real(context.home)
   const base = {
     mode,
     network: settings?.network ?? true,
     required: settings?.required ?? false,
-    platform,
-    home: real(context.home),
+    platform: process.platform,
+    home,
   }
   if (mode === "off") return { ...base, write: [], denyRead: [] }
-  const temp = temporary(context, env)
+  const temp = temporary(home, env)
   const own = (value: string) => real(absolute(value, context))
   const roots = [
     context.directory,
@@ -87,7 +96,7 @@ export function resolve(settings: Settings | undefined, context: Context): Polic
           ...roots,
           ...git(roots[0]).filter((folder) => !roots.some((root) => inside(folder, root))),
           ...temp,
-          ...caches(platform, base.home, env, temp),
+          ...caches(home, env, temp),
           "/dev",
           ...(settings?.write ?? []).map(own),
         ]
@@ -110,16 +119,24 @@ export function available() {
 
 export function detect(
   platform: NodeJS.Platform,
-  probe = { landlock, seccomp, seatbelt: () => fs.existsSync("/usr/bin/sandbox-exec") },
+  probe = { landlock, seccomp, seatbelt: () => fs.existsSync(SEATBELT) },
 ): Availability {
-  if (platform === "darwin")
-    return probe.seatbelt() ? { ok: true } : { ok: false, reason: "/usr/bin/sandbox-exec is missing" }
+  if (platform === "darwin") return probe.seatbelt() ? { ok: true } : { ok: false, reason: `${SEATBELT} is missing` }
   if (platform !== "linux") return { ok: false, reason: `there is no sandbox on ${platform}` }
-  const abi = probe.landlock()
-  if (abi === 0) return { ok: false, reason: "this kernel has no Landlock" }
-  if (abi < 2) return { ok: false, reason: `this kernel's Landlock (ABI ${abi}) is too old` }
-  if (!probe.seccomp()) return { ok: false, reason: "this kernel has no seccomp filters" }
-  return { ok: true, landlock: abi }
+  try {
+    const reason =
+      Landlock.unsupported(probe.landlock()) ?? (probe.seccomp() ? undefined : "this kernel has no seccomp filters")
+    return reason === undefined ? { ok: true } : { ok: false, reason }
+  } catch (error) {
+    // The C library didn't load.
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export function decide(policy: Policy, machine: Availability = available()): Decision {
+  if (policy.mode === "off") return { type: "none" }
+  if (!machine.ok) return policy.required ? { type: "refused", reason: machine.reason } : { type: "none" }
+  return { type: "sandbox", mode: policy.mode, network: policy.network }
 }
 
 let warned = false
@@ -129,30 +146,19 @@ let warned = false
  * `sandbox-exec` command confines itself on Linux. When the machine can't sandbox, the command runs unsandboxed, or
  * is refused when the policy requires the sandbox.
  */
-export function wrap(
-  policy: Policy,
-  argv: readonly string[],
-  self: readonly string[],
-  machine: Availability = available(),
-): Wrapped {
-  if (policy.mode === "off") return { type: "run", argv: [...argv], sandboxed: false }
-  if (!machine.ok) {
-    const reason = `This machine can't sandbox commands: ${machine.reason}.`
-    if (policy.required)
-      return { type: "refuse", reason: `${reason} The command was not run, as sandbox.required is set.` }
-    const first = !warned
-    warned = true
-    return {
-      type: "run",
-      argv: [...argv],
-      sandboxed: false,
-      ...(first ? { warning: `${reason} Commands run unsandboxed.` } : {}),
-    }
+export function wrap(policy: Policy, argv: Argv, self: Argv, machine: Availability = available()): Wrapped {
+  const decision = decide(policy, machine)
+  const cannot = (reason: string) => `This machine can't sandbox commands: ${reason}.`
+  if (decision.type === "refused")
+    return { type: "refuse", reason: `${cannot(decision.reason)} The command was not run, as sandbox.required is set.` }
+  if (decision.type === "sandbox") {
+    if (policy.platform === "darwin")
+      return { type: "run", argv: [SEATBELT, "-p", Seatbelt.profile(policy), ...argv], sandboxed: true }
+    return { type: "run", argv: [...self, "sandbox-exec", Landlock.encode(policy), "--", ...argv], sandboxed: true }
   }
-  const confined = { write: policy.write, deny: policy.denyRead, network: policy.network }
-  if (policy.platform === "darwin")
-    return { type: "run", argv: ["/usr/bin/sandbox-exec", "-p", Seatbelt.profile(confined), ...argv], sandboxed: true }
-  return { type: "run", argv: [...self, "sandbox-exec", Landlock.encode(confined), "--", ...argv], sandboxed: true }
+  if (policy.mode === "off" || machine.ok || warned) return { type: "run", argv, sandboxed: false }
+  warned = true
+  return { type: "run", argv, sandboxed: false, warning: `${cannot(machine.reason)} Commands run unsandboxed.` }
 }
 
 /** The note added to the result of a sandboxed command that failed: where it may write, and how to go outside. */
@@ -161,7 +167,7 @@ export function note(policy: Policy) {
   const places = policy.write.map((item) => shorten(item, policy.home)).join(", ")
   return [
     `This command ran in the sandbox, which lets it write only to ${places}${policy.network ? "" : ", and gives it no network"}.`,
-    "If the sandbox stopped it, run it again with `sandbox: false` (asks for the `unsandboxed` permission), or add the path to `sandbox.write` in the config.",
+    `If the sandbox stopped it, run it again with \`sandbox: false\` (asks for the \`${permission}\` permission), or add the path to \`sandbox.write\` in the config.`,
   ].join(" ")
 }
 
@@ -215,10 +221,10 @@ const cacheVariables = [
 ]
 
 /** The usual package and build caches that exist. A variable that names the home folder (or above) is ignored. */
-function caches(platform: NodeJS.Platform, home: string, env: Context["env"] & {}, temp: readonly string[]) {
+function caches(home: string, env: Env, temp: readonly string[]) {
   const named = cacheVariables.flatMap((name) => (env[name] ?? "").split(":")).filter((item) => path.isAbsolute(item))
   const darwin =
-    platform === "darwin"
+    process.platform === "darwin"
       ? [
           ...macCaches.map((item) => path.join(home, item)),
           // The per-user cache folder next to the per-user temp folder (/private/var/folders/xx/yyyy/T).
@@ -227,15 +233,19 @@ function caches(platform: NodeJS.Platform, home: string, env: Context["env"] & {
           ),
         ]
       : []
+  // Most of them are missing: checking first spares resolving each one's folders.
   return [...homeCaches.map((item) => path.join(home, item)), ...darwin, ...named]
+    .filter((item) => fs.existsSync(item))
     .map(real)
-    .filter((item) => fs.existsSync(item) && !inside(home, item))
+    .filter((item) => !inside(home, item))
 }
 
-/** The temp folders that exist: the command's own, its TMPDIR, this process's, /tmp and /var/tmp. */
-function temporary(context: Context, env: Context["env"] & {}) {
-  const home = real(context.home)
-  const named = [context.tmp, env.TMPDIR, os.tmpdir()]
+/**
+ * The temp folders that exist: the command's TMPDIR and this process's, ignored like a cache variable when one names
+ * the home folder (or above), then /tmp and /var/tmp, which programs use whatever TMPDIR says.
+ */
+function temporary(home: string, env: Env) {
+  const named = [env.TMPDIR, os.tmpdir()]
     .filter((item): item is string => item !== undefined && path.isAbsolute(item))
     .map(real)
     .filter((item) => !inside(home, item))
@@ -245,12 +255,11 @@ function temporary(context: Context, env: Context["env"] & {}) {
 /** openforge's credentials (the database holds them, also the copies a switch keeps) and service passwords. */
 function secrets(context: Context) {
   const database = context.database ?? path.join(context.data, "opencode.db")
-  const releases = path.join(context.data, "releases")
   return [
     ...["", "-wal", "-shm", "-journal"].map((suffix) => database + suffix),
     path.join(context.data, "auth.json"),
     ...matching(context.data, databaseFile),
-    ...folders(releases).flatMap((folder) => matching(folder, databaseFile)),
+    ...folders(path.join(context.data, "releases")).flatMap((folder) => matching(folder, databaseFile)),
     path.join(context.state, "service.json"),
     path.join(context.state, "service.json.pty-handoff"),
     ...matching(context.state, serviceFile),
@@ -292,49 +301,22 @@ function absolute(value: string, context: Context) {
   return path.resolve(context.directory, value)
 }
 
-/** The real path; for a path that doesn't exist yet, its deepest existing folder's real path plus the rest. */
-function real(file: string): string {
-  const resolved = path.resolve(file)
-  const found = attempt(() => fs.realpathSync.native(resolved))
-  if (found !== undefined) return found
-  const parent = path.dirname(resolved)
-  return parent === resolved ? resolved : path.join(real(parent), path.basename(resolved))
-}
-
-function inside(child: string, parent: string) {
-  const relative = path.relative(parent, child)
-  return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
-}
-
 function shorten(file: string, home: string) {
-  if (file === home) return "~"
   return inside(file, home) ? path.join("~", path.relative(home, file)) : file
 }
 
 function matching(directory: string, pattern: RegExp) {
-  return (attempt(() => fs.readdirSync(directory)) ?? [])
-    .filter((name) => pattern.test(name))
-    .map((name) => path.join(directory, name))
+  return entries(directory)
+    .filter((entry) => pattern.test(entry.name))
+    .map((entry) => path.join(directory, entry.name))
 }
 
 function folders(directory: string) {
-  return (attempt(() => fs.readdirSync(directory, { withFileTypes: true })) ?? [])
+  return entries(directory)
     .filter((entry) => entry.isDirectory())
     .map((entry) => path.join(directory, entry.name))
 }
 
-function text(file: string) {
-  return attempt(() => fs.readFileSync(file, "utf8"))
-}
-
 function unique(items: readonly string[]) {
   return [...new Set(items)]
-}
-
-function attempt<T>(fn: () => T) {
-  try {
-    return fn()
-  } catch {
-    return undefined
-  }
 }

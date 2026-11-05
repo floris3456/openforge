@@ -9,7 +9,7 @@ import { serveV1 } from "./fixture/runner-v1.js"
 describe("runner protocol", () => {
   test("this release's client speaks protocol 1, as the runner of 0.1.0 does", async () => {
     await using directory = await folder()
-    const runner = await serveV1(path.join(directory.path, "runner"))
+    await using runner = await serveV1(path.join(directory.path, "runner"))
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(path.join(directory.path, "runner"))
@@ -35,7 +35,7 @@ describe("runner protocol", () => {
         yield* connection.signal(started.command.id, "SIGTERM", { remove: true })
       }),
     )
-    expect(runner.requests.map((request) => (request as { op: string }).op)).toEqual([
+    expect(runner.requests.map((request) => request.op)).toEqual([
       "hello",
       "start",
       "deadline",
@@ -51,23 +51,23 @@ describe("runner protocol", () => {
       signal: "SIGTERM",
       remove: true,
     })
-    await runner.close()
   })
 
   test("picks the newest version both sides speak", async () => {
     await using directory = await folder()
-    const runner = await serveV1(path.join(directory.path, "runner"), [1, 2])
+    await using runner = await serveV1(path.join(directory.path, "runner"), [1, 2])
     const connection = await run(RunnerClient.connect(path.join(directory.path, "runner")))
     expect(connection.protocol).toBe(Math.max(...RunnerProtocol.SUPPORTED.filter((version: number) => version <= 2)))
-    await runner.close()
+    expect(runner.requests).toEqual([{ id: 1, op: "hello", protocol: connection.protocol, token: "v1-token" }])
   })
 
   test("refuses a runner that speaks no version this release knows", async () => {
     await using directory = await folder()
-    const runner = await serveV1(path.join(directory.path, "runner"), [99])
+    await using runner = await serveV1(path.join(directory.path, "runner"), [99])
     const error = await run(RunnerClient.connect(path.join(directory.path, "runner")).pipe(Effect.flip))
     expect(error).toMatchObject({ reason: "protocol" })
     expect(error.message).toContain("speaks protocol 99")
-    await runner.close()
+    // Refused before it sends its token.
+    expect(runner.requests).toEqual([])
   })
 })

@@ -31,7 +31,7 @@ const exit = {
 export async function serveV1(directory: string, protocols: number[] = [1]) {
   fs.mkdirSync(directory, { recursive: true })
   fs.writeFileSync(path.join(directory, "token"), "v1-token", { mode: 0o600 })
-  const requests: unknown[] = []
+  const requests: Record<string, unknown>[] = []
   let deadline: number | null = null
   const server = net.createServer((socket) => {
     const write = (value: unknown) => socket.write(JSON.stringify(value) + "\n")
@@ -90,6 +90,6 @@ export async function serveV1(directory: string, protocols: number[] = [1]) {
   await new Promise<void>((resolve) => server.listen(path.join(directory, "sock"), resolve))
   return {
     requests,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    [Symbol.asyncDispose]: () => new Promise<void>((resolve) => server.close(() => resolve())),
   }
 }

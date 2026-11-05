@@ -1,7 +1,8 @@
 export * as RunnerOutput from "./output.js"
 
 import fs from "node:fs"
-import { open, rename } from "node:fs/promises"
+import { open, rename, rm } from "node:fs/promises"
+import type { RunnerProtocol } from "./protocol.js"
 
 /** Bytes kept from the start of a command's output. */
 export const HEAD = 1024 * 1024
@@ -11,10 +12,7 @@ export const LIMIT = 8 * 1024 * 1024
 export const CHUNK = 64 * 1024
 
 export type Bounds = { readonly head: number; readonly limit: number }
-export const bounds: Bounds = { head: HEAD, limit: LIMIT }
-
-/** How a finished file that dropped bytes is laid out: `head` bytes, a `marker` bytes long line, then the last `kept` bytes. */
-export type Layout = { readonly head: number; readonly marker: number; readonly kept: number }
+const bounds: Bounds = { head: HEAD, limit: LIMIT }
 
 export const marker = (dropped: number) => `\n[... ${dropped} bytes of output dropped here ...]\n`
 
@@ -31,7 +29,7 @@ const nothing = (start: number): Range => ({ start, position: 0, length: 0 })
 export class Writer {
   size = 0
   lines = 0
-  layout: Layout | undefined
+  layout: RunnerProtocol.Layout | undefined
   private fd: number
   private open = true
 
@@ -66,7 +64,10 @@ export class Writer {
     return { offset: range.start, data: data.subarray(0, read) }
   }
 
-  /** Puts the file in its final order. Returns the layout when bytes were dropped. */
+  /**
+   * Puts the file in its final order. Returns the layout when bytes were dropped. When that fails (a full disk), it
+   * throws, and only the file's head stays readable: the newest bytes are left in ring order, which readers skip.
+   */
   finish() {
     if (this.layout || this.size <= this.limits.limit) return this.layout
     const head = this.limits.head
@@ -77,6 +78,29 @@ export class Writer {
     const kept = this.limits.limit - head - settle(Buffer.byteLength(marker(this.size - this.limits.limit)))
     const line = Buffer.from(marker(this.size - head - kept))
     const temporary = `${this.file}.${process.pid}.tmp`
+    try {
+      this.reorder(temporary, line, kept)
+      const reordered = fs.openSync(this.file, "r")
+      fs.closeSync(this.fd)
+      this.fd = reordered
+    } catch (cause) {
+      this.layout = { head, marker: 0, kept: 0 }
+      fs.rmSync(temporary, { force: true })
+      throw cause
+    }
+    this.layout = { head, marker: line.length, kept }
+    return this.layout
+  }
+
+  close() {
+    if (!this.open) return
+    this.open = false
+    fs.closeSync(this.fd)
+  }
+
+  /** Writes the head, the dropped-bytes `line` and the newest `kept` bytes in order to `temporary`, then moves it over the file. */
+  private reorder(temporary: string, line: Buffer, kept: number) {
+    const head = this.limits.head
     const target = fs.openSync(temporary, "w", 0o600)
     const buffer = Buffer.allocUnsafe(CHUNK)
     const copy = (position: number, length: number, to: number) => {
@@ -87,25 +111,18 @@ export class Writer {
         done += read
       }
     }
-    copy(0, head, 0)
-    fs.writeSync(target, line, 0, line.length, head)
-    for (let offset = this.size - kept; offset < this.size; ) {
-      const range = this.running(offset)
-      copy(range.position, range.length, head + line.length + offset - (this.size - kept))
-      offset += range.length
+    try {
+      copy(0, head, 0)
+      fs.writeSync(target, line, 0, line.length, head)
+      for (let offset = this.size - kept; offset < this.size; ) {
+        const range = this.running(offset)
+        copy(range.position, range.length, head + line.length + offset - (this.size - kept))
+        offset += range.length
+      }
+    } finally {
+      fs.closeSync(target)
     }
-    fs.closeSync(target)
-    fs.closeSync(this.fd)
     fs.renameSync(temporary, this.file)
-    this.fd = fs.openSync(this.file, "r")
-    this.layout = { head, marker: line.length, kept }
-    return this.layout
-  }
-
-  close() {
-    if (!this.open) return
-    this.open = false
-    fs.closeSync(this.fd)
   }
 
   private running(offset: number): Range {
@@ -120,7 +137,7 @@ export class Writer {
 }
 
 /** Where logical bytes from `offset` lie in a finished file; bytes in the dropped part continue at the kept tail. */
-export function locate(layout: Layout | undefined, size: number, offset: number): Range {
+function locate(layout: RunnerProtocol.Layout | undefined, size: number, offset: number): Range {
   if (offset >= size) return nothing(offset)
   if (!layout) return { start: offset, position: offset, length: size - offset }
   if (offset < layout.head) return { start: offset, position: offset, length: layout.head - offset }
@@ -135,7 +152,7 @@ export function locate(layout: Layout | undefined, size: number, offset: number)
  */
 export async function read(
   file: string,
-  finished: { readonly size: number; readonly layout?: Layout },
+  finished: { readonly size: number; readonly layout?: RunnerProtocol.Layout },
   offset: number,
   limit: number,
 ) {
@@ -145,6 +162,8 @@ export async function read(
     ? { start: finished.size - layout.kept, position: layout.head, length: layout.marker + layout.kept }
     : locate(layout, finished.size, offset)
   const length = Math.min(limit, range.length)
+  // Only the head of a file that could not be put in order is read; the rest is skipped at once.
+  if (skipping && range.length === 0) return { data: Buffer.alloc(0), cursor: range.start, skipped: true }
   if (length <= 0) return { data: Buffer.alloc(0), cursor: Math.min(offset, finished.size), skipped: false }
   const handle = await open(file, "r")
   const data = await handle
@@ -160,6 +179,12 @@ export async function read(
 export async function writeAtomic(file: string, text: string) {
   const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   const handle = await open(temporary, "w", 0o600)
-  await handle.writeFile(text).finally(() => handle.close())
-  await rename(temporary, file)
+  await handle
+    .writeFile(text)
+    .finally(() => handle.close())
+    .then(() => rename(temporary, file))
+    .catch(async (cause: unknown) => {
+      await rm(temporary, { force: true })
+      throw cause
+    })
 }

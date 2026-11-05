@@ -4,6 +4,7 @@ import { testRender } from "@opentui/solid"
 import type { ShellInfo } from "@opencode/client"
 import { expect, test } from "bun:test"
 import { createSignal, onMount } from "solid-js"
+import { DialogShellOutput } from "../../src/component/dialog-shell-output"
 import { ConfigProvider } from "../../src/config"
 import { ClientProvider } from "../../src/context/client"
 import { DataProvider, useData } from "../../src/context/data"
@@ -13,14 +14,36 @@ import { TuiAppProvider } from "../../src/context/runtime"
 import { StorageProvider } from "../../src/context/storage"
 import { ThemeProvider } from "../../src/context/theme"
 import { Composer } from "../../src/routes/session/composer"
-import { DialogProvider } from "../../src/ui/dialog"
+import { DialogProvider, useDialog } from "../../src/ui/dialog"
 import { ToastProvider } from "../../src/ui/toast"
+import type { ShellOutputRetry } from "../../src/util/shell-output"
 import { emptyThemeSource, tmpdir } from "../fixture/fixture"
 import { createApi, createEventStream, createFetch, createSseResponse, json } from "../fixture/tui-client"
 import { TestTuiContexts } from "../fixture/tui-environment"
 import { createTuiResolvedConfig } from "../fixture/tui-runtime"
 
-async function setup(width: number, output = "") {
+/** Retries that wait until the test runs them. */
+function retries() {
+  const waiting: (() => void)[] = []
+  const retry: ShellOutputRetry = (again) => {
+    waiting.push(again)
+    return () => {
+      if (waiting.includes(again)) waiting.splice(waiting.indexOf(again), 1)
+    }
+  }
+  return {
+    retry,
+    pending: () => waiting.length,
+    run() {
+      const again = waiting.shift()
+      if (!again) throw new Error("no retry is waiting")
+      again()
+    },
+  }
+}
+
+/** With `retry`, the viewer opens at once, as the shell tab opens it, but retrying when the test says. */
+async function setup(width: number, output = "", retry?: ShellOutputRetry) {
   const temporary = await tmpdir()
   const location = { directory: `${temporary.path}/original` }
   const shell: ShellInfo = {
@@ -88,8 +111,12 @@ async function setup(width: number, output = "") {
 
   function Shells() {
     const data = useData()
+    const dialog = useDialog()
     const [open, setOpen] = createSignal(true)
-    onMount(() => void data.shell.sync(location))
+    onMount(() => {
+      void data.shell.sync(location)
+      if (retry) dialog.replace(() => <DialogShellOutput shell={shell} location={location} retry={retry} />)
+    })
     return <Composer sessionID="ses_fixture" open={open()} defaultTab="shell" onClose={() => setOpen(false)} />
   }
 
@@ -188,8 +215,7 @@ test.each([40, 100])("shell output opens, follows, scrolls, and survives exit at
   await app.waitForFrame((frame) => frame.includes("Render complete") && frame.includes("code 0"), { maxPasses: 100 })
   expect(app.captureCharFrame()).not.toContain("[32m")
   expect(app.watching()).toBe(0)
-  // Pushed, never polled: one size read and one watch, and no reconnect once the command ended.
-  await Bun.sleep(1100)
+  // Pushed, never polled: one size read and one watch.
   expect(app.requests.every((request) => request.method === "GET")).toBe(true)
   const reads = app.requests.filter((request) => request.url.pathname !== "/api/shell")
   expect(reads.map((request) => request.url.pathname)).toEqual([
@@ -206,24 +232,54 @@ test.each([40, 100])("shell output opens, follows, scrolls, and survives exit at
 })
 
 test("empty output explains redirection, reconnects after errors, and preserves output after removal", async () => {
-  await using app = await setup(100)
-  app.mockInput.pressEnter()
+  const later = retries()
+  await using app = await setup(100, "", later.retry)
   await app.waitForFrame((frame) => frame.includes("No captured output") && frame.includes("redirected"))
   await app.waitFor(() => app.watching() === 1)
   app.fail()
   await app.waitForFrame((frame) => frame.includes("Retrying"), { maxPasses: 100 })
+  expect(later.pending()).toBe(1)
+  // Still failing: it tries again later, once.
+  const count = app.requests.length
+  later.run()
+  await app.waitFor(() => later.pending() === 1)
+  expect(app.requests.length).toBeGreaterThan(count)
+  expect(app.captureCharFrame()).toContain("Retrying")
   app.state.failure = false
+  later.run()
   // Back before any new output: reconnecting alone clears the error.
   await app.waitForFrame((frame) => !frame.includes("Retrying"), { maxPasses: 150 })
   await app.waitFor(() => app.watching() === 1)
   app.write("Recovered output\n")
   await app.waitForFrame((frame) => frame.includes("Recovered output"))
+  // A stream that ends says nothing of why: the next read finds the command gone, and nothing is retried after it.
   app.remove()
+  await app.waitFor(() => later.pending() === 1)
+  later.run()
   await app.waitForFrame((frame) => frame.includes("no longer available"), { maxPasses: 150 })
   expect(app.captureCharFrame()).toContain("Recovered output")
-  const count = app.requests.length
-  await Bun.sleep(1100)
-  expect(app.requests).toHaveLength(count)
+  expect(later.pending()).toBe(0)
+})
+
+test("an ended command is not read again", async () => {
+  const later = retries()
+  await using app = await setup(100, "Done\n", later.retry)
+  await app.waitForFrame((frame) => frame.includes("Done"))
+  app.exit(0)
+  await app.waitForFrame((frame) => frame.includes("code 0"), { maxPasses: 100 })
+  expect(app.watching()).toBe(0)
+  expect(later.pending()).toBe(0)
+})
+
+test("closing the viewer cancels a waiting retry", async () => {
+  const later = retries()
+  await using app = await setup(100, "Partial\n", later.retry)
+  await app.waitForFrame((frame) => frame.includes("Partial"))
+  app.fail()
+  await app.waitFor(() => later.pending() === 1)
+  app.mockInput.pressEscape()
+  await app.waitForFrame((frame) => !frame.includes("Shell output"))
+  expect(later.pending()).toBe(0)
 })
 
 test.each([40, 100])("mouse-wheel scrolling pauses and resumes output following at %s columns", async (width) => {

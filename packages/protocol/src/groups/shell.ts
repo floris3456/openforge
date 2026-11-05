@@ -81,7 +81,7 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
           identifier: "experimental.shell.watch",
           summary: "Watch shell output",
           description:
-            "Experimental. Streams combined output from an absolute byte cursor as it arrives, then the final command info once it has ended. A reader that falls behind skips ahead and is told so (truncated).",
+            "Stream combined output from an absolute byte cursor as it arrives, then the final command info once it has ended. A reader that falls behind skips ahead and is told so (truncated). Experimental: may change without compatibility guarantees.",
         }),
       ),
   )
@@ -100,6 +100,4 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
         }),
       ),
   )
-  .annotateMerge(
-    OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }),
-  )
+  .annotateMerge(OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }))

@@ -19,7 +19,7 @@ import { parseArgs } from "node:util"
 import { Effect, Fiber, Stream } from "effect"
 import { RunnerClient } from "../src/client.js"
 import { RunnerOutput } from "../src/output.js"
-import type { RunnerProtocol } from "../src/protocol.js"
+import { alive, command, environment } from "../test/fixture/runner.js"
 
 const { values } = parseArgs({
   options: {
@@ -36,35 +36,11 @@ const directory = path.join(root, "runner")
 const argv = values.binary
   ? [values.binary, "runner", directory]
   : [process.execPath, path.join(import.meta.dir, "..", "test", "fixture", "serve.ts"), directory]
-const env = Object.fromEntries(
-  Object.entries(process.env).flatMap(([key, value]) => (value === undefined ? [] : [[key, value]])),
-)
-
-let counter = 0
-const command = (script: string): RunnerProtocol.Start => {
-  const id = `sh_bench${String(++counter).padStart(8, "0")}`
-  return {
-    id,
-    argv: ["/bin/sh", "-c", script],
-    cwd: root,
-    env,
-    deadline: null,
-    output: path.join(root, `${id}.out`),
-    meta: { command: script },
-  }
-}
+const env = environment()
 
 const round = (value: number) => Math.round(value * 100) / 100
 const median = (samples: number[]) => samples.toSorted((a, b) => a - b)[Math.floor(samples.length / 2)]
 const step = (name: string) => Effect.sync(() => process.stderr.write(`bench: ${name}\n`))
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
 
 type Memory = { rss: number; own: number }
 const memory = (pid: number): Memory => {
@@ -132,14 +108,14 @@ const bench = Effect.gen(function* () {
   const direct = { started: [] as number[], exited: [] as number[] }
   const through = { started: [] as number[], exited: [] as number[] }
   for (let run = 0; run < runs; run++) {
-    const input = command("exit 0")
+    const input = command(root, "exit 0")
     const before = performance.now()
     const child = Bun.spawn([...input.argv], { cwd: root, env, stdout: Bun.file(input.output), stderr: "ignore" })
     direct.started.push(performance.now() - before)
     yield* Effect.promise(() => child.exited)
     direct.exited.push(performance.now() - before)
 
-    const ours = command("exit 0")
+    const ours = command(root, "exit 0")
     const start = performance.now()
     const started = yield* connection.start(ours)
     through.started.push(performance.now() - start)
@@ -166,7 +142,7 @@ const bench = Effect.gen(function* () {
     runner,
     Effect.gen(function* () {
       const running = yield* Effect.forEach(Array.from({ length: 50 }), () =>
-        connection.start(command("printf ready; sleep 60")),
+        connection.start(command(root, "printf ready; sleep 60")),
       )
       const watches = yield* Effect.forEach(running, (started) =>
         connection
@@ -185,7 +161,7 @@ const bench = Effect.gen(function* () {
 
   yield* step("output")
   // 1 GB (or --output-bytes) through one command while a viewer follows it.
-  const big = command(`yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c ${Number(values["output-bytes"])}`)
+  const big = command(root, `yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c ${Number(values["output-bytes"])}`)
   const output = yield* sampled(
     runner,
     Effect.gen(function* () {

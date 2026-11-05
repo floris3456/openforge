@@ -1,19 +1,15 @@
 export * as SessionContinuity from "./continuity.js"
 
+import { Usage, type AIError, type CompactionCheckpointResponse, type CompactionResponse } from "@opencode/ai/effect"
 import {
-  ai,
-  Usage,
-  type AIError,
-  type CompactionCheckpointResponse,
-  type CompactionResponse,
-  type LLMRequest,
-} from "@opencode/ai/effect"
-import type {
-  CheckpointRequest,
-  CompactionRequest,
-  EndpointCompactOptions,
-  LLMClientShape,
-  TriggerCompactOptions,
+  LLMClient,
+  RequestExecutor,
+  type CheckpointRequest,
+  type CompactionRequest,
+  type EndpointCompactOptions,
+  type LLMClientService,
+  type LLMClientShape,
+  type TriggerCompactOptions,
 } from "@opencode/ai/route"
 import { Continuity } from "@opencode/schema/continuity"
 import { FinishReason } from "@opencode/schema/llm"
@@ -25,11 +21,10 @@ import { Cause, Clock, Context, Deferred, Effect, Exit, Latch, Layer, Option, Sc
 import { Bus } from "./bus.js"
 import { PendingRequestTable, SessionRestTable } from "./continuity/sql.js"
 import { Database } from "./database/database.js"
+import { requestExecutor } from "./effect/app-node-platform.js"
 import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
-
-export { Continuity }
 
 const PAUSE_TIMEOUT = 120_000
 /** Written when a pause completes, so the next start knows its executions rested and adds no restart notice. */
@@ -69,7 +64,7 @@ const Tools = Schema.Struct({
   }),
 })
 
-export const Rest = Schema.Union([Boundary, Retry, Tools])
+const Rest = Schema.Union([Boundary, Retry, Tools])
 export type Rest = typeof Rest.Type
 export type RetryRest = typeof Retry.Type
 export type ToolsRest = typeof Tools.Type
@@ -117,7 +112,10 @@ export class Activity {
     if (this.resting > 0) return true
     if (!this.streamed) return false
     const tools = Array.from(this.tools.values())
-    return tools.some((tool) => tool.state === "gated" || tool.state === "waiting") && tools.every((tool) => tool.state !== "busy")
+    return (
+      tools.some((tool) => tool.state === "gated" || tool.state === "waiting") &&
+      tools.every((tool) => tool.state !== "busy")
+    )
   }
 
   /** What keeps this execution from resting. */
@@ -208,6 +206,11 @@ const pendingRequest = (row: typeof PendingRequestTable.$inferSelect): PendingRe
   ...(row.reply === null ? {} : { reply: row.reply }),
 })
 
+/** The arguments of each `compact` overload, told apart by the mechanism. */
+type TriggerCompact = [request: CheckpointRequest, options: TriggerCompactOptions]
+type EndpointCompact = [request: CompactionRequest, options?: EndpointCompactOptions]
+const triggers = (args: TriggerCompact | EndpointCompact): args is TriggerCompact => args[1]?.mechanism === "trigger"
+
 export interface Options {
   /** Start with the gate closed; writes are refused until `resume`. */
   readonly paused?: boolean
@@ -235,13 +238,21 @@ export interface Interface {
   /** A wait with a stored deadline, such as a retry backoff: the execution rests while it runs. */
   readonly idle: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   /** Runs a tool call registered on the activity, once the gate is open. */
-  readonly tool: <A, E, R>(activity: Activity, entry: ToolEntry, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+  readonly tool: <A, E, R>(
+    activity: Activity,
+    entry: ToolEntry,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>
   /**
    * A wait inside a tool call that survives a stop: a permission or question, a subagent, a runner command. The call
    * stops counting as busy, and its checkpoint `data` is stored for the next process. Plain `effect` for calls that
    * cannot be continued.
    */
-  readonly wait: <A, E, R>(callID: string | undefined, effect: Effect.Effect<A, E, R>, data?: unknown) => Effect.Effect<A, E, R>
+  readonly wait: <A, E, R>(
+    callID: string | undefined,
+    effect: Effect.Effect<A, E, R>,
+    data?: unknown,
+  ) => Effect.Effect<A, E, R>
   /** Whether a wait inside this tool call would survive a stop. */
   readonly survives: (callID: string | undefined) => Effect.Effect<boolean>
   /** The checkpoint data handed back to a tool call that a restart continues. */
@@ -291,12 +302,15 @@ export const layer = (options: Options = {}) =>
       let changes = Deferred.makeUnsafe<void>()
       let outcome: Deferred.Deferred<Continuity.PauseResult> | undefined
 
-      // Only a pause in progress listens, so transitions cost nothing otherwise.
-      const changed = () => {
-        if (state !== "pausing") return
+      const wake = () => {
         const signal = changes
         changes = Deferred.makeUnsafe()
         Deferred.doneUnsafe(signal, Exit.void)
+      }
+
+      // Only a pause in progress listens, so transitions cost nothing otherwise.
+      const changed = () => {
+        if (state === "pausing") wake()
       }
 
       const waiting = () => [...models, ...Array.from(activities.values()).flatMap((activity) => activity.busy())]
@@ -316,62 +330,66 @@ export const layer = (options: Options = {}) =>
         }),
       )
 
-      const settle = Effect.gen(function* () {
-        let published = ""
-        while (state === "pausing") {
-          const signal = changes
-          const left = waiting()
-          if (left.length === 0) return true
-          const key = JSON.stringify(left)
-          if (key !== published) {
-            published = key
-            yield* bus.publish(Continuity.Event.Pausing, { deadline: deadline ?? 0, waiting: left })
-          }
-          yield* Deferred.await(signal)
-        }
-        return false
-      })
-
-      const run = (timeout: number) =>
+      // Until nothing keeps the pause `result` waiting, or it is no longer the pause in progress.
+      const settle = (result: Deferred.Deferred<Continuity.PauseResult>, until: number) =>
         Effect.gen(function* () {
-          const done = yield* settle.pipe(Effect.timeoutOption(timeout))
-          if (state === "pausing" && Option.isSome(done) && done.value) {
+          let published = ""
+          while (outcome === result) {
+            const signal = changes
+            const left = waiting()
+            if (left.length === 0) return
+            const key = JSON.stringify(left)
+            if (key !== published) {
+              published = key
+              yield* bus.publish(Continuity.Event.Pausing, { deadline: until, waiting: left })
+            }
+            yield* Deferred.await(signal)
+          }
+        })
+
+      const run = (result: Deferred.Deferred<Continuity.PauseResult>, until: number, timeout: number) =>
+        Effect.gen(function* () {
+          const settled = yield* settle(result, until).pipe(Effect.timeoutOption(timeout))
+          // Resumed meanwhile, and maybe paused again: that resume or pause decides the state.
+          if (outcome !== result) return { paused: false as const, waiting: waiting() }
+          if (Option.isSome(settled)) {
             state = "paused"
             deadline = undefined
             const sessions = rested()
-            yield* kv.set(RESTED, { at: yield* Clock.currentTimeMillis, sessions })
+            yield* kv.set(RESTED, true)
             yield* bus.publish(Continuity.Event.Paused, { rested: sessions })
             return { paused: true as const, rested: sessions }
           }
           const left = waiting()
-          if (state === "pausing") {
-            state = "running"
-            deadline = undefined
-            gate.openUnsafe()
-            yield* bus.publish(Continuity.Event.Expired, { waiting: left })
-          }
+          state = "running"
+          deadline = undefined
+          gate.openUnsafe()
+          yield* bus.publish(Continuity.Event.Expired, { waiting: left })
           return { paused: false as const, waiting: left }
         })
 
       const pause: Interface["pause"] = (input) =>
         Effect.gen(function* () {
           if (state === "paused") return { paused: true as const, rested: rested() }
-          if (state === "running" || outcome === undefined) {
-            const timeout = input?.timeout ?? PAUSE_TIMEOUT
-            state = "pausing"
-            deadline = (yield* Clock.currentTimeMillis) + timeout
-            gate.closeUnsafe()
-            const result = Deferred.makeUnsafe<Continuity.PauseResult>()
-            outcome = result
-            // The pause outlives the request that asked for it, so a dropped connection cannot leave the gate shut.
-            yield* run(timeout).pipe(
-              Effect.flatMap((value) => Deferred.succeed(result, value)),
-              Effect.ensuring(Effect.sync(() => (outcome === result ? (outcome = undefined) : undefined))),
-              Effect.forkIn(scope, { startImmediately: true }),
-            )
-            return yield* Deferred.await(result)
-          }
-          return yield* Deferred.await(outcome)
+          if (state === "pausing" && outcome) return yield* Deferred.await(outcome)
+          const timeout = input?.timeout ?? PAUSE_TIMEOUT
+          const result = Deferred.makeUnsafe<Continuity.PauseResult>()
+          const until = (yield* Clock.currentTimeMillis) + timeout
+          state = "pausing"
+          deadline = until
+          outcome = result
+          gate.closeUnsafe()
+          // The pause outlives the request that asked for it, so a dropped connection cannot leave the gate shut.
+          yield* run(result, until, timeout).pipe(
+            Effect.flatMap((value) => Deferred.succeed(result, value)),
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (outcome === result) outcome = undefined
+              }),
+            ),
+            Effect.forkIn(scope, { startImmediately: true }),
+          )
+          return yield* Deferred.await(result)
         })
 
       const resume = Effect.gen(function* () {
@@ -380,10 +398,10 @@ export const layer = (options: Options = {}) =>
         state = "running"
         startedPaused = false
         deadline = undefined
+        // Ends a pause in progress: its loop sees it is no longer the current one.
+        outcome = undefined
         gate.openUnsafe()
-        const signal = changes
-        changes = Deferred.makeUnsafe()
-        Deferred.doneUnsafe(signal, Exit.void)
+        wake()
         // After a paused start the restart sweep reads the marker; otherwise nothing stopped and it is stale.
         if (!restart) yield* kv.remove(RESTED)
         yield* bus.publish(Continuity.Event.Resumed, {})
@@ -473,7 +491,11 @@ export const layer = (options: Options = {}) =>
           if (activity === undefined || activity.rested) yield* gate.await
           return {
             acquire: Effect.sync(() => {
-              const work: Continuity.Work = { ...(activity ? { sessionID: activity.sessionID } : {}), kind: "model", name }
+              const work: Continuity.Work = {
+                ...(activity ? { sessionID: activity.sessionID } : {}),
+                kind: "model",
+                name,
+              }
               models.add(work)
               changed()
               return work
@@ -498,12 +520,10 @@ export const layer = (options: Options = {}) =>
           request: CompactionRequest,
           options?: EndpointCompactOptions,
         ): Effect.Effect<CompactionResponse, AIError>
-        function compact(request: LLMRequest, options?: TriggerCompactOptions | EndpointCompactOptions) {
-          const name = String(request.model.id)
-          if (options?.mechanism === "trigger" && ai.canCompact(request, { mechanism: "trigger" }))
-            return model(name, llm.compact(request, options))
-          if (options?.mechanism !== "trigger" && ai.canCompact(request)) return model(name, llm.compact(request, options))
-          return Effect.die(new Error(`Model ${name} cannot compact this request`))
+        // `llm.compact` refuses a route that cannot compact, as without the gate.
+        function compact(...args: TriggerCompact | EndpointCompact) {
+          const name = String(args[0].model.id)
+          return triggers(args) ? model(name, llm.compact(...args)) : model(name, llm.compact(...args))
         }
         return {
           stream: (request, options) =>
@@ -592,14 +612,18 @@ export const layer = (options: Options = {}) =>
             .where(eq(PendingRequestTable.id, id))
             .run()
             .pipe(Effect.orDie, Effect.asVoid),
-        remove: (id) => db.delete(PendingRequestTable).where(eq(PendingRequestTable.id, id)).run().pipe(Effect.orDie, Effect.asVoid),
+        remove: (id) =>
+          db.delete(PendingRequestTable).where(eq(PendingRequestTable.id, id)).run().pipe(Effect.orDie, Effect.asVoid),
         get: (id) =>
           db
             .select()
             .from(PendingRequestTable)
             .where(eq(PendingRequestTable.id, id))
             .get()
-            .pipe(Effect.orDie, Effect.map((row) => (row === undefined ? undefined : pendingRequest(row)))),
+            .pipe(
+              Effect.orDie,
+              Effect.map((row) => (row === undefined ? undefined : pendingRequest(row))),
+            ),
         find: (kind, source) =>
           db
             .select()
@@ -613,7 +637,10 @@ export const layer = (options: Options = {}) =>
               ),
             )
             .get()
-            .pipe(Effect.orDie, Effect.map((row) => (row === undefined ? undefined : pendingRequest(row)))),
+            .pipe(
+              Effect.orDie,
+              Effect.map((row) => (row === undefined ? undefined : pendingRequest(row))),
+            ),
       }
 
       return Service.of({
@@ -744,3 +771,21 @@ export const noopLayer = Layer.sync(Service, () => {
 export const configured = (options: Options = {}) =>
   makeGlobalNode({ service: Service, layer: layer(options), deps: [Database.node, Bus.node, KV.node] })
 export const node = configured()
+
+/**
+ * The model client where the service runs, in place of `LayerNodePlatform.llmClient`: `base`, the real client unless
+ * a test gives its fake, with every call gated by `client`.
+ */
+export const llmClient = (base: Layer.Layer<LLMClientService, never, RequestExecutor.Service> = LLMClient.layer) =>
+  makeGlobalNode({
+    service: LLMClient.Service,
+    layer: Layer.effect(
+      LLMClient.Service,
+      Effect.gen(function* () {
+        const continuity = yield* Service
+        const llm = yield* LLMClient.Service
+        return continuity.client(llm)
+      }),
+    ).pipe(Layer.provide(base)),
+    deps: [node, requestExecutor],
+  })

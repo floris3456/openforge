@@ -24,6 +24,7 @@ import { Model } from "@opencode/core/model"
 import { Permission } from "@opencode/core/permission"
 import { PermissionSaved } from "@opencode/core/permission/saved"
 import { Plugin } from "@opencode/core/plugin"
+import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
 import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -38,14 +39,14 @@ import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
-import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
+import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
 
 // The agent's shell commands through the real sandbox. Every temp folder is writable inside the sandbox, so the
 // folders a command must not write to sit in this package instead.
 
 const sessionID = Session.ID.make("ses_shell_sandbox")
 const NOTE = "This command ran in the sandbox, which lets it write only to "
-const self = [process.execPath, path.join(import.meta.dir, "fixture/sandbox-exec.ts")]
+const self: Sandbox.Argv = [process.execPath, path.join(import.meta.dir, "fixture/sandbox-exec.ts")]
 const state = { root: "" }
 
 beforeAll(() => {
@@ -74,8 +75,17 @@ const executionNode = makeGlobalNode({
 
 const plugins = makeLocationNode({
   name: "test/shell-sandbox-plugins",
-  layer: Layer.effectDiscard(registerToolPlugin(ShellTool.Plugin)),
+  layer: Layer.effectDiscard(
+    Effect.gen(function* () {
+      const hooks = yield* PluginHooks.Service
+      // Its session hooks too, which say what the sandbox allows.
+      yield* registerToolPlugin(ShellTool.Plugin, {
+        session: { hook: (name, callback, options) => hooks.register("session", name, callback, options) },
+      })
+    }),
+  ),
   deps: [
+    PluginHooks.node,
     Config.node,
     Environment.node,
     FileAccess.node,
@@ -162,6 +172,26 @@ const call = (input: typeof ShellTool.Input.Type) => ({
 const text = (result: { readonly content?: ReadonlyArray<Tool.Content> }) =>
   (result.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n\n")
 
+/** The shell tool as a request of the test agent offers it to the model. */
+const offered = (registry: Tool.Interface) =>
+  Effect.gen(function* () {
+    const hooks = yield* PluginHooks.Service
+    const shell = (yield* toolDefinitions(registry)).find((tool) => tool.name === "shell")
+    if (!shell) throw new Error("the shell tool is missing")
+    const event = yield* hooks.trigger("session", "context", {
+      sessionID,
+      model: Model.Ref.make({ id: Model.ID.make("test"), providerID: Provider.ID.make("test") }),
+      system: [],
+      messages: [],
+      options: {},
+      agent: toolIdentity.agent,
+      tools: { shell: { description: shell.description, input: structuredClone(shell.inputSchema) } },
+    })
+    return event.tools.shell
+  })
+
+const WRITE = "Commands run in a sandbox that lets them write only to the chat's folder"
+
 /** A folder outside every place the sandbox lets a command write. */
 const outside = () => fs.mkdtempSync(path.join(state.root, "outside-"))
 
@@ -202,11 +232,40 @@ describe("the agent's shell commands in the sandbox", () => {
           expect(fs.existsSync(target)).toBe(false)
           expect(text(refused)).toContain("Permission denied")
           expect(text(refused)).toContain(`Exited with code 1\n\n${NOTE}`)
-          // The chat's folder is in the write list, shortened when it is under the home folder.
-        expect(text(refused)).toContain(path.basename(chat))
+          // The chat's folder comes first in the write list, shortened when it is under the home folder.
+          const home = fs.realpathSync((yield* Global.Service).home)
+          const folder = fs.realpathSync(chat)
+          const shown = folder.startsWith(home + path.sep) ? path.join("~", path.relative(home, folder)) : folder
+          expect(text(refused)).toContain(`${NOTE}${shown}, `)
           expect(text(refused)).toContain("`sandbox: false`")
         }),
       ),
+  )
+
+  sandboxed("the shell tool tells the model what the sandbox allows, the same until the settings change", () =>
+    withChat({}, (registry) =>
+      Effect.gen(function* () {
+        const first = yield* offered(registry)
+        expect(first.description).toContain(
+          `${WRITE}, its git folders, the temp folder and the package caches, unless the config allows more.`,
+        )
+        expect(first.description).toContain("has to write elsewhere, run it again with `sandbox: false`")
+        expect(first.input).toHaveProperty("properties.sandbox")
+        expect(yield* offered(registry)).toEqual(first)
+
+        const agents = yield* Agent.Service
+        yield* agents.transform((editor) =>
+          editor.update(toolIdentity.agent, (info) => {
+            info.sandbox = { mode: "read", network: false }
+          }),
+        )
+        const read = yield* offered(registry)
+        expect(read.description).toContain(
+          "Commands run in a sandbox that lets them write only to the temp folder, and gives them no network.",
+        )
+        expect(read.description).toContain("has to write elsewhere or use the network, run it again")
+      }),
+    ),
   )
 
   sandboxed("the config's write list and the agent's add up", () =>
@@ -287,6 +346,10 @@ describe("on a machine that can't sandbox", () => {
   posix("a command is refused when the sandbox is required, and otherwise runs unsandboxed with one warning", () =>
     withChat({ sandbox: { required: true } }, (registry) =>
       Effect.gen(function* () {
+        // The model is told how to run a command at all.
+        expect((yield* offered(registry)).description).toContain(
+          "This machine can't sandbox commands: this kernel has no Landlock. The config requires the sandbox, so to run a command, run it again with `sandbox: false`",
+        )
         const bus = yield* Bus.Service
         const toasts: string[] = []
         yield* bus.subscribe(TuiEvent.ToastShow).pipe(
@@ -324,6 +387,25 @@ describe("on a machine that can't sandbox", () => {
         expect(toasts).toEqual([
           "This machine can't sandbox commands: this kernel has no Landlock. Commands run unsandboxed.",
         ])
+        expect((yield* offered(registry)).description).not.toContain("sandbox")
+      }),
+    ),
+  )
+})
+
+describe("with the sandbox off", () => {
+  const posix = process.platform === "win32" ? it.live.skip : it.live
+
+  posix("the shell tool mentions no sandbox, offers no way out of one, and `sandbox: false` asks nothing", () =>
+    withChat({ sandbox: { mode: "off" } }, (registry) =>
+      Effect.gen(function* () {
+        const shell = yield* offered(registry)
+        expect(shell.description).not.toContain("sandbox")
+        expect(shell.input).not.toHaveProperty("properties.sandbox")
+        const target = path.join(outside(), "file")
+        const ran = yield* answered(registry, { command: `touch '${target}'`, sandbox: false }, [])
+        expect(ran.exit).toMatchObject({ _tag: "Success", value: { status: "completed", metadata: { exit: 0 } } })
+        expect(fs.existsSync(target)).toBe(true)
       }),
     ),
   )

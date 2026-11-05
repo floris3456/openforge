@@ -1,7 +1,7 @@
 export * as ShellWrap from "./wrap.js"
 
 import { Sandbox } from "@opencode/sandbox"
-import type { Shell } from "@opencode/schema/shell"
+import type { Entry } from "@opencode/schema/config"
 import { TuiEvent } from "@opencode/schema/tui-event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
@@ -21,42 +21,53 @@ export type Command = {
 
 export type Wrapped = Command & {
   /** Set when the command runs in the sandbox: what the result of a failed command says about it. */
-  readonly note?: string
+  readonly sandboxNote?: string
 }
 
+/** How an agent's commands run here; the shell tool tells the model. A workspace's commands are never confined. */
+export type Confinement = Sandbox.Decision
+
 export interface Interface {
+  /** How the commands of `agent` are confined, worked out once per change of the config or the agent. */
+  readonly confinement: (agent: Agent.ID) => Effect.Effect<Confinement>
   /**
    * Turns a shell command into the process that runs it, for example the sandbox command around it. Failing refuses
-   * the command. `metadata` is the command's (the shell tool sets `sessionID` and `agent`).
+   * the command. Only an agent's commands are confined, and not those the user allowed out (`unsandboxed`).
    */
   readonly wrap: (
     command: Command,
-    context: { readonly metadata: Shell.Metadata },
+    context: { readonly agent?: Agent.ID; readonly unsandboxed?: boolean },
   ) => Effect.Effect<Wrapped, AppProcess.AppProcessError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ShellWrap") {}
 
-export const unwrapped = Layer.succeed(Service, Service.of({ wrap: (command) => Effect.succeed(command) }))
+const unconfined: Confinement = { type: "none" }
 
-export const node = makeLocationNode({ service: Service, layer: unwrapped, deps: [] })
+export const node = makeLocationNode({
+  service: Service,
+  layer: Layer.succeed(
+    Service,
+    Service.of({ confinement: () => Effect.succeed(unconfined), wrap: (command) => Effect.succeed(command) }),
+  ),
+  deps: [],
+})
 
 export type Options = {
   /** Starts this openforge, whose hidden `sandbox-exec` command confines a command on Linux. */
-  readonly self: readonly string[]
+  readonly self: Sandbox.Argv
   /** The live database, when it isn't `<data>/opencode.db`. */
   readonly database?: string
-  /** Whether this machine can sandbox; the sandbox works it out itself when not given. */
+  /** Whether this machine can sandbox, instead of its own answer; tests act out a machine that can't. */
   readonly machine?: Sandbox.Availability
 }
 
 /**
- * Confines the commands an agent runs: those whose metadata names its `agent`, unless they carry `sandbox: false`
- * (the shell tool asked for the `unsandboxed` permission first). Commands the user runs (`!`, the shell API) and those
- * of a workspace's own environment run as they are. The policy layers the config's `sandbox` settings, then the
- * agent's.
+ * Confines the commands an agent runs, unless the shell tool asked the user to let one out (`unsandboxed`). Commands
+ * the user runs (`!`, the shell API) and those of a workspace's own environment run as they are. The policy layers
+ * the config's `sandbox` settings, then the agent's.
  */
-export const sandboxed = (options: Options) =>
+const sandboxed = (options: Options) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -66,15 +77,13 @@ export const sandboxed = (options: Options) =>
       const global = yield* Global.Service
       const bus = yield* Bus.Service
       const ref = Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID })
-      return Service.of({
-        wrap: Effect.fn("ShellWrap.wrap")(function* (command, context) {
-          const agent = context.metadata.agent
-          if (typeof agent !== "string" || context.metadata.sandbox === false || location.workspaceID !== undefined)
-            return command
-          const layers = (yield* config.entries()).flatMap((entry) =>
-            entry.type === "document" ? [entry.info.sandbox] : [],
-          )
-          const policy = Sandbox.resolve(Sandbox.merge(...layers, (yield* agents.get(Agent.ID.make(agent)))?.sandbox), {
+      const resolve = (entries: readonly Entry[], agent: Agent.Info | undefined, env?: Command["env"]) =>
+        Sandbox.resolve(
+          Sandbox.merge(
+            ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info.sandbox] : [])),
+            agent?.sandbox,
+          ),
+          {
             directory: location.directory,
             worktree: location.project.directory,
             home: global.home,
@@ -82,8 +91,35 @@ export const sandboxed = (options: Options) =>
             state: global.state,
             config: global.config,
             ...(options.database ? { database: options.database } : {}),
-            env: command.env,
-          })
+            ...(env ? { env } : {}),
+          },
+        )
+      // The config's documents and an agent are new objects after a change, so a confinement worked out from the
+      // same ones still holds.
+      const confined = new Map<
+        Agent.ID,
+        {
+          readonly entries: readonly Entry[]
+          readonly agent: Agent.Info | undefined
+          readonly confinement: Confinement
+        }
+      >()
+
+      return Service.of({
+        confinement: Effect.fn("ShellWrap.confinement")(function* (id) {
+          if (location.workspaceID !== undefined) return unconfined
+          const entries = yield* config.entries()
+          const agent = yield* agents.get(id)
+          const known = confined.get(id)
+          if (known?.entries === entries && known.agent === agent) return known.confinement
+          const confinement = Sandbox.decide(resolve(entries, agent), options.machine)
+          confined.set(id, { entries, agent, confinement })
+          return confinement
+        }),
+        wrap: Effect.fn("ShellWrap.wrap")(function* (command, context) {
+          if (context.agent === undefined || context.unsandboxed || location.workspaceID !== undefined) return command
+          const agent = yield* agents.get(context.agent)
+          const policy = resolve(yield* config.entries(), agent, command.env)
           const wrapped = Sandbox.wrap(policy, command.argv, options.self, options.machine)
           if (wrapped.type === "refuse")
             return yield* new AppProcess.AppProcessError({
@@ -99,8 +135,8 @@ export const sandboxed = (options: Options) =>
             )
           }
           if (!wrapped.sandboxed) return command
-          const note = Sandbox.note(policy)
-          return { ...command, argv: [wrapped.argv[0], ...wrapped.argv.slice(1)], ...(note ? { note } : {}) }
+          const sandboxNote = Sandbox.note(policy)
+          return { ...command, argv: wrapped.argv, ...(sandboxNote ? { sandboxNote } : {}) }
         }),
       })
     }),

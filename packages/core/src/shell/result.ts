@@ -5,6 +5,8 @@ import type { Shell } from "@opencode/schema/shell"
 export type Result = {
   info: Shell.Info
   capture: { output: string; truncated: boolean } | undefined
+  /** Set when the command ran in the sandbox: where it may write, and how to go outside. */
+  sandboxNote?: string
 }
 
 type Output = { output: string; truncated: boolean; exit?: number; signal?: string; timeout?: boolean }
@@ -28,9 +30,8 @@ export function output(result: Result): Output {
 }
 
 /** The note of a sandboxed command that exited with an error: where the sandbox let it write, and how to go outside. */
-export function sandbox(info: Shell.Info) {
-  const note = info.metadata.sandbox
-  return typeof note === "string" && info.exit !== undefined && info.exit !== 0 ? note : undefined
+export function sandboxNote(result: Result) {
+  return result.info.exit !== undefined && result.info.exit !== 0 ? result.sandboxNote : undefined
 }
 
 export function notice(output: Pick<Output, "exit" | "signal" | "timeout">) {

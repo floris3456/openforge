@@ -169,14 +169,16 @@ const layer = Layer.effect(
 
     const remember = (request: Request) => {
       replied.set(request.id, request.sessionID)
-      if (replied.size > REPLIED_LIMIT) replied.delete(replied.keys().next().value!)
+      if (replied.size <= REPLIED_LIMIT) return
+      const [oldest] = replied.keys()
+      replied.delete(oldest)
     }
 
     const close = Effect.gen(function* () {
       closed = true
       // A stopping process keeps its stored requests for the rerun of their tools in the next one.
-      if (continuity.stopping()) return pending.clear()
-      yield* Effect.forEach(Array.from(pending.values()), (item) =>
+      const declined = continuity.stopping() ? [] : Array.from(pending.values())
+      yield* Effect.forEach(declined, (item) =>
         bus
           .publish(Permission.Event.Replied, {
             sessionID: item.request.sessionID,
@@ -409,13 +411,23 @@ const layer = Layer.effect(
         })
       })
 
-    const reply = Effect.fn("Permission.reply")((input: ReplyInput) =>
+    const asked = (id: ID) => pending.has(id) || replied.has(id)
+
+    const reply = Effect.fn("Permission.reply")(function* (input: ReplyInput) {
+      if (asked(input.requestID)) return yield* replyAsked(input)
+      // A rerun may be taking its stored request: once it has, the answer is for the request it asked again.
+      return yield* restoring
+        .withPermit(Effect.suspend(() => (asked(input.requestID) ? replyAsked(input) : replyStored(input))))
+        .pipe(Effect.uninterruptible)
+    })
+
+    // A request this process asked.
+    const replyAsked = (input: ReplyInput) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const existing = pending.get(input.requestID)
           const owner = existing?.request.sessionID ?? replied.get(input.requestID)
-          if (owner === undefined) return yield* restoring.withPermit(replyStored(input))
-          if (input.sessionID !== undefined && owner !== input.sessionID)
+          if (owner === undefined || (input.sessionID !== undefined && owner !== input.sessionID))
             return yield* new NotFoundError({ requestID: input.requestID })
           // A client that resends an answer it already gave gets the same success.
           if (!existing) return
@@ -464,8 +476,7 @@ const layer = Layer.effect(
             yield* answer(item, { reply: "always" })
           }
         }),
-      ),
-    )
+      )
 
     const list = Effect.fn("Permission.list")(function* () {
       return Array.from(pending.values(), (item) => item.request)

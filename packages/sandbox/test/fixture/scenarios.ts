@@ -1,12 +1,14 @@
-// End-to-end cases from the spec, run against real processes. `bun test` runs them on this machine, and the compiled
-// proof binary (proof.ts) runs the same cases on Linux through the compiled openforge and on macOS.
+// The sandbox's end-to-end cases, run against real sandboxed processes: where a command may write and read, its
+// grandchildren, the network switched off, a git worktree, the read and off modes, what reaches the command, and
+// failing closed without Landlock. `bun test` runs them on this machine, and the compiled proof binary (proof.ts) runs
+// the same cases on Linux through the compiled openforge and on macOS.
 import fs from "node:fs"
 import path from "node:path"
 import { Sandbox } from "../../src/sandbox.js"
 
 export interface Launch {
   /** Starts openforge, whose `sandbox-exec` confines on Linux. */
-  readonly self: readonly string[]
+  readonly self: Sandbox.Argv
   /** Starts proof.ts, for its `client` and `no-landlock` commands. */
   readonly tool: readonly string[]
 }
@@ -75,7 +77,7 @@ export async function setup(root: string): Promise<Fixture> {
     main,
     worktree,
     env,
-    context: { directory: project, home, data, state, config, tmp, env },
+    context: { directory: project, home, data, state, config, env },
   }
 }
 
@@ -115,10 +117,7 @@ export async function probe(
   if (wrapped.type !== "run") throw new Error(wrapped.reason)
   const result = await spawn(wrapped.argv, { cwd, env: fixture.env })
   const found = Object.fromEntries(
-    result.stdout
-      .split("\n")
-      .filter((line) => line.includes("="))
-      .map((line) => line.split("=") as [string, string]),
+    [...result.stdout.matchAll(/^(\w+)=(ok|refused)$/gm)].map((match): [string, string] => [match[1], match[2]]),
   )
   if (Object.keys(found).length !== Object.keys(checks).length)
     throw new Error(`sandboxed shell failed (${result.code}): ${result.stderr}`)
@@ -220,15 +219,16 @@ export const scenarios: Scenario[] = [
     name: "confines grandchildren, also those that outlive the command",
     run: async (fixture, launch) => {
       const policy = Sandbox.resolve(undefined, fixture.context)
-      // Fixture paths have no characters the shell would need quoted.
       const target = path.join(fixture.home, "grandchild")
       const later = path.join(fixture.home, "later")
       const result = path.join(fixture.tmp, "later.result")
+      // The grandchild writes to $F, which every shell on the way inherits.
+      const grandchild = (file: string) => `F=${q(file)} sh -c 'sh -c "echo x > \\"\\$F\\""'`
       const found = await probe(policy, fixture, launch, {
-        grandchild: `sh -c "sh -c 'echo x > ${target}'"`,
-        grandchildChat: `sh -c "sh -c 'echo x > ${path.join(fixture.project, "grandchild")}'"`,
-        detached: `(sleep 0.2; (echo x > ${later} && echo ok || echo refused) > ${q(result)} 2>/dev/null) </dev/null >/dev/null 2>&1 & true`,
-        ...(process.platform === "linux" ? { setsid: `setsid sh -c 'echo x > ${target}'` } : {}),
+        grandchild: grandchild(target),
+        grandchildChat: grandchild(path.join(fixture.project, "grandchild")),
+        detached: `(sleep 0.2; (echo x > ${q(later)} && echo ok || echo refused) > ${q(result)} 2>/dev/null) </dev/null >/dev/null 2>&1 & true`,
+        ...(process.platform === "linux" ? { setsid: `F=${q(target)} setsid sh -c 'echo x > "$F"'` } : {}),
       })
       const deadline = Date.now() + 10_000
       while (!fs.existsSync(result) || fs.readFileSync(result, "utf8") === "") {
@@ -239,8 +239,8 @@ export const scenarios: Scenario[] = [
         ...compare(found, { grandchild: "refused", grandchildChat: "ok", detached: "ok" }),
         ...(found.setsid === undefined || found.setsid === "refused" ? [] : ["setsid: expected refused"]),
         ...(fs.readFileSync(result, "utf8").trim() === "refused" ? [] : ["the detached grandchild could write to ~"]),
-        ...(fs.existsSync(path.join(fixture.home, "grandchild")) ? ["~/grandchild was written"] : []),
-        ...(fs.existsSync(path.join(fixture.home, "later")) ? ["~/later was written"] : []),
+        ...(fs.existsSync(target) ? ["~/grandchild was written"] : []),
+        ...(fs.existsSync(later) ? ["~/later was written"] : []),
       ]
     },
   },
@@ -323,8 +323,8 @@ export const scenarios: Scenario[] = [
       const policy = Sandbox.resolve({ mode: "off", deny_read: ["~/secret/key"] }, fixture.context)
       const made = [path.join(fixture.home, "off-mode"), path.join(fixture.other, "off-mode")]
       const found = await probe(policy, fixture, launch, {
-        home: `echo x > ${q(made[0]!)}`,
-        otherProject: `echo x > ${q(made[1]!)}`,
+        home: `echo x > ${q(made[0])}`,
+        otherProject: `echo x > ${q(made[1])}`,
         denied: `cat ${q(path.join(fixture.home, "secret/key"))}`,
       })
       for (const file of made) fs.rmSync(file, { force: true })
@@ -344,10 +344,9 @@ export const scenarios: Scenario[] = [
       const wrapped = Sandbox.wrap(policy, ["/bin/sh", "-c", script], launch.self, { ok: true })
       if (wrapped.type !== "run") return [wrapped.reason]
       const result = await spawn(wrapped.argv, { cwd: fixture.project, env: fixture.env })
-      const missing = await spawn(
-        (Sandbox.wrap(policy, ["no-such-command-here"], launch.self, { ok: true }) as { argv: string[] }).argv,
-        { cwd: fixture.project, env: fixture.env },
-      )
+      const absent = Sandbox.wrap(policy, ["no-such-command-here"], launch.self, { ok: true })
+      if (absent.type !== "run") return [absent.reason]
+      const missing = await spawn(absent.argv, { cwd: fixture.project, env: fixture.env })
       return [
         ...(result.code === 7 ? [] : [`exit code ${result.code}, stderr ${result.stderr}`]),
         ...(result.stdout.includes(`home=${fixture.home}`) ? [] : ["HOME did not pass"]),

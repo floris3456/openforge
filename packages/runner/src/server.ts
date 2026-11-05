@@ -20,6 +20,8 @@ export type Options = {
   /** How long to wait for the folder's lock, which an exiting runner still holds for a moment. */
   readonly wait?: number
   readonly bounds?: RunnerOutput.Bounds
+  /** Where the runner reports what went wrong: its stderr, which is the folder's log, by default. */
+  readonly log?: (line: string) => void
 }
 
 export type Runner = {
@@ -39,6 +41,11 @@ export class LockedError extends Error {
 
 const HIGH_WATER = 256 * 1024
 const PACE = 50
+const GRACE = 10_000
+const LOCK_WAIT = 5_000
+const LOCK_RETRY = 50
+// How long clients still connected when the runner exits get to read their last frames.
+const GOODBYE = 2_000
 // A leader that exited may leave children holding its pipes; their output is read this much longer.
 const DRAIN = 1_000
 // Ended commands stay listed while the runner lives; their exit files outlast it.
@@ -61,6 +68,8 @@ type Entry = {
   removed: boolean
   /** Its pipes have closed; `exit` follows once the exit file is written. */
   ended: boolean
+  /** Writing its output failed once, which was reported; later failures are not. */
+  lost: boolean
   exit?: RunnerProtocol.Exit
   deadlineTimer?: ReturnType<typeof setTimeout>
   killTimer?: ReturnType<typeof setTimeout>
@@ -89,9 +98,18 @@ type Watch = {
  */
 export async function serve(options: Options): Promise<Runner> {
   const directory = options.directory
-  const killAfter = options.killAfter ?? 3_000
+  const killAfter = options.killAfter ?? RunnerProtocol.KILL_AFTER
+  const report = options.log ?? ((line: string) => void process.stderr.write(`${new Date().toISOString()} ${line}\n`))
+  // Something that failed for one command, reported instead of taking the runner and every other command down.
+  const guarded = (what: string, action: () => void) => {
+    try {
+      action()
+    } catch (cause) {
+      report(`${what}: ${RunnerProtocol.messageOf(cause)}`)
+    }
+  }
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const acquired = await acquire(RunnerPaths.lock(directory), options.wait ?? 5_000)
+  const acquired = await acquire(RunnerPaths.lock(directory), options.wait ?? LOCK_WAIT)
   if (!acquired) throw new LockedError(directory)
   const lock = acquired
   const token = randomBytes(32).toString("hex")
@@ -101,7 +119,7 @@ export async function serve(options: Options): Promise<Runner> {
 
   const entries = new Map<string, Entry>()
   const connections = new Set<Connection>()
-  let ended = 0
+  let endings = 0
   let closing = false
   let resolveClosed = () => {}
   const closed = new Promise<void>((resolve) => (resolveClosed = resolve))
@@ -114,15 +132,6 @@ export async function serve(options: Options): Promise<Runner> {
     })
   })
   fs.chmodSync(socketPath, 0o600)
-  await RunnerOutput.writeAtomic(
-    RunnerPaths.info(directory),
-    JSON.stringify({
-      pid: process.pid,
-      version: options.version,
-      protocols: RunnerProtocol.SPOKEN,
-      started: Date.now(),
-    }),
-  )
   let stopping = false
   let grace: ReturnType<typeof setTimeout> | undefined
   // Nothing runs: wait a while for the next command, so a burst of short ones shares this runner. Asked to stop, exit.
@@ -130,7 +139,7 @@ export async function serve(options: Options): Promise<Runner> {
     if ([...entries.values()].some((entry) => !entry.exit)) return
     if (stopping) return idle()
     clearTimeout(grace)
-    grace = setTimeout(idle, options.grace ?? 10_000)
+    grace = setTimeout(idle, options.grace ?? GRACE)
     grace.unref()
   }
   rest()
@@ -146,6 +155,7 @@ export async function serve(options: Options): Promise<Runner> {
     )
     socket.on("data", read)
     socket.on("drain", () => connection.watches.forEach((watch) => watch.waiting && pump(watch)))
+    // A client that goes away mid-write; the close that follows cleans up after it.
     socket.on("error", () => {})
     socket.on("close", () => {
       connections.delete(connection)
@@ -153,12 +163,7 @@ export async function serve(options: Options): Promise<Runner> {
       connection.watches.forEach((watch) => watch.entry.watches.delete(watch))
       if (closing && connections.size === 0) finish()
     })
-    send(connection, {
-      type: "hello",
-      protocols: [...RunnerProtocol.SPOKEN],
-      version: options.version,
-      pid: process.pid,
-    })
+    send(connection, { type: "hello", protocols: RunnerProtocol.SPOKEN, version: options.version, pid: process.pid })
   }
 
   function receive(connection: Connection, line: string) {
@@ -168,7 +173,7 @@ export async function serve(options: Options): Promise<Runner> {
     if (!connection.authenticated) {
       if (request.op !== "hello" || request.token !== token)
         return fail(connection, request.id, "auth", "authentication failed", true)
-      if (!(RunnerProtocol.SPOKEN as readonly number[]).includes(request.protocol))
+      if (!RunnerProtocol.SPOKEN.includes(request.protocol))
         return fail(connection, request.id, "protocol", `unsupported protocol ${request.protocol}`, true)
       connection.authenticated = true
       return send(connection, { id: request.id, type: "ok" })
@@ -199,8 +204,10 @@ export async function serve(options: Options): Promise<Runner> {
     clearTimeout(grace)
     const failed = (cause: unknown) => {
       writer?.close()
-      fs.rmSync(input.output, { force: true })
-      fail(connection, id, "spawn", cause instanceof Error ? cause.message : String(cause))
+      guarded(`cannot remove the output of ${input.id}, which did not start`, () =>
+        fs.rmSync(input.output, { force: true }),
+      )
+      fail(connection, id, "spawn", RunnerProtocol.messageOf(cause))
       rest()
     }
     let writer: RunnerOutput.Writer | undefined
@@ -231,6 +238,7 @@ export async function serve(options: Options): Promise<Runner> {
       deadline: null,
       removed: false,
       ended: false,
+      lost: false,
     }
     entries.set(input.id, entry)
     arm(entry, input.deadline)
@@ -239,7 +247,11 @@ export async function serve(options: Options): Promise<Runner> {
       // A full disk loses output, not the runner.
       try {
         output.append(chunk)
-      } catch {}
+      } catch (cause) {
+        if (!entry.lost)
+          report(`cannot write the output of ${input.id}, so some of it is lost: ${RunnerProtocol.messageOf(cause)}`)
+        entry.lost = true
+      }
       // The chunk is in the file now. Detaching its buffer frees it at once; left to the collector, a flood of output
       // piles up tens of MB of buffers before a collection runs. Only a buffer the chunk has to itself.
       if (chunk.buffer instanceof ArrayBuffer && chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength)
@@ -249,7 +261,10 @@ export async function serve(options: Options): Promise<Runner> {
     const readers = [child.stdout.getReader(), child.stderr.getReader()]
     const drained = readers.map(async (reader) => {
       while (true) {
-        const next = await reader.read().catch(() => ({ done: true as const, value: undefined }))
+        const next = await reader.read().catch((cause: unknown) => {
+          report(`cannot read the output of ${input.id}: ${RunnerProtocol.messageOf(cause)}`)
+          return { done: true as const, value: undefined }
+        })
         if (next.done) return
         append(next.value)
       }
@@ -258,13 +273,23 @@ export async function serve(options: Options): Promise<Runner> {
     void child.exited.then(() => {
       clearTimeout(entry.deadlineTimer)
       // Pipes still held by the group's other processes are closed after a moment, so the command still ends.
-      drain = setTimeout(() => readers.forEach((reader) => void reader.cancel().catch(() => {})), DRAIN)
+      drain = setTimeout(
+        () =>
+          readers.forEach((reader) =>
+            reader
+              .cancel()
+              .catch((cause: unknown) =>
+                report(`cannot close the output of ${input.id}: ${RunnerProtocol.messageOf(cause)}`),
+              ),
+          ),
+        DRAIN,
+      )
       drain.unref()
     })
     void Promise.all([child.exited, ...drained]).then(() => {
       clearTimeout(drain)
       end(entry, { code: child.exitCode, signal: child.signalCode === null ? null : String(child.signalCode) })
-      if (++ended % COLLECT_ENDED === 0) Bun.gc(true)
+      if (++endings % COLLECT_ENDED === 0) Bun.gc(true)
     })
     send(connection, { id, type: "started", command: describe(entry), existing: false })
   }
@@ -284,17 +309,27 @@ export async function serve(options: Options): Promise<Runner> {
 
   function signal(entry: Entry, name: string) {
     if (name === "SIGTERM" || name === "SIGKILL") entry.reason ??= "killed"
-    kill(entry.pid, name)
+    kill(entry, name)
     if (name !== "SIGTERM" || entry.killTimer) return
     // The group may outlive its leader, so the escalation does not depend on the leader still running.
-    entry.killTimer = setTimeout(() => kill(entry.pid, "SIGKILL"), killAfter)
+    entry.killTimer = setTimeout(() => kill(entry, "SIGKILL"), killAfter)
     entry.killTimer.unref()
+  }
+
+  // A group that is gone already has nothing left to signal.
+  function kill(entry: Entry, signal: string) {
+    try {
+      process.kill(-entry.pid, signal)
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ESRCH"))
+        report(`cannot send ${signal} to ${entry.id}: ${RunnerProtocol.messageOf(cause)}`)
+    }
   }
 
   function end(entry: Entry, status: { code: number | null; signal: string | null }) {
     clearTimeout(entry.deadlineTimer)
     entry.ended = true
-    const layout = finalize(entry.writer)
+    const layout = finalize(entry)
     const exit: RunnerProtocol.Exit = {
       id: entry.id,
       status: entry.reason ?? "exited",
@@ -308,29 +343,43 @@ export async function serve(options: Options): Promise<Runner> {
       ...(layout ? { layout } : {}),
       meta: entry.meta,
     }
-    // Told only once its exit file is written, so whoever hears of the end can rely on the file.
+    // Told once its exit file is written, so whoever hears of the end finds the file. One that can't be written is
+    // reported and the end told all the same: its watchers get it, though a later service won't find the command.
     const written = entry.removed
       ? Promise.resolve()
-      : RunnerOutput.writeAtomic(RunnerPaths.exit(entry.output), JSON.stringify(exit))
-    void written
-      .catch(() => {})
-      .then(() => {
-        entry.exit = exit
-        if (entry.removed) discard(entry)
-        entry.watches.forEach(pump)
-        const ended = [...entries.values()].filter((item) => item.exit)
-        ended.slice(0, -ENDED_LIMIT).forEach((item) => {
-          item.writer.close()
-          entries.delete(item.id)
-        })
-        rest()
+      : RunnerOutput.writeAtomic(RunnerPaths.exit(entry.output), JSON.stringify(exit)).catch((cause: unknown) =>
+          report(`cannot write the exit file of ${entry.id}: ${RunnerProtocol.messageOf(cause)}`),
+        )
+    void written.then(() => {
+      entry.exit = exit
+      if (entry.removed) discard(entry)
+      entry.watches.forEach(pump)
+      const exited = [...entries.values()].filter((item) => item.exit)
+      exited.slice(0, -ENDED_LIMIT).forEach((item) => {
+        item.writer.close()
+        entries.delete(item.id)
       })
+      rest()
+    })
+  }
+
+  function finalize(entry: Entry) {
+    try {
+      return entry.writer.finish()
+    } catch (cause) {
+      report(
+        `cannot put the output of ${entry.id} in order, so only its start can be read: ${RunnerProtocol.messageOf(cause)}`,
+      )
+      return entry.writer.layout
+    }
   }
 
   function discard(entry: Entry) {
     entry.writer.close()
-    fs.rmSync(entry.output, { force: true })
-    fs.rmSync(RunnerPaths.exit(entry.output), { force: true })
+    guarded(`cannot remove the files of ${entry.id}`, () => {
+      fs.rmSync(entry.output, { force: true })
+      fs.rmSync(RunnerPaths.exit(entry.output), { force: true })
+    })
   }
 
   function watch(connection: Connection, request: Extract<RunnerProtocol.Request, { op: "watch" }>, entry: Entry) {
@@ -430,7 +479,7 @@ export async function serve(options: Options): Promise<Runner> {
       connection.socket.end()
     })
     if (connections.size === 0) return finish()
-    setTimeout(() => connections.forEach((connection) => connection.socket.destroy()), 2_000).unref()
+    setTimeout(() => connections.forEach((connection) => connection.socket.destroy()), GOODBYE).unref()
   }
 
   let finished = false
@@ -439,7 +488,6 @@ export async function serve(options: Options): Promise<Runner> {
     finished = true
     entries.forEach((entry) => entry.writer.close())
     fs.rmSync(RunnerPaths.token(directory), { force: true })
-    fs.rmSync(RunnerPaths.info(directory), { force: true })
     lock.release()
     resolveClosed()
   }
@@ -458,25 +506,11 @@ export async function serve(options: Options): Promise<Runner> {
   }
 }
 
-function finalize(writer: RunnerOutput.Writer) {
-  try {
-    return writer.finish()
-  } catch {
-    return writer.layout
-  }
-}
-
-function kill(pgid: number, signal: string) {
-  try {
-    process.kill(-pgid, signal)
-  } catch {}
-}
-
 async function acquire(file: string, wait: number) {
   const deadline = Date.now() + wait
   while (true) {
     const lock = await RunnerLock.acquire(file)
     if (lock || Date.now() >= deadline) return lock
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY))
   }
 }

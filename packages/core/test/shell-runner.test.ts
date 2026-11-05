@@ -3,6 +3,7 @@ import fs from "fs"
 import net from "net"
 import path from "path"
 import { Effect, Fiber, Queue, Schedule, Stream } from "effect"
+import { RunnerClient } from "@opencode/runner/client"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { Location } from "@opencode/core/location"
 import { Shell } from "@opencode/core/shell"
@@ -234,9 +235,7 @@ describe("Shell through the tool runner", () => {
           yield* until(() => fs.existsSync(ready))
           const child = Number(fs.readFileSync(path.join(host.tmp, "child"), "utf8"))
           const waiting = yield* shell.wait(info.id).pipe(Effect.flip, Effect.forkScoped)
-          const runner = JSON.parse(
-            fs.readFileSync(RunnerPaths.info(RunnerPaths.directory(host.state, "test")), "utf8"),
-          )
+          const runner = yield* RunnerClient.connect(RunnerPaths.directory(host.state, "test")).pipe(Effect.scoped)
           expect(runner.pid).not.toBe(process.pid)
           process.kill(runner.pid, "SIGKILL")
 

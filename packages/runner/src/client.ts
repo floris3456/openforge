@@ -51,7 +51,11 @@ type Handler = { readonly frame: (frame: RunnerProtocol.Frame) => boolean; reado
 
 const failure = (reason: RunnerError["reason"], message: string) => new RunnerError({ reason, message })
 
-const describe = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
+/** No runner answers there: none runs, or the one that did went away. */
+const absent = (error: RunnerError) => error.reason === "unavailable" || error.reason === "lost"
+
+// The runner's log starts over once it passes this size.
+const LOG_LIMIT = 1024 * 1024
 
 /** Connects to the runner of `directory`. Fails with `unavailable` when none runs there. */
 export const connect = Effect.fn("RunnerClient.connect")(function* (directory: string) {
@@ -63,7 +67,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
   const socket = yield* Effect.callback<net.Socket, RunnerError>((resume) => {
     const socket = net.createConnection({ path: RunnerPaths.socket(directory) })
     socket.once("connect", () => resume(Effect.succeed(socket)))
-    socket.once("error", (cause) => resume(Effect.fail(failure("unavailable", describe(cause)))))
+    socket.once("error", (cause) => resume(Effect.fail(failure("unavailable", RunnerProtocol.messageOf(cause)))))
     return Effect.sync(() => socket.destroy())
   })
   yield* Scope.addFinalizer(
@@ -76,7 +80,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
   const closed = yield* Deferred.make<Closed>()
   const hello = yield* Deferred.make<RunnerProtocol.Hello, RunnerError>()
   const handlers = new Map<number, Handler>()
-  let said = false
+  let bye = false
   let next = 1
   socket.on(
     "data",
@@ -95,7 +99,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
         const frame = RunnerProtocol.decodeFrame(line)
         if (frame._tag === "None") return
         if (frame.value.type === "bye") {
-          said = true
+          bye = true
           return
         }
         const id = frame.value.id
@@ -108,7 +112,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
   )
   socket.once("close", () => {
     Deferred.doneUnsafe(hello, Exit.fail(failure("lost", "the runner closed the connection")))
-    Deferred.doneUnsafe(closed, Exit.succeed(said ? "bye" : "lost"))
+    Deferred.doneUnsafe(closed, Exit.succeed(bye ? "bye" : "lost"))
     const pending = [...handlers.values()]
     handlers.clear()
     pending.forEach((handler) => handler.lost())
@@ -118,7 +122,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
     if (!socket.destroyed) socket.write(JSON.stringify(value) + "\n")
   }
   // Once the connection has ended nothing answers, so later requests fail at once.
-  const gone = () => failure(said ? "closing" : "lost", "the runner closed the connection")
+  const gone = () => failure(bye ? "closing" : "lost", "the runner closed the connection")
 
   const request = <A>(build: (id: number) => object, accept: (frame: RunnerProtocol.Frame) => A | undefined) =>
     Effect.callback<A, RunnerError>((resume) => {
@@ -126,15 +130,16 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
       const id = next++
       handlers.set(id, {
         frame: (frame) => {
-          if (frame.type === "error") resume(Effect.fail(failure(frame.code, frame.message)))
-          else {
-            const value = accept(frame)
-            resume(
-              value === undefined
-                ? Effect.fail(failure("protocol", `unexpected ${frame.type} frame`))
-                : Effect.succeed(value),
-            )
+          if (frame.type === "error") {
+            resume(Effect.fail(failure(frame.code, frame.message)))
+            return true
           }
+          const value = accept(frame)
+          resume(
+            value === undefined
+              ? Effect.fail(failure("protocol", `unexpected ${frame.type} frame`))
+              : Effect.succeed(value),
+          )
           return true
         },
         lost: () => resume(Effect.fail(gone())),
@@ -203,7 +208,7 @@ export const connect = Effect.fn("RunnerClient.connect")(function* (directory: s
               Queue.endUnsafe(queue)
               return true
             },
-            lost: () => Queue.failCauseUnsafe(queue, Cause.fail(failure("lost", "the runner closed the connection"))),
+            lost: () => Queue.failCauseUnsafe(queue, Cause.fail(gone())),
           })
           yield* Effect.addFinalizer(() => Effect.sync(() => handlers.delete(id)))
           write({
@@ -269,37 +274,32 @@ export const connectOrStart = Effect.fn("RunnerClient.connectOrStart")(function*
 ) {
   const attempt = connect(directory)
   return yield* attempt.pipe(
-    Effect.catchIf(
-      (error) => error.reason === "unavailable" || error.reason === "lost",
-      () =>
-        launch.pipe(
-          Effect.andThen(
-            attempt.pipe(
-              Effect.retry({
-                while: (error) => error.reason === "unavailable" || error.reason === "lost",
-                schedule: Schedule.spaced("20 millis"),
-              }),
-              Effect.timeoutOrElse({
-                duration: timeout,
-                orElse: () => Effect.fail(failure("unavailable", `the runner in ${directory} did not start`)),
-              }),
-            ),
+    Effect.catchIf(absent, () =>
+      launch.pipe(
+        Effect.andThen(
+          attempt.pipe(
+            Effect.retry({ while: absent, schedule: Schedule.spaced("20 millis") }),
+            Effect.timeoutOrElse({
+              duration: timeout,
+              orElse: () => Effect.fail(failure("unavailable", `the runner in ${directory} did not start`)),
+            }),
           ),
         ),
+      ),
     ),
   )
 })
 
 /**
  * Starts the runner `argv` (`openforge runner <directory>`) detached, so it belongs to neither this process nor its
- * group and outlives it. Its stderr goes to the folder's log, which starts over once it passes 1 MiB.
+ * group and outlives it. Its stderr goes to the folder's log.
  */
 export const launch = (argv: ReadonlyArray<string>, directory: string, env: NodeJS.ProcessEnv = process.env) =>
   Effect.try({
     try: () => {
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
       const log = RunnerPaths.log(directory)
-      if ((fs.statSync(log, { throwIfNoEntry: false })?.size ?? 0) > 1024 * 1024) fs.rmSync(log, { force: true })
+      if ((fs.statSync(log, { throwIfNoEntry: false })?.size ?? 0) > LOG_LIMIT) fs.rmSync(log, { force: true })
       const child = spawn("/bin/sh", ["-c", '"$@" </dev/null >/dev/null 2>>"$RUNNER_LOG" &', "sh", ...argv], {
         detached: true,
         stdio: "ignore",
@@ -307,5 +307,5 @@ export const launch = (argv: ReadonlyArray<string>, directory: string, env: Node
       })
       child.unref()
     },
-    catch: (cause) => failure("spawn", describe(cause)),
+    catch: (cause) => failure("spawn", RunnerProtocol.messageOf(cause)),
   })

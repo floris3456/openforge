@@ -10,12 +10,20 @@ import { Schema } from "effect"
 /** The versions a client of this release can speak, newest first. */
 export const SUPPORTED = [1] as const
 /** The versions this release's runner speaks. */
-export const SPOKEN = [1] as const
+export const SPOKEN: ReadonlyArray<number> = [1]
 
 /** The longest line either side accepts. */
 export const MAX_LINE = 4 * 1024 * 1024
 
+/**
+ * How long a command's group gets between SIGTERM and SIGKILL: from the runner, and from a client that stops the group
+ * itself because the runner is gone.
+ */
+export const KILL_AFTER = 3_000
+
+/** How a finished file that dropped bytes is laid out: `head` bytes, a `marker` bytes long line, then the last `kept` bytes. */
 export const Layout = Schema.Struct({ head: Schema.Number, marker: Schema.Number, kept: Schema.Number })
+export type Layout = typeof Layout.Type
 
 /** Opaque to the runner: what its client needs to know the command again later. */
 export const Meta = Schema.Record(Schema.String, Schema.Unknown)
@@ -142,6 +150,9 @@ export const decodeHello = Schema.decodeUnknownOption(Schema.fromJsonString(Hell
 export const decodeRequest = Schema.decodeUnknownOption(Schema.fromJsonString(Request))
 export const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(Frame))
 export const decodeExit = Schema.decodeUnknownOption(Schema.fromJsonString(Exit))
+
+/** The text an error frame or a client error carries for something thrown. */
+export const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause))
 
 /** Splits a byte stream into lines, refusing one longer than `MAX_LINE`. */
 export function lines(onLine: (line: string) => void, onOverflow: () => void) {

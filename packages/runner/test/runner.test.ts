@@ -8,7 +8,7 @@ import { RunnerOutput } from "../src/output.js"
 import { RunnerPaths } from "../src/paths.js"
 import { RunnerProtocol } from "../src/protocol.js"
 import { RunnerServer } from "../src/server.js"
-import { alive, command, folder, run, serve, until } from "./fixture/runner.js"
+import { alive, command, folder, run, serve, served, until } from "./fixture/runner.js"
 
 const collect = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   connection.watch(id, { offset, output }).pipe(Stream.runCollect)
@@ -34,15 +34,14 @@ const readExit = (output: string) =>
 
 describe("runner", () => {
   test("starts a command, pushes its output from an offset and then its exit, and writes the exit file", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
         expect(connection).toMatchObject({ protocol: 1, version: "test", pid: process.pid })
-        const ready = path.join(directory.path, "ready")
+        const ready = path.join(host.path, "ready")
         const input = command(
-          directory.path,
+          host.path,
           `printf 'hello '; while [ ! -e ${ready} ]; do sleep 0.01; done; printf world; exit 3`,
           { meta: { command: "greeting" } },
         )
@@ -70,16 +69,15 @@ describe("runner", () => {
         expect(exitOf(later)).toEqual(exit)
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("starting the same id twice gives the same command", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const input = command(directory.path, "sleep 30")
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const input = command(host.path, "sleep 30")
         const first = yield* connection.start(input)
         const second = yield* connection.start({ ...input, argv: ["/bin/sh", "-c", "exit 1"] })
         expect(second.existing).toBe(true)
@@ -93,25 +91,19 @@ describe("runner", () => {
         })
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("a SIGTERM to a command reaches its whole group and turns into SIGKILL when ignored", async () => {
-    await using directory = await folder()
-    await using runner = await serve({
-      directory: path.join(directory.path, "runner"),
-      version: "test",
-      killAfter: 200,
-      grace: 50,
-    })
+    await using host = await served({ killAfter: 200 })
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const ready = path.join(directory.path, "ready")
-        const input = command(directory.path, `trap '' TERM; sleep 30 & echo $! > child; : > ${ready}; wait; wait`)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const ready = path.join(host.path, "ready")
+        const input = command(host.path, `trap '' TERM; sleep 30 & echo $! > child; : > ${ready}; wait; wait`)
         const started = yield* connection.start(input)
         yield* Effect.promise(() => until(() => fs.existsSync(ready)))
-        const child = Number(fs.readFileSync(path.join(directory.path, "child"), "utf8"))
+        const child = Number(fs.readFileSync(path.join(host.path, "child"), "utf8"))
         expect(alive(child)).toBe(true)
         const watched = yield* watching(connection, input.id, 0, false)
         yield* connection.signal(input.id, "SIGTERM")
@@ -122,17 +114,16 @@ describe("runner", () => {
         yield* Effect.promise(() => until(() => !alive(child)))
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("ends a command at its deadline, which the client can move or clear", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const timed = command(directory.path, "sleep 30", { deadline: Date.now() + 60_000 })
-        const cleared = command(directory.path, "sleep 0.5; printf done", { deadline: Date.now() + 100 })
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const timed = command(host.path, "sleep 30", { deadline: Date.now() + 60_000 })
+        const cleared = command(host.path, "sleep 0.5; printf done", { deadline: Date.now() + 100 })
         yield* connection.start(timed)
         yield* connection.start(cleared)
         const timedExit = yield* watching(connection, timed.id, 0, false)
@@ -148,7 +139,7 @@ describe("runner", () => {
         expect(text(finished)).toBe("done")
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("after its last command it waits its grace period for another, then stops listening, says bye and frees the folder", async () => {
@@ -181,25 +172,23 @@ describe("runner", () => {
   })
 
   test("once the runner has said bye, requests on its connection fail at once", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
         expect(yield* connection.closed).toBe("bye")
-        const input = command(directory.path, "printf late")
+        const input = command(host.path, "printf late")
         expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
         expect(yield* collect(connection, input.id).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
       }).pipe(Effect.timeout("2 seconds")),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("a fresh runner that never gets a command exits after its grace period", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
-    await runner.closed
-    expect(fs.existsSync(RunnerPaths.socket(runner.directory))).toBe(false)
+    await using host = await served()
+    await host.runner.closed
+    expect(fs.existsSync(RunnerPaths.socket(host.runner.directory))).toBe(false)
   })
 
   test("only one runner serves a folder at a time", async () => {
@@ -213,12 +202,11 @@ describe("runner", () => {
   })
 
   test("refuses a client without the token and one without a shared protocol", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
+    await using host = await served({ grace: 500 })
     const exchange = (line: string) =>
       new Promise<string[]>((resolve) => {
         const lines: string[] = []
-        const socket = net.createConnection({ path: RunnerPaths.socket(runner.directory) })
+        const socket = net.createConnection({ path: RunnerPaths.socket(host.runner.directory) })
         socket.setEncoding("utf8")
         socket.on(
           "data",
@@ -230,46 +218,44 @@ describe("runner", () => {
         socket.once("data", () => socket.write(line + "\n"))
         socket.on("close", () => resolve(lines))
       })
-    const token = fs.readFileSync(RunnerPaths.token(runner.directory), "utf8")
-    expect(fs.statSync(RunnerPaths.token(runner.directory)).mode & 0o777).toBe(0o600)
+    const token = fs.readFileSync(RunnerPaths.token(host.runner.directory), "utf8")
+    expect(fs.statSync(RunnerPaths.token(host.runner.directory)).mode & 0o777).toBe(0o600)
     const wrong = await exchange(JSON.stringify({ id: 0, op: "hello", protocol: 1, token: "wrong" }))
     expect(JSON.parse(wrong[0])).toMatchObject({ type: "hello", protocols: [1], version: "test" })
     expect(JSON.parse(wrong[1])).toMatchObject({ id: 0, type: "error", code: "auth" })
     const future = await exchange(JSON.stringify({ id: 0, op: "hello", protocol: 99, token }))
     expect(JSON.parse(future[1])).toMatchObject({ id: 0, type: "error", code: "protocol" })
-    await runner.closed
+    await host.runner.closed
   })
 
   test("reports a command that cannot start and leaves no file", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 500 })
+    await using host = await served({ grace: 500 })
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const input = command(directory.path, "true", { cwd: path.join(directory.path, "missing") })
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const input = command(host.path, "true", { cwd: path.join(host.path, "missing") })
         expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "spawn" })
         expect(fs.existsSync(input.output)).toBe(false)
         const missing = {
-          ...command(directory.path, "true"),
-          argv: [path.join(directory.path, "no-such-shell")] as const,
+          ...command(host.path, "true"),
+          argv: [path.join(host.path, "no-such-shell")] as const,
         }
         expect(yield* connection.start(missing).pipe(Effect.flip)).toMatchObject({ reason: "spawn" })
         expect(fs.existsSync(missing.output)).toBe(false)
         expect((yield* connection.list).map((item) => item.id)).toEqual([])
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("an end is told only once its exit file is written, and removed commands leave no files", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
         // Watched once started, a short command's watch often comes while its end is being written.
         for (let index = 0; index < 300; index++) {
-          const input = command(directory.path, "exit 0")
+          const input = command(host.path, "exit 0")
           yield* connection.start(input)
           exitOf(yield* collect(connection, input.id, 0, false))
           expect(fs.existsSync(RunnerPaths.exit(input.output))).toBe(true)
@@ -277,17 +263,16 @@ describe("runner", () => {
         }
       }),
     )
-    await runner.closed
-    expect(fs.readdirSync(directory.path).filter((name) => name !== "runner")).toEqual([])
+    await host.runner.closed
+    expect(fs.readdirSync(host.path).filter((name) => name !== "runner")).toEqual([])
   })
 
   test("a command whose leader exited ends a moment later, even while its background process holds the pipes", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const input = command(directory.path, "sleep 30 & printf leader")
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const input = command(host.path, "sleep 30 & printf leader")
         const started = yield* connection.start(input)
         const begun = Date.now()
         const events = yield* collect(connection, input.id)
@@ -297,16 +282,15 @@ describe("runner", () => {
         process.kill(-started.command.pgid, "SIGKILL")
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 
   test("removing a command stops it and deletes its files", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const input = command(directory.path, "printf partial; sleep 30")
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const input = command(host.path, "printf partial; sleep 30")
         yield* connection.start(input)
         const exit = yield* watching(connection, input.id, 0, false)
         yield* connection.signal(input.id, "SIGTERM", { remove: true })
@@ -315,35 +299,28 @@ describe("runner", () => {
         expect(fs.existsSync(RunnerPaths.exit(input.output))).toBe(false)
       }),
     )
-    await runner.closed
+    await host.runner.closed
   })
 })
 
 describe("runner output", () => {
   test("keeps the first and the newest bytes within the limit, and says how much it dropped", async () => {
-    await using directory = await folder()
-    const bounds = { head: 16, limit: 96 }
-    await using runner = await serve({
-      directory: path.join(directory.path, "runner"),
-      version: "test",
-      bounds,
-      grace: 50,
-    })
+    await using host = await served({ bounds: { head: 16, limit: 96 } })
     const lines = Array.from({ length: 40 }, (_, index) => `line ${String(index).padStart(3, "0")}\n`).join("")
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
-        const release = path.join(directory.path, "release")
-        const input = command(directory.path, `printf '${lines}'; while [ ! -e ${release} ]; do sleep 0.02; done`)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        const release = path.join(host.path, "release")
+        const input = command(host.path, `printf '${lines}'; while [ ! -e ${release} ]; do sleep 0.02; done`)
         yield* connection.start(input)
         yield* Effect.promise(() => until(() => fs.existsSync(input.output) && fs.statSync(input.output).size >= 96))
 
         // While it runs the file holds the head and a ring of the newest bytes; reads see them in order.
         expect(fs.statSync(input.output).size).toBe(96)
-        const head = yield* RunnerClient.read(runner.directory, input.id, 0, 1_000)
+        const head = yield* RunnerClient.read(host.runner.directory, input.id, 0, 1_000)
         expect(head).toMatchObject({ offset: 0, size: lines.length })
         expect(head.data.toString()).toBe(lines.slice(0, 16))
-        const tail = yield* RunnerClient.read(runner.directory, input.id, 16, 1_000)
+        const tail = yield* RunnerClient.read(host.runner.directory, input.id, 16, 1_000)
         expect(tail.offset).toBe(lines.length - 80)
         expect(tail.data.toString()).toBe(lines.slice(-80))
 
@@ -370,17 +347,69 @@ describe("runner output", () => {
         expect(end.data.length).toBe(0)
       }),
     )
-    await runner.closed
+    await host.runner.closed
+  })
+
+  test("when its folder refuses a command's last writes, the end still arrives, what is in order is read, and the log says why", async () => {
+    const log: string[] = []
+    await using host = await served({ bounds: { head: 16, limit: 96 }, log: (line) => log.push(line) })
+    const out = path.join(host.path, "out")
+    fs.mkdirSync(out)
+    const release = path.join(host.path, "release")
+    const lines = Array.from({ length: 40 }, (_, index) => `line ${String(index).padStart(3, "0")}\n`).join("")
+    const wait = `while [ ! -e ${release} ]; do sleep 0.01; done`
+    const small = command(host.path, `printf small; ${wait}`, { output: path.join(out, "small.out") })
+    const large = command(host.path, `printf '${lines}'; ${wait}`, { output: path.join(out, "large.out") })
+    await run(
+      Effect.gen(function* () {
+        const connection = yield* RunnerClient.connect(host.runner.directory)
+        yield* connection.start(small)
+        yield* connection.start(large)
+        yield* Effect.promise(() =>
+          until(() => fs.statSync(small.output).size === 5 && fs.statSync(large.output).size === 96),
+        )
+        const watched = yield* Effect.forEach([small, large], (input) => watching(connection, input.id, 0, false))
+        // Open files still take output; the exit files and the reordered file can't be created.
+        fs.chmodSync(out, 0o500)
+        fs.writeFileSync(release, "")
+        const [smallExit, largeExit] = (yield* Effect.forEach(watched, Fiber.join)).map(exitOf)
+        fs.chmodSync(out, 0o700)
+
+        expect(smallExit).toMatchObject({ status: "exited", code: 0, size: 5 })
+        expect(fs.existsSync(RunnerPaths.exit(small.output))).toBe(false)
+        expect(largeExit).toMatchObject({
+          status: "exited",
+          code: 0,
+          size: lines.length,
+          layout: { head: 16, marker: 0, kept: 0 },
+        })
+        const head = yield* Effect.promise(() => RunnerOutput.read(large.output, largeExit, 0, 1_000))
+        expect(head).toMatchObject({ cursor: 16, skipped: false })
+        expect(head.data.toString()).toBe(lines.slice(0, 16))
+        // The newest bytes were left out of order, so a reader skips them.
+        const rest = yield* Effect.promise(() => RunnerOutput.read(large.output, largeExit, 16, 1_000))
+        expect(rest).toMatchObject({ cursor: lines.length, skipped: true })
+        expect(rest.data.length).toBe(0)
+        expect(fs.readdirSync(out).toSorted()).toEqual(["large.out", "small.out"])
+      }),
+    )
+    await host.runner.closed
+    expect(log.map((line) => line.replace(/: EACCES: .*/, ": EACCES")).toSorted()).toEqual(
+      [
+        `cannot put the output of ${large.id} in order, so only its start can be read: EACCES`,
+        `cannot write the exit file of ${large.id}: EACCES`,
+        `cannot write the exit file of ${small.id}: EACCES`,
+      ].toSorted(),
+    )
   })
 
   test("a command printing about 1 GB leaves an 8 MiB file, and the runner's memory stays flat meanwhile", async () => {
-    await using directory = await folder()
-    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
-        const connection = yield* RunnerClient.connect(runner.directory)
+        const connection = yield* RunnerClient.connect(host.runner.directory)
         const bytes = 1_000_000_000
-        const input = command(directory.path, `printf START; head -c ${bytes} /dev/zero | tr '\\0' x; printf END`)
+        const input = command(host.path, `printf START; head -c ${bytes} /dev/zero | tr '\\0' x; printf END`)
         Bun.gc(true)
         const before = process.memoryUsage.rss()
         let most = before
@@ -392,7 +421,6 @@ describe("runner output", () => {
         expect((most - before) / 1024 / 1024).toBeLessThan(16)
         expect(exit).toMatchObject({ status: "exited", code: 0, size: bytes + 8 })
         const size = fs.statSync(input.output).size
-        expect(size).toBeLessThanOrEqual(RunnerOutput.LIMIT)
         expect(size).toBe(RunnerOutput.LIMIT)
         const handle = fs.openSync(input.output, "r")
         const start = Buffer.alloc(5)
@@ -407,6 +435,6 @@ describe("runner output", () => {
         expect(middle.toString()).toContain(`bytes of output dropped here`)
       }),
     )
-    await runner.closed
+    await host.runner.closed
   }, 120_000)
 })

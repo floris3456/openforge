@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { expect } from "bun:test"
 import { OpenCode, resend } from "@opencode/client"
+import { SERVICE_SWITCHING } from "@opencode/protocol/groups/service"
 import { Session } from "@opencode/schema/session"
 import { Effect } from "effect"
 import path from "node:path"
@@ -8,6 +9,19 @@ import { HttpServer } from "effect/http"
 import { tmpdirScoped } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerProcess } from "../src/process"
+
+/** A server over a database file, which the next server starts from as a release switch does. */
+const onFile = (database: string) => ({
+  hostname: "127.0.0.1",
+  port: 0,
+  password: "secret",
+  app: { version: "test-version" },
+  database: { path: database },
+  config: { project: false },
+  models: { fetch: false },
+  fs: { filewatcher: false },
+})
+const authorization = `Basic ${btoa("opencode:secret")}`
 
 it.live("a paused start answers reads and refuses writes until it is resumed", () =>
   Effect.gen(function* () {
@@ -23,7 +37,7 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
       Effect.promise(() =>
         fetch(new URL(path, HttpServer.formatAddress(server.address)), {
           ...init,
-          headers: { authorization: `Basic ${btoa("opencode:secret")}`, "content-type": "application/json" },
+          headers: { authorization, "content-type": "application/json" },
         }),
       )
 
@@ -37,10 +51,7 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
     const refused = yield* request("/api/session", { method: "POST", body: "{}" })
     expect(refused.status).toBe(503)
     expect(refused.headers.get("retry-after")).toBe("1")
-    expect(yield* Effect.promise(() => refused.json())).toEqual({
-      code: "service_switching",
-      message: "switching, try again in 1 s",
-    })
+    expect(yield* Effect.promise(() => refused.json())).toEqual(SERVICE_SWITCHING)
 
     const resumed = yield* request("/api/experimental/service/resume", { method: "POST" })
     expect(resumed.status).toBe(200)
@@ -56,18 +67,7 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
 it.live("a prompt refused by a paused start is resent with the same id and taken once after resume", () =>
   Effect.gen(function* () {
     const directory = yield* tmpdirScoped("openforge-pause-resend-")
-    const database = { path: path.join(directory.path, "opencode.db") }
-    const options = {
-      hostname: "127.0.0.1",
-      port: 0,
-      password: "secret",
-      app: { version: "test-version" },
-      database,
-      config: { project: false },
-      models: { fetch: false },
-      fs: { filewatcher: false },
-    }
-    const authorization = `Basic ${btoa("opencode:secret")}`
+    const options = onFile(path.join(directory.path, "opencode.db"))
     const sessionID = Session.ID.create()
     // The release before the switch: the chat exists.
     yield* Effect.scoped(
@@ -80,14 +80,14 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
 
     // The new release starts paused.
     const server = yield* ServerProcess.start<never, never>({ ...options, paused: true })
-    const refused: string[] = []
+    const refused = Promise.withResolvers<string>()
     const api = OpenCode.make({
       baseUrl: HttpServer.formatAddress(server.address),
       headers: { authorization },
       fetch: Object.assign(
         async (input: string | URL | Request, init?: RequestInit) => {
           const response = await fetch(input, init)
-          if (response.status === 503) refused.push(new URL(input instanceof Request ? input.url : input).pathname)
+          if (response.status === 503) refused.resolve(new URL(input instanceof Request ? input.url : input).pathname)
           return response
         },
         { preconnect: fetch.preconnect },
@@ -96,10 +96,7 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
     const opened = Promise.withResolvers<void>()
     const prompt = { sessionID, id: "msg_switch_once", text: "Carry on", resume: false }
     const sent = resend(() => api.session.prompt(prompt), { ready: () => opened.promise })
-    yield* Effect.promise(async () => {
-      while (refused.length < 1) await Bun.sleep(5)
-    })
-    expect(refused).toEqual([`/api/session/${sessionID}/prompt`])
+    expect(yield* Effect.promise(() => refused.promise)).toBe(`/api/session/${sessionID}/prompt`)
 
     yield* Effect.promise(() => api.experimental.service.resume())
     opened.resolve()
@@ -115,18 +112,7 @@ it.live("a prompt refused by a paused start is resent with the same id and taken
 const storedQuestion = (prefix: string) =>
   Effect.gen(function* () {
     const directory = yield* tmpdirScoped(prefix)
-    const database = { path: path.join(directory.path, "opencode.db") }
-    const options = {
-      hostname: "127.0.0.1",
-      port: 0,
-      password: "secret",
-      app: { version: "test-version" },
-      database,
-      config: { project: false },
-      models: { fetch: false },
-      fs: { filewatcher: false },
-    }
-    const authorization = `Basic ${btoa("opencode:secret")}`
+    const options = onFile(path.join(directory.path, "opencode.db"))
     const sessionID = Session.ID.create()
     yield* Effect.scoped(
       Effect.gen(function* () {
@@ -153,7 +139,7 @@ const storedQuestion = (prefix: string) =>
       ],
     }
     yield* Effect.sync(() => {
-      using db = new Database(database.path)
+      using db = new Database(options.database.path)
       db.run(
         "INSERT INTO pending_request (id, session_id, kind, message_id, call_id, request, time_created, time_updated) VALUES (?, ?, 'form', ?, ?, ?, ?, ?)",
         [
@@ -177,7 +163,7 @@ const storedQuestion = (prefix: string) =>
         }),
       )
     const stored = Effect.sync(() => {
-      using db = new Database(database.path, { readonly: true })
+      using db = new Database(options.database.path, { readonly: true })
       const row = db.query<{ reply: string }, [string]>("SELECT reply FROM pending_request WHERE id = ?").get(formID)
       return JSON.parse(row?.reply ?? "null") as unknown
     })

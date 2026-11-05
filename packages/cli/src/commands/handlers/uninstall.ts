@@ -7,14 +7,14 @@ import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { ServerConnection } from "../../services/server-connection"
 import { ReleaseLayout } from "../../upgrade/layout"
-import { Release } from "../../upgrade/release"
+import { Product } from "@opencode/schema/product"
 import { handlePromptErrors, prompt, requireInteractive } from "../../ui/prompt"
 import { errorMessage } from "../../util/error"
 
 export default Runtime.handler(
   Commands.commands.uninstall,
   Effect.fn("cli.uninstall")(function* (input) {
-    intro("Uninstall openforge")
+    intro(`Uninstall ${Product.name}`)
     const fs = yield* FileSystem.FileSystem
     const global = yield* Global.Service
     // Data, config, and state hold sessions, credentials, settings, and prompt history; uninstall only removes the cache
@@ -26,13 +26,13 @@ export default Runtime.handler(
       : []
     const layout = ReleaseLayout.at(global.data)
     const binaries = (yield* ReleaseLayout.installed(layout)).map((version) => ReleaseLayout.binary(layout, version))
-    const command = path.join(global.home, ".local", "bin", Release.binary)
+    const command = path.join(global.home, ".local", "bin", Product.binary)
     const commandLink = (yield* fs.readLink(command).pipe(Effect.option)).pipe(
-      Option.filter((target) => target === path.join(layout.current, Release.binary)),
+      Option.filter((target) => target === path.join(layout.current, Product.binary)),
     )
     const current = yield* fs.readLink(layout.current).pipe(Effect.option)
 
-    log.message("The following global files will be removed (shared by openforge versions and channels):")
+    log.message(`The following global files will be removed (shared by ${Product.name} versions and channels):`)
     if (yield* fs.exists(global.cache)) log.info(`  Cache: ${global.cache}`)
     services.forEach((name) =>
       log.info(`  Stop background service and persistent terminals: ${path.join(global.state, name)}`),
@@ -41,7 +41,7 @@ export default Runtime.handler(
     if (Option.isSome(current)) log.info(`  Release link: ${layout.current}`)
     binaries.forEach((file) => log.info(`  Binary: ${file}`))
     if (!binaries.length)
-      log.warn(`No openforge release is installed in ${layout.releases}. Remove the binary manually.`)
+      log.warn(`No ${Product.name} release is installed in ${layout.releases}. Remove the binary manually.`)
 
     if (input.dryRun) {
       log.warn("Dry run - no changes made")

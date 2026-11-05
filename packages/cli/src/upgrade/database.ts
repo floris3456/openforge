@@ -4,6 +4,7 @@
 import type { Database } from "bun:sqlite"
 import { Effect, FileSystem, Option } from "effect"
 import path from "node:path"
+import { errorMessage } from "../util/error"
 import { UpgradeError } from "./release"
 
 /** Writes a consistent copy of `database` to `target` with SQLite's `VACUUM INTO`. False when there is no database. */
@@ -69,10 +70,7 @@ function sqlite<A>(file: string, use: (db: Database) => A) {
       using db = new Database(file)
       return use(db)
     },
-    catch: (cause) =>
-      new UpgradeError({
-        reason: `Could not use the database ${file}: ${cause instanceof Error ? cause.message : String(cause)}`,
-      }),
+    catch: (cause) => new UpgradeError({ reason: `could not use the database ${file}: ${errorMessage(cause)}` }),
   })
 }
 

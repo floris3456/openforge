@@ -1,8 +1,9 @@
 import { intro, log, outro, spinner } from "@clack/prompts"
+import { switchingMessage, waitingMessage } from "@opencode/client/promise"
+import { Product } from "@opencode/schema/product"
 import { Effect, Option } from "effect"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
-import { ReleaseSwitch } from "../../upgrade/switch"
 import { Updater } from "../../upgrade/updater"
 import { handlePromptErrors } from "../../ui/prompt"
 
@@ -28,21 +29,12 @@ export default Runtime.handler(
         target: Option.getOrUndefined(input.target),
         restoreDatabase: input.restoreDatabase,
         notify: (state) => {
-          if (state.type === "installing") return step(`Installing openforge ${state.version}`)
+          if (state.type === "installing") return step(`Installing ${Product.name} ${state.version}`)
           if (state.type === "switching" && spinning && state.waiting)
-            return progress.message(
-              `Switching to openforge ${state.version}${state.waiting.length ? `; waiting for ${ReleaseSwitch.describe(state.waiting)}` : ""}`,
-            )
-          if (state.type === "switching") return step(`Switching to openforge ${state.version}`)
-          if (state.type === "waiting") {
-            stop(`openforge ${state.version} installed`)
-            return log.info(
-              state.waiting
-                ? `The chats did not pause within 2 minutes; switching to openforge ${state.version} once this has finished: ${ReleaseSwitch.describe(state.waiting)}`
-                : `The running service cannot pause; switching to openforge ${state.version} once no chat is running`,
-            )
-          }
-          if (state.type === "switched") return stop(`openforge ${state.version} is running`)
+            return progress.message(switchingMessage(state.version, state.waiting))
+          if (state.type === "switching") return step(switchingMessage(state.version))
+          if (state.type === "waiting") return stop(waitingMessage(state))
+          if (state.type === "switched") return stop(`${Product.name} ${state.version} is running`)
           if (state.type === "failed") return stop("Failed", 1)
         },
       })
@@ -50,13 +42,13 @@ export default Runtime.handler(
     if (outcome.type === "unavailable") return yield* Effect.fail(new Error(outcome.message))
     if (outcome.type === "switched" && input.restoreDatabase)
       log.info(
-        `The database used until now is kept beside openforge ${outcome.from}; to get it back: openforge upgrade ${outcome.from} --restore-database`,
+        `The database used until now is kept beside ${Product.name} ${outcome.from}; to get it back: ${Product.binary} upgrade ${outcome.from} --restore-database`,
       )
     if (outcome.type === "current")
       log.info(
         Option.isSome(input.target)
-          ? `openforge ${outcome.version} is already in use`
-          : `openforge ${outcome.version} is up to date`,
+          ? `${Product.name} ${outcome.version} is already in use`
+          : `${Product.name} ${outcome.version} is up to date`,
       )
     outro("Done")
   }, handlePromptErrors),

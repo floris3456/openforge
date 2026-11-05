@@ -78,7 +78,11 @@ export const target = Effect.fnUntraced(function* (directory: string) {
   return {
     layout: ReleaseLayout.at(dirs.data),
     database,
-    service: { file, env: { FAKE_REGISTRATION: file, FAKE_DATABASE: database, FAKE_LOG: history(directory) } },
+    service: {
+      file,
+      env: { FAKE_REGISTRATION: file, FAKE_DATABASE: database, FAKE_LOG: history(directory) },
+      pty: "handoff" as const,
+    },
     log: path.join(dirs.log, "upgrade.log"),
     timeout: Duration.seconds(4),
   } satisfies ReleaseSwitch.Target
@@ -95,7 +99,7 @@ export async function happened(directory: string) {
   return text.split("\n").filter(Boolean)
 }
 
-/** Asks the fake service at `url` something only tests ask: `/fake/work`, `/fake/finish`, `/fake/busy`, … */
+/** Asks the fake service at `url` something only tests ask: `/fake/work`, `/fake/finish`, `/fake/reads`, … */
 export async function fake(url: string, route: string, body?: unknown) {
   const response = await fetch(new URL(route, url), {
     method: "POST",

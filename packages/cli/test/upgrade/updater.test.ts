@@ -1,9 +1,11 @@
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
+import type { UpgradeState } from "@opencode/client/promise"
 import { describe, expect, test } from "bun:test"
 import { Duration, Effect, Fiber, Schedule } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { withEnsureTiming } from "../../../client/src/service-timing"
 import { testEffect } from "../../../core/test/lib/effect"
 import { ReleaseLayout } from "../../src/upgrade/layout"
 import { ReleaseSwitch } from "../../src/upgrade/switch"
@@ -76,16 +78,16 @@ const install = (
           pause: options.pause,
         })
       }).pipe(provide)
-    const states: Updater.State[] = []
-    const heard = new Set<{ readonly match: (state: Updater.State) => boolean; readonly done: () => void }>()
-    const notify = (state: Updater.State) => {
+    const states: UpgradeState[] = []
+    const heard = new Set<{ readonly match: (state: UpgradeState) => boolean; readonly done: () => void }>()
+    const notify = (state: UpgradeState) => {
       states.push(state)
       heard.forEach((listener) => (listener.match(state) ? listener.done() : undefined))
     }
     // Waits until the upgrade reports a state of this type, or one that matches.
-    const reports = (expected: Updater.State["type"] | ((state: Updater.State) => boolean)) =>
+    const reports = (expected: UpgradeState["type"] | ((state: UpgradeState) => boolean)) =>
       Effect.callback<void>((resume) => {
-        const match = typeof expected === "string" ? (state: Updater.State) => state.type === expected : expected
+        const match = typeof expected === "string" ? (state: UpgradeState) => state.type === expected : expected
         if (states.some(match)) return resume(Effect.void)
         const listener = { match, done: () => resume(Effect.void) }
         heard.add(listener)
@@ -203,9 +205,6 @@ describe("upgrade", () => {
         .upgrade({ notify: test.notify })
         .pipe(Effect.forkChild({ startImmediately: true }))
       yield* test.reports((state) => state.type === "switching" && state.waiting !== undefined)
-      // The service has not stopped while the tool runs.
-      yield* Effect.sleep("200 millis")
-      expect(yield* test.reported).toBe("0.1.0")
       yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
       expect(yield* Fiber.join(upgrading).pipe(Effect.timeout("10 seconds"))).toEqual({
         type: "switched",
@@ -219,6 +218,7 @@ describe("upgrade", () => {
         { type: "switching", version: "0.1.1", waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] },
         { type: "switched", version: "0.1.1" },
       ])
+      // The pause ended only once the tool had returned, and the service stopped after it.
       expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.1 started paused", "0.1.1 resumed"])
     }),
   )
@@ -235,7 +235,7 @@ describe("upgrade", () => {
       expect(test.states.at(-1)).toEqual({
         type: "waiting",
         version: "0.1.1",
-        waiting: [{ ...tool("ses_a"), title: "Fix the tests" }],
+        expired: { limit: 1_000, waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] },
       })
       expect(yield* test.reported).toBe("0.1.0")
       expect(yield* test.happened).toEqual(["0.1.0 pause expired"])
@@ -321,54 +321,52 @@ describe("upgrade", () => {
     }),
   )
 
-  it.live(
-    "says so when the old service does not stop, and does not hold that against the new release",
-    () =>
-      Effect.gen(function* () {
-        const test = yield* install({ latest: "0.1.1" })
-        yield* test.publish("0.1.1")
-        // 0.1.0's service again, now under a parent that never reaps it, as under a TUI that replaced itself: once
-        // stopped it stays a zombie, which still counts as running.
-        yield* Service.stop({ file: test.switching.service.file })
-        yield* Effect.acquireRelease(
-          Effect.sync(() =>
-            Bun.spawn(
-              [
-                "sh",
-                "-c",
-                '"$@" & exec sleep 60',
-                "sh",
-                ReleaseLayout.binary(test.switching.layout, "0.1.0"),
-                "serve",
-                "--service",
-              ],
-              { env: { ...process.env, ...test.switching.service.env }, stdout: "ignore", stderr: "inherit" },
-            ),
+  it.live("says so when the old service does not stop, and does not hold that against the new release", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1" })
+      yield* test.publish("0.1.1")
+      // A stop gives a service 12 s after SIGTERM and 5 s after SIGKILL; this one never goes.
+      withEnsureTiming(test.switching.service, { stopPollInterval: 10, stopTimeout: 200, killTimeout: 200 })
+      // 0.1.0's service again, now under a parent that never reaps it, as under a TUI that replaced itself: once
+      // stopped it stays a zombie, which still counts as running.
+      yield* Service.stop({ file: test.switching.service.file })
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.spawn(
+            [
+              "sh",
+              "-c",
+              '"$@" & exec sleep 60',
+              "sh",
+              ReleaseLayout.binary(test.switching.layout, "0.1.0"),
+              "serve",
+              "--service",
+            ],
+            { env: { ...process.env, ...test.switching.service.env }, stdout: "ignore", stderr: "inherit" },
           ),
-          (keeper) =>
-            Effect.promise(async () => {
-              keeper.kill("SIGKILL")
-              await keeper.exited
-            }),
-        )
-        yield* test.reported.pipe(
-          Effect.flatMap((version) => (version === "0.1.0" ? Effect.void : Effect.fail("not yet"))),
-          Effect.retry(Schedule.spaced("20 millis")),
-          Effect.timeout("5 seconds"),
-        )
-        const pid = (yield* Effect.promise(() => Bun.file(test.switching.service.file).json())).pid
-        const error = yield* (yield* test.make()).upgrade({ notify: test.notify }).pipe(Effect.flip)
-        const reason = `the background service did not stop: Server process ${pid} is still running`
-        expect(error.message).toBe(`upgrade to 0.1.1 failed: ${reason}; still on 0.1.0. Log: ${test.switching.log}`)
-        expect(test.states.at(-1)).toEqual({ type: "failed", message: error.message })
-        expect(yield* test.current).toBe("0.1.0")
-        expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
-        const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
-        expect(log).toContain(`0.1.0 -> 0.1.1: stopping the background service\n`)
-        expect(log).toContain(`0.1.0 -> 0.1.1: failed: ${reason}\n`)
-      }),
-    // Stopping waits 12 s after SIGTERM and 5 s after SIGKILL before it gives up.
-    30_000,
+        ),
+        (keeper) =>
+          Effect.promise(async () => {
+            keeper.kill("SIGKILL")
+            await keeper.exited
+          }),
+      )
+      yield* test.reported.pipe(
+        Effect.flatMap((version) => (version === "0.1.0" ? Effect.void : Effect.fail("not yet"))),
+        Effect.retry(Schedule.spaced("20 millis")),
+        Effect.timeout("5 seconds"),
+      )
+      const pid = (yield* Effect.promise(() => Bun.file(test.switching.service.file).json())).pid
+      const error = yield* (yield* test.make()).upgrade({ notify: test.notify }).pipe(Effect.flip)
+      const reason = `the background service did not stop: Server process ${pid} is still running`
+      expect(error.message).toBe(`upgrade to 0.1.1 failed: ${reason}; still on 0.1.0. Log: ${test.switching.log}`)
+      expect(test.states.at(-1)).toEqual({ type: "failed", message: error.message })
+      expect(yield* test.current).toBe("0.1.0")
+      expect(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide)).toEqual({})
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain(`0.1.0 -> 0.1.1: stopping the background service\n`)
+      expect(log).toContain(`0.1.0 -> 0.1.1: failed: ${reason}\n`)
+    }),
   )
 
   it.live("rolls back a release that fails to start and does not retry it on its own until a newer one is out", () =>
@@ -380,7 +378,7 @@ describe("upgrade", () => {
       const error = test.states.at(-1)
       expect(error?.type).toBe("failed")
       if (error?.type !== "failed") return
-      expect(error.message).toStartWith("upgrade to 0.1.1 failed: The service of openforge 0.1.1 exited (code 3).")
+      expect(error.message).toStartWith("upgrade to 0.1.1 failed: the service of openforge 0.1.1 exited (code 3)")
       expect(error.message).toEndWith(`; still on 0.1.0. Log: ${test.switching.log}`)
       expect(yield* test.current).toBe("0.1.0")
       expect(yield* test.reported).toBe("0.1.0")
@@ -391,7 +389,7 @@ describe("upgrade", () => {
       expect(test.states).toEqual([])
       const again = yield* updater.upgrade().pipe(Effect.flip)
       expect(again.message).toContain("failed to start before and was rolled back")
-      expect(again.message).toContain('Run "openforge upgrade 0.1.1" to try it again')
+      expect(again.message).toContain('run "openforge upgrade 0.1.1" to try it again')
       expect(test.downloads()).toHaveLength(1)
 
       // By hand it is tried again (and rolls back again).

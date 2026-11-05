@@ -1,41 +1,61 @@
 // Switching the release in use, one switch at a time across every openforge process, through a lock in the data
-// folder. A service that can pause (0.1.0 and later) is paused first: it stops starting model calls and tools, and
-// every chat rests at a step boundary recorded in the database. If that takes longer than 2 minutes the service opens
-// again by itself, and the switch tries again once the work it reported has finished. The switch then stops the
-// service, copies the database next to the release it leaves, points `current` at the new release, starts it paused,
-// checks within 10 s that it answers with the new version and reads its database, and resumes it: every chat
-// continues where it rested. If anything fails after the stop it points `current` back, restores the copy, and starts
-// and resumes the old release, so the chats continue there. A service from before 0.1.0 cannot pause; the switch
-// then waits until no chat is running, as those releases did.
+// folder:
+//   1. Pause the running service (0.1.0 and later): it stops starting model calls and tools, and every chat rests at
+//      a step boundary recorded in the database.
+//   2. If that takes longer than 2 minutes the service opens again by itself, and the switch tries again once the work
+//      it reported has finished.
+//   3. Stop the service.
+//   4. Copy the database next to the release it leaves, point `current` at the new release and start it paused.
+//   5. Check within 10 s that it answers with the new version, reads its database and reaches the tool runners.
+//   6. Resume it: every chat continues where it rested.
+// If anything fails after the stop it points `current` back, restores the copy, and starts and resumes the old
+// release, so the chats continue there. A service from before 0.1.0 cannot pause; the switch then waits until no chat
+// is running, as those releases did.
 
-import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { ClientError, describeWork, OpenCode, type ContinuityWork, type OpenCodeEvent } from "@opencode/client/promise"
-import { launchService, type ServiceProcess } from "@opencode/client/service-launch"
+import { Service, type Endpoint, type ServiceContender } from "@opencode/client/effect/service"
+import {
+  ClientError,
+  describeWork,
+  OpenCode,
+  type ContinuityWork,
+  type EventSubscribeInput,
+  type OpenCodeClient,
+  type OpenCodeEvent,
+  type SwitchWork,
+} from "@opencode/client/promise"
+import { Product } from "@opencode/schema/product"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Logging } from "@opencode/util/observability/logging"
-import { Deferred, Duration, Effect, Exit, Fiber, FileSystem, Option, Schedule, Schema } from "effect"
+import { Deferred, Duration, Effect, Exit, Fiber, FileSystem, Option, Schedule } from "effect"
 import path from "node:path"
-import { Release, UpgradeError } from "./release"
+import { errorMessage } from "../util/error"
+import { UpgradeError } from "./release"
 import { ReleaseDatabase } from "./database"
 import { ReleaseLayout } from "./layout"
 import { SwitchLock } from "./switch-lock"
 import { ReleaseVersion } from "./version"
 
-export const checkTimeout = Duration.seconds(10)
-export const pauseTimeout = Duration.minutes(2)
-
-/**
- * Work a pause waits for: a step that has not reached a boundary, a running tool or a model call, with the title of
- * its chat once the switch has read it.
- */
-export type Work = ContinuityWork & { readonly title?: string }
+const checkTimeout = Duration.seconds(10)
+const pauseTimeout = Duration.minutes(2)
+// How long the pause waits for its event subscription to go live before it asks the service to pause anyway.
+const subscribeTimeout = Duration.seconds(2)
+// How often a starting service's registration is read until it reports the version, within the check's timeout.
+const registrationInterval = Duration.millis(50)
+// A started service that failed its check gets this long after SIGTERM, then this long after SIGKILL.
+const killGrace = Duration.seconds(3)
+const reapTimeout = Duration.seconds(2)
+// How soon a wait for the running service's work listens again after its event stream failed.
+const relistenDelay = Duration.seconds(1)
 
 export type Target = {
   readonly layout: ReleaseLayout.Layout
   /** The live database file. */
   readonly database: string
-  /** The managed service's registration file and the environment it is started with. */
-  readonly service: { readonly file: string; readonly env?: Readonly<Record<string, string>> }
+  /**
+   * The managed service: its registration file, the environment it is started with, and what happens to its
+   * persistent terminals when the switch stops it: they are handed to the next service.
+   */
+  readonly service: { readonly file: string; readonly env?: Readonly<Record<string, string>>; readonly pty: "handoff" }
   /** Append-only log of switch attempts, named in failure messages. */
   readonly log: string
   /** How long a started service gets to answer with its version; 10 s unless a test shortens it. */
@@ -44,10 +64,13 @@ export type Target = {
   readonly pause?: Duration.Duration
 }
 
+/** A pause that gave up after `limit` milliseconds while `waiting` still ran. */
+export type Expired = { readonly limit: number; readonly waiting: ReadonlyArray<SwitchWork> }
+
 export type Result =
   | { readonly type: "switched"; readonly from: string; readonly to: string }
-  /** Not switched yet: the pause gave up while `waiting` ran, or a service that cannot pause runs a chat. */
-  | { readonly type: "busy"; readonly waiting?: ReadonlyArray<Work> }
+  /** Not switched yet: the pause `expired`, or a service that cannot pause runs a chat. */
+  | { readonly type: "busy"; readonly expired?: Expired }
   | { readonly type: "unchanged"; readonly version: string }
   | {
       readonly type: "rolled-back"
@@ -78,7 +101,7 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
     readonly from: string
     readonly to: string
     readonly restore?: string
-    readonly onWaiting?: (waiting: ReadonlyArray<Work>) => void
+    readonly onWaiting?: (waiting: ReadonlyArray<SwitchWork>) => void
   },
 ) {
   const flock = yield* EffectFlock.Service
@@ -91,23 +114,23 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
     Effect.gen(function* () {
       yield* flock
         .acquire(SwitchLock.key, target.layout.locks, { timeoutMs: Duration.toMillis(SwitchLock.timeout) })
-        .pipe(Effect.catch(() => fail("another openforge process is still switching releases")))
+        .pipe(Effect.catch(() => fail(`another ${Product.name} process is still switching releases`)))
       const current = yield* ReleaseLayout.current(target.layout)
       if (current === input.to) return { type: "unchanged" as const, version: input.to }
       if (current !== input.from)
-        return yield* fail(`openforge changed from ${input.from} to ${current ?? "nothing"} meanwhile`)
+        return yield* fail(`${Product.name} changed from ${input.from} to ${current ?? "nothing"} meanwhile`)
       if (!(yield* fs.exists(ReleaseLayout.binary(target.layout, input.to))))
-        return yield* fail(`openforge ${input.to} is not installed`)
+        return yield* fail(`${Product.name} ${input.to} is not installed`)
 
       // Once the service has paused the switch runs to its end, even if this process is asked to exit meanwhile;
       // asked while it pauses, the service opens again.
       return yield* Effect.uninterruptibleMask((interruptible) =>
         Effect.gen(function* () {
           const held = yield* interruptible(hold(target, input.onWaiting ?? (() => {}), log))
-          if (held.type === "busy") return { type: "busy" as const, ...(held.waiting ? { waiting: held.waiting } : {}) }
+          if (held.type === "busy") return held
           const old = held.type === "paused" ? held.endpoint : undefined
           yield* log("stopping the background service")
-          const stopped = yield* stop(target).pipe(Effect.exit)
+          const stopped = yield* Service.stop(target.service).pipe(Effect.exit)
           if (Exit.isFailure(stopped)) {
             // Not the new release's fault, so it is not remembered as bad. A paused service that is still there
             // carries on.
@@ -140,7 +163,7 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           const reason = failureMessage(switched)
           yield* log(`failed: ${reason}`)
           yield* log(`rolling back to ${input.from}`)
-          yield* stop(target).pipe(Effect.ignore)
+          yield* Service.stop(target.service).pipe(Effect.ignore)
           yield* ReleaseLayout.point(target.layout, input.from)
           if (progress.copied) yield* ReleaseDatabase.restore(copyOf(target, input.from), target.database)
           // Without a database before the switch, whatever the new release created goes. A database whose copy
@@ -169,13 +192,13 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
 })
 
 /**
- * Step 1: pauses the running service, reporting what it still waits for. `busy` when the pause gave up, or when a
- * service that cannot pause runs a chat; `legacy` when such a service runs none. Interrupted before it answers, the
- * service opens again.
+ * Steps 1 and 2: pauses the running service, reporting what it still waits for. `busy` when the pause expired, or
+ * when a service that cannot pause runs a chat; `legacy` when such a service runs none. Interrupted before it answers,
+ * the service opens again.
  */
 const hold = Effect.fnUntraced(function* (
   target: Target,
-  onWaiting: (waiting: ReadonlyArray<Work>) => void,
+  onWaiting: (waiting: ReadonlyArray<SwitchWork>) => void,
   log: (message: string) => Effect.Effect<void, never, FileSystem.FileSystem>,
 ) {
   const endpoint = yield* Service.discover({ file: target.service.file })
@@ -194,7 +217,7 @@ const hold = Effect.fnUntraced(function* (
     yield* log(
       missing(error)
         ? "the running service cannot pause; switching once no chat is running"
-        : `the running service did not say whether it can pause (${errorText(error)}); switching once no chat is running`,
+        : `the running service did not say whether it can pause (${errorMessage(error)}); switching once no chat is running`,
     )
     return { type: "busy" as const }
   }
@@ -209,10 +232,10 @@ const hold = Effect.fnUntraced(function* (
     }
   }).pipe(Effect.ensuring(Deferred.done(live, Exit.void)), Effect.ignore, Effect.forkChild({ startImmediately: true }))
   // The first report of what it waits for comes right after the pause starts; listen before asking.
-  yield* Deferred.await(live).pipe(Effect.timeoutOption("2 seconds"))
+  yield* Deferred.await(live).pipe(Effect.timeoutOption(subscribeTimeout))
   const result = yield* Effect.tryPromise({
     try: (signal) => api.experimental.service.pause({ timeout: Duration.toMillis(timeout) }, { signal }),
-    catch: (cause) => new UpgradeError({ reason: `the background service did not pause: ${errorText(cause)}` }),
+    catch: (cause) => new UpgradeError({ reason: `the background service did not pause: ${errorMessage(cause)}` }),
   }).pipe(
     Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : reopen(endpoint))),
     Effect.ensuring(Fiber.interrupt(watching)),
@@ -223,13 +246,13 @@ const hold = Effect.fnUntraced(function* (
   }
   const waiting = yield* Effect.promise((signal) => titled(result.waiting, signal))
   yield* log(
-    `the pause gave up after ${Duration.format(timeout)} and the service carries on; switching once this has finished: ${describe(waiting)}`,
+    `the pause gave up after ${Duration.format(timeout)} and the service carries on; switching once this has finished: ${describeWork(waiting)}`,
   )
-  return { type: "busy" as const, waiting }
+  return { type: "busy" as const, expired: { limit: Duration.toMillis(timeout), waiting } }
 })
 
 /** Adds each chat's title to the work a pause waits for; a chat is read once, and one that can't be read has none. */
-function titles(api: ReturnType<typeof client>) {
+function titles(api: OpenCodeClient) {
   const known = new Map<string, Promise<string | undefined>>()
   const title = (sessionID: string, signal: AbortSignal) => {
     const found =
@@ -243,7 +266,7 @@ function titles(api: ReturnType<typeof client>) {
   }
   return (waiting: ReadonlyArray<ContinuityWork>, signal: AbortSignal) =>
     Promise.all(
-      waiting.map(async (work): Promise<Work> => {
+      waiting.map(async (work): Promise<SwitchWork> => {
         if (!work.sessionID) return work
         const name = await title(work.sessionID, signal)
         return name ? { ...work, title: name } : work
@@ -255,56 +278,29 @@ function titles(api: ReturnType<typeof client>) {
 const reopen = (endpoint: Endpoint) =>
   Effect.tryPromise((signal) => client(endpoint).experimental.service.resume({ signal })).pipe(Effect.ignore)
 
-/** Stops the managed service, handing persistent terminals to the next one. */
-export const stop = Effect.fn("upgrade.switch.stop")(function* (target: Target) {
-  yield* Service.stop({ file: target.service.file, pty: "handoff" })
-})
-
 /**
- * Starts the service from `current`, paused when the release can be, and requires it to pass the checks within 10 s:
- * it answers with `version`, reads its database and reaches the tool runner. The switch starts exactly one service
- * and stops it by its PID when a check fails, so no attempt of a failed release is left starting up once a rollback
- * restores the database.
+ * Step 4's start: starts the service from `current`, paused when the release can be, and requires it to pass the
+ * checks of step 5 within 10 s. The switch starts exactly one service and stops it by its PID when a check fails, so
+ * no attempt of a failed release is left starting up once a rollback restores the database.
  */
 export const start = Effect.fn("upgrade.switch.start")(function* (target: Target, version: string) {
   const timeout = target.timeout ?? checkTimeout
   const paused = pausable(version)
-  const env = {
-    ...process.env,
-    ...target.service.env,
-    ...(yield* handoff(target.service.file)),
-    [SwitchLock.variable]: "1",
-  }
   // Started outside this process, which may replace itself with the new release and could then never reap it.
-  const service = yield* Effect.try({
-    try: () =>
-      launchService(
-        path.join(target.layout.current, Release.binary),
-        ["serve", "--service", ...(paused ? ["--paused"] : [])],
-        env,
-      ),
-    catch: (cause) => new Error(`Could not start openforge ${version}: ${String(cause)}`),
-  })
-  const child = service.launcher
-  let stderr = ""
-  const collect = (chunk: Buffer) => {
-    stderr = (stderr + chunk.toString("utf8")).slice(-8_192)
-  }
-  child.stderr?.on("data", collect)
-  const exited = yield* Deferred.make<string>()
-  child.once("error", (cause) => Deferred.doneUnsafe(exited, Effect.succeed(cause.message)))
-  void service.exited.then(() =>
-    Deferred.doneUnsafe(
-      exited,
-      Effect.succeed(service.signalCode ?? (service.exitCode === null ? "status unknown" : `code ${service.exitCode}`)),
+  const service = yield* Service.launch({
+    file: target.service.file,
+    command: [path.join(target.layout.current, Product.binary), "serve", "--service", ...(paused ? ["--paused"] : [])],
+    env: { ...target.service.env, [SwitchLock.variable]: "1" },
+  }).pipe(
+    Effect.mapError(
+      (cause) => new Error(`could not start ${Product.name} ${version}: ${errorMessage(cause.cause ?? cause)}`),
     ),
   )
-  child.unref()
-  const detail = () => (stderr.trim() ? `\n${stderr.trim()}` : "")
+  const detail = () => (service.stderr() ? `\n${service.stderr()}` : "")
 
   const ready = Service.discover({ file: target.service.file, version }).pipe(
     Effect.flatMap((endpoint) => (endpoint ? Effect.succeed(endpoint) : Effect.fail(new Error("not ready")))),
-    Effect.retry(Schedule.spaced("50 millis")),
+    Effect.retry(Schedule.spaced(registrationInterval)),
   )
   const checked = ready.pipe(
     Effect.flatMap((endpoint) =>
@@ -316,23 +312,24 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
   )
   const outcome = yield* Effect.raceFirst(
     checked,
-    Deferred.await(exited).pipe(Effect.map((reason) => ({ type: "exited" as const, reason }))),
+    exited(service).pipe(Effect.map((reason) => ({ type: "exited" as const, reason }))),
   ).pipe(Effect.timeoutOption(timeout))
   const result = Option.getOrUndefined(outcome)
   if (result?.type === "ready") {
-    // The service outlives this process; keep draining its stderr so it never blocks on a full pipe.
-    child.stderr?.off("data", collect)
-    child.stderr?.resume()
+    // The service outlives this process; its stderr is drained from now on so it never blocks on a full pipe.
+    service.release()
     return { endpoint: result.endpoint, paused: result.paused }
   }
   if (result?.type === "exited")
-    return yield* Effect.fail(new Error(`The service of openforge ${version} exited (${result.reason}).${detail()}`))
-  yield* kill(service, exited)
+    return yield* Effect.fail(
+      new Error(`the service of ${Product.name} ${version} exited (${result.reason})${detail()}`),
+    )
+  yield* kill(service)
   if (result?.type === "failed")
-    return yield* Effect.fail(new Error(`The service of openforge ${version} failed its check: ${result.reason}`))
+    return yield* Effect.fail(new Error(`the service of ${Product.name} ${version} failed its check: ${result.reason}`))
   return yield* Effect.fail(
     new Error(
-      `The service of openforge ${version} did not answer with that version within ${Duration.format(timeout)}.${detail()}`,
+      `the service of ${Product.name} ${version} did not answer with that version within ${Duration.format(timeout)}${detail()}`,
     ),
   )
 })
@@ -342,28 +339,21 @@ const check = Effect.fnUntraced(function* (endpoint: Endpoint, paused: boolean) 
   // The service opens and migrates its database before it answers at all; this read proves it can use it.
   yield* Effect.tryPromise({
     try: (signal) => client(endpoint).session.list({ limit: 1 }, { signal }),
-    catch: (cause) => new Error(`it could not read its database: ${errorText(cause)}`),
+    catch: (cause) => new Error(`it could not read its database: ${errorMessage(cause)}`),
   })
-  // The tool runner came with the pause, in 0.1.0; an earlier release has neither.
-  if (paused) yield* runnerReachable(endpoint)
-})
-
-/**
- * Step 5's last check: every tool runner holding commands answers the new service, so those commands reach the same
- * tool calls after the resume. Runs while the service is still paused, within the 10 s of the check; a failure rolls
- * the switch back.
- */
-export const runnerReachable = Effect.fnUntraced(function* (endpoint: Endpoint): Effect.fn.Return<void, Error> {
+  // The tool runner came with the pause, in 0.1.0; an earlier release has neither. Every runner holding commands must
+  // answer the new service, so those commands reach the same tool calls after the resume.
+  if (!paused) return
   const status = yield* Effect.tryPromise({
     try: (signal) => client(endpoint).experimental.service.status({ signal }),
-    catch: (cause) => new Error(`it did not say whether it reaches the tool runners: ${errorText(cause)}`),
+    catch: (cause) => new Error(`it did not say whether it reaches the tool runners: ${errorMessage(cause)}`),
   })
   const lost = (status.runners ?? []).filter((runner) => !runner.reachable)
   if (lost.length === 0) return
   return yield* Effect.fail(
     new Error(
       `it can't reach the tool runner of ${lost
-        .map((runner) => `openforge ${runner.version}${runner.reason ? ` (${runner.reason})` : ""}`)
+        .map((runner) => `${Product.name} ${runner.version}${runner.reason ? ` (${runner.reason})` : ""}`)
         .join(", ")}`,
     ),
   )
@@ -374,36 +364,32 @@ const resume = Effect.fnUntraced(function* (started: { readonly endpoint: Endpoi
   if (!started.paused) return
   const status = yield* Effect.tryPromise({
     try: (signal) => client(started.endpoint).experimental.service.resume({ signal }),
-    catch: (cause) => new Error(`The new service did not resume: ${errorText(cause)}`),
+    catch: (cause) => new Error(`the new service did not resume: ${errorMessage(cause)}`),
   })
   if (status.state !== "running")
-    return yield* Effect.fail(new Error(`The new service is ${status.state} after resuming.`))
+    return yield* Effect.fail(new Error(`the new service is ${status.state} after resuming`))
 })
 
-const kill = Effect.fnUntraced(function* (service: ServiceProcess, exited: Deferred.Deferred<string>) {
-  yield* Effect.sync(() => service.kill("SIGTERM"))
-  if (Option.isSome(yield* Deferred.await(exited).pipe(Effect.timeoutOption("3 seconds")))) return
-  yield* Effect.sync(() => service.kill("SIGKILL"))
-  yield* Deferred.await(exited).pipe(Effect.timeoutOption("2 seconds"))
-})
-
-// `Service.stop({ pty: "handoff" })` leaves the persistent terminals' handoff ticket beside the registration; the
-// next service adopts them from OPENCODE_PTY_HANDOFF, as `Service.ensure` passes it.
-const Sidecar = Schema.Struct({ handoff: Schema.NullOr(Schema.Unknown), expiresAt: Schema.Number })
-const decodeSidecar = Schema.decodeUnknownOption(Schema.fromJsonString(Sidecar))
-
-const handoff = Effect.fnUntraced(function* (file: string) {
-  const fs = yield* FileSystem.FileSystem
-  const sidecar = (yield* fs.readFileString(`${file}.pty-handoff`).pipe(Effect.option)).pipe(
-    Option.flatMap(decodeSidecar),
-    Option.filter((value) => value.expiresAt > Date.now() && value.handoff !== null),
+/** Why a started service ended: its exit code or signal, or why it could not start. */
+const exited = (service: ServiceContender) =>
+  Effect.promise(() => service.child.exited).pipe(
+    Effect.map(() => {
+      const failed = service.error()
+      if (failed) return errorMessage(failed.cause ?? failed)
+      if (service.child.signalCode) return service.child.signalCode
+      return service.child.exitCode === null ? "status unknown" : `code ${service.child.exitCode}`
+    }),
   )
-  if (Option.isNone(sidecar)) return {}
-  return { OPENCODE_PTY_HANDOFF: JSON.stringify(sidecar.value.handoff) }
+
+const kill = Effect.fnUntraced(function* (service: ServiceContender) {
+  yield* Effect.sync(() => service.child.kill("SIGTERM"))
+  if (Option.isSome(yield* exited(service).pipe(Effect.timeoutOption(killGrace)))) return
+  yield* Effect.sync(() => service.child.kill("SIGKILL"))
+  yield* exited(service).pipe(Effect.timeoutOption(reapTimeout))
 })
 
 /** Whether a chat is running on the local service; false when no service is running. */
-export const busy = Effect.fn("upgrade.switch.busy")(function* (target: Target) {
+const busy = Effect.fnUntraced(function* (target: Target) {
   const endpoint = yield* Service.discover({ file: target.service.file })
   if (!endpoint) return false
   return yield* Effect.tryPromise((signal) => client(endpoint).session.active({ signal })).pipe(
@@ -413,29 +399,16 @@ export const busy = Effect.fn("upgrade.switch.busy")(function* (target: Target) 
   )
 })
 
-/**
- * For a service that cannot pause: waits until no chat runs on it. It listens for chats ending instead of polling.
- */
+/** For a service that cannot pause: waits until no chat runs on it. */
 export const idle = Effect.fn("upgrade.switch.idle")(function* (target: Target) {
-  const wait = Effect.gen(function* () {
-    const endpoint = yield* Service.discover({ file: target.service.file })
-    if (!endpoint) return
-    const api = client(endpoint)
-    yield* Effect.tryPromise(async (signal) => {
-      const events = api.event.subscribe({
-        types: ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
-        signal,
-      })
-      // The stream opens with server.connected, so the first check runs once the subscription is live.
-      for await (const _event of events) {
-        if (Object.keys(await api.session.active({ signal })).length === 0) return
-      }
-      throw new Error("The event stream ended")
-    })
-  })
-  // The service may restart while a chat runs; look it up again.
-  yield* wait.pipe(Effect.retry(Schedule.spaced("1 second")))
+  yield* listen(
+    target,
+    ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"],
+    async (api, _event, signal) => Object.keys(await api.session.active({ signal })).length === 0,
+  )
 })
+
+type Events = NonNullable<EventSubscribeInput["types"]>
 
 // Events after which work a pause reported may have finished.
 const ended = [
@@ -449,50 +422,59 @@ const ended = [
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",
-] as const satisfies ReadonlyArray<OpenCodeEvent["type"]>
+] as const satisfies Events
 
 /**
- * After a pause gave up: waits until the work it reported has finished, listening to the service's events instead
- * of polling. A step counts as finished once its chat's step or execution ends, so the next step of the same chat
- * does not hold the switch back; a tool or model call once the service no longer lists it as running.
+ * After a pause expired: waits until the work it reported has finished. A step counts as finished once its chat's
+ * step or execution ends, so the next step of the same chat does not hold the switch back; a tool or model call once
+ * the service no longer lists it as running.
  */
-export const finished = Effect.fn("upgrade.switch.finished")(function* (target: Target, waiting: ReadonlyArray<Work>) {
+export const finished = Effect.fn("upgrade.switch.finished")(function* (
+  target: Target,
+  waiting: ReadonlyArray<SwitchWork>,
+) {
   let left = [...waiting]
-  const wait = Effect.gen(function* () {
+  yield* listen(target, ended, async (api, event, signal) => {
+    const sessionID = "sessionID" in event.data ? event.data.sessionID : undefined
+    if (event.type.startsWith("session.execution.")) left = left.filter((work) => work.sessionID !== sessionID)
+    if (event.type.startsWith("session.step."))
+      left = left.filter((work) => work.sessionID !== sessionID || work.kind === "tool")
+    const running = await api.experimental.service.status({ signal }).then(
+      (status) => status.waiting,
+      (error: unknown) => {
+        // A service that cannot pause took over; the next attempt finds out.
+        if (missing(error)) return []
+        throw error
+      },
+    )
+    left = left.filter((work) => running.some((item) => same(item, work)))
+    return left.length === 0
+  })
+})
+
+/**
+ * Listens to the running service's `types` events, instead of polling it, until `done` holds after one. The stream
+ * opens with `server.connected`, so the first check runs once the subscription is live. A service that restarts
+ * meanwhile is looked up again; without one, nothing runs that could still hold the switch back.
+ */
+const listen = Effect.fnUntraced(function* (
+  target: Target,
+  types: Events,
+  done: (api: OpenCodeClient, event: OpenCodeEvent, signal: AbortSignal) => Promise<boolean>,
+) {
+  const attempt = Effect.gen(function* () {
     const endpoint = yield* Service.discover({ file: target.service.file })
     if (!endpoint) return
     const api = client(endpoint)
-    yield* Effect.tryPromise({
-      try: async (signal) => {
-        // The stream opens with server.connected, so the first check runs once the subscription is live.
-        for await (const event of api.event.subscribe({ types: [...ended], signal })) {
-          const sessionID = "sessionID" in event.data ? event.data.sessionID : undefined
-          if (event.type.startsWith("session.execution.")) left = left.filter((work) => work.sessionID !== sessionID)
-          if (event.type.startsWith("session.step."))
-            left = left.filter((work) => work.sessionID !== sessionID || work.kind === "tool")
-          const running = (await api.experimental.service.status({ signal })).waiting
-          left = left.filter((work) => running.some((item) => same(item, work)))
-          if (left.length === 0) return
-        }
-        throw new Error("The event stream ended")
-      },
-      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
-    }).pipe(
-      // A service that cannot pause took over; the next attempt finds out.
-      Effect.catchIf(missing, () => Effect.void),
-    )
+    yield* Effect.tryPromise(async (signal) => {
+      for await (const event of api.event.subscribe({ types, signal })) if (await done(api, event, signal)) return
+      throw new Error("the event stream ended")
+    })
   })
-  // The service may restart meanwhile; look it up again.
-  yield* wait.pipe(Effect.retry(Schedule.spaced("1 second")))
+  yield* attempt.pipe(Effect.retry(Schedule.spaced(relistenDelay)))
 })
 
-/** `a reply in "Fix the tests", webfetch in "Docs"`: what a pause waits for, for logs and the command line. */
-export function describe(waiting: ReadonlyArray<Work>) {
-  if (waiting.length === 0) return "nothing"
-  return describeWork(waiting, (sessionID) => waiting.find((work) => work.sessionID === sessionID)?.title)
-}
-
-function same(left: Work, right: Work) {
+function same(left: ContinuityWork, right: ContinuityWork) {
   return left.sessionID === right.sessionID && left.kind === right.kind && left.name === right.name
 }
 
@@ -512,15 +494,10 @@ function client(endpoint: Endpoint) {
   return OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
 }
 
-function errorText(cause: unknown) {
-  return cause instanceof Error ? cause.message : String(cause)
-}
-
 function failureMessage(exit: Exit.Exit<unknown, unknown>) {
   if (Exit.isSuccess(exit)) return ""
   const error = Option.getOrUndefined(Exit.findErrorOption(exit))
-  if (error instanceof Error) return error.message
-  return error === undefined ? "the service stopped unexpectedly" : String(error)
+  return error === undefined ? "the service stopped unexpectedly" : errorMessage(error)
 }
 
 /** Adds a line about going from `from` to `to` to the upgrade log; never fails. */

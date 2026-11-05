@@ -4,6 +4,7 @@
 //   ~/.local/bin/openforge -> <data>/current/openforge
 // A release folder also holds the database copy made when openforge last switched away from it.
 
+import { Product } from "@opencode/schema/product"
 import { RunnerLock } from "@opencode/runner/lock"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { AppProcess } from "@opencode/util/process"
@@ -14,7 +15,8 @@ import { Release, UpgradeError } from "./release"
 import { SwitchLock } from "./switch-lock"
 import { ReleaseVersion } from "./version"
 
-export const keep = 3
+// How many releases stay installed.
+const keep = 3
 
 export type Layout = {
   readonly data: string
@@ -42,7 +44,7 @@ export function folder(layout: Layout, version: string) {
 }
 
 export function binary(layout: Layout, version: string) {
-  return path.join(layout.releases, version, Release.binary)
+  return path.join(folder(layout, version), Product.binary)
 }
 
 /** The version `current` points at, or undefined when openforge was not installed into this layout. */
@@ -109,7 +111,7 @@ export const verify = Effect.fn("upgrade.layout.verify")(function* (file: string
     })
     .pipe(
       Effect.mapError(
-        (cause) => new UpgradeError({ reason: `The new openforge binary did not run: ${cause.message}` }),
+        (cause) => new UpgradeError({ reason: `the new ${Product.name} binary did not run: ${cause.message}` }),
       ),
     )
   const printed = result.stdout.toString("utf8").trim()
@@ -118,8 +120,8 @@ export const verify = Effect.fn("upgrade.layout.verify")(function* (file: string
   return yield* new UpgradeError({
     reason:
       result.exitCode === 0
-        ? `The new openforge binary reports version "${printed}", not ${version}.`
-        : `The new openforge binary failed its version check (exit ${result.exitCode}): ${result.stderr.toString("utf8").trim() || printed}`,
+        ? `the new ${Product.name} binary reports version "${printed}", not ${version}`
+        : `the new ${Product.name} binary failed its version check (exit ${result.exitCode}): ${result.stderr.toString("utf8").trim() || printed}`,
   })
 })
 
@@ -147,7 +149,7 @@ export const install = Effect.fn("upgrade.layout.install")(function* (input: {
       const sha256 = yield* Release.download(asset.url, archive)
       if (sha256 !== asset.sha256)
         return yield* new UpgradeError({
-          reason: `The SHA-256 of the downloaded ${asset.name} is ${sha256}; the release lists ${asset.sha256}.`,
+          reason: `the SHA-256 of the downloaded ${asset.name} is ${sha256}; the release lists ${asset.sha256}`,
         })
       const unpacked = path.join(temporary, "unpacked")
       yield* fs.makeDirectory(unpacked)
@@ -161,7 +163,7 @@ export const install = Effect.fn("upgrade.layout.install")(function* (input: {
     Effect.mapError((cause) =>
       cause instanceof UpgradeError
         ? cause
-        : new UpgradeError({ reason: `Could not install openforge ${version}: ${cause.message}` }),
+        : new UpgradeError({ reason: `could not install ${Product.name} ${version}: ${cause.message}` }),
     ),
   )
   // macOS checks a binary the first time it runs from a path, again once it has moved: about 1.5 s for openforge.
@@ -178,7 +180,7 @@ const unpack = Effect.fnUntraced(function* (archive: string, directory: string) 
     appProcess.run(ChildProcess.make("tar", args), { timeout: "2 minutes", maxOutputBytes: 100_000 }).pipe(
       Effect.flatMap(AppProcess.requireSuccess),
       Effect.mapError(
-        (cause) => new UpgradeError({ reason: `Could not unpack ${path.basename(archive)}: ${cause.message}` }),
+        (cause) => new UpgradeError({ reason: `could not unpack ${path.basename(archive)}: ${cause.message}` }),
       ),
     )
   const entries = (yield* tar(["-tzf", archive])).stdout
@@ -186,16 +188,16 @@ const unpack = Effect.fnUntraced(function* (archive: string, directory: string) 
     .split("\n")
     .map((line) => line.trim().replace(/^\.\//, ""))
     .filter((line) => line && line !== "." && line !== "./")
-  if (entries.length !== 1 || entries[0] !== Release.binary)
+  if (entries.length !== 1 || entries[0] !== Product.binary)
     return yield* new UpgradeError({
-      reason: `${path.basename(archive)} must hold only "${Release.binary}"; it holds ${entries.join(", ") || "nothing"}.`,
+      reason: `${path.basename(archive)} must hold only "${Product.binary}"; it holds ${entries.join(", ") || "nothing"}`,
     })
   yield* tar(["-xzf", archive, "-C", directory])
-  const file = path.join(directory, Release.binary)
+  const file = path.join(directory, Product.binary)
   const info = yield* fs.lstat(file).pipe(Effect.option)
   if (Option.isNone(info) || info.value.type !== "File")
     return yield* new UpgradeError({
-      reason: `"${Release.binary}" in ${path.basename(archive)} is not a regular file.`,
+      reason: `"${Product.binary}" in ${path.basename(archive)} is not a regular file`,
     })
   return file
 })

@@ -1,5 +1,6 @@
 import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
+import { describeWork, type SwitchWork } from "@opencode/client/promise"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
@@ -87,22 +88,6 @@ describe("pausable", () => {
     expect(ReleaseSwitch.pausable("0.0.1")).toBe(false)
     expect(ReleaseSwitch.pausable("not a version")).toBe(false)
   })
-
-  test("says what a pause waits for, naming each chat by its title", () => {
-    const waiting = [
-      // A chat in the middle of a reply reports its model call and its step: one reply.
-      { sessionID: "ses_a", kind: "model" as const, name: "slow", title: "Fix the tests" },
-      { sessionID: "ses_a", kind: "step" as const, name: "reply", title: "Fix the tests" },
-      { ...tool("ses_b"), title: "Docs" },
-      { sessionID: "ses_c", kind: "model" as const, name: "slow" },
-      { kind: "model" as const, name: "slow" },
-      { kind: "step" as const, name: "compaction" },
-    ]
-    expect(ReleaseSwitch.describe(waiting)).toBe(
-      'a reply in "Fix the tests", webfetch in "Docs", a reply in an untitled chat, a model call, a step',
-    )
-    expect(ReleaseSwitch.describe([])).toBe("nothing")
-  })
 })
 
 describe("switch steps", () => {
@@ -152,7 +137,7 @@ describe("switch steps", () => {
         expect(info?.version).toBe("0.1.0")
         // The service a switch starts skips the switch lock it would otherwise wait for.
         expect(info?.switching).toBe("1")
-        yield* ReleaseSwitch.stop(test.switching).pipe(test.provide)
+        yield* Service.stop(test.switching.service)
         expect(yield* Service.discover({ file: test.switching.service.file })).toBeUndefined()
         yield* ReleaseLayout.point(test.switching.layout, "0.1.1").pipe(test.provide)
         const error = yield* ReleaseSwitch.start(test.switching, "0.1.1").pipe(test.provide, Effect.flip)
@@ -178,7 +163,7 @@ describe("switch steps", () => {
   it.live("fails the check of a service that cannot read its database and stops it", () =>
     Effect.gen(function* () {
       const test = yield* installed("0.1.0", { version: "0.1.1", serve: "unreadable" })
-      yield* ReleaseSwitch.stop(test.switching).pipe(test.provide)
+      yield* Service.stop(test.switching.service)
       yield* ReleaseLayout.point(test.switching.layout, "0.1.1").pipe(test.provide)
       const error = yield* ReleaseSwitch.start(test.switching, "0.1.1").pipe(test.provide, Effect.flip)
       expect(error.message).toContain("failed its check: it could not read its database")
@@ -219,7 +204,7 @@ describe("switch", () => {
     Effect.gen(function* () {
       const test = yield* installed("0.1.0", { version: "0.1.1" })
       yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a"), tool("ses_untitled", "bash")]))
-      const reports = yield* Deferred.make<ReadonlyArray<ReleaseSwitch.Work>>()
+      const reports = yield* Deferred.make<ReadonlyArray<SwitchWork>>()
       const running = yield* ReleaseSwitch.run(test.switching, {
         from: "0.1.0",
         to: "0.1.1",
@@ -228,7 +213,7 @@ describe("switch", () => {
       const reported = yield* Deferred.await(reports).pipe(Effect.timeout("5 seconds"))
       // Each chat is read for its title.
       expect(reported).toEqual([{ ...tool("ses_a"), title: "Fix the tests" }, tool("ses_untitled", "bash")])
-      expect(ReleaseSwitch.describe(reported)).toBe('webfetch in "Fix the tests", bash in an untitled chat')
+      expect(describeWork(reported)).toBe('webfetch in "Fix the tests", bash in an untitled chat')
       // Nothing has stopped while the tool runs.
       expect(yield* test.happened).toEqual([])
       yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
@@ -247,7 +232,10 @@ describe("switch", () => {
       const test = yield* installed("0.1.0", { version: "0.1.1" }, { pause: Duration.seconds(1) })
       yield* Effect.promise(() => fake(test.url, "/fake/work", [tool("ses_a")]))
       const busy = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
-      expect(busy).toEqual({ type: "busy", waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] })
+      expect(busy).toEqual({
+        type: "busy",
+        expired: { limit: 1_000, waiting: [{ ...tool("ses_a"), title: "Fix the tests" }] },
+      })
       expect(yield* test.happened).toEqual(["0.1.0 pause expired"])
       expect((yield* reported(test.switching))?.version).toBe("0.1.0")
       expect(yield* paused(test.switching)).toMatchObject({ state: "running" })
@@ -256,14 +244,22 @@ describe("switch", () => {
         'the pause gave up after 1s and the service carries on; switching once this has finished: webfetch in "Fix the tests"',
       )
 
+      const before = Number(yield* Effect.promise(() => fake(test.url, "/fake/reads?of=status")))
       const finished = yield* ReleaseSwitch.finished(test.switching, [tool("ses_a")]).pipe(
         test.provide,
         Effect.forkChild({ startImmediately: true }),
       )
-      // The chat's step ends while its tool keeps running: the switch keeps waiting.
+      // It reads the status once it listens, and again after each event while it waits.
+      const reads = (count: number) =>
+        Effect.promise(() => fake(test.url, `/fake/reads?of=status&count=${before + count}`)).pipe(
+          Effect.timeout("5 seconds"),
+        )
+      yield* reads(1)
+      // The chat's step ends while its tool keeps running: the switch keeps waiting, so it reads again after the next.
       yield* Effect.promise(() => fake(test.url, "/fake/step?sessionID=ses_a"))
-      yield* Effect.sleep("300 millis")
-      expect(finished.pollUnsafe()).toBeUndefined()
+      yield* reads(2)
+      yield* Effect.promise(() => fake(test.url, "/fake/step?sessionID=ses_a"))
+      yield* reads(3)
       yield* Effect.promise(() => fake(test.url, "/fake/finish?sessionID=ses_a"))
       yield* Fiber.join(finished).pipe(Effect.timeout("5 seconds"))
 
@@ -306,12 +302,22 @@ describe("switch", () => {
       const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
       expect(log).toContain("0.0.1 -> 0.1.0: the running service cannot pause; switching once no chat is running")
 
+      const before = Number(yield* Effect.promise(() => fake(test.url, "/fake/reads?of=active")))
       const idle = yield* ReleaseSwitch.idle(test.switching).pipe(
         test.provide,
         Effect.forkChild({ startImmediately: true }),
       )
-      yield* Effect.sleep("300 millis")
-      expect(idle.pollUnsafe()).toBeUndefined()
+      // It reads the running chats once it listens, and again after each execution that ends while it waits.
+      const reads = (count: number) =>
+        Effect.promise(() => fake(test.url, `/fake/reads?of=active&count=${before + count}`)).pipe(
+          Effect.timeout("5 seconds"),
+        )
+      yield* reads(1)
+      // Another chat's execution ends while one still runs: it keeps waiting, so it reads again after the next.
+      yield* Effect.promise(() => fake(test.url, "/fake/executed"))
+      yield* reads(2)
+      yield* Effect.promise(() => fake(test.url, "/fake/executed"))
+      yield* reads(3)
       yield* Effect.promise(() => fake(test.url, "/fake/idle"))
       yield* Fiber.join(idle).pipe(Effect.timeout("5 seconds"))
 
@@ -418,7 +424,7 @@ describe("switch", () => {
       const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
       expect(result).toMatchObject({ type: "rolled-back", restored: true })
       if (result.type !== "rolled-back") return
-      expect(result.reason).toStartWith("Could not use the database")
+      expect(result.reason).toStartWith("could not use the database")
       expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.0 started paused", "0.1.0 resumed"])
       expect(yield* ReleaseLayout.current(test.switching.layout).pipe(test.provide)).toBe("0.1.0")
       expect((yield* reported(test.switching))?.version).toBe("0.1.0")
@@ -455,24 +461,32 @@ describe("waiting", () => {
   it.live("a starting service waits while another process holds the switch lock", () =>
     Effect.gen(function* () {
       const directory = yield* root
-      const done = yield* Deferred.make<void>()
       const layout = ReleaseLayout.at(path.join(directory, "data"))
       const flock = yield* EffectFlock.Service.pipe(Effect.provide(layer(directory)))
+      const acquired = yield* Deferred.make<void>()
       const held = yield* Effect.forkChild(
-        Effect.scoped(flock.acquire(SwitchLock.key, layout.locks).pipe(Effect.andThen(Effect.never))),
+        Effect.scoped(
+          flock
+            .acquire(SwitchLock.key, layout.locks)
+            .pipe(Effect.andThen(Deferred.succeed(acquired, undefined)), Effect.andThen(Effect.never)),
+        ),
         { startImmediately: true },
       )
-      yield* Effect.sleep("100 millis")
+      yield* Deferred.await(acquired)
+      // The starting service asks for the switch lock, and gets it once the holder lets go.
+      const asked = yield* Deferred.make<{ readonly key: string; readonly dir?: string }>()
       const waiting = yield* SwitchLock.wait().pipe(
-        Effect.andThen(Deferred.succeed(done, undefined)),
+        Effect.provideService(EffectFlock.Service, {
+          ...flock,
+          acquire: (key, dir, options) =>
+            Deferred.succeed(asked, { key, dir }).pipe(Effect.andThen(flock.acquire(key, dir, options))),
+        }),
         Effect.provide(layer(directory)),
         Effect.forkChild({ startImmediately: true }),
       )
-      yield* Effect.sleep("500 millis")
-      expect(yield* Deferred.isDone(done)).toBe(false)
+      expect(yield* Deferred.await(asked)).toEqual({ key: SwitchLock.key, dir: layout.locks })
       yield* Fiber.interrupt(held)
-      yield* Fiber.join(waiting)
-      expect(yield* Deferred.isDone(done)).toBe(true)
+      yield* Fiber.join(waiting).pipe(Effect.timeout("5 seconds"))
     }),
   )
 

@@ -12,6 +12,8 @@
 // Like the real releases, one before 0.1.0 has no pause, refuses `--paused` and answers 404 under
 // /api/experimental/service/. From 0.1.0 on it pauses at once unless the test gave it work (POST /fake/work), which
 // holds the pause until POST /fake/finish ends it or the pause gives up. Started paused it refuses writes with 503.
+// It counts the reads of its status and of its running chats, so a test can tell that a wait has read them again
+// after an event (POST /fake/reads).
 import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { appendFileSync, writeFileSync } from "node:fs"
@@ -75,6 +77,23 @@ const runners =
     ? [{ version: "0.1.0", reachable: false, reason: "it speaks no protocol this release knows" }]
     : []
 const status = () => ({ state, startedPaused, waiting: work, rested: [], active: [], runners })
+const reads = { status: 0, active: 0 }
+const readers = new Set<() => void>()
+const read = (of: keyof typeof reads) => {
+  reads[of]++
+  readers.forEach((reader) => reader())
+}
+// Resolves once `of` has been read `count` times in all.
+const readsOf = (of: keyof typeof reads, count: number) =>
+  new Promise<void>((resolve) => {
+    const reader = () => {
+      if (reads[of] < count) return
+      readers.delete(reader)
+      resolve()
+    }
+    readers.add(reader)
+    reader()
+  })
 
 const pause = async (timeout: number) => {
   if (work.length === 0) {
@@ -112,7 +131,10 @@ const server = Bun.serve({
       return Response.json({ version: reported, pid: process.pid, urls: [], paths: { tmp: "/tmp" }, switching })
     if (url.pathname.startsWith("/api/experimental/persistent-pty/")) return Response.json({ handoff: null })
     if (url.pathname.startsWith("/api/experimental/service/") && !pausable) return new Response(null, { status: 404 })
-    if (url.pathname === "/api/experimental/service/status") return Response.json({ data: status() })
+    if (url.pathname === "/api/experimental/service/status") {
+      read("status")
+      return Response.json({ data: status() })
+    }
     if (url.pathname === "/api/experimental/service/pause") {
       const body = (await request.json()) as { timeout?: number }
       return Response.json({ data: await pause(body.timeout ?? 120_000) })
@@ -134,8 +156,10 @@ const server = Bun.serve({
         return Response.json({ code: "database", message: "database disk image is malformed" }, { status: 500 })
       return Response.json({ data: [], cursor: { next: null, previous: null } })
     }
-    if (url.pathname === "/api/session/active")
+    if (url.pathname === "/api/session/active") {
+      read("active")
       return Response.json({ data: busy ? { ses_fake: { type: "running" } } : {} })
+    }
     // Chats the test names: `ses_a` is titled, `ses_untitled` has no title yet; any other is unknown.
     const session = url.pathname.match(/^\/api\/session\/(ses_a|ses_untitled)$/)
     if (session && request.method === "GET")
@@ -177,6 +201,18 @@ const server = Bun.serve({
       busy = false
       publish("session.execution.succeeded", { sessionID: "ses_fake" })
       return new Response("idle")
+    }
+    // Another chat's execution ends while `ses_fake` keeps running.
+    if (url.pathname === "/fake/executed") {
+      publish("session.execution.succeeded", { sessionID: "ses_other" })
+      return new Response("executed")
+    }
+    // `?of=status|active`: how often that was read; with `&count=N`, once it has been read N times.
+    if (url.pathname === "/fake/reads") {
+      const of = url.searchParams.get("of") === "active" ? "active" : "status"
+      const count = url.searchParams.get("count")
+      if (count !== null) await readsOf(of, Number(count))
+      return new Response(String(reads[of]))
     }
     if (url.pathname === "/fake/work") {
       work = (await request.json()) as Work[]

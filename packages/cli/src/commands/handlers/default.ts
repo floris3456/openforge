@@ -9,14 +9,13 @@ import { Context, Effect, Exit, Fiber, FileSystem, Option, Queue, Scope } from "
 import path from "node:path"
 import { ServerConnection } from "../../services/server-connection"
 import { ReleaseLayout } from "../../upgrade/layout"
-import { Release } from "../../upgrade/release"
 import { Updater } from "../../upgrade/updater"
 import { UpdatePreflight } from "../../services/update-preflight"
 import { Npm } from "@opencode/util/npm"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_HIGHLIGHTS, OPENCODE_VERSION } from "../../version"
 import { Env } from "../../env"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { OpenCode } from "@opencode/client/promise"
+import { OpenCode, type UpgradeState } from "@opencode/client/promise"
 import { findSession } from "../../session-target"
 import { errorMessage } from "../../util/error"
 import { TuiDrafts } from "../../tui-drafts"
@@ -68,9 +67,9 @@ export default Runtime.handler(Commands, (input) =>
         catch: (cause) => new Error(errorMessage(cause)),
       })) !== undefined
     const updater = yield* Updater.Service
-    let latest: Updater.State | undefined
-    const listeners = new Set<(state: Updater.State) => void>()
-    const publish = (state: Updater.State) => {
+    let latest: UpgradeState | undefined
+    const listeners = new Set<(state: UpgradeState) => void>()
+    const publish = (state: UpgradeState) => {
       latest = state
       listeners.forEach((notify) => notify(state))
     }
@@ -79,11 +78,11 @@ export default Runtime.handler(Commands, (input) =>
     // Once per start, never on a timer. A standalone server shares the database, so it must not switch it.
     if (!input.standalone) yield* updater.startup(publish).pipe(Effect.forkIn(upgrades, { startImmediately: true }))
     const global = yield* Global.Service
-    const releaseBinary = path.join(ReleaseLayout.at(global.data).current, Release.binary)
+    const releaseBinary = path.join(ReleaseLayout.at(global.data).current, Product.binary)
     const relaunch: { to?: { readonly sessionID?: string } } = {}
+    const execve = process.platform === "win32" ? undefined : process.execve?.bind(process)
     const relaunchable =
-      typeof process.execve === "function" &&
-      process.platform !== "win32" &&
+      execve !== undefined &&
       requestedServer === undefined &&
       server.service !== undefined &&
       (yield* updater.current()) !== undefined
@@ -153,7 +152,7 @@ export default Runtime.handler(Commands, (input) =>
           input.standalone
             ? Promise.resolve({
                 type: "unavailable" as const,
-                message: "A --standalone server shares the database; upgrade from openforge without --standalone.",
+                message: `A --standalone server shares the database; upgrade from ${Product.binary} without --standalone.`,
               })
             : runPromise(
                 updater.upgrade({ notify: publish }).pipe(Effect.forkIn(upgrades), Effect.flatMap(Fiber.join)),
@@ -177,7 +176,7 @@ export default Runtime.handler(Commands, (input) =>
         runFork(effect)
       },
     }).pipe(Effect.provide(LayerNode.compile(Global.node)))
-    if (!relaunch.to) return
+    if (!relaunch.to || !execve) return
     // Same process, same terminal: the TUI restored the terminal when it closed, and the new release sets it up again.
     const args = [
       ...(relaunch.to.sessionID ? ["--session", relaunch.to.sessionID] : []),
@@ -200,11 +199,11 @@ export default Runtime.handler(Commands, (input) =>
       args,
       drafts: carry.length,
     })
-    yield* Effect.try(() => process.execve?.(releaseBinary, [releaseBinary, ...args], env)).pipe(
+    yield* Effect.try(() => execve(releaseBinary, [releaseBinary, ...args], env)).pipe(
       Effect.catch((error) =>
         Effect.sync(() =>
           process.stderr.write(
-            `Could not restart on the new openforge (${errorMessage(error)}); run openforge again to get the new screens.\n` +
+            `Could not restart on the new ${Product.name} release (${errorMessage(error)}); run ${Product.binary} to use it.\n` +
               (kept ? `Your half-typed prompts are kept in ${kept}.\n` : ""),
           ),
         ),

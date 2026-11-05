@@ -1,11 +1,13 @@
 // openforge's self-upgrade: one install method (GitHub releases, see ./release.ts), checked once at startup and
 // on `/update` or `openforge upgrade`; never on a timer.
 
+import type { UpgradeOutcome, UpgradeState } from "@opencode/client/promise"
 import { RunnerPaths } from "@opencode/runner/paths"
+import { Product } from "@opencode/schema/product"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
-import { Context, Duration, Effect, FileSystem, Layer, Semaphore } from "effect"
+import { Context, Duration, Effect, FileSystem, Layer, Option, Semaphore } from "effect"
 import { parse, type ParseError } from "jsonc-parser"
 import path from "node:path"
 import { databasePath } from "../database-path"
@@ -17,49 +19,29 @@ import { Release, UpgradeError } from "./release"
 import { ReleaseSwitch } from "./switch"
 import { ReleaseVersion } from "./version"
 
-export { UpgradeError } from "./release"
-
 export type Policy = "disable" | "notify" | "auto"
 
-/**
- * What an upgrade in progress reports, in order: installing, switching (again with what the pause still waits for,
- * as that changes), waiting (only when the switch has to try again later), then switched or failed.
- */
-export type State =
-  | { readonly type: "available"; readonly version: string }
-  | { readonly type: "installing"; readonly version: string }
-  | { readonly type: "switching"; readonly version: string; readonly waiting?: ReadonlyArray<ReleaseSwitch.Work> }
-  /**
-   * Installed, not switched yet: the pause gave up while `waiting` ran, and the switch tries again once that has
-   * finished. Without `waiting`, the running service cannot pause and the switch waits until no chat is running.
-   */
-  | { readonly type: "waiting"; readonly version: string; readonly waiting?: ReadonlyArray<ReleaseSwitch.Work> }
-  | { readonly type: "switched"; readonly version: string }
-  | { readonly type: "failed"; readonly version?: string; readonly message: string }
-
-export type Outcome =
-  | { readonly type: "current"; readonly version: string }
-  | { readonly type: "unavailable"; readonly message: string }
-  | { readonly type: "switched"; readonly from: string; readonly to: string }
+// Several processes may install the same release at once; one downloads, the others wait and find it installed.
+const installLock = { key: "openforge-release-install", timeout: Duration.minutes(15) }
 
 export type UpgradeInput = {
   /** A version to switch to, kept or downloaded; the latest release when omitted. */
   readonly target?: string
   /** Use the database copy made when `target` was left instead of the current database. */
   readonly restoreDatabase?: boolean
-  readonly notify?: (state: State) => void
+  readonly notify?: (state: UpgradeState) => void
 }
 
 export interface Interface {
   /** The release `current` points at, when this openforge runs from the install layout. */
   readonly current: () => Effect.Effect<string | undefined>
   /** Once at startup: tells about (`notify`) or switches to (`auto`) a newer release. Never fails. */
-  readonly startup: (notify: (state: State) => void) => Effect.Effect<void>
+  readonly startup: (notify: (state: UpgradeState) => void) => Effect.Effect<void>
   /** Installs a release and switches to it while chats run, whatever the policy. */
-  readonly upgrade: (input?: UpgradeInput) => Effect.Effect<Outcome, UpgradeError>
+  readonly upgrade: (input?: UpgradeInput) => Effect.Effect<UpgradeOutcome, UpgradeError>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@openforge/cli/Updater") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/cli/Updater") {}
 
 export type Options = {
   readonly data: string
@@ -104,19 +86,19 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     if (options.local)
       return {
         type: "unavailable" as const,
-        message: "This openforge runs from a source checkout. Install a release to upgrade it.",
+        message: `This ${Product.name} runs from a source checkout. Install a release to upgrade it.`,
       }
     if (!options.platform)
       return {
         type: "unavailable" as const,
-        message: `openforge releases are built for ${Release.platforms.join(" and ")} only.`,
+        message: `${Product.name} releases are built for ${Release.platforms.join(" and ")} only.`,
       }
     const own = yield* fs.realPath(ReleaseLayout.binary(layout, options.version)).pipe(Effect.option)
     const from = yield* ReleaseLayout.current(layout)
-    if (own._tag === "None" || own.value !== options.executable || !from)
+    if (Option.isNone(own) || own.value !== options.executable || !from)
       return {
         type: "unavailable" as const,
-        message: `openforge upgrades itself only when installed with install.sh into ${layout.releases}; this one runs from ${options.executable}.`,
+        message: `${Product.name} upgrades itself only when installed with install.sh into ${layout.releases}; this one runs from ${options.executable}.`,
       }
     return { type: "installed" as const, from, platform: options.platform }
   })
@@ -133,14 +115,13 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
   })
 
   const install = Effect.fnUntraced(function* (manifest: Release.Manifest, platform: Release.Platform) {
-    // Several TUIs may install the same release at startup; one downloads, the others find it installed.
     yield* Effect.scoped(
       Effect.gen(function* () {
         yield* flock
-          .acquire(`openforge-release-install`, layout.locks, { timeoutMs: Duration.toMillis("15 minutes") })
+          .acquire(installLock.key, layout.locks, { timeoutMs: Duration.toMillis(installLock.timeout) })
           .pipe(
             Effect.mapError(
-              () => new UpgradeError({ reason: "Another openforge process is still installing a release." }),
+              () => new UpgradeError({ reason: `another ${Product.name} process is still installing a release` }),
             ),
           )
         yield* ReleaseLayout.install({ layout, base: options.base, manifest, platform })
@@ -158,7 +139,9 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     const copy = ReleaseSwitch.copyOf(switching, input.to)
     if (input.restore) {
       if (yield* fs.exists(copy)) return copy
-      return yield* new UpgradeError({ reason: `There is no database copy from when openforge ${input.to} was left.` })
+      return yield* new UpgradeError({
+        reason: `there is no database copy from when ${Product.name} ${input.to} was left`,
+      })
     }
     // A newer release migrates the database forward itself.
     if (!ReleaseVersion.newer(input.from, input.to)) return undefined
@@ -168,18 +151,18 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     if (!known)
       return yield* new UpgradeError({
         reason:
-          `openforge ${input.to} was never left on this machine, so there is no database copy that shows which ` +
-          `database changes it knows. Not switching: it might not be able to read the current database.`,
+          `${Product.name} ${input.to} was never left on this machine, so there is no database copy that shows which ` +
+          `database changes it knows; not switching, as it might not be able to read the current database`,
       })
     const unknown = live.filter((id) => !known.includes(id))
     if (unknown.length === 0) return undefined
     const at = (yield* ReleaseDatabase.madeAt(copy))?.toISOString() ?? "an unknown time"
     return yield* new UpgradeError({
       reason:
-        `openforge ${input.to} can't read the current database: newer releases changed its structure ` +
-        `(${unknown.join(", ")}). The copy made when openforge ${input.to} was left, at ${at}, can be used instead, ` +
-        `but it lacks everything stored since then: chats, messages and settings saved after ${at}. ` +
-        `To switch with that copy: openforge upgrade ${input.to} --restore-database`,
+        `${Product.name} ${input.to} can't read the current database: newer releases changed its structure ` +
+        `(${unknown.join(", ")}). The copy made when ${Product.name} ${input.to} was left, at ${at}, can be used ` +
+        `instead, but it lacks everything stored since then: chats, messages and settings saved after ${at}. ` +
+        `To switch with that copy: ${Product.binary} upgrade ${input.to} --restore-database`,
     })
   })
 
@@ -192,7 +175,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       input.target === undefined
         ? undefined
         : (ReleaseVersion.normalize(input.target) ??
-          (yield* new UpgradeError({ reason: `Not a version: ${input.target}` })))
+          (yield* new UpgradeError({ reason: `not a version: ${input.target}` })))
     const kept = requested !== undefined && (yield* ReleaseLayout.installed(layout)).includes(requested)
     const manifest = kept ? undefined : yield* Release.manifest(options.base, requested ?? "latest")
     const to = requested ?? manifest?.version ?? from
@@ -201,14 +184,14 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     const bad = requested === undefined ? (yield* ReleaseLayout.bad(layout))[to] : undefined
     if (bad)
       return yield* new UpgradeError({
-        reason: `openforge ${to} failed to start before and was rolled back (${bad.reason}; log: ${bad.log}). Run "openforge upgrade ${to}" to try it again.`,
+        reason: `${Product.name} ${to} failed to start before and was rolled back (${bad.reason}; log: ${bad.log}); run "${Product.binary} upgrade ${to}" to try it again`,
       })
     const switching = yield* target()
     const restore = yield* database(switching, { from, to, restore: input.restoreDatabase ?? false })
     // Every step from here on is in the upgrade log; a failed one leaves `from` in use.
     const failed = (reason: string) =>
       new UpgradeError({
-        reason: `upgrade to ${to} failed: ${reason.replace(/\.$/, "")}; still on ${from}. Log: ${switching.log}`,
+        reason: `upgrade to ${to} failed: ${reason}; still on ${from}. Log: ${switching.log}`,
       })
     if (manifest) {
       notify({ type: "installing", version: to })
@@ -227,8 +210,10 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         onWaiting: (waiting) => notify({ type: "switching", version: to, waiting }),
       })
       if (outcome.type !== "busy") return outcome
-      notify({ type: "waiting", version: to, ...(outcome.waiting ? { waiting: outcome.waiting } : {}) })
-      yield* outcome.waiting ? ReleaseSwitch.finished(switching, outcome.waiting) : ReleaseSwitch.idle(switching)
+      notify({ type: "waiting", version: to, expired: outcome.expired })
+      yield* outcome.expired
+        ? ReleaseSwitch.finished(switching, outcome.expired.waiting)
+        : ReleaseSwitch.idle(switching)
       return outcome
     }).pipe(
       Effect.repeat({ until: (result) => result.type !== "busy" }),
@@ -236,13 +221,13 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     )
     if (result.type === "rolled-back")
       return yield* failed(
-        result.restored ? result.reason : `${result.reason} (openforge ${from} did not start again either)`,
+        result.restored ? result.reason : `${result.reason} (${Product.name} ${from} did not start again either)`,
       )
     notify({ type: "switched", version: to })
     return { type: "switched" as const, from, to }
   })
 
-  const startup = (notify: (state: State) => void) =>
+  const startup = (notify: (state: UpgradeState) => void) =>
     Effect.gen(function* () {
       if (options.local || options.disabled) return
       const policy = yield* readPolicy()
@@ -321,9 +306,9 @@ export const layer = Layer.effect(
       base: Release.base(),
       database: databasePath(global.data),
       service: ServiceConfig.options().pipe(
-        Effect.map((options) => ({ file: options.file, env: options.env })),
+        Effect.map((options) => ({ file: options.file, env: options.env, pty: "handoff" as const })),
         Effect.mapError(
-          (cause) => new UpgradeError({ reason: `Could not read the service configuration: ${cause.message}` }),
+          (cause) => new UpgradeError({ reason: `could not read the service configuration: ${cause.message}` }),
         ),
         Effect.provide(context),
       ),

@@ -93,7 +93,6 @@ test("the upgrade dialog shows the switch's steps, so the notice stays away whil
   const listeners = new Set<(state: UpdateState) => void>()
   const switched = Promise.withResolvers<void>()
   const updater = {
-    remote: false,
     subscribe: (notify: (state: UpdateState) => void) => {
       listeners.add(notify)
       return () => listeners.delete(notify)
@@ -124,7 +123,6 @@ test("the upgrade dialog shows the switch's steps, so the notice stays away whil
 test("the screen that runs the switch names the release it switches to", async () => {
   const listeners = new Set<(state: UpdateState) => void>()
   const updater = {
-    remote: false,
     subscribe: (notify: (state: UpdateState) => void) => {
       listeners.add(notify)
       return () => listeners.delete(notify)

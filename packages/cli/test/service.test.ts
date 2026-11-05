@@ -21,20 +21,18 @@ import { testEffect } from "../../core/test/lib/effect"
 const it = testEffect(NodeFileSystem.layer)
 
 test("managed service ports are stable per installation channel", () => {
-  expect(ServiceConfig.defaultPort("latest", "linux")).toBe(3674)
-  expect(ServiceConfig.defaultPort("dev", "linux")).toBe(3674)
-  expect(ServiceConfig.defaultPort("beta", "linux")).toBe(3674)
-  expect(ServiceConfig.defaultPort("next", "linux")).toBe(3674)
-  expect(ServiceConfig.defaultPort("local", "linux")).toBe(3675)
-  expect(ServiceConfig.defaultPort("latest", "darwin")).toBe(3674)
-  expect(ServiceConfig.defaultPort("preview-a", "linux")).toBe(ServiceConfig.defaultPort("preview-a", "linux"))
-  expect(ServiceConfig.defaultPort("preview-a", "linux")).not.toBe(ServiceConfig.defaultPort("preview-b", "linux"))
+  expect(ServiceConfig.defaultPort("latest")).toBe(3674)
+  expect(ServiceConfig.defaultPort("dev")).toBe(3674)
+  expect(ServiceConfig.defaultPort("beta")).toBe(3674)
+  expect(ServiceConfig.defaultPort("next")).toBe(3674)
+  expect(ServiceConfig.defaultPort("local")).toBe(3675)
+  expect(ServiceConfig.defaultPort("preview-a")).toBe(ServiceConfig.defaultPort("preview-a"))
+  expect(ServiceConfig.defaultPort("preview-a")).not.toBe(ServiceConfig.defaultPort("preview-b"))
 })
 
 test("managed service ports stay clear of opencode, OpenCodePlus and the ranges Windows and WSL reserve", () => {
-  const ports = ["latest", "dev", "local", ...Array.from({ length: 200 }, (_, index) => `preview-${index}`)].flatMap(
-    (channel) =>
-      (["linux", "darwin", "win32"] as const).map((platform) => ServiceConfig.defaultPort(channel, platform)),
+  const ports = ["latest", "dev", "local", ...Array.from({ length: 200 }, (_, index) => `preview-${index}`)].map(
+    (channel) => ServiceConfig.defaultPort(channel),
   )
   // opencode uses 49374 and 49375 and hashes its other channels into 10000-59999; OpenCodePlus uses 40375.
   expect(ports.filter((port) => port >= 10_000)).toEqual([])

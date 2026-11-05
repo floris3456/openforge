@@ -6,7 +6,6 @@ import path from "node:path"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { ServerConnection } from "../../services/server-connection"
-import { RetainedImage } from "../../services/retained-image"
 import { ReleaseLayout } from "../../upgrade/layout"
 import { Release } from "../../upgrade/release"
 import { handlePromptErrors, prompt, requireInteractive } from "../../ui/prompt"
@@ -75,8 +74,6 @@ export default Runtime.handler(
       )
     }
 
-    // Links that keep an older OpenCode replaceable may still run; move them so the cache can go.
-    if (process.platform === "win32") yield* RetainedImage.relocate(global.cache, global.tmp)
     const errors: string[] = []
     progress.start("Removing Cache...")
     yield* fs.remove(global.cache, { recursive: true, force: true }).pipe(

@@ -12,7 +12,6 @@ function source() {
     relaunches,
     switched: (version: string) => listeners.forEach((notify) => notify({ type: "switched", version })),
     updater: {
-      remote: false,
       subscribe: (notify: (state: UpdateState) => void) => {
         listeners.add(notify)
         return () => listeners.delete(notify)

@@ -44,20 +44,10 @@ export function filename(channel = OPENCODE_CHANNEL) {
   return `service-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`
 }
 
-export function defaultPort(channel = OPENCODE_CHANNEL, platform = process.platform) {
-  const port = channelPort(channel)
-  // Windows hands out 0xC000-0xFFFF for outgoing connections, Hyper-V and WinNAT reserve blocks of that range at boot,
-  // and WSL mirrored networking reserves a 4096-port block that usually covers 44620-48715. A reserved port fails as in
-  // use while nothing listens on it. Moving into the 0x7000 block, below 32768, avoids all of them and keeps the low
-  // 12 bits: 0xC0DE becomes 0x70DE.
-  if (platform === "win32" && port >= 0x8000) return 0x7000 | (port & 0xfff)
-  return port
-}
-
 // openforge's own ports, so it runs beside opencode (49374, 49375 and 10000-59999 for its other channels) and
 // OpenCodePlus (40375). 3674 spells FORG on a phone keypad; below 10000 it is also outside the Linux and macOS ephemeral
 // ranges and the blocks Windows and WSL reserve.
-function channelPort(channel: string) {
+export function defaultPort(channel = OPENCODE_CHANNEL) {
   if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return 3674
   if (channel === "local") return 3675
   return 3676 + (Number.parseInt(Hash.fast(channel).slice(0, 8), 16) % 10)

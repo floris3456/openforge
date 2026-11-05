@@ -225,7 +225,6 @@ test("a screen told the switch finished restarts only once its waiting writes we
     fetch: fake.fetch,
     args: { sessionID: fake.sessionID },
     updater: {
-      remote: false,
       subscribe: (notify) => {
         listeners.add(notify)
         return () => listeners.delete(notify)
@@ -267,7 +266,6 @@ test("a screen told the switch finished does not restart while a write is still 
     fetch,
     args: { sessionID: fake.sessionID },
     updater: {
-      remote: false,
       subscribe: (notify) => {
         listeners.add(notify)
         return () => listeners.delete(notify)

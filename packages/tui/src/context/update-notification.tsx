@@ -48,7 +48,6 @@ export type UpdateOutcome =
   | { readonly type: "switched"; readonly from: string; readonly to: string }
 
 export type UpdateSource = {
-  readonly remote: boolean
   readonly subscribe: (notify: (state: UpdateState) => void) => () => void
   /** Installs the latest release and switches to it while chats run. */
   readonly upgrade: () => Promise<UpdateOutcome>

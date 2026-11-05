@@ -144,7 +144,6 @@ export default Runtime.handler(Commands, (input) =>
         update: (update) => runPromise(config.update(update)),
       },
       updater: {
-        remote: requestedServer !== undefined,
         subscribe: (notify) => {
           if (latest) notify(latest)
           listeners.add(notify)

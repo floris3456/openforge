@@ -530,6 +530,25 @@ describe("waiting", () => {
     }),
   )
 
+  it.live("tells whether a switch holds its lock, and shows none where the lock can't be written", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const provide = Effect.provide(layer(directory))
+      const locks = ReleaseLayout.at(path.join(directory, "data")).locks
+      expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(false)
+      // Asking took the lock and let it go again.
+      const flock = yield* EffectFlock.Service.pipe(provide)
+      yield* flock.acquire(SwitchLock.key, locks, { timeoutMs: 1_000 })
+      expect(yield* SwitchLock.held(locks).pipe(provide)).toBe(true)
+      const sealed = path.join(directory, "sealed")
+      yield* Effect.acquireRelease(
+        Effect.promise(() => fs.mkdir(sealed, { mode: 0o555 })),
+        () => Effect.promise(() => fs.chmod(sealed, 0o755)),
+      )
+      expect(yield* SwitchLock.held(path.join(sealed, "locks")).pipe(provide)).toBe(false)
+    }),
+  )
+
   it.live("the service a switch starts does not wait for the switch's lock", () =>
     Effect.gen(function* () {
       const directory = yield* root

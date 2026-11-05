@@ -165,8 +165,9 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           const reason = failureMessage(switched)
           yield* log(`failed: ${reason}`)
           yield* log(`rolling back to ${input.from}`)
-          // A new service that never registered took no persistent terminals over: stopping nothing would throw
-          // away the ticket the old service handed them on with, which its release takes them back with.
+          // With no service registered there is nothing to stop, and a stop would throw away the ticket the old
+          // service handed its persistent terminals on with. A new service that never registered never took them
+          // over, so the old release takes them back with that ticket.
           if (yield* fs.exists(target.service.file).pipe(Effect.orElseSucceed(() => true)))
             yield* Service.stop(target.service).pipe(Effect.ignore)
           yield* ReleaseLayout.point(target.layout, input.from)

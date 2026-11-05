@@ -37,7 +37,10 @@ export const held = Effect.fn("upgrade.switch-lock.held")(function* (locks: stri
   const flock = yield* EffectFlock.Service
   return yield* Effect.scoped(flock.acquire(key, locks, { timeoutMs: Duration.toMillis(probe) })).pipe(
     Effect.as(false),
-    Effect.orElseSucceed(() => true),
+    Effect.catchTag("LockTimeoutError", () => Effect.succeed(true)),
+    // A lock folder this process can't write to shows no switch, and must not stop it from connecting.
+    Effect.orElseSucceed(() => false),
+    Effect.catchDefect(() => Effect.succeed(false)),
   )
 })
 

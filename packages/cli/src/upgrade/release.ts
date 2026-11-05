@@ -3,7 +3,7 @@
 // (`archive`) holding just the `openforge` binary, and `SHA256SUMS`.
 
 import { Product } from "@opencode/schema/product"
-import { Duration, Effect, Schema } from "effect"
+import { Duration, Effect, Option, Schema } from "effect"
 import { errorMessage } from "../util/error"
 import { ReleaseVersion } from "./version"
 
@@ -30,7 +30,12 @@ export const Manifest = Schema.Struct({
 })
 export type Manifest = typeof Manifest.Type
 
-const decodeManifest = Schema.decodeUnknownEffect(Schema.fromJsonString(Manifest))
+const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Manifest))
+
+/** Reads the text of a `release.json`; undefined when it is not one. */
+export function decodeManifest(text: string) {
+  return Option.getOrUndefined(decode(text))
+}
 
 /** The archive that holds `platform`'s build. */
 export function archive(platform: Platform) {
@@ -64,9 +69,8 @@ export function sums(text: string) {
 /** Fetches a release's `release.json`; `target` is `latest` or a version. */
 export const manifest = Effect.fn("upgrade.release.manifest")(function* (base: string, target: "latest" | string) {
   const text = yield* fetchText(url(base, target, "release.json"), "the release information")
-  const manifest = yield* decodeManifest(text).pipe(
-    Effect.mapError(() => new UpgradeError({ reason: "the release information (release.json) is not valid" })),
-  )
+  const manifest = decodeManifest(text)
+  if (!manifest) return yield* new UpgradeError({ reason: "the release information (release.json) is not valid" })
   const version = ReleaseVersion.normalize(manifest.version)
   if (!version)
     return yield* new UpgradeError({ reason: `the release information names an invalid version: ${manifest.version}` })

@@ -2,9 +2,10 @@
 
 // Builds an openforge release on this machine, and uploads one to GitHub Releases with --publish.
 //
-// A build writes the release assets into the release folder: release.json, one openforge-<target>.tar.gz per target
-// (holding only `openforge`), SHA256SUMS and install.sh, plus build-info.json, which is not uploaded. --publish
-// uploads exactly those assets, so the bytes that were tested are the bytes that are released; it never builds.
+// A build writes the release assets into the release folder: release.json, one archive per target (holding only
+// the binary), SHA256SUMS and install.sh, as packages/cli/src/upgrade/release.ts reads them, plus build-info.json,
+// which is not uploaded. --publish uploads exactly those assets, so the bytes that were tested are the bytes that are
+// released; it never builds. The packages are imported by path: the workspace root does not depend on them.
 
 import { $ } from "bun"
 import { closeSync, openSync } from "node:fs"
@@ -12,11 +13,14 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { parseArgs } from "node:util"
+import { Release } from "../../packages/cli/src/upgrade/release"
 import { Product } from "../../packages/schema/src/product"
 
-const targets = ["linux-x64", "darwin-arm64"] as const
-type Target = (typeof targets)[number]
-const published = ["release.json", ...targets.map(archiveName), "SHA256SUMS", "install.sh"]
+const targets = Release.platforms
+type Target = Release.Platform
+const published = ["release.json", ...targets.map(Release.archive), "SHA256SUMS", "install.sh"]
+// How long the built binary gets to print its version.
+const versionTimeout = 30_000
 
 const usage = `Usage: bun script/openforge/release.ts --version <x.y.z> [--out <dir>]
        bun script/openforge/release.ts --version <x.y.z> [--out <dir>] --publish [--notes-file <file>] [--dry-run]
@@ -65,12 +69,7 @@ async function build(version: string) {
   // packages of every platform.
   for (const target of targets) builds.push(await buildTarget(version, target, builds.length === 0))
 
-  const installable = await Bun.file(installer).exists()
-  if (installable) await fs.copyFile(installer, path.join(out, "install.sh"))
-  if (!installable) {
-    await fs.rm(path.join(out, "install.sh"), { force: true })
-    console.warn(`warning: ${path.relative(root, installer)} is missing, so this release has no install.sh`)
-  }
+  await fs.copyFile(installer, path.join(out, "install.sh"))
 
   const assets = Object.fromEntries(
     await Promise.all(
@@ -80,12 +79,11 @@ async function build(version: string) {
       ]),
     ),
   )
-  await Bun.write(path.join(out, "release.json"), JSON.stringify({ version, assets }, null, 2) + "\n")
+  const manifest = { version, assets } satisfies Release.Manifest
+  await Bun.write(path.join(out, "release.json"), JSON.stringify(manifest, null, 2) + "\n")
   await Bun.write(path.join(out, "SHA256SUMS"), await checksums(await present(published)))
-  await Bun.write(
-    path.join(out, "build-info.json"),
-    JSON.stringify({ version, commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n",
-  )
+  const info = { version, commit, dirty, builtAt: new Date().toISOString() } satisfies BuildInfo
+  await Bun.write(path.join(out, "build-info.json"), JSON.stringify(info, null, 2) + "\n")
 
   console.log(`\n${Product.name} ${version} (${commit.slice(0, 10)}${dirty ? ", uncommitted changes" : ""}) → ${out}`)
   for (const item of builds)
@@ -141,7 +139,7 @@ async function checkVersion(binary: string, version: string) {
     },
     stdout: "pipe",
     stderr: "pipe",
-    timeout: 30_000,
+    timeout: versionTimeout,
   })
   await fs.rm(home, { recursive: true, force: true })
   const printed = result.stdout.toString().trim()
@@ -153,7 +151,7 @@ async function checkVersion(binary: string, version: string) {
 
 // Each archive holds the binary alone, at its top level.
 async function pack(binary: string, target: Target) {
-  const archive = path.join(out, archiveName(target))
+  const archive = path.join(out, Release.archive(target))
   await $`tar --format=ustar --owner=0 --group=0 --numeric-owner -czf ${archive} -C ${path.dirname(binary)} ${Product.binary}`
   const entries = (await $`tar -tzf ${archive}`.text()).trim().split("\n")
   if (entries.length !== 1 || entries[0] !== Product.binary)
@@ -163,16 +161,12 @@ async function pack(binary: string, target: Target) {
 
 async function publish(version: string) {
   const files = await present(published)
-  const info = (await Bun.file(path.join(out, "build-info.json"))
-    .json()
-    .catch(() => ({}))) as { version?: string; commit?: string; dirty?: boolean }
+  const info = await buildInfo()
   const problems = [
     ...published.filter((name) => !files.includes(name)).map((name) => `missing ${path.join(out, name)}`),
     ...(await verify(version, files)),
-    ...(info.version === version && info.commit
-      ? []
-      : [`no build of ${version} recorded in ${path.join(out, "build-info.json")}`]),
-    ...(info.dirty === false ? [] : ["the assets were not built from a clean commit"]),
+    ...(info?.version === version ? [] : [`no build of ${version} recorded in ${path.join(out, "build-info.json")}`]),
+    ...(info?.dirty === false ? [] : ["the assets were not built from a clean commit"]),
   ]
   const notes = values["notes-file"]
   // GitHub creates the tag at the commit the assets were built from, so that commit must be pushed first.
@@ -184,7 +178,7 @@ async function publish(version: string) {
     "--repo",
     Product.repository,
     "--latest",
-    ...(info.commit ? ["--target", info.commit] : []),
+    ...(info ? ["--target", info.commit] : []),
     ...(notes ? ["--notes-file", path.resolve(notes)] : ["--notes", ""]),
     ...published.map((name) => path.join(out, name)),
   ]
@@ -202,48 +196,67 @@ async function publish(version: string) {
 // SHA256SUMS must list every other asset with its checksum, and release.json must describe this version's archives.
 async function verify(version: string, files: string[]) {
   const sums = files.includes("SHA256SUMS")
-    ? (await Bun.file(path.join(out, "SHA256SUMS")).text())
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => line.split("  "))
-    : []
-  const release = (
-    files.includes("release.json")
-      ? await Bun.file(path.join(out, "release.json"))
-          .json()
-          .catch(() => ({}))
-      : {}
-  ) as { version?: string; assets?: Partial<Record<Target, { name?: string; sha256?: string }>> }
+    ? Release.sums(await Bun.file(path.join(out, "SHA256SUMS")).text())
+    : new Map<string, string>()
   const listed = await Promise.all(
     files
       .filter((name) => name !== "SHA256SUMS")
       .map(async (name) => {
-        const hash = sums.find((line) => line[1] === name)?.[0]
+        const hash = sums.get(name)
         if (hash === undefined) return [`SHA256SUMS does not list ${name}`]
         if (hash !== (await sha256(path.join(out, name)))) return [`SHA256SUMS does not match ${name}`]
         return []
       }),
   )
+  if (!files.includes("release.json")) return listed.flat()
+  const release = Release.decodeManifest(await Bun.file(path.join(out, "release.json")).text())
+  if (!release) return [...listed.flat(), "release.json is not a valid release description"]
   const described = await Promise.all(
     targets.map(async (target) => {
-      const asset = release.assets?.[target]
-      if (!files.includes(archiveName(target))) return []
-      if (asset?.name === archiveName(target) && asset.sha256 === (await sha256(path.join(out, archiveName(target)))))
-        return []
-      return [`release.json does not describe ${archiveName(target)}`]
+      const name = Release.archive(target)
+      const asset = release.assets[target]
+      if (!files.includes(name)) return []
+      if (asset?.name === name && asset.sha256 === (await sha256(path.join(out, name)))) return []
+      return [`release.json does not describe ${name}`]
     }),
   )
   return [
     ...listed.flat(),
     ...described.flat(),
-    ...(files.includes("release.json") && release.version !== version
-      ? [`release.json is for ${release.version}, not ${version}`]
-      : []),
+    ...(release.version === version ? [] : [`release.json is for ${release.version}, not ${version}`]),
   ]
 }
 
-function archiveName(target: Target) {
-  return `${Product.binary}-${target}.tar.gz`
+// What a build records about itself in build-info.json.
+type BuildInfo = {
+  readonly version: string
+  readonly commit: string
+  readonly dirty: boolean
+  readonly builtAt: string
+}
+
+// The build recorded in the release folder; undefined without one.
+async function buildInfo() {
+  const file = Bun.file(path.join(out, "build-info.json"))
+  if (!(await file.exists())) return
+  const value: unknown = await file.json().catch(() => undefined)
+  if (!isBuildInfo(value)) throw new Error(`${file.name} is not a build record; build ${version} again`)
+  return value
+}
+
+function isBuildInfo(value: unknown): value is BuildInfo {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "version" in value &&
+    typeof value.version === "string" &&
+    "commit" in value &&
+    typeof value.commit === "string" &&
+    "dirty" in value &&
+    typeof value.dirty === "boolean" &&
+    "builtAt" in value &&
+    typeof value.builtAt === "string"
+  )
 }
 
 async function present(names: string[]) {

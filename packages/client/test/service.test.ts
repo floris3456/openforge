@@ -13,6 +13,7 @@ import {
   stoppedExitCode,
 } from "./fixture/service-fixture"
 import { accelerate } from "./fixture/service-timing"
+import { until } from "./fixture/wait"
 import { defaultEnsureTiming, withEnsureTiming } from "../src/service-timing"
 
 const ensure = accelerate(Service.ensure)
@@ -282,13 +283,15 @@ test.skipIf(process.platform === "win32")(
       expect(ancestors(info.pid)).not.toContain(starter.pid)
       expect(ancestors(info.pid)).not.toContain(process.pid)
       // execve keeps the PID; wait until the starter runs `sleep`.
-      while (
-        !Bun.spawnSync(["ps", "-o", "comm=", "-p", String(starter.pid)])
-          .stdout.toString()
-          .trim()
-          .endsWith("sleep")
+      await until(
+        () =>
+          Bun.spawnSync(["ps", "-o", "comm=", "-p", String(starter.pid)])
+            .stdout.toString()
+            .trim()
+            .endsWith("sleep"),
+        10_000,
+        "the starter replacing itself with sleep",
       )
-        await Bun.sleep(10)
       await run(stop({ file: registration }))
       expect(() => process.kill(info.pid, 0)).toThrow()
     } finally {

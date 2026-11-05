@@ -17,6 +17,9 @@ import { ReleaseVersion } from "./version"
 
 // How many releases stay installed.
 const keep = 3
+// How long the new binary's version check and the archive's tar may run, and how much they may print.
+const versionRun = { timeout: "30 seconds", maxOutputBytes: 10_000, maxErrorBytes: 10_000 } as const
+const tarRun = { timeout: "2 minutes", maxOutputBytes: 100_000 } as const
 
 export type Layout = {
   readonly data: string
@@ -104,11 +107,7 @@ export const prune = Effect.fn("upgrade.layout.prune")(function* (layout: Layout
 export const verify = Effect.fn("upgrade.layout.verify")(function* (file: string, version: string) {
   const appProcess = yield* AppProcess.Service
   const result = yield* appProcess
-    .run(ChildProcess.make(file, ["--version"]), {
-      timeout: "30 seconds",
-      maxOutputBytes: 10_000,
-      maxErrorBytes: 10_000,
-    })
+    .run(ChildProcess.make(file, ["--version"]), versionRun)
     .pipe(
       Effect.mapError(
         (cause) => new UpgradeError({ reason: `the new ${Product.name} binary did not run: ${cause.message}` }),
@@ -177,7 +176,7 @@ const unpack = Effect.fnUntraced(function* (archive: string, directory: string) 
   const fs = yield* FileSystem.FileSystem
   const appProcess = yield* AppProcess.Service
   const tar = (args: string[]) =>
-    appProcess.run(ChildProcess.make("tar", args), { timeout: "2 minutes", maxOutputBytes: 100_000 }).pipe(
+    appProcess.run(ChildProcess.make("tar", args), tarRun).pipe(
       Effect.flatMap(AppProcess.requireSuccess),
       Effect.mapError(
         (cause) => new UpgradeError({ reason: `could not unpack ${path.basename(archive)}: ${cause.message}` }),

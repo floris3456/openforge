@@ -46,6 +46,8 @@ const killGrace = Duration.seconds(3)
 const reapTimeout = Duration.seconds(2)
 // How soon a wait for the running service's work listens again after its event stream failed.
 const relistenDelay = Duration.seconds(1)
+// The switch log is cut back to its last half megabyte once it passes one megabyte.
+const logSize = { max: 1024 * 1024, keep: 512 * 1024 }
 
 export type Target = {
   readonly layout: ReleaseLayout.Layout
@@ -109,7 +111,7 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
   const log = (message: string) => note(target, input, message)
   // A failure that changed nothing; `from` stays in use.
   const fail = (reason: string) => Effect.fail(new UpgradeError({ reason }))
-  yield* Logging.trim(target.log, { max: 1024 * 1024, keep: 512 * 1024 }).pipe(Effect.ignore)
+  yield* Logging.trim(target.log, logSize).pipe(Effect.ignore)
   return yield* Effect.scoped(
     Effect.gen(function* () {
       yield* flock

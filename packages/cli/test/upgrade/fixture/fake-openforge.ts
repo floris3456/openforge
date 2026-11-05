@@ -8,12 +8,14 @@
 //   FAKE_SERVE=runner-lost    answers with its version but can't reach the tool runner of 0.1.0
 //   FAKE_SERVE=held           answers with its version, but its status, which a switch checks, waits for
 //                             POST /fake/check; with `?runner=lost` it then can't reach the tool runner of 0.1.0
+//   FAKE_SERVE=unresumable    answers with its version, but stays paused when asked to resume
 //   FAKE_PRINT                what --version prints instead of the version
 // The service records `m-<version>` in the database's migration journal, as a release migrating it would, and appends
 // what happens to it to FAKE_LOG: `<version> started [paused]`, `paused`, `resumed`, `stopped`, `prompt <id>`.
 // Like the real releases, one before 0.1.0 has no pause, refuses `--paused` and answers 404 under
 // /api/experimental/service/. From 0.1.0 on it pauses at once unless the test gave it work (POST /fake/work), which
-// holds the pause until POST /fake/finish ends it or the pause gives up. Started paused it refuses writes with 503.
+// holds the pause until POST /fake/finish ends it or the pause gives up. Started paused it refuses writes with 503,
+// except those a paused start answers (`ServiceSwitch.answers`), the terminals' handoff among them.
 // It counts the reads of its status and of its running chats, so a test can tell that a wait has read them again
 // after an event (POST /fake/reads).
 // With FAKE_TERMINALS=1 it holds persistent terminals: asked for their handoff it answers with the ticket
@@ -139,10 +141,14 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname === "/api/info")
       return Response.json({ version: reported, pid: process.pid, urls: [], paths: { tmp: "/tmp" }, switching })
-    if (url.pathname === "/api/experimental/persistent-pty/handoff" && terminals) {
+    if (startedPaused && !ServiceSwitch.answers(request.method, url.pathname) && !url.pathname.startsWith("/fake/"))
+      return Response.json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
+    if (url.pathname === ServiceSwitch.handoff && terminals) {
       const ticket = `ticket-${version}`
       record(`handoff ${ticket}`)
-      return Response.json({ handoff: { directory: "/fake/pty", instanceID: "fake", ticket, expiresAt: Date.now() + 60_000 } })
+      return Response.json({
+        handoff: { directory: "/fake/pty", instanceID: "fake", ticket, expiresAt: Date.now() + 60_000 },
+      })
     }
     if (url.pathname.startsWith("/api/experimental/persistent-pty/")) return Response.json({ handoff: null })
     if (url.pathname.startsWith(ServiceSwitch.path) && !pausable) return new Response(null, { status: 404 })
@@ -156,14 +162,13 @@ const server = Bun.serve({
       return Response.json({ data: await pause(body.timeout ?? 120_000) })
     }
     if (url.pathname === "/api/experimental/service/resume") {
+      if (process.env.FAKE_SERVE === "unresumable") return Response.json({ data: status() })
       state = "running"
       startedPaused = false
       record("resumed")
       publish("service.resumed", {})
       return Response.json({ data: status() })
     }
-    if (request.method !== "GET" && startedPaused && !url.pathname.startsWith("/fake/"))
-      return Response.json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
     if (url.pathname === "/api/session") {
       if (process.env.FAKE_SERVE === "unreadable")
         return Response.json({ code: "database", message: "database disk image is malformed" }, { status: 500 })

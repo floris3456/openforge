@@ -395,6 +395,30 @@ describe("switch", () => {
       }),
   )
 
+  for (const serve of ["unreadable", "runner-lost", "unresumable"] as const)
+    it.live(
+      `gives the persistent terminals back to the old release when the new service took them and then failed (${serve})`,
+      () =>
+        Effect.gen(function* () {
+          const test = yield* installed("0.1.0", { version: "0.1.1", serve }, { terminals: true })
+          const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+          expect(result).toMatchObject({ type: "rolled-back", restored: true })
+          // 0.1.1 took the terminals over as it started; asked before it stops, it hands them back with its own ticket.
+          expect(yield* test.happened).toEqual([
+            "0.1.0 paused",
+            "0.1.0 handoff ticket-0.1.0",
+            "0.1.0 stopped",
+            "0.1.1 adopts ticket-0.1.0",
+            "0.1.1 started paused",
+            "0.1.1 handoff ticket-0.1.1",
+            "0.1.1 stopped",
+            "0.1.0 adopts ticket-0.1.1",
+            "0.1.0 started paused",
+            "0.1.0 resumed",
+          ])
+        }),
+    )
+
   it.live("rolls back when the new service can't reach a tool runner that holds commands", () =>
     Effect.gen(function* () {
       const test = yield* installed("0.1.0", { version: "0.1.1", serve: "runner-lost" })

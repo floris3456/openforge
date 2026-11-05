@@ -41,6 +41,8 @@ const pauseTimeout = Duration.minutes(2)
 const subscribeTimeout = Duration.seconds(2)
 // How often a starting service's registration is read until it reports the version, within the check's timeout.
 const registrationInterval = Duration.millis(50)
+// How long a started service that failed its check gets to hand the persistent terminals back before it is stopped.
+const handoffTimeout = Duration.seconds(2)
 // A started service that failed its check gets this long after SIGTERM, then this long after SIGKILL.
 const killGrace = Duration.seconds(3)
 const reapTimeout = Duration.seconds(2)
@@ -330,6 +332,10 @@ export const start = Effect.fn("upgrade.switch.start")(function* (target: Target
     return yield* Effect.fail(
       new Error(`the service of ${Product.name} ${version} exited (${result.reason})${detail()}`),
     )
+  // One that answered with its version has taken the persistent terminals over; the release a rollback starts next
+  // takes them back with the ticket it hands them on with. A paused start answers that request too.
+  if (result?.type === "failed")
+    yield* Service.handoff({ file: target.service.file, timeout: Duration.toMillis(handoffTimeout) })
   yield* kill(service)
   if (result?.type === "failed")
     return yield* Effect.fail(new Error(`the service of ${Product.name} ${version} failed its check: ${result.reason}`))

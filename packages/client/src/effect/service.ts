@@ -166,6 +166,21 @@ export const stop = Effect.fn("service.stop")(function* (options: StopOptions = 
   if (info !== undefined) yield* terminate(info, options, ensureTiming(options))
 })
 
+/**
+ * Ask the registered service to hand its persistent terminals on to the next service it is replaced by, without
+ * stopping it. Best-effort, as in `stop`: a service that does not answer within `timeout` ms shuts them down.
+ */
+export const handoff = Effect.fn("service.handoff")(function* (options: {
+  readonly file?: string
+  readonly timeout: number
+}) {
+  const info = yield* read(options.file)
+  if (info === undefined) return
+  yield* Effect.tryPromise(() => PtyHandoff.prepare(options.file ?? fallback(), info, options.timeout)).pipe(
+    Effect.catch((cause) => Effect.logWarning("Failed to prepare persistent terminals for replacement", cause)),
+  )
+})
+
 /** Schema for the local service registration file. */
 export const Info = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -224,4 +239,4 @@ const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly f
 })
 
 /** Effect-based local service lifecycle operations. */
-export const Service = { discover, discovered, incumbent, ensure, launch, stop, headers, Info }
+export const Service = { discover, discovered, incumbent, ensure, launch, stop, handoff, headers, Info }

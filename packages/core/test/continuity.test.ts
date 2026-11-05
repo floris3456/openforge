@@ -611,6 +611,33 @@ describe("SessionContinuity", () => {
     }),
   )
 
+  it.effect("a question dismissed while paused stays dismissed for the rerun after the stop", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      yield* script(llm, [TestLLM.toolCall("call_question", "question", question)])
+
+      const first = yield* start()
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "ask me" })
+      const before = yield* first.events.waitFor(Form.Event.Created)
+      expect((yield* first.continuity.pause()).paused).toBe(true)
+      const form = yield* first.form(session.location)
+      yield* form.cancel(before.data.form.id)
+      yield* first.stop
+
+      const second = yield* start()
+      yield* Effect.raceFirst(
+        second.events.waitFor(Form.Event.Created),
+        second.events.waitFor(SessionEvent.Execution.Interrupted, (event) => event.data.sessionID === session.id),
+      )
+      // The rerun found it dismissed: nothing was asked, and the turn ends as a dismissal does.
+      expect(second.events.of(Form.Event.Created)).toEqual([])
+      expect(yield* transcript(second, session.id)).toContain("The user dismissed this question")
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
+    }),
+  )
+
   // As an answer resent through a release switch arrives: the new release runs, its tool has not asked again yet.
   it.effect("an answer to a question that arrives before its tool asks again reaches the rerun", () =>
     Effect.gen(function* () {

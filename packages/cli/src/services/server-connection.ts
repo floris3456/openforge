@@ -1,7 +1,7 @@
 import { Service, type Endpoint, type EnsureOptions } from "@opencode/client/effect/service"
 import { ClientError, isUnauthorizedError, OpenCode } from "@opencode/client/promise"
 import { OPENCODE_VERSION } from "../version"
-import { Effect, Option, Redacted } from "effect"
+import { Effect, Fiber, Option, Redacted } from "effect"
 import { Server as ServerFlag, Standalone as StandaloneFlag } from "../commands/commands"
 import { Env } from "../env"
 import { Updater } from "../upgrade/updater"
@@ -52,8 +52,8 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
   const mismatch = args.mismatch ?? "ignore"
   const options = yield* ServiceConfig.options({ checkVersion: mismatch !== "ignore" })
   // A release switch stops the service and starts the next one. A client that started one of its own meanwhile would
-  // start the release it runs, the old one, so it waits for the switch and then finds the new service. Every command
-  // of the CLI has the updater (see cli.ts); a caller without it does not wait.
+  // start the release it runs, the old one, so until the switch is done it only looks for the service the switch
+  // starts. Every command of the CLI has the updater (see cli.ts); a caller without it does not wait.
   const updater = yield* Effect.serviceOption(Updater.Service)
   const switched = Option.match(updater, { onNone: () => Effect.void, onSome: (updater) => updater.switched() })
   return {
@@ -65,7 +65,19 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
 function managedService(options: EnsureOptions, switched: Effect.Effect<void>) {
   const reconnectOptions = { ...options, version: undefined }
   return {
-    reconnect: () => switched.pipe(Effect.andThen(Service.ensure(reconnectOptions))),
+    // The service a switch starts is taken as soon as it is registered, while it is still paused, so that the writes
+    // a client resends reach it the moment it resumes. The wait for the switch's lock cannot be interrupted, so it
+    // runs on its own and ends with the switch.
+    reconnect: () =>
+      Effect.gen(function* () {
+        const switching = yield* Effect.forkDetach(switched)
+        const found = yield* Effect.raceFirst(
+          Service.discovered(reconnectOptions).pipe(Effect.map(Option.some)),
+          Fiber.join(switching).pipe(Effect.as(Option.none<Endpoint>())),
+        )
+        if (Option.isSome(found)) return found.value
+        return yield* Service.ensure(reconnectOptions)
+      }),
     restart: () =>
       Effect.gen(function* () {
         yield* switched

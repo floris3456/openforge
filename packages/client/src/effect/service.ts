@@ -20,6 +20,8 @@ export type Info = typeof Info.Type
 // is all a client needs to connect. The daemon's own configuration (port,
 // persisted password) is CLI-owned and never read here.
 
+const notStarted = "Timed out waiting for the background service to start"
+
 // Read-only lookup: registration file plus health check and version gate.
 // Never spawns; escalation to ensure() is the caller's policy.
 /** Discover a healthy, compatible local service without starting one. */
@@ -29,6 +31,20 @@ export const discover = Effect.fn("service.discover")(function* (options: Discov
   if (!found.compatible) return undefined
   if (!matchesVersion(found.version, options)) return undefined
   return found.endpoint
+})
+
+/** Wait until `discover` finds a service, without starting one: for a caller that knows another process starts it. */
+export const discovered = Effect.fn("service.discovered")(function* (options: DiscoverOptions = {}) {
+  const timing = ensureTiming(options)
+  const found = yield* discover(options).pipe(
+    Effect.map(Option.fromNullishOr),
+    Effect.repeat({
+      until: Option.isSome,
+      schedule: Schedule.spaced(timing.pollInterval).pipe(Schedule.upTo({ duration: timing.promiseTimeout })),
+    }),
+  )
+  if (Option.isNone(found)) return yield* Effect.fail(new Error(notStarted))
+  return found.value
 })
 
 /** Recognize an authenticated compatible service bound to an expected URL, including while it starts or fails. */
@@ -116,8 +132,7 @@ export const ensure = Effect.fn("service.ensure")(function* (options: EnsureOpti
     }),
     Effect.ensuring(Effect.sync(() => pool.releaseAll())),
   )
-  if (Option.isNone(found))
-    return yield* Effect.fail(pool.failure() ?? new Error("Timed out waiting for the background service to start"))
+  if (Option.isNone(found)) return yield* Effect.fail(pool.failure() ?? new Error(notStarted))
   return found.value.endpoint
 })
 
@@ -209,4 +224,4 @@ const terminate = Effect.fnUntraced(function* (info: Info, options: { readonly f
 })
 
 /** Effect-based local service lifecycle operations. */
-export const Service = { discover, incumbent, ensure, launch, stop, headers, Info }
+export const Service = { discover, discovered, incumbent, ensure, launch, stop, headers, Info }

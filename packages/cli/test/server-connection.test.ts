@@ -61,13 +61,23 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
   }
 })
 
-test("a reconnect while a release switch runs waits for the switch before it looks for a service", async () => {
+test("a reconnect while a release switch runs takes the service the switch starts once it is registered", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-server-switch-"))
-  const server = Bun.serve({
-    port: 0,
-    fetch: () => Response.json({ version: OPENCODE_VERSION, pid: process.pid, urls: [] }),
-  })
+  const info = () => Response.json({ version: OPENCODE_VERSION, pid: process.pid, urls: [] })
+  // The service before the switch, and the one the switch starts.
+  const before = Bun.serve({ port: 0, fetch: info })
+  const after = Bun.serve({ port: 0, fetch: info })
   const registration = path.join(root, "state", ServiceConfig.filename())
+  const register = (server: typeof before) =>
+    fs.writeFile(
+      registration,
+      JSON.stringify({
+        id: "server-switch-test",
+        version: OPENCODE_VERSION,
+        url: server.url.toString(),
+        pid: process.pid,
+      }),
+    )
   const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
   // A switch another process runs: it is under way until `done`; `asked` once a reconnect waits for it.
   const done = Effect.runSync(Deferred.make<void>())
@@ -91,27 +101,22 @@ test("a reconnect while a release switch runs waits for the switch before it loo
     )
   try {
     await fs.mkdir(path.dirname(registration), { recursive: true })
-    await fs.writeFile(
-      registration,
-      JSON.stringify({
-        id: "server-switch-test",
-        version: OPENCODE_VERSION,
-        url: server.url.toString(),
-        pid: process.pid,
-      }),
-    )
+    await register(before)
     const resolved = await runPromise(ServerConnection.resolve())
     if (!resolved.service) throw new Error("Expected managed service capabilities")
-    // The service the switch leaves is registered; the reconnect only finds it once the switch is done.
+    // The switch stopped the service before it; the reconnect asks for the switch, then the new service registers.
+    await fs.rm(registration)
     const reconnecting = runPromise(resolved.service.reconnect())
     expect(await Promise.race([asked.promise, reconnecting.then(() => "reconnected")])).toBe("asked")
-    Effect.runSync(Deferred.succeed(done, undefined))
-    expect(await reconnecting).toEqual(resolved.endpoint)
+    await register(after)
+    expect((await reconnecting).url).toBe(after.url.toString())
   } finally {
-    await server.stop(true)
+    Effect.runSync(Deferred.succeed(done, undefined))
+    await before.stop(true)
+    await after.stop(true)
     await fs.rm(root, { recursive: true, force: true })
   }
-})
+}, 10_000)
 
 test("service options only require a matching version when requested", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-options-"))

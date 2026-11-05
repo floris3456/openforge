@@ -7,6 +7,8 @@ export type Result = {
   capture: { output: string; truncated: boolean } | undefined
   /** Set when the command ran in the sandbox: where it may write, and how to go outside. */
   sandboxNote?: string
+  /** Set when the command failed instead of ending, as when its tool runner died under it: why. */
+  error?: string
 }
 
 type Output = { output: string; truncated: boolean; exit?: number; signal?: string; timeout?: boolean }
@@ -71,18 +73,21 @@ export function notification(input: {
 
 export function userNotification(result: Result) {
   const captured = output(result)
-  const status =
-    result.info.status === "killed"
-      ? "Cancelled"
-      : captured.exit === 0
-        ? undefined
-        : (notice(captured) ?? "Exited with code unknown")
+  const { state, status } = ending(result, captured)
   const message = notification({
     shellID: result.info.id,
     command: result.info.command,
-    state: result.info.status === "killed" ? "cancelled" : "completed",
+    state,
     text: [captured.output, status].filter((item) => item !== undefined && item !== "").join("\n\n"),
     output: captured,
   })
   return { ...message, text: `The following shell command was executed by the user:\n${message.text}` }
+}
+
+// How a `!` command's end reads to the model: why it failed, that it was cancelled, or how it exited if not with 0.
+function ending(result: Result, captured: Output) {
+  if (result.error !== undefined) return { state: "error" as const, status: `Failed: ${result.error}` }
+  if (result.info.status === "killed") return { state: "cancelled" as const, status: "Cancelled" }
+  const status = captured.exit === 0 ? undefined : (notice(captured) ?? "Exited with code unknown")
+  return { state: "completed" as const, status }
 }

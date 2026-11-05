@@ -6,8 +6,10 @@ import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
 import { TestLLM } from "@opencode/ai/testing"
+import { RunnerClient } from "@opencode/runner/client"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -115,8 +117,8 @@ const it = { live: process.platform === "win32" ? harness.live.skip : harness.li
 
 type Host = Effect.Success<typeof machine>
 
-/** Starts a service generation; `stop` is its SIGTERM. */
-const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
+/** Starts a service generation; `stop` is its SIGTERM. A `separate` runner is a process of its own, so it can die. */
+const start = (host: Host, options: { readonly paused?: boolean; readonly separate?: boolean } = {}) =>
   Effect.gen(function* () {
     const database = yield* Database.Service
     const llm = yield* TestLLM.Test
@@ -127,12 +129,16 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
         Database.node.replace(Layer.succeed(Database.Service, database)),
         LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
         SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
-        ShellRunner.node.replace(ShellRunner.configured({ launch: host.launch })),
+        ShellRunner.node.replace(
+          ShellRunner.configured({ launch: options.separate ? host.launchSeparate : host.launch }),
+        ),
         App.node.replace(App.configured({ version: "test" })),
+        // The machine's folders: the runner's, and the shell files it keeps.
+        Global.node.replace(host.global),
         PluginSupervisor.node.replace(plugins),
         offlineModels,
         fixedModel,
-      ]).pipe(Layer.provide(host.global)),
+      ]),
       scope,
     )
     const events = yield* record(Context.get(context, Bus.Service)).pipe(Scope.provide(scope))
@@ -218,13 +224,14 @@ describe("a foreground shell tool call across a stop", () => {
           yield* shellTool(llm, chat.command.command)
           yield* first.sessions.prompt({ sessionID: chat.session.id, text: "run it" })
           yield* eventually(() => chat.command.runs() === 1, "the command's start")
+          // The command can print before the service has heard that it started.
+          const pid = (yield* first.events.waitFor(Shell.Event.Created)).data.info.pid ?? 0
 
           if (paused) {
             const result = yield* first.continuity.pause()
             expect(result).toEqual({ paused: true, rested: [chat.session.id] })
           }
           yield* first.stop
-          const pid = created(first)[0]?.pid ?? 0
           expect(pid).toBeGreaterThan(0)
           expect(alive(pid)).toBe(true)
 
@@ -259,7 +266,7 @@ describe("a foreground shell tool call across a stop", () => {
       yield* shellTool(llm, chat.command.command)
       yield* first.sessions.prompt({ sessionID: chat.session.id, text: "run it" })
       yield* eventually(() => chat.command.runs() === 1, "the command's start")
-      const pid = created(first)[0]?.pid ?? 0
+      const pid = (yield* first.events.waitFor(Shell.Event.Created)).data.info.pid ?? 0
       expect(alive(pid)).toBe(true)
       yield* first.sessions.interrupt(chat.session.id)
       yield* eventually(() => !alive(pid), "the command's end")
@@ -347,6 +354,32 @@ describe("a `!` command across a stop", () => {
         expect(yield* reported(second, chat.session.id)).toHaveLength(1)
         const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
         expect(messages.filter((message) => message.type === "shell")).toMatchObject([{ id, status: "exited" }])
+      }),
+    { timeout: 30_000 },
+  )
+})
+
+describe("a `!` command whose tool runner dies", () => {
+  it.live(
+    "is reported to the model as failed, with why, not as cancelled",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* machine
+        const generation = yield* start(host, { separate: true })
+        const chat = yield* setup(host, generation)
+        yield* generation.sessions
+          .shell({ sessionID: chat.session.id, command: chat.command.command })
+          .pipe(Effect.forkChild({ startImmediately: true }))
+        yield* eventually(() => chat.command.runs() === 1, "the command's start")
+        const runner = yield* RunnerClient.connect(RunnerPaths.directory(host.state, "test")).pipe(Effect.scoped)
+        process.kill(runner.pid, "SIGKILL")
+
+        yield* noticed(generation, chat.session.id)
+        const notices = yield* reported(generation, chat.session.id)
+        expect(notices).toHaveLength(1)
+        expect(notices[0]).toContain('state="error"')
+        expect(notices[0]).toContain("Failed: the tool runner stopped unexpectedly")
+        expect(notices[0]).not.toContain("Cancelled")
       }),
     { timeout: 30_000 },
   )

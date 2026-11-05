@@ -48,10 +48,12 @@ export const resume = Effect.fn("SessionShell.resume")(function* (input: { sessi
 const follow = (shell: Shell.Interface, info: Shell.Info) => ({
   info,
   result: shell.result(info).pipe(
+    // Shell.Info has no failed status, so the command reads as killed; `error` tells the model it failed.
     Effect.catchTag("Shell.RunnerStoppedError", (error) =>
-      Effect.succeed({
-        info: { ...info, status: "killed" as const, time: { ...info.time, completed: Date.now() } },
-        capture: { output: error.message, truncated: false },
+      Effect.succeed<ShellResult.Result>({
+        info: { ...info, status: "killed", time: { ...info.time, completed: Date.now() } },
+        capture: { output: "", truncated: false },
+        error: error.message,
       }),
     ),
   ),

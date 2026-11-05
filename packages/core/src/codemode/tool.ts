@@ -81,13 +81,15 @@ const description = [
   "Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.",
 ].join("\n")
 
+export const name = "execute"
+
 export const create = (
   inventory: Inventory,
   executeTool: (name: string, tool: Info, input: unknown, context: ToolContext) => Effect.Effect<Result, Error>,
   permission: Permission.Interface,
 ) => {
   return {
-    name: "execute",
+    name,
     description,
     input: CodeMode.Input,
     output: ExecuteOutput,

@@ -144,6 +144,7 @@ const run = (snapshots: Layer.Layer<Snapshot.Service>) =>
           isLocationClosed: () => false,
           sessionID,
           assistantMessageID: SessionMessage.ID.create(),
+          step: 1,
           agent: Agent.defaultID,
           model,
           prepared: {

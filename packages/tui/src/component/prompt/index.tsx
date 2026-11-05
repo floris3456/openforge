@@ -1124,7 +1124,12 @@ export function Prompt(props: PromptProps) {
       syncExtmarksWithPromptParts()
     }
     if (move.creating()) return false
-    if (auto()?.visible) return false
+    // An Enter given before the popup opened on what was typed with it (see the popup's catchUp) does what it does on
+    // the popup.
+    if (auto()?.visible) {
+      auto()?.select()
+      return false
+    }
     const trimmed = store.prompt.text.trim()
     if (!trimmed && (!props.sessionID || store.mode === "shell" || delivery === "queue"))
       return delivery === "steer" ? (await props.onEmptySubmit?.()) === true : false
@@ -2039,6 +2044,7 @@ export function Prompt(props: PromptProps) {
         setPrompt={(cb) => {
           setStore("prompt", produce(cb))
         }}
+        submit={() => void submit()}
         setExtmark={(part, extmarkId) => {
           setStore("extmarkToPart", (map: Map<number, PromptPartRef>) => {
             const newMap = new Map(map)

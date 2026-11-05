@@ -47,6 +47,8 @@ export type AutocompleteRef = {
   onInput: (value: string) => void
   visible: false | "reference" | "command" | "directory"
   completeQueueableCommand: () => boolean
+  /** Does what Enter does on the popup: picks the highlighted item. */
+  select: () => void
 }
 
 export type AutocompleteOption = {
@@ -78,6 +80,8 @@ export function Autocomplete(props: {
   argumentAutocomplete?: (command: KeymapCommand) => "directory" | undefined
   directoryOptions?: (query: string) => AutocompleteOption[]
   setPrompt: (input: (prompt: PromptInfo) => void) => void
+  /** Sends the prompt: what Enter does once the popup has closed. */
+  submit: () => void
   setExtmark: (part: PromptPartRef, extmarkId: number) => void
   anchor: () => BoxRenderable
   input: () => TextareaRenderable
@@ -724,6 +728,8 @@ export function Autocomplete(props: {
         title: "Select autocomplete item",
         group: "Autocomplete",
         run() {
+          catchUp()
+          if (!store.visible) return props.submit()
           select()
         },
       },
@@ -732,6 +738,8 @@ export function Autocomplete(props: {
         title: "Complete autocomplete item",
         group: "Autocomplete",
         run() {
+          catchUp()
+          if (!store.visible) return
           const selected = options()[store.selected]
           if (selected?.isDirectory) {
             expandDirectory()
@@ -750,6 +758,67 @@ export function Autocomplete(props: {
       },
     ],
   }))
+
+  // Keys that came in the same read as this one reach the composer only after it: opentui reports a content change a
+  // microtask late. The popup follows the text as typed first, so Enter acts on it, not on what came before.
+  function catchUp() {
+    const text = props.input().plainText
+    if (text === props.value) return
+    props.setPrompt((draft) => {
+      draft.text = text
+    })
+    follow(text)
+    setSearch(filter() ?? "")
+    setStore("selected", 0)
+  }
+
+  // Opens, moves or closes the popup as the composer's text changes.
+  function follow(value: string) {
+    if (dismissedValue() === value) return
+    setDismissedValue(undefined)
+    const input = props.input()
+    const offset = input.cursorOffset
+    const beforeCursor = input.getTextRange(0, offset)
+    const argument = slashArgumentAutocomplete(
+      beforeCursor,
+      renderer.widthMethod,
+      keymapCommands(),
+      props.argumentAutocomplete,
+    )
+    if (argument?.type === "directory") {
+      show("directory", argument.index)
+      return
+    }
+
+    if (store.visible) {
+      if (
+        // Typed text before the trigger
+        props.input().cursorOffset <= store.index ||
+        // There is a space between the trigger and the cursor
+        props.input().getTextRange(store.index, props.input().cursorOffset).match(/\s/)
+      ) {
+        hide()
+      }
+      return
+    }
+
+    // Check if autocomplete should reopen (e.g., after backspace deleted a space)
+    if (offset === 0) return
+
+    const slash = slashTriggerIndex(beforeCursor, renderer.widthMethod)
+    if (slash === 0) {
+      show("command")
+      setStore("index", slash)
+      return
+    }
+
+    // Check for "@" trigger - find the nearest "@" before cursor with no whitespace between
+    const idx = mentionTriggerIndex(beforeCursor, renderer.widthMethod)
+    if (idx !== undefined) {
+      show("reference")
+      setStore("index", idx)
+    }
+  }
 
   function show(mode: Exclude<AutocompleteRef["visible"], false>, index = props.input().cursorOffset) {
     setStore({
@@ -794,52 +863,8 @@ export function Autocomplete(props: {
         select()
         return true
       },
-      onInput(value) {
-        if (dismissedValue() === value) return
-        setDismissedValue(undefined)
-        const input = props.input()
-        const offset = input.cursorOffset
-        const beforeCursor = input.getTextRange(0, offset)
-        const argument = slashArgumentAutocomplete(
-          beforeCursor,
-          renderer.widthMethod,
-          keymapCommands(),
-          props.argumentAutocomplete,
-        )
-        if (argument?.type === "directory") {
-          show("directory", argument.index)
-          return
-        }
-
-        if (store.visible) {
-          if (
-            // Typed text before the trigger
-            props.input().cursorOffset <= store.index ||
-            // There is a space between the trigger and the cursor
-            props.input().getTextRange(store.index, props.input().cursorOffset).match(/\s/)
-          ) {
-            hide()
-          }
-          return
-        }
-
-        // Check if autocomplete should reopen (e.g., after backspace deleted a space)
-        if (offset === 0) return
-
-        const slash = slashTriggerIndex(beforeCursor, renderer.widthMethod)
-        if (slash === 0) {
-          show("command")
-          setStore("index", slash)
-          return
-        }
-
-        // Check for "@" trigger - find the nearest "@" before cursor with no whitespace between
-        const idx = mentionTriggerIndex(beforeCursor, renderer.widthMethod)
-        if (idx !== undefined) {
-          show("reference")
-          setStore("index", idx)
-        }
-      },
+      onInput: follow,
+      select,
     })
   })
 

@@ -42,6 +42,8 @@ export interface Interface {
   readonly upgrade: (input?: UpgradeInput) => Effect.Effect<UpgradeOutcome, UpgradeError>
   /** Returns once no process is switching releases, so the service in use is the one the switch left. */
   readonly switched: () => Effect.Effect<void>
+  /** Whether a process is switching releases now. */
+  readonly switching: () => Effect.Effect<boolean>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/cli/Updater") {}
@@ -281,6 +283,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
           Effect.provide(context),
         ),
     switched: () => SwitchLock.wait(layout.locks).pipe(Effect.provide(context)),
+    switching: () => SwitchLock.held(layout.locks).pipe(Effect.provide(context)),
   })
 })
 

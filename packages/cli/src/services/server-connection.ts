@@ -56,8 +56,16 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
   // starts. Every command of the CLI has the updater (see cli.ts); a caller without it does not wait.
   const updater = yield* Effect.serviceOption(Updater.Service)
   const switched = Option.match(updater, { onNone: () => Effect.void, onSome: (updater) => updater.switched() })
+  const switching = yield* Option.match(updater, {
+    onNone: () => Effect.succeed(false),
+    onSome: (updater) => updater.switching(),
+  })
   return {
-    endpoint: yield* resolveManaged({ ...options, onStart: args.onStart }, mismatch),
+    // One that starts during a switch does the same, rather than replace the service the switch started because it
+    // runs another version.
+    endpoint: switching
+      ? yield* duringSwitch({ ...options, version: undefined, onStart: args.onStart }, switched)
+      : yield* resolveManaged({ ...options, onStart: args.onStart }, mismatch),
     service: managedService(options, switched),
   } satisfies Resolved
 })
@@ -65,19 +73,7 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
 function managedService(options: EnsureOptions, switched: Effect.Effect<void>) {
   const reconnectOptions = { ...options, version: undefined }
   return {
-    // The service a switch starts is taken as soon as it is registered, while it is still paused, so that the writes
-    // a client resends reach it the moment it resumes. The wait for the switch's lock cannot be interrupted, so it
-    // runs on its own and ends with the switch.
-    reconnect: () =>
-      Effect.gen(function* () {
-        const switching = yield* Effect.forkDetach(switched)
-        const found = yield* Effect.raceFirst(
-          Service.discovered(reconnectOptions).pipe(Effect.map(Option.some)),
-          Fiber.join(switching).pipe(Effect.as(Option.none<Endpoint>())),
-        )
-        if (Option.isSome(found)) return found.value
-        return yield* Service.ensure(reconnectOptions)
-      }),
+    reconnect: () => duringSwitch(reconnectOptions, switched),
     restart: () =>
       Effect.gen(function* () {
         yield* switched
@@ -86,6 +82,22 @@ function managedService(options: EnsureOptions, switched: Effect.Effect<void>) {
       }),
   }
 }
+
+/**
+ * Connects while a release switch may run, to a service of any version. The service a switch starts is taken as soon
+ * as it is registered, while it is still paused, so that the writes a client resends reach it the moment it resumes.
+ * The wait for the switch's lock cannot be interrupted, so it runs on its own and ends with the switch.
+ */
+const duringSwitch = (options: EnsureOptions, switched: Effect.Effect<void>) =>
+  Effect.gen(function* () {
+    const switching = yield* Effect.forkDetach(switched)
+    const found = yield* Effect.raceFirst(
+      Service.discovered(options).pipe(Effect.map(Option.some)),
+      Fiber.join(switching).pipe(Effect.as(Option.none<Endpoint>())),
+    )
+    if (Option.isSome(found)) return found.value
+    return yield* Service.ensure(options)
+  })
 
 export const shutdownPersistentPty = Effect.fn("cli.server-connection.shutdown-persistent-pty")(function* (
   options: EnsureOptions,

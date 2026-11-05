@@ -81,6 +81,8 @@ export namespace EffectFlock {
 
   export interface Interface {
     readonly acquire: (key: string, dir?: string, options?: Options) => Effect.Effect<void, LockError, Scope.Scope>
+    /** Whether someone holds the lock now: its lock dir exists and is not stale. Writes nothing and never waits. */
+    readonly held: (key: string, dir?: string, options?: Pick<Options, "staleMs">) => Effect.Effect<boolean>
     readonly withLock: {
       (key: string, dir?: string): <A, E, R>(body: Effect.Effect<A, E, R>) => Effect.Effect<A, E | LockError, R>
       <A, E, R>(body: Effect.Effect<A, E, R>, key: string, dir?: string): Effect.Effect<A, E | LockError, R>
@@ -294,6 +296,13 @@ export namespace EffectFlock {
         )
       })
 
+      const held = Effect.fn("EffectFlock.held")(function* (key: string, dir?: string, options: Options = {}) {
+        const lockDir = path.join(dir ?? lockRoot, Hash.fast(key) + ".lock")
+        if (!(yield* safeStat(lockDir))) return false
+        const staleMs = options.staleMs ?? DEFAULT_STALE_MS
+        return !(yield* isStale(lockDir, path.join(lockDir, "heartbeat"), path.join(lockDir, "meta.json"), staleMs))
+      })
+
       const withLock: Interface["withLock"] = Function.dual(
         (args) => Effect.isEffect(args[0]),
         <A, E, R>(body: Effect.Effect<A, E, R>, key: string, dir?: string): Effect.Effect<A, E | LockError, R> =>
@@ -305,7 +314,7 @@ export namespace EffectFlock {
           ),
       )
 
-      return Service.of({ acquire, withLock })
+      return Service.of({ acquire, held, withLock })
     }),
   )
 

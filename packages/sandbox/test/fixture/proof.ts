@@ -1,15 +1,17 @@
 // The sandbox proof as one program, so it also runs compiled where there is no Bun (the Mac):
 //   proof run <root> [openforge]   sets up a fixture in <root> (outside every temp folder) and runs every scenario
-//   proof bench <root> [openforge] the median start-up cost of a sandboxed command against an unsandboxed one, for a
-//                                  home in <root>; the folders on the way to it set how many Landlock rules there are
+//   proof bench <root> [openforge] the start-up cost of a sandboxed command against an unsandboxed one, for a home in
+//                                  <root>; the folders on the way to it set how many Landlock rules there are
 //   proof client <tcp|udp|udp6|unix> <host|path> [port]   one connection or datagram; exits 1 when refused
 //   proof no-landlock <argv…>      runs argv where the kernel answers ENOSYS to every Landlock call
 //   proof detect                   prints available() for this machine
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
-import { installFilter } from "#native"
+import { installFilter, noNewPrivileges } from "#native"
 import { Landlock } from "../../src/landlock.js"
 import { Sandbox } from "../../src/sandbox.js"
+import { Seccomp } from "../../src/seccomp.js"
 import { runAll, setup, spawn, type Launch } from "./scenarios.js"
 
 // Compiled, argv[1] is the program inside the binary; from source, the script.
@@ -19,8 +21,8 @@ const tool = process.argv[1]?.endsWith(".ts") ? [process.execPath, process.argv[
 if (command === "client") process.exit(await client(args))
 if (command === "no-landlock") noLandlock(args)
 if (command === "detect") console.log(JSON.stringify(Sandbox.available()))
-if (command === "run") process.exit(await run(args[0]!, args.slice(1)))
-if (command === "bench") await bench(args[0]!, args.slice(1))
+if (command === "run") process.exit(await run(args[0], args.slice(1)))
+if (command === "bench") await bench(args[0], args.slice(1))
 
 function launch(self: string[]): Launch {
   return { self: self.length ? self : [process.execPath, path.join(import.meta.dir, "sandbox-exec.ts")], tool }
@@ -48,7 +50,7 @@ async function run(root: string, self: string[]) {
 
 async function client(args: string[]) {
   const [kind, target, port] = args
-  const outcome = await connect(kind!, target!, Number(port)).then(
+  const outcome = await connect(kind, target, Number(port)).then(
     () => undefined,
     (error: unknown) => String(error),
   )
@@ -74,32 +76,32 @@ async function connect(kind: string, target: string, port: number) {
 }
 
 function noLandlock(argv: string[]) {
-  // seccomp: on this architecture, landlock_create_ruleset, _add_rule and _restrict_self (444-446) return ENOSYS.
-  const arch = process.arch === "arm64" ? 0xc00000b7 : 0xc000003e
   const ENOSYS = 38
-  const lines = [
-    [0x20, 0, 0, 4],
-    [0x15, 0, 4, arch],
-    [0x20, 0, 0, 0],
-    [0x35, 0, 2, 444], // jge 444
-    [0x35, 1, 0, 447], // jge 447 → allow
-    [0x06, 0, 0, 0x00050000 | ENOSYS],
-    [0x06, 0, 0, 0x7fff0000],
-  ]
-  const program = new Uint8Array(lines.length * 8)
-  const view = new DataView(program.buffer)
-  lines.forEach(([code, jt, jf, k], index) => {
-    view.setUint16(index * 8, code!, true)
-    view.setUint8(index * 8 + 2, jt!)
-    view.setUint8(index * 8 + 3, jf!)
-    view.setUint32(index * 8 + 4, k!, true)
-  })
-  installFilter(program)
-  process.execve!(argv[0]!, argv, process.env)
+  // landlock_create_ruleset, landlock_add_rule and landlock_restrict_self have the same numbers on every architecture.
+  const calls = [444, 445, 446]
+  noNewPrivileges()
+  installFilter(
+    Seccomp.assemble([
+      Seccomp.load(Seccomp.Data.nr),
+      ...calls.map((nr) => Seccomp.jeq(nr, "enosys")),
+      Seccomp.ret(Seccomp.Action.allow),
+      { ...Seccomp.ret(Seccomp.Action.errno | ENOSYS), label: "enosys" },
+    ]),
+  )
+  process.execve!(argv[0], argv, process.env)
 }
 
+const ROUNDS = 200
+const WARMUP = 5
+const PREPARATIONS = 200
+
+/**
+ * Starts `/bin/sh -c true` unsandboxed and in each sandbox variant, one of each per round with the order turning, so
+ * a change in the machine's load hits every variant alike. The cost of a variant is the median of its difference to
+ * the unsandboxed start of the same round. "bare" is the sandbox's own process with nothing to enforce (an empty
+ * Seatbelt profile, or a Landlock policy that allows everything), which splits that from the cost of the rules.
+ */
 async function bench(folder: string, self: string[]) {
-  const runs = 50
   if (fs.existsSync(folder)) throw new Error(`${folder} exists`)
   fs.mkdirSync(folder, { recursive: true })
   const home = path.join(fs.realpathSync(folder), "home")
@@ -115,43 +117,70 @@ async function bench(folder: string, self: string[]) {
     fs.writeFileSync(file, "")
   }
   fs.mkdirSync(context.directory, { recursive: true })
+  const sandbox = launch(self).self
+  const shell = ["/bin/sh", "-c", "true"]
   const policy = Sandbox.resolve(undefined, context)
-  const command = ["/bin/sh", "-c", "true"]
-  const variants = {
-    unsandboxed: command,
-    sandboxed: wrapped(policy, command, launch(self).self),
-    "sandboxed, network off": wrapped(Sandbox.resolve({ network: false }, context), command, launch(self).self),
+  const variants: Record<string, readonly string[]> = {
+    unsandboxed: shell,
+    bare:
+      process.platform === "darwin"
+        ? ["/usr/bin/sandbox-exec", "-p", "(version 1)\n(allow default)", ...shell]
+        : [...sandbox, "sandbox-exec", Landlock.encode({ write: ["/"], denyRead: [], network: true }), "--", ...shell],
+    sandboxed: wrapped(policy, shell, sandbox),
+    "sandboxed, network off": wrapped(Sandbox.resolve({ network: false }, context), shell, sandbox),
   }
-  const medians: Record<string, number> = {}
-  for (const [name, argv] of Object.entries(variants)) medians[name] = await median(argv, runs, home)
+  const names = Object.keys(variants)
+  const times = Object.fromEntries(names.map((name): [string, number[]] => [name, []]))
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
+  for (let round = 0; round < WARMUP + ROUNDS; round++)
+    for (const name of [...names.slice(round % names.length), ...names.slice(0, round % names.length)]) {
+      const elapsed = await started(variants[name], { cwd: home, env })
+      if (round >= WARMUP) times[name].push(elapsed)
+    }
+  // What the service does for each command before it starts it.
+  const preparing = Array.from({ length: PREPARATIONS }, () => {
+    const begun = performance.now()
+    wrapped(Sandbox.resolve(undefined, context), shell, sandbox)
+    return performance.now() - begun
+  })
   fs.rmSync(folder, { recursive: true, force: true })
-  const rules = Landlock.rules({ write: policy.write, deny: policy.denyRead, network: true }).length
-  console.log(`platform ${process.platform} ${process.arch}, home ${home}, ${runs} runs each`)
+
+  const rules = Landlock.rules(policy).length
+  console.log(`platform ${process.platform} ${process.arch}, ${os.cpus().length} cores, home ${home}`)
+  const load = os.loadavg().map((value) => value.toFixed(2))
+  console.log(`load average ${load.join(" ")} at the end`)
   console.log(
     process.platform === "darwin"
-      ? "sandboxed with /usr/bin/sandbox-exec -p <profile>"
-      : `sandboxed with ${launch(self).self.join(" ")} sandbox-exec, ${rules} Landlock rules`,
+      ? `sandboxed with /usr/bin/sandbox-exec -p <profile>, ${variants.sandboxed[2].length} bytes`
+      : `sandboxed with ${sandbox.join(" ")} sandbox-exec, ${rules} Landlock rules`,
   )
-  for (const [name, value] of Object.entries(medians))
-    console.log(`${name.padEnd(24)} median ${value.toFixed(2)} ms  (+${(value - medians.unsandboxed!).toFixed(2)} ms)`)
+  console.log(`${ROUNDS} rounds; ms, median [10th-90th percentile]`)
+  console.log(`${"".padEnd(24)} start                      cost (difference to unsandboxed, same round)`)
+  for (const name of names) {
+    const cost = times[name].map((value, index) => value - times.unsandboxed[index])
+    console.log(`${name.padEnd(24)} ${spread(times[name]).padEnd(26)} ${name === "unsandboxed" ? "" : spread(cost)}`)
+  }
+  console.log(
+    `${"working out the policy".padEnd(24)} ${spread(preparing)}  (Sandbox.resolve and wrap, in this process)`,
+  )
 }
 
-function wrapped(policy: Sandbox.Policy, command: string[], self: readonly string[]) {
+function wrapped(policy: Sandbox.Policy, command: readonly string[], self: readonly string[]) {
   const result = Sandbox.wrap(policy, command, self)
   if (result.type !== "run" || !result.sandboxed) throw new Error("cannot sandbox here")
   return result.argv
 }
 
-async function median(argv: string[], runs: number, home: string) {
-  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
-  const times: number[] = []
-  for (let index = 0; index < runs + 5; index++) {
-    const started = performance.now()
-    const result = await spawn(argv, { cwd: home, env })
-    const elapsed = performance.now() - started
-    if (result.code !== 0) throw new Error(`${argv[0]} exited ${result.code}: ${result.stderr}`)
-    if (index >= 5) times.push(elapsed)
-  }
-  times.sort((left, right) => left - right)
-  return times[Math.floor(times.length / 2)]!
+async function started(argv: readonly string[], options: { cwd: string; env: Record<string, string> }) {
+  const begun = performance.now()
+  const result = await spawn(argv, options)
+  const elapsed = performance.now() - begun
+  if (result.code !== 0) throw new Error(`${argv[0]} exited ${result.code}: ${result.stderr}`)
+  return elapsed
+}
+
+function spread(values: readonly number[]) {
+  const sorted = [...values].sort((left, right) => left - right)
+  const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))]
+  return `${at(0.5).toFixed(2)} [${at(0.1).toFixed(2)}-${at(0.9).toFixed(2)}]`
 }

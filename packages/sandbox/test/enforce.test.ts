@@ -13,7 +13,7 @@ const launch = {
     : [process.execPath, path.join(import.meta.dir, "fixture/sandbox-exec.ts")],
   tool: [process.execPath, path.join(import.meta.dir, "fixture/proof.ts")],
 }
-const state = { fixture: undefined as Fixture | undefined }
+const state: { fixture?: Fixture } = {}
 
 beforeAll(async () => {
   if (!machine.ok) return

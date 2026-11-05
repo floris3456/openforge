@@ -181,9 +181,9 @@ describe("wrap", () => {
     expect(result.sandboxed).toBe(true)
     expect(result.argv.slice(0, 2)).toEqual(["/opt/openforge", "sandbox-exec"])
     expect(result.argv.slice(3)).toEqual(["--", "/bin/sh", "-c", "make"])
-    expect(Landlock.decode(result.argv[2]!)).toEqual({
+    expect(Landlock.decode(result.argv[2])).toEqual({
       write: ["/work/chat", "/tmp", "/dev"],
-      deny: ["/home/u/.local/share/openforge/opencode.db"],
+      denyRead: ["/home/u/.local/share/openforge/opencode.db"],
       network: false,
     })
   })
@@ -200,7 +200,7 @@ describe("wrap", () => {
         "-p",
         Seatbelt.profile({
           write: ["/work/chat", "/tmp", "/dev"],
-          deny: ["/home/u/.local/share/openforge/opencode.db"],
+          denyRead: ["/home/u/.local/share/openforge/opencode.db"],
           network: true,
         }),
         "/bin/zsh",
@@ -243,10 +243,21 @@ test("detect: Landlock 2 or later and seccomp on Linux, /usr/bin/sandbox-exec on
     seccomp: () => seccomp,
     seatbelt: () => seatbelt,
   })
-  expect(Sandbox.detect("linux", probe(10))).toEqual({ ok: true, landlock: 10 })
+  expect(Sandbox.detect("linux", probe(10))).toEqual({ ok: true })
+  expect(Sandbox.detect("linux", probe(2))).toEqual({ ok: true })
   expect(Sandbox.detect("linux", probe(0))).toEqual({ ok: false, reason: "this kernel has no Landlock" })
-  expect(Sandbox.detect("linux", probe(1))).toEqual({ ok: false, reason: "this kernel's Landlock (ABI 1) is too old" })
+  expect(Sandbox.detect("linux", probe(1))).toEqual({
+    ok: false,
+    reason: "this kernel's Landlock (ABI 1) is too old (needs 2)",
+  })
   expect(Sandbox.detect("linux", probe(6, false))).toEqual({ ok: false, reason: "this kernel has no seccomp filters" })
+  const unloadable = () => {
+    throw new Error("cannot load the C library (libc.so.6)")
+  }
+  expect(Sandbox.detect("linux", { ...probe(10), landlock: unloadable })).toEqual({
+    ok: false,
+    reason: "cannot load the C library (libc.so.6)",
+  })
   expect(Sandbox.detect("darwin", probe(0))).toEqual({ ok: true })
   expect(Sandbox.detect("darwin", probe(0, false, false))).toEqual({
     ok: false,
@@ -266,12 +277,15 @@ test("note: says where the command may write and how to run it outside the sandb
 
 describe("Landlock", () => {
   test("the policy survives encoding; anything else is refused", () => {
-    const value = { write: ["/a b", "/dev"], deny: ["/c"], network: false }
+    const value = { write: ["/a b", "/dev"], denyRead: ["/c"], network: false }
     expect(Landlock.decode(Landlock.encode(value))).toEqual(value)
     const encoded = (input: unknown) => Buffer.from(JSON.stringify(input)).toString("base64url")
     expect(() => Landlock.decode(encoded({ ...value, v: 1, write: ["relative"] }))).toThrow("invalid sandbox policy")
     expect(() => Landlock.decode(encoded({ ...value, v: 2 }))).toThrow("invalid sandbox policy")
-    expect(() => Landlock.decode(encoded({ v: 1, write: [], deny: [] }))).toThrow("invalid sandbox policy")
+    expect(() => Landlock.decode(encoded({ v: 1, write: [], denyRead: [] }))).toThrow("invalid sandbox policy")
+    expect(() => Landlock.decode(encoded({ v: 1, write: [], deny: [], network: true }))).toThrow(
+      "invalid sandbox policy",
+    )
     expect(() => Landlock.decode("not base64 json")).toThrow()
   })
 
@@ -282,7 +296,7 @@ describe("Landlock", () => {
     const nested = path.join(base, "secret/nested")
     fs.mkdirSync(nested)
     fs.symlinkSync(key, path.join(base, "secret/link"))
-    const rules = Landlock.rules({ write: [], deny: [key], network: true })
+    const rules = Landlock.rules({ write: [], denyRead: [key], network: true })
     const access = (file: string) => rules.filter((rule) => rule.path === file).map((rule) => rule.access)
     const read = Landlock.Access.execute | Landlock.Access.readFile | Landlock.Access.readDir
     // The way from / to the denied file may only be listed.
@@ -293,22 +307,25 @@ describe("Landlock", () => {
     expect(access(sibling)).toEqual([Landlock.Access.execute | Landlock.Access.readFile])
     expect(access(nested)).toEqual([read])
     expect(access("/usr")).toEqual([read])
-    expect(Landlock.rules({ write: [], deny: [], network: true })).toEqual([{ path: "/", access: read }])
+    expect(Landlock.rules({ write: [], denyRead: [], network: true })).toEqual([{ path: "/", access: read }])
   })
 
   test("writes beneath folders, to single files, and skips paths that don't exist", () => {
     const base = folder()
     const file = touch(path.join(base, "file"))
-    const rules = Landlock.rules({ write: [base, file, path.join(base, "missing")], deny: [], network: true }).slice(1)
+    const rules = Landlock.rules({
+      write: [base, file, path.join(base, "missing")],
+      denyRead: [],
+      network: true,
+    }).slice(1)
     expect(rules.map((rule) => rule.path)).toEqual([base, file])
-    expect(rules[0]!.access & Landlock.Access.makeReg).toBe(Landlock.Access.makeReg)
-    expect(rules[0]!.access & Landlock.Access.refer).toBe(Landlock.Access.refer)
-    expect(rules[0]!.access & Landlock.Access.readFile).toBe(0n)
-    expect(rules[1]!.access).toBe(Landlock.Access.writeFile | Landlock.Access.truncate | Landlock.Access.ioctlDev)
+    expect(rules[0].access & Landlock.Access.makeReg).toBe(Landlock.Access.makeReg)
+    expect(rules[0].access & Landlock.Access.refer).toBe(Landlock.Access.refer)
+    expect(rules[0].access & Landlock.Access.readFile).toBe(0n)
+    expect(rules[1].access).toBe(Landlock.Access.writeFile | Landlock.Access.truncate | Landlock.Access.ioctlDev)
   })
 
-  test("handles every filesystem right an ABI knows, except connecting to Unix sockets", () => {
-    expect(Landlock.handled(1)).toBe(0x1fffn)
+  test("handles every filesystem right an ABI knows, except reaching Unix sockets by path", () => {
     expect(Landlock.handled(2)).toBe(0x3fffn)
     expect(Landlock.handled(4)).toBe(0x7fffn)
     expect(Landlock.handled(10)).toBe(0xffffn)
@@ -353,12 +370,27 @@ describe("Seccomp", () => {
     expect(run(program, 0x40000028, 281, AF_UNIX)).toBe(ALLOW)
     expect(() => Seccomp.network("ia32")).toThrow()
   })
+
+  test("assembles forward jumps to labels, and refuses a label that is missing or not ahead", () => {
+    const program = Seccomp.assemble([
+      Seccomp.load(Seccomp.Data.nr),
+      Seccomp.jeq(7, "refuse"),
+      Seccomp.ret(Seccomp.Action.allow),
+      { ...Seccomp.ret(Seccomp.Action.errno | 1), label: "refuse" },
+    ])
+    expect(run(program, 0, 7)).toBe(0x00050001)
+    expect(run(program, 0, 8)).toBe(ALLOW)
+    expect(() => Seccomp.assemble([Seccomp.jeq(7, "nowhere")])).toThrow("no line labelled nowhere after line 0")
+    expect(() => Seccomp.assemble([{ ...Seccomp.ret(0), label: "back" }, Seccomp.jeq(7, "back")])).toThrow(
+      "no line labelled back after line 1",
+    )
+  })
 })
 
 describe("Seatbelt", () => {
   test("allows by default and denies writes outside the write list and reads of the deny list", () => {
     expect(
-      Seatbelt.profile({ write: ["/work/chat", "/private/tmp", "/dev"], deny: ["/Users/u/secret"], network: true }),
+      Seatbelt.profile({ write: ["/work/chat", "/private/tmp", "/dev"], denyRead: ["/Users/u/secret"], network: true }),
     ).toBe(
       [
         "(version 1)",
@@ -370,7 +402,7 @@ describe("Seatbelt", () => {
   })
 
   test("denies IP networking when the network is off, which leaves Unix sockets alone", () => {
-    const profile = Seatbelt.profile({ write: ["/dev"], deny: [], network: false })
+    const profile = Seatbelt.profile({ write: ["/dev"], denyRead: [], network: false })
     expect(profile).toContain('(deny network* (remote ip "*:*"))')
     expect(profile).toContain('(deny network* (local ip "*:*"))')
     expect(profile).not.toContain("file-read*")
@@ -378,18 +410,20 @@ describe("Seatbelt", () => {
   })
 
   test("quotes paths, and denies every write when nothing is writable", () => {
-    expect(Seatbelt.profile({ write: ['/a "b"\\c'], deny: [], network: true })).toContain('(subpath "/a \\"b\\"\\\\c")')
-    expect(Seatbelt.profile({ write: [], deny: [], network: true }).split("\n")).toContain("(deny file-write*)")
+    expect(Seatbelt.profile({ write: ['/a "b"\\c'], denyRead: [], network: true })).toContain(
+      '(subpath "/a \\"b\\"\\\\c")',
+    )
+    expect(Seatbelt.profile({ write: [], denyRead: [], network: true }).split("\n")).toContain("(deny file-write*)")
   })
 })
 
-function parents(file: string) {
-  const result = [file]
-  while (path.dirname(result.at(-1)!) !== result.at(-1)) result.push(path.dirname(result.at(-1)!))
-  return result.slice(0, -1)
+/** `file` and the folders above it, without /. */
+function parents(file: string): string[] {
+  const parent = path.dirname(file)
+  return parent === file ? [] : [file, ...parents(parent)]
 }
 
-/** Runs a classic BPF seccomp program on one call: loads, equality jumps, greater-or-equal jumps and returns. */
+/** Runs a classic BPF seccomp program on one call: loads, equality jumps and returns. */
 function evaluate(program: Uint8Array, call: { arch: number; nr: number; domain: number }) {
   const view = new DataView(program.buffer, program.byteOffset, program.byteLength)
   const data = new DataView(new ArrayBuffer(64))
@@ -404,7 +438,6 @@ function evaluate(program: Uint8Array, call: { arch: number; nr: number; domain:
     const k = view.getUint32(pc * 8 + 4, true)
     if (code === 0x20) accumulator = data.getUint32(k, true)
     else if (code === 0x15) pc += accumulator === k ? jt : jf
-    else if (code === 0x35) pc += accumulator >= k ? jt : jf
     else if (code === 0x06) return k
     else throw new Error(`unknown instruction ${code}`)
   }

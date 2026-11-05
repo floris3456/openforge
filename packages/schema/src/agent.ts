@@ -51,7 +51,7 @@ export const Info = Schema.Struct({
             { action: "read", resource: "*.env.*", effect: "ask" },
             { action: "read", resource: "*.env.example", effect: "allow" },
             // A shell command that leaves the sandbox (`sandbox: false`).
-            { action: "unsandboxed", resource: "*", effect: "ask" },
+            { action: ConfigSandbox.permission, resource: "*", effect: "ask" },
           ],
         }) satisfies Info,
     })),

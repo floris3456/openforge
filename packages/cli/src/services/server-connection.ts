@@ -4,6 +4,7 @@ import { OPENCODE_VERSION } from "../version"
 import { Effect, Option, Redacted } from "effect"
 import { Server as ServerFlag, Standalone as StandaloneFlag } from "../commands/commands"
 import { Env } from "../env"
+import { Updater } from "../upgrade/updater"
 import { ServiceConfig } from "./service-config"
 import { Standalone } from "./standalone"
 import { errorMessage } from "../util/error"
@@ -50,18 +51,24 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
 
   const mismatch = args.mismatch ?? "ignore"
   const options = yield* ServiceConfig.options({ checkVersion: mismatch !== "ignore" })
+  // A release switch stops the service and starts the next one. A client that started one of its own meanwhile would
+  // start the release it runs, the old one, so it waits for the switch and then finds the new service. Every command
+  // of the CLI has the updater (see cli.ts); a caller without it does not wait.
+  const updater = yield* Effect.serviceOption(Updater.Service)
+  const switched = Option.match(updater, { onNone: () => Effect.void, onSome: (updater) => updater.switched() })
   return {
     endpoint: yield* resolveManaged({ ...options, onStart: args.onStart }, mismatch),
-    service: managedService(options),
+    service: managedService(options, switched),
   } satisfies Resolved
 })
 
-function managedService(options: EnsureOptions) {
+function managedService(options: EnsureOptions, switched: Effect.Effect<void>) {
   const reconnectOptions = { ...options, version: undefined }
   return {
-    reconnect: () => Service.ensure(reconnectOptions),
+    reconnect: () => switched.pipe(Effect.andThen(Service.ensure(reconnectOptions))),
     restart: () =>
       Effect.gen(function* () {
+        yield* switched
         yield* Service.stop({ file: options.file, pty: "handoff" })
         yield* Service.ensure(reconnectOptions)
       }),

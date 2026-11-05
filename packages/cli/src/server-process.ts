@@ -70,7 +70,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const foreground = options.mode === "default"
-      if (options.mode === "service") yield* SwitchLock.wait()
+      if (options.mode === "service") yield* SwitchLock.wait(SwitchLock.directory(global.data))
       const serviceOptions = options.mode === "service" ? yield* ServiceConfig.options() : undefined
       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"

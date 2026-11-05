@@ -2,7 +2,6 @@
 // itself so `serve --service` can wait for it without loading the client.
 
 import { EffectFlock } from "@opencode/util/effect-flock"
-import { Global } from "@opencode/util/global"
 import { Duration, Effect } from "effect"
 import path from "node:path"
 
@@ -16,17 +15,17 @@ export function directory(data: string) {
 }
 
 /**
- * Called by `serve --service` before it starts: while another process switches releases, wait for it to finish,
- * so a client reconnecting during the switch does not start the old release's service.
+ * While another process switches releases, waits for it to finish. A service started meanwhile (`serve --service`)
+ * would be the old release's, and a client reconnecting meanwhile finds the new release's service once it is done.
+ * `locks` is the lock folder (`directory`).
  */
-export const wait = Effect.fn("upgrade.switch-lock.wait")(function* () {
+export const wait = Effect.fn("upgrade.switch-lock.wait")(function* (locks: string) {
   if (process.env[variable]) {
     delete process.env[variable]
     return
   }
   const flock = yield* EffectFlock.Service
-  const global = yield* Global.Service
-  yield* Effect.scoped(flock.acquire(key, directory(global.data), { timeoutMs: Duration.toMillis(timeout) })).pipe(
+  yield* Effect.scoped(flock.acquire(key, locks, { timeoutMs: Duration.toMillis(timeout) })).pipe(
     Effect.catch((error) => Effect.logWarning("starting while a release switch still holds its lock", { error })),
   )
 })

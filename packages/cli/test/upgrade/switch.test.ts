@@ -475,7 +475,7 @@ describe("waiting", () => {
       yield* Deferred.await(acquired)
       // The starting service asks for the switch lock, and gets it once the holder lets go.
       const asked = yield* Deferred.make<{ readonly key: string; readonly dir?: string }>()
-      const waiting = yield* SwitchLock.wait().pipe(
+      const waiting = yield* SwitchLock.wait(layout.locks).pipe(
         Effect.provideService(EffectFlock.Service, {
           ...flock,
           acquire: (key, dir, options) =>
@@ -498,8 +498,9 @@ describe("waiting", () => {
         Effect.sync(() => (process.env[SwitchLock.variable] = "1")),
         () => Effect.sync(() => delete process.env[SwitchLock.variable]),
       )
-      yield* flock.acquire(SwitchLock.key, ReleaseLayout.at(path.join(directory, "data")).locks)
-      yield* SwitchLock.wait().pipe(Effect.provide(layer(directory)), Effect.timeout("2 seconds"))
+      const locks = ReleaseLayout.at(path.join(directory, "data")).locks
+      yield* flock.acquire(SwitchLock.key, locks)
+      yield* SwitchLock.wait(locks).pipe(Effect.provide(layer(directory)), Effect.timeout("2 seconds"))
       expect(process.env[SwitchLock.variable]).toBeUndefined()
     }),
   )

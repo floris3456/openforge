@@ -17,6 +17,7 @@ import { ReleaseDatabase } from "./database"
 import { ReleaseLayout } from "./layout"
 import { Release, UpgradeError } from "./release"
 import { ReleaseSwitch } from "./switch"
+import { SwitchLock } from "./switch-lock"
 import { ReleaseVersion } from "./version"
 
 export type Policy = "disable" | "notify" | "auto"
@@ -39,6 +40,8 @@ export interface Interface {
   readonly startup: (notify: (state: UpgradeState) => void) => Effect.Effect<void>
   /** Installs a release and switches to it while chats run, whatever the policy. */
   readonly upgrade: (input?: UpgradeInput) => Effect.Effect<UpgradeOutcome, UpgradeError>
+  /** Returns once no process is switching releases, so the service in use is the one the switch left. */
+  readonly switched: () => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/cli/Updater") {}
@@ -267,6 +270,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
           ),
           Effect.provide(context),
         ),
+    switched: () => SwitchLock.wait(layout.locks).pipe(Effect.provide(context)),
   })
 })
 

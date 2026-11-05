@@ -2,7 +2,7 @@ import { NodeFileSystem, NodeServices } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
-import { Console, Effect, FileSystem, Option, Scope } from "effect"
+import { Console, Deferred, Effect, FileSystem, Option, Scope } from "effect"
 import { Command } from "effect/cli"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -11,6 +11,7 @@ import { Commands, PrintLogs, Server, Standalone } from "../src/commands/command
 import { Spec } from "../src/framework/spec"
 import { ServerConnection } from "../src/services/server-connection"
 import { ServiceConfig } from "../src/services/service-config"
+import { Updater } from "../src/upgrade/updater"
 import { isolatedEnv } from "./fixture/environment"
 
 test("resolution groups Effect-native lifecycle operations only for the managed service", async () => {
@@ -54,6 +55,58 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
     const explicit = await runPromise(ServerConnection.resolve({ server: server.url.toString() }))
     expect(explicit.endpoint.url).toBe(server.url.toString())
     expect(explicit.service).toBeUndefined()
+  } finally {
+    await server.stop(true)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("a reconnect while a release switch runs waits for the switch before it looks for a service", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-server-switch-"))
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ version: OPENCODE_VERSION, pid: process.pid, urls: [] }),
+  })
+  const registration = path.join(root, "state", ServiceConfig.filename())
+  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  // A switch another process runs: it is under way until `done`; `asked` once a reconnect waits for it.
+  const done = Effect.runSync(Deferred.make<void>())
+  const asked = Promise.withResolvers<"asked">()
+  const updater = {
+    current: () => Effect.succeed(undefined),
+    startup: () => Effect.void,
+    upgrade: () => Effect.die(new Error("no upgrade in this test")),
+    switched: () => Effect.sync(() => asked.resolve("asked")).pipe(Effect.andThen(Deferred.await(done))),
+  } satisfies Updater.Interface
+  const runPromise = <A, E>(
+    effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope | Updater.Service>,
+  ) =>
+    Effect.runPromise(
+      effect.pipe(
+        Effect.provideService(Updater.Service, updater),
+        Effect.provide(layer),
+        Effect.provide(NodeFileSystem.layer),
+        Effect.scoped,
+      ),
+    )
+  try {
+    await fs.mkdir(path.dirname(registration), { recursive: true })
+    await fs.writeFile(
+      registration,
+      JSON.stringify({
+        id: "server-switch-test",
+        version: OPENCODE_VERSION,
+        url: server.url.toString(),
+        pid: process.pid,
+      }),
+    )
+    const resolved = await runPromise(ServerConnection.resolve())
+    if (!resolved.service) throw new Error("Expected managed service capabilities")
+    // The service the switch leaves is registered; the reconnect only finds it once the switch is done.
+    const reconnecting = runPromise(resolved.service.reconnect())
+    expect(await Promise.race([asked.promise, reconnecting.then(() => "reconnected")])).toBe("asked")
+    Effect.runSync(Deferred.succeed(done, undefined))
+    expect(await reconnecting).toEqual(resolved.endpoint)
   } finally {
     await server.stop(true)
     await fs.rm(root, { recursive: true, force: true })

@@ -976,6 +976,7 @@ export type ExperimentalSessionLogOutput =
             readonly model: Model.Ref
             readonly snapshot?: Snapshot.ID | undefined
             readonly started: number
+            readonly proxyRequestID?: string | undefined
           }
         }
       | {

@@ -227,6 +227,7 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
                 draft.finish = undefined
                 draft.rawFinish = undefined
                 draft.native = undefined
+                draft.proxyRequestID = event.data.proxyRequestID
                 draft.time.created = DateTime.makeUnsafe(event.data.started)
                 draft.time.streamed = undefined
                 draft.time.completed = undefined
@@ -254,6 +255,7 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
               time: { created: DateTime.makeUnsafe(event.data.started) },
               content: [],
               snapshot: event.data.snapshot ? { start: event.data.snapshot } : undefined,
+              proxyRequestID: event.data.proxyRequestID,
             }),
           )
         }),

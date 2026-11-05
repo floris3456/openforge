@@ -35,6 +35,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { Tool } from "../tool.js"
 import { SessionAffinity } from "./affinity.js"
 import { SessionModelTransport } from "./model-transport.js"
+import { SessionProxyRequest } from "./proxy-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
@@ -67,6 +68,8 @@ export interface Prepared<Event = SessionRequest> {
   readonly request: LLMRequest
   readonly options: StreamOptions
   readonly retry: (event: PluginHooks.Domains["session"]["retry"]) => Effect.Effect<void>
+  /** The proxy's ID of this request, once its answer arrived; undefined for other providers (`proxyRequestID`). */
+  readonly proxyRequestID?: () => string | undefined
   /** Runs a tool call against the tools this request advertised. */
   readonly executeTool: (
     input: Parameters<Tool.Snapshot["execute"]>[0],
@@ -334,7 +337,7 @@ export const layer = Layer.effect(
       const hasHttpHooks =
         (yield* hooks.has("session", "http.request", model.ref.providerID)) ||
         (yield* hooks.has("session", "http.response", model.ref.providerID))
-      const http: StreamOptions["http"] = hasHttpHooks
+      const httpHooks: StreamOptions["http"] = hasHttpHooks
         ? (req, handler) =>
             Effect.gen(function* () {
               const request = yield* HttpClientRequest.toWeb(req)
@@ -390,11 +393,17 @@ export const layer = Layer.effect(
               model.chunkTimeout,
             )
           : undefined
+      // The proxy's request ID is read on native HTTP routes only, which CLIProxyPacer's models use: any HTTP
+      // middleware on the AI SDK route copies the request body, and a WebSocket step gets no HTTP answer.
+      const proxy =
+        request.model.route.protocol === "ai-sdk" || webSocket ? undefined : SessionProxyRequest.capture(httpHooks)
+      const http = proxy?.http ?? httpHooks
 
       return {
         event: shaped,
         request,
         options: { ...(http ? { http } : {}), ...(webSocket ? { webSocket } : {}) },
+        ...(proxy ? { proxyRequestID: proxy.current } : {}),
         retry: (event: Parameters<Prepared["retry"]>[0]) =>
           hooks.trigger("session", "retry", event).pipe(Effect.asVoid),
         // Permission.assert and the question tool throw declines as defects so tools cannot

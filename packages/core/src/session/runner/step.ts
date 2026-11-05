@@ -108,6 +108,7 @@ export const make = Effect.gen(function* () {
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
       pendingSnapshot: Fiber.join(pendingStartSnapshot),
       started: yield* Clock.currentTimeMillis,
+      proxyRequestID: input.prepared.proxyRequestID,
       ...(resume
         ? {
             resume: {

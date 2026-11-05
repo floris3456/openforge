@@ -237,6 +237,11 @@ export const Assistant = Schema.Struct({
   tokens: TokenUsage.Info.pipe(optional),
   error: SessionError.Error.pipe(optional),
   retry: AssistantRetry.pipe(optional),
+  /**
+   * The step's request ID at CLIProxyPacer, from the answer's `X-CPA-Trace-Id`: what its request records and stored
+   * prompts go by. Absent for other providers.
+   */
+  proxyRequestID: Schema.String.pipe(optional),
   time: Schema.Struct({
     created: DateTimeUtcFromMillis,
     /** When the provider response body ended, before tool settlement. */

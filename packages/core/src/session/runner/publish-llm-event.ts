@@ -26,6 +26,8 @@ type Input = {
   readonly pendingSnapshot?: Effect.Effect<Snapshot.ID | undefined>
   readonly started: number
   readonly assistantMessageID: SessionMessage.ID
+  /** The proxy's ID of the request, once its answer's headers arrived (`SessionModelRequest`'s `proxyRequestID`). */
+  readonly proxyRequestID?: () => string | undefined
   /** Continues a step whose reply streamed in an earlier process: its unsettled tool calls and the provider's finish. */
   readonly resume?: {
     readonly tools: ReadonlyArray<{
@@ -146,6 +148,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
       assistantMessageID,
       snapshot,
       started: input.started,
+      proxyRequestID: input.proxyRequestID?.(),
     })
     return assistantMessageID
   })

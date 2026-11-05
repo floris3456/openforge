@@ -1403,6 +1403,7 @@ export type SessionStepStarted = {
     model: ModelRef
     snapshot?: SnapshotID
     started: number
+    proxyRequestID?: string
   }
 }
 
@@ -2724,6 +2725,7 @@ export type SessionMessageAssistant = {
   tokens?: TokenUsageInfo
   error?: SessionStructuredError
   retry?: SessionMessageAssistantRetry
+  proxyRequestID?: string
 }
 
 export type FormInfo = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata; fields: FormFields }

@@ -302,12 +302,15 @@ export const layer = (options: Options = {}) =>
       let changes = Deferred.makeUnsafe<void>()
       let outcome: Deferred.Deferred<Continuity.PauseResult> | undefined
 
-      // Only a pause in progress listens, so transitions cost nothing otherwise.
-      const changed = () => {
-        if (state !== "pausing") return
+      const wake = () => {
         const signal = changes
         changes = Deferred.makeUnsafe()
         Deferred.doneUnsafe(signal, Exit.void)
+      }
+
+      // Only a pause in progress listens, so transitions cost nothing otherwise.
+      const changed = () => {
+        if (state === "pausing") wake()
       }
 
       const waiting = () => [...models, ...Array.from(activities.values()).flatMap((activity) => activity.busy())]
@@ -398,9 +401,7 @@ export const layer = (options: Options = {}) =>
         // Ends a pause in progress: its loop sees it is no longer the current one.
         outcome = undefined
         gate.openUnsafe()
-        const signal = changes
-        changes = Deferred.makeUnsafe()
-        Deferred.doneUnsafe(signal, Exit.void)
+        wake()
         // After a paused start the restart sweep reads the marker; otherwise nothing stopped and it is stale.
         if (!restart) yield* kv.remove(RESTED)
         yield* bus.publish(Continuity.Event.Resumed, {})

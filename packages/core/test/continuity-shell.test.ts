@@ -367,6 +367,13 @@ describe("a `!` command whose tool runner dies", () => {
         const host = yield* machine
         const generation = yield* start(host, { separate: true })
         const chat = yield* setup(host, generation)
+        // A test that fails before it kills the runner stops the command's group, so the runner exits after it.
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            const pid = created(generation)[0]?.pid
+            if (pid !== undefined && alive(pid)) process.kill(-pid, "SIGKILL")
+          }),
+        )
         yield* generation.sessions
           .shell({ sessionID: chat.session.id, command: chat.command.command })
           .pipe(Effect.forkChild({ startImmediately: true }))

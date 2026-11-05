@@ -62,6 +62,39 @@ it.live("a paused start answers reads and refuses writes until it is resumed", (
   }),
 )
 
+// A switch that rolls back asks the paused new release to hand the persistent terminals back before it stops it. The
+// handoff carries no chat data a rollback could lose.
+it.live("a paused start answers the persistent terminals' handoff and still refuses other writes", () =>
+  Effect.gen(function* () {
+    const server = yield* ServerProcess.start<never, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      app: { version: "test-version" },
+      database: { path: ":memory:" },
+      paused: true,
+    })
+    const post = (path: string) =>
+      Effect.promise(() =>
+        fetch(new URL(path, HttpServer.formatAddress(server.address)), {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: "{}",
+        }),
+      )
+
+    const handoff = yield* post(ServiceSwitch.handoff)
+    expect(handoff.status).toBe(200)
+    // No terminal runs here, so there is nothing to hand on.
+    expect(yield* Effect.promise(() => handoff.json())).toEqual({ handoff: null })
+    for (const path of ["/api/experimental/persistent-pty/shutdown", "/api/session"]) {
+      const refused = yield* post(path)
+      expect(refused.status).toBe(503)
+      expect(yield* Effect.promise(() => refused.json())).toEqual(ServiceSwitch.refused)
+    }
+  }),
+)
+
 // What a client does during a switch: a write refused by the paused new release is resent with the same id, and goes
 // in once, as soon as the service resumes.
 it.live("a prompt refused by a paused start is resent with the same id and taken once after resume", () =>

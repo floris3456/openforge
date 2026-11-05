@@ -220,14 +220,16 @@ function dispatch(
   })
 }
 
-/** A paused start answers reads, and the service routes that resume it, but refuses writes until it is resumed. */
+/**
+ * A paused start answers reads, the service routes that resume it and the terminals' handoff, but refuses writes until
+ * it is resumed (`ServiceSwitch.answers`).
+ */
 function refusingWrites(continuity: SessionContinuity.Interface, app: App): App {
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     if (
       !continuity.refusesWrites() ||
-      ServiceSwitch.reads.has(request.method) ||
-      new URL(request.url, "http://localhost").pathname.startsWith(ServiceSwitch.path)
+      ServiceSwitch.answers(request.method, new URL(request.url, "http://localhost").pathname)
     )
       return yield* app
     return HttpServerResponse.jsonUnsafe(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })

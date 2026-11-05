@@ -89,6 +89,7 @@ test("a reconnect while a release switch runs takes the service the switch start
     switched: () => Effect.sync(() => asked.resolve("asked")).pipe(Effect.andThen(Deferred.await(done))),
     // The switch starts after this client connected.
     switching: () => Effect.succeed(false),
+    switchedTo: () => Effect.succeed(undefined),
   } satisfies Updater.Interface
   const runPromise = <A, E>(
     effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem | Scope.Scope | Updater.Service>,

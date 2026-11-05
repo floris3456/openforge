@@ -1,7 +1,8 @@
 // openforge's self-upgrade: one install method (GitHub releases, see ./release.ts), checked once at startup and
 // on `/update` or `openforge upgrade`; never on a timer.
 
-import type { UpgradeOutcome, UpgradeState } from "@opencode/client/promise"
+import { headers, type Endpoint } from "@opencode/client/effect/service"
+import { OpenCode, type UpgradeOutcome, type UpgradeState } from "@opencode/client/promise"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { Product } from "@opencode/schema/product"
 import { EffectFlock } from "@opencode/util/effect-flock"
@@ -44,6 +45,11 @@ export interface Interface {
   readonly switched: () => Effect.Effect<void>
   /** Whether a process is switching releases now. */
   readonly switching: () => Effect.Effect<boolean>
+  /**
+   * The release another process switched the service at `endpoint` to: the version that service reports, when
+   * `current` names it and this process runs another. A TUI restarts on it.
+   */
+  readonly switchedTo: (endpoint: Endpoint) => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/cli/Updater") {}
@@ -284,6 +290,16 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         ),
     switched: () => SwitchLock.wait(layout.locks).pipe(Effect.provide(context)),
     switching: () => SwitchLock.held(layout.locks).pipe(Effect.provide(context)),
+    switchedTo: (endpoint) =>
+      Effect.gen(function* () {
+        const info = yield* Effect.tryPromise((signal) =>
+          OpenCode.make({ baseUrl: endpoint.url, headers: headers(endpoint) }).server.info({ signal }),
+        ).pipe(Effect.option)
+        if (Option.isNone(info) || info.value.version === options.version) return undefined
+        if ((yield* ReleaseLayout.current(layout).pipe(Effect.orElseSucceed(() => undefined))) !== info.value.version)
+          return undefined
+        return info.value.version
+      }).pipe(Effect.provide(context)),
   })
 })
 

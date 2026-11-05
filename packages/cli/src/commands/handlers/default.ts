@@ -101,12 +101,8 @@ export default Runtime.handler(Commands, (input) =>
     // Another process may have switched the release while this TUI was connected; the service then comes back
     // on the release `current` points at.
     const noticeSwitch = async (endpoint: Endpoint) => {
-      const info = await OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
-        .server.info()
-        .catch(() => undefined)
-      if (!info || info.version === OPENCODE_VERSION) return
-      if ((await runPromise(updater.current())) !== info.version) return
-      publish({ type: "switched", version: info.version })
+      const version = await runPromise(updater.switchedTo(endpoint))
+      if (version) publish({ type: "switched", version })
     }
     yield* run({
       app: {

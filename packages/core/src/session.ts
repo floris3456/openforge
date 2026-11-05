@@ -68,6 +68,7 @@ import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
 import { SessionContinuity } from "./continuity.js"
+import { ContinuityCommand } from "./continuity/command.js"
 import { KV } from "./kv.js"
 
 // get project -> project.locations
@@ -498,10 +499,10 @@ const layer = Layer.effect(
       }),
       command: Effect.fn("Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
-        return yield* SessionCommand.once(
-          input.id,
-          SessionCommand.execute({ ...input, session }).pipe(Effect.provideService(Instance.Service, instances)),
-        ).pipe(Effect.provideService(KV.Service, kv))
+        return yield* SessionCommand.execute({ ...input, session }).pipe(
+          Effect.provideService(Instance.Service, instances),
+          ContinuityCommand.once(kv, input.id),
+        )
       }),
       shell: (input) => sessions.forSession(input.sessionID).shell(input),
       recoverShells: sessions.recoverShells,

@@ -14,6 +14,9 @@
 // holds the pause until POST /fake/finish ends it or the pause gives up. Started paused it refuses writes with 503.
 // It counts the reads of its status and of its running chats, so a test can tell that a wait has read them again
 // after an event (POST /fake/reads).
+// With FAKE_TERMINALS=1 it holds persistent terminals: asked for their handoff it answers with the ticket
+// `ticket-<version>` and records `handoff ticket-<version>`; started with a ticket (OPENCODE_PTY_HANDOFF), it records
+// `adopts <ticket>` first thing, before it can crash.
 import { Database } from "bun:sqlite"
 import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { randomUUID } from "node:crypto"
@@ -43,6 +46,10 @@ if (paused && !pausable) {
   console.error(`fake openforge ${version}: unknown flag --paused`)
   process.exit(2)
 }
+
+const terminals = process.env.FAKE_TERMINALS === "1"
+const inherited = process.env.OPENCODE_PTY_HANDOFF
+if (terminals && inherited) record(`adopts ${(JSON.parse(inherited) as { ticket: string }).ticket}`)
 
 const database = process.env.FAKE_DATABASE
 if (database) {
@@ -130,6 +137,11 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname === "/api/info")
       return Response.json({ version: reported, pid: process.pid, urls: [], paths: { tmp: "/tmp" }, switching })
+    if (url.pathname === "/api/experimental/persistent-pty/handoff" && terminals) {
+      const ticket = `ticket-${version}`
+      record(`handoff ${ticket}`)
+      return Response.json({ handoff: { directory: "/fake/pty", instanceID: "fake", ticket, expiresAt: Date.now() + 60_000 } })
+    }
     if (url.pathname.startsWith("/api/experimental/persistent-pty/")) return Response.json({ handoff: null })
     if (url.pathname.startsWith(ServiceSwitch.path) && !pausable) return new Response(null, { status: 404 })
     if (url.pathname === "/api/experimental/service/status") {

@@ -165,7 +165,10 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           const reason = failureMessage(switched)
           yield* log(`failed: ${reason}`)
           yield* log(`rolling back to ${input.from}`)
-          yield* Service.stop(target.service).pipe(Effect.ignore)
+          // A new service that never registered took no persistent terminals over: stopping nothing would throw
+          // away the ticket the old service handed them on with, which its release takes them back with.
+          if (yield* fs.exists(target.service.file).pipe(Effect.orElseSucceed(() => true)))
+            yield* Service.stop(target.service).pipe(Effect.ignore)
           yield* ReleaseLayout.point(target.layout, input.from)
           if (progress.copied) yield* ReleaseDatabase.restore(copyOf(target, input.from), target.database)
           // Without a database before the switch, whatever the new release created goes. A database whose copy

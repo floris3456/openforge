@@ -29,15 +29,21 @@ import {
 const it = testEffect(NodeServices.layer)
 
 // An install with `from` in use and its service running, plus `to` kept beside it. What happened to the fake
-// services before the test starts is left out of `happened`.
+// services before the test starts is left out of `happened`. With `terminals` the services hold persistent terminals
+// (see fake-openforge.ts).
 const installed = (
   from: string,
   to?: { readonly version: string; readonly serve?: Serve },
-  options: { readonly pause?: Duration.Duration } = {},
+  options: { readonly pause?: Duration.Duration; readonly terminals?: boolean } = {},
 ) =>
   Effect.gen(function* () {
     const directory = yield* root
-    const switching = { ...(yield* target(directory)), ...options }
+    const base = yield* target(directory)
+    const switching = {
+      ...base,
+      pause: options.pause,
+      service: options.terminals ? { ...base.service, env: { ...base.service.env, FAKE_TERMINALS: "1" } } : base.service,
+    }
     yield* Effect.promise(() => keep(switching.layout, from))
     if (to) yield* Effect.promise(() => keep(switching.layout, to.version, { serve: to.serve }))
     yield* ReleaseLayout.point(switching.layout, from).pipe(Effect.provide(layer(directory)))
@@ -348,6 +354,40 @@ describe("switch", () => {
       const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
       expect(log).toContain("0.1.0 -> 0.1.1: failed: ")
       expect(log).toContain("rolled back; the service reports 0.1.0")
+    }),
+  )
+
+  it.live("hands the persistent terminals on to the new release", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" }, { terminals: true })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toEqual({ type: "switched", from: "0.1.0", to: "0.1.1" })
+      expect(yield* test.happened).toEqual([
+        "0.1.0 paused",
+        "0.1.0 handoff ticket-0.1.0",
+        "0.1.0 stopped",
+        "0.1.1 adopts ticket-0.1.0",
+        "0.1.1 started paused",
+        "0.1.1 resumed",
+      ])
+    }),
+  )
+
+  it.live("gives the persistent terminals back to the old release when the new service crashed before it registered", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1", serve: "crash" }, { terminals: true })
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+      expect(result).toMatchObject({ type: "rolled-back", restored: true })
+      // 0.1.1 crashed before it took the terminals over, so the ticket 0.1.0 handed them on with is still good.
+      expect(yield* test.happened).toEqual([
+        "0.1.0 paused",
+        "0.1.0 handoff ticket-0.1.0",
+        "0.1.0 stopped",
+        "0.1.1 adopts ticket-0.1.0",
+        "0.1.0 adopts ticket-0.1.0",
+        "0.1.0 started paused",
+        "0.1.0 resumed",
+      ])
     }),
   )
 

@@ -1,9 +1,10 @@
 // Writes that a release switch must not lose. While the service switches it cannot be reached for a moment, and
 // the new release refuses writes with 503 until it is resumed ("switching, try again in 1 s"), so that a rollback
 // cannot lose one. Neither kind of failure reached the service, so any write is sent again until the service takes
-// it, for up to 2 minutes. A connection that drops after the request went out is different: the old service may have
-// taken it just before it stopped. Only a write the service may get twice and end up the same is resent then: one
-// that sets something, settles a request by its id, or carries an id the service ignores when it sees it again.
+// it, up to the resender's limit. A connection that drops after the request went out is different: the old service
+// may have taken it just before it stopped. Only a write the service may get twice and end up the same is resent
+// then: one that sets something, settles a request by its id, or carries an id the service ignores when it sees it
+// again.
 import { Product } from "@opencode/schema/product"
 import { spokenDuration } from "./continuity.js"
 

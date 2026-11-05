@@ -25,7 +25,7 @@ describe("sandbox-exec", () => {
   test.skipIf(!Sandbox.available().ok)("confines the command from both entries, then runs it", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "openforge-sandbox-exec-"))
     try {
-      const policy = Landlock.encode({ write: ["/dev"], deny: [], network: true })
+      const policy = Landlock.encode({ write: ["/dev"], denyRead: [], network: true })
       const script = (name: string) => `echo x > ${path.join(home, name)} || echo refused; echo ran; exit 3`
       const results = await Promise.all(
         ["src/main.ts", "src/index.ts"].map(async (entry, index) => {

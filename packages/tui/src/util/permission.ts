@@ -1,3 +1,4 @@
+import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import { Locale } from "./locale"
 import { canonicalToolName, finiteNumber, webSearchProviderLabel } from "./tool-display"
 
@@ -63,20 +64,11 @@ export function permissionPresentation(
     }
   }
 
-  if (action === "shell") {
+  if (action === "shell" || action === ConfigSandbox.permission) {
     const command = text(input.command)
     return {
       icon: "#",
-      title: "Shell command",
-      lines: command ? [`$ ${command}`] : resources.map((item) => `- ${item}`),
-    }
-  }
-
-  if (action === "unsandboxed") {
-    const command = text(input.command)
-    return {
-      icon: "#",
-      title: "Run outside the sandbox",
+      title: action === "shell" ? "Shell command" : "Run outside the sandbox",
       lines: command ? [`$ ${command}`] : resources.map((item) => `- ${item}`),
     }
   }

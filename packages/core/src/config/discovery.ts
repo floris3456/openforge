@@ -15,7 +15,7 @@ export const names = ["opencode.json", "opencode.jsonc"]
 /** Eligible sources in priority order, including paths that may appear later. */
 export interface Sources {
   readonly system?: { readonly path: AbsolutePath; readonly present: boolean }
-  /** macOS MDM managed preferences plist (`ai.opencode.managed`), when one is deployed. */
+  /** macOS MDM managed preferences plist (`Product.preferences`), when one is deployed. */
   readonly preferences?: AbsolutePath
   readonly global?: AbsolutePath
   readonly explicit?: AbsolutePath
@@ -35,8 +35,8 @@ export function systemDirectory(platform: NodeJS.Platform = process.platform, en
 /** macOS MDM managed preferences plists, most specific first; the first one present wins. */
 export function preferencePaths(user: string) {
   return [
-    AbsolutePath.make(path.join("/Library/Managed Preferences", user, "ai.opencode.managed.plist")),
-    AbsolutePath.make("/Library/Managed Preferences/ai.opencode.managed.plist"),
+    AbsolutePath.make(path.join("/Library/Managed Preferences", user, `${Product.preferences}.plist`)),
+    AbsolutePath.make(`/Library/Managed Preferences/${Product.preferences}.plist`),
   ]
 }
 

@@ -16,3 +16,8 @@ export const name = "openforge"
 export const short = "OF"
 /** The GitHub repository that holds the releases and the issues. */
 export const repository = "floris3456/openforge"
+/**
+ * The macOS managed-preferences domain, which device management deploys as `<domain>.plist` under
+ * `/Library/Managed Preferences`: reverse DNS of the repository, as openforge has no domain of its own.
+ */
+export const preferences = "io.github.floris3456.openforge.managed"

@@ -63,7 +63,9 @@ const server = Bun.serve({
       return Response.json({ handoff: null })
     }
     if (pathname === "/api/experimental/persistent-pty/handoff" && mode === "handoff") {
-      if (request.method !== "POST" || request.headers.get("authorization") !== "Basic " + btoa("opencode:private"))
+      // As a service's auth: the user openforge, or opencode, which clients before openforge 0.0.4 send.
+      const accepted = ["openforge", "opencode"].map((user) => "Basic " + btoa(`${user}:private`))
+      if (request.method !== "POST" || !accepted.includes(request.headers.get("authorization") ?? ""))
         return new Response(null, { status: 401 })
       await writeFile(registration + ".prepared", JSON.stringify(handoff))
       return Response.json({ handoff })

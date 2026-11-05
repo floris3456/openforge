@@ -7,6 +7,7 @@ import path from "path"
 import { AbsolutePath } from "./schema.js"
 import { Bus } from "./bus.js"
 import { Database } from "./database/database.js"
+import { Product } from "@opencode/schema/product"
 import { Worktree } from "@opencode/schema/worktree"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Git } from "./git.js"
@@ -288,8 +289,10 @@ const layer = Layer.effect(
       if (row) yield* bus.publish(ProjectSchema.Event.Updated, fromRow(row))
     })
 
+    // A project id cached in the git common dir, under openforge's name: opencode's (`<common dir>/opencode`) is not
+    // openforge's to take.
     const cached = Effect.fnUntraced(function* (dir: string) {
-      return yield* fs.readFileString(path.join(dir, "opencode")).pipe(
+      return yield* fs.readFileString(path.join(dir, Product.folder)).pipe(
         Effect.map((value) => value.trim()),
         Effect.map((value) => (value ? ID.make(value) : undefined)),
         Effect.orElseSucceed(() => undefined),

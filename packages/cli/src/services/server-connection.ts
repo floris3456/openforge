@@ -30,6 +30,7 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
     return yield* Effect.fail(new Error("--server and --standalone cannot be combined"))
   if (server !== undefined) {
     const password = yield* Env.password
+    // Any server: openforge's take openforge and opencode, older ones (0.0.3 and before) and upstream's only opencode.
     const endpoint = {
       url: server,
       auth: password ? { type: "basic" as const, username: "opencode", password: Redacted.value(password) } : undefined,

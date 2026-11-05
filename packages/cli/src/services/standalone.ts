@@ -50,7 +50,7 @@ const makeEndpoint = Effect.fn("cli.standalone.endpoint")(
     const ready = yield* Effect.tryPromise(() => decodeReady(output))
     return {
       url: ready.url,
-      auth: { type: "basic" as const, username: "opencode", password },
+      auth: { type: "basic" as const, username: "openforge", password },
       pid: proc.pid,
       exited: proc.exitCode,
     }

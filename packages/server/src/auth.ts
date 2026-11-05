@@ -15,9 +15,14 @@ export type Info = {
 
 export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
+/** The basic-auth user. */
+export const USERNAME = "openforge"
+/** The user before openforge 0.0.4, still accepted: its clients reach a newer service during a switch. */
+export const LEGACY_USERNAME = "opencode"
+
 export class Config extends Context.Service<Config, Info>()("@opencode/ServerAuthConfig") {
   static configLayer(input: Pick<Info, "password">) {
-    return Layer.succeed(this, this.of({ ...input, username: "opencode" }))
+    return Layer.succeed(this, this.of({ ...input, username: USERNAME }))
   }
 
   static get layer() {
@@ -31,7 +36,8 @@ export function required(config: Info) {
 
 // Session tokens issued by pairing links are accepted anywhere the password is.
 export function authorized(credentials: DecodedCredentials, config: Info) {
-  if (Option.isNone(config.password) || credentials.username !== config.username) return false
+  if (Option.isNone(config.password)) return false
+  if (credentials.username !== config.username && credentials.username !== LEGACY_USERNAME) return false
   const password = Redacted.value(credentials.password)
   return password === config.password.value || verifySession(password, config)
 }

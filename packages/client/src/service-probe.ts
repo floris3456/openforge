@@ -47,11 +47,22 @@ export function same(left: Info, right: Info) {
   return left.id === right.id && left.version === right.version && left.url === right.url && left.pid === right.pid
 }
 
+/**
+ * The basic-auth user of a registered service: `openforge`, but `opencode` for a service of openforge 0.0.0 to 0.0.3,
+ * which accepts only that. A client meets one when it switches back to such a release.
+ */
+export function serviceUser(version: string | undefined) {
+  return version !== undefined && /^0\.0\.[0-3]$/.test(version) ? "opencode" : "openforge"
+}
+
 /** Ask a registered owner for its health and classify the answer. */
 export async function probeResult(info: Info, timeout = defaultEnsureTiming.requestTimeout) {
   const endpoint = {
     url: info.url,
-    auth: info.password === undefined ? undefined : { type: "basic", username: "opencode", password: info.password },
+    auth:
+      info.password === undefined
+        ? undefined
+        : { type: "basic", username: serviceUser(info.version), password: info.password },
   } satisfies Endpoint
   const signal = AbortSignal.timeout(timeout)
   const result = await fetch(new URL("/api/info", info.url), { headers: headers(endpoint), signal })

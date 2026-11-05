@@ -67,7 +67,6 @@ import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
-import { SessionContinuity } from "./continuity.js"
 import { ContinuityCommand } from "./continuity/command.js"
 import { KV } from "./kv.js"
 
@@ -278,9 +277,7 @@ const layer = Layer.effect(
     const bus = yield* Bus.Service
     const projects = yield* Project.Service
     const execution = yield* SessionExecution.Service
-    const continuity = yield* SessionContinuity.Service
-    const client = yield* LLMClient.Service
-    const llm = continuity.client(client)
+    const llm = yield* LLMClient.Service
     const transport = yield* SessionModelTransport.Service
     const store = yield* SessionStore.Service
     const instances = yield* Instance.Service
@@ -563,7 +560,6 @@ export const node: LayerNode.Provider<Service, never, typeof Node.tags.values.gl
     SessionExecution.node,
     SessionModelTransport.node,
     llmClient,
-    SessionContinuity.node,
     SessionStore.node,
     Instance.node,
     SessionInbox.node,

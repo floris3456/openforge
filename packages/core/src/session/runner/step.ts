@@ -87,8 +87,7 @@ const RESULT_MISSING = { type: "tool.result-missing", message: "Provider did not
 export const make = Effect.gen(function* () {
   const bus = yield* Bus.Service
   const continuity = yield* SessionContinuity.Service
-  const client = yield* LLMClient.Service
-  const llm = continuity.client(client)
+  const llm = yield* LLMClient.Service
   const snapshots = yield* Snapshot.Service
   const toolOutput = yield* ToolOutput.Service
 

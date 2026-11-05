@@ -39,7 +39,6 @@ import { toLLMMessages } from "./runner/to-llm-message.js"
 import { SessionRecentText } from "./recent-text.js"
 import { contentFilterError, toSessionError } from "./to-session-error.js"
 import { SessionUsage } from "./usage.js"
-import { SessionContinuity } from "../continuity.js"
 
 export type Settings = {
   auto: boolean
@@ -250,9 +249,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const agents = yield* Agent.Service
     const bus = yield* Bus.Service
-    const continuity = yield* SessionContinuity.Service
-    const client = yield* LLMClient.Service
-    const llm = continuity.client(client)
+    const llm = yield* LLMClient.Service
     const catalog = yield* Model.Service
     const models = yield* SessionRunnerModel.Service
     const db = (yield* Database.Service).db
@@ -946,16 +943,7 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [
-    Agent.node,
-    Bus.node,
-    Database.node,
-    llmClient,
-    Model.node,
-    SessionModelRequest.node,
-    SessionRunnerModel.node,
-    SessionContinuity.node,
-  ],
+  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
 })
 
 /**

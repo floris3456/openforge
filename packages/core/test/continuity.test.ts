@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test"
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { eq } from "drizzle-orm"
-import { AIError, LanguageModel, LLMEvent, ToolFailure, TransportError, type LLMRequest } from "@opencode/ai/effect"
+import { ai, AIError, LanguageModel, LLMEvent, ToolFailure, TransportError, type LLMRequest } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
 import { TestLLM } from "@opencode/ai/testing"
@@ -204,6 +204,7 @@ const nodes = LayerNode.group([
   SessionRestart.node,
   SessionContinuity.node,
   LocationServiceMap.node,
+  LayerNodePlatform.llmClient,
 ])
 
 const it = testEffect(Layer.mergeAll(AppNodeBuilder.build(Database.node), TestLLM.testLayer(), tempGlobalLayer))
@@ -260,7 +261,7 @@ const start = (
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
         Global.node.replace(Layer.succeed(Global.Service, global)),
-        LayerNodePlatform.llmClient.replace(Layer.succeed(LLMClient.Service, llm)),
+        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
         SessionContinuity.node.replace(
           wrap
             ? continuityNode.mapLayer((layer) =>
@@ -922,6 +923,36 @@ describe("SessionContinuity", () => {
       expect(first.events.of(Continuity.Event.Expired)).toHaveLength(1)
       // Open again: work that waits for the gate passes.
       yield* first.continuity.awaitOpen
+    }),
+  )
+
+  // Such as a title, a plugin's own call, or a compaction that runs on its own.
+  it.effect("a model call outside a turn holds a pause until it ends, and waits while paused", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      const release = yield* Deferred.make<void>()
+      yield* script(llm, [held(release, TestLLM.text("first", "t1")), TestLLM.text("second", "t2")])
+      const request = ai.request({
+        model: LanguageModel.make({ id: "model", provider: "test", route: OpenAIChat.route }),
+        prompt: "name this chat",
+      })
+
+      const first = yield* start()
+      const client = Context.get(first.context, LLMClient.Service)
+      const running = yield* client.generate(request).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* llm.wait(1)
+      const pause = yield* first.continuity.pause().pipe(Effect.forkChild({ startImmediately: true }))
+      expect((yield* first.continuity.status).waiting).toEqual([{ kind: "model", name: "model" }])
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(running)
+      expect(yield* Fiber.join(pause)).toEqual({ paused: true, rested: [] })
+
+      const waiting = yield* client.generate(request).pipe(Effect.forkChild({ startImmediately: true }))
+      expect(yield* counts(llm)).toEqual({ parent: 1, child: 0 })
+      yield* first.continuity.resume
+      yield* Fiber.join(waiting)
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 0 })
     }),
   )
 

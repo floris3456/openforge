@@ -1,19 +1,15 @@
 export * as SessionContinuity from "./continuity.js"
 
+import { Usage, type AIError, type CompactionCheckpointResponse, type CompactionResponse } from "@opencode/ai/effect"
 import {
-  ai,
-  Usage,
-  type AIError,
-  type CompactionCheckpointResponse,
-  type CompactionResponse,
-  type LLMRequest,
-} from "@opencode/ai/effect"
-import type {
-  CheckpointRequest,
-  CompactionRequest,
-  EndpointCompactOptions,
-  LLMClientShape,
-  TriggerCompactOptions,
+  LLMClient,
+  RequestExecutor,
+  type CheckpointRequest,
+  type CompactionRequest,
+  type EndpointCompactOptions,
+  type LLMClientService,
+  type LLMClientShape,
+  type TriggerCompactOptions,
 } from "@opencode/ai/route"
 import { Continuity } from "@opencode/schema/continuity"
 import { FinishReason } from "@opencode/schema/llm"
@@ -25,6 +21,7 @@ import { Cause, Clock, Context, Deferred, Effect, Exit, Latch, Layer, Option, Sc
 import { Bus } from "./bus.js"
 import { PendingRequestTable, SessionRestTable } from "./continuity/sql.js"
 import { Database } from "./database/database.js"
+import { requestExecutor } from "./effect/app-node-platform.js"
 import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
@@ -207,6 +204,11 @@ const pendingRequest = (row: typeof PendingRequestTable.$inferSelect): PendingRe
   ...(row.agent === null ? {} : { agent: row.agent }),
   ...(row.reply === null ? {} : { reply: row.reply }),
 })
+
+/** The arguments of each `compact` overload, told apart by the mechanism. */
+type TriggerCompact = [request: CheckpointRequest, options: TriggerCompactOptions]
+type EndpointCompact = [request: CompactionRequest, options?: EndpointCompactOptions]
+const triggers = (args: TriggerCompact | EndpointCompact): args is TriggerCompact => args[1]?.mechanism === "trigger"
 
 export interface Options {
   /** Start with the gate closed; writes are refused until `resume`. */
@@ -498,12 +500,10 @@ export const layer = (options: Options = {}) =>
           request: CompactionRequest,
           options?: EndpointCompactOptions,
         ): Effect.Effect<CompactionResponse, AIError>
-        function compact(request: LLMRequest, options?: TriggerCompactOptions | EndpointCompactOptions) {
-          const name = String(request.model.id)
-          if (options?.mechanism === "trigger" && ai.canCompact(request, { mechanism: "trigger" }))
-            return model(name, llm.compact(request, options))
-          if (options?.mechanism !== "trigger" && ai.canCompact(request)) return model(name, llm.compact(request, options))
-          return Effect.die(new Error(`Model ${name} cannot compact this request`))
+        // `llm.compact` refuses a route that cannot compact, as without the gate.
+        function compact(...args: TriggerCompact | EndpointCompact) {
+          const name = String(args[0].model.id)
+          return triggers(args) ? model(name, llm.compact(...args)) : model(name, llm.compact(...args))
         }
         return {
           stream: (request, options) =>
@@ -744,3 +744,21 @@ export const noopLayer = Layer.sync(Service, () => {
 export const configured = (options: Options = {}) =>
   makeGlobalNode({ service: Service, layer: layer(options), deps: [Database.node, Bus.node, KV.node] })
 export const node = configured()
+
+/**
+ * The model client where the service runs, in place of `LayerNodePlatform.llmClient`: `base`, the real client unless
+ * a test gives its fake, with every call gated by `client`.
+ */
+export const llmClient = (base: Layer.Layer<LLMClientService, never, RequestExecutor.Service> = LLMClient.layer) =>
+  makeGlobalNode({
+    service: LLMClient.Service,
+    layer: Layer.effect(
+      LLMClient.Service,
+      Effect.gen(function* () {
+        const continuity = yield* Service
+        const llm = yield* LLMClient.Service
+        return continuity.client(llm)
+      }),
+    ).pipe(Layer.provide(base)),
+    deps: [node, requestExecutor],
+  })

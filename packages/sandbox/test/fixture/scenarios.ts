@@ -216,6 +216,48 @@ export const scenarios: Scenario[] = [
     },
   },
   {
+    name: "refuses reading the database copies a switch makes while a command runs",
+    run: async (fixture, launch) => {
+      const data = path.join(fixture.home, ".local/share/openforge")
+      // A release openforge has not switched away from yet: no copy in its folder when the command starts.
+      write(path.join(data, "releases/0.2.0/openforge"))
+      const policy = Sandbox.resolve(undefined, fixture.context)
+      const started = path.join(fixture.tmp, "copies.started")
+      const copied = path.join(fixture.tmp, "copies.made")
+      const copy = path.join(data, "releases/0.2.0/opencode.db")
+      const probing = probe(policy, fixture, launch, {
+        started: `: > ${q(started)}`,
+        // As a command that runs through a switch: the copies appear while it runs.
+        waited: `while [ ! -e ${q(copied)} ]; do sleep 0.01; done`,
+        copy: `cat ${q(copy)}`,
+        partial: `cat ${q(`${copy}.partial`)}`,
+        restore: `cat ${q(path.join(data, "opencode.db.restore"))}`,
+        releaseBinary: `cat ${q(path.join(data, "releases/0.2.0/openforge"))}`,
+      })
+      const made = [copy, `${copy}.partial`, path.join(data, "opencode.db.restore")]
+      try {
+        // No event says the sandboxed shell has started; it leaves a file.
+        const deadline = Date.now() + 10_000
+        while (!fs.existsSync(started) && Date.now() < deadline) await Bun.sleep(10)
+        for (const file of made) write(file, "credentials\n")
+        write(copied)
+        return compare(await probing, {
+          started: "ok",
+          waited: "ok",
+          copy: "refused",
+          partial: "refused",
+          restore: "refused",
+          releaseBinary: "ok",
+        })
+      } finally {
+        write(copied)
+        await probing.catch(() => undefined)
+        for (const file of [...made, started, copied]) fs.rmSync(file, { force: true })
+        fs.rmSync(path.join(data, "releases/0.2.0"), { recursive: true, force: true })
+      }
+    },
+  },
+  {
     name: "confines grandchildren, also those that outlive the command",
     run: async (fixture, launch) => {
       const policy = Sandbox.resolve(undefined, fixture.context)

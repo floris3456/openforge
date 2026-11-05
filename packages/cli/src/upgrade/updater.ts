@@ -46,8 +46,8 @@ export interface Interface {
   /** Whether a process is switching releases now. */
   readonly switching: () => Effect.Effect<boolean>
   /**
-   * The release another process switched the service at `endpoint` to: the version that service reports, when
-   * `current` names it and this process runs another. A TUI restarts on it.
+   * The release another process switched the service at `endpoint` to: once no switch runs, the version that service
+   * reports, when `current` names it and this process runs another. A TUI restarts on it.
    */
   readonly switchedTo: (endpoint: Endpoint) => Effect.Effect<string | undefined>
 }
@@ -292,6 +292,9 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     switching: () => SwitchLock.held(layout.locks).pipe(Effect.provide(context)),
     switchedTo: (endpoint) =>
       Effect.gen(function* () {
+        // A switch may still roll back: a service that is new, and paused until it passes its checks, may be stopped
+        // again and `current` point back. Once the switch is done, a service gone with it is no longer there.
+        yield* SwitchLock.wait(layout.locks)
         const info = yield* Effect.tryPromise((signal) =>
           OpenCode.make({ baseUrl: endpoint.url, headers: headers(endpoint) }).server.info({ signal }),
         ).pipe(Effect.option)

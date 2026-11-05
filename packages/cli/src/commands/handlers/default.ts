@@ -99,11 +99,12 @@ export default Runtime.handler(Commands, (input) =>
     const drafts = path.join(global.state, "drafts")
     stashDrafts(yield* TuiDrafts.take(drafts, process.env))
     // Another process may have switched the release while this TUI was connected; the service then comes back
-    // on the release `current` points at.
+    // on the release `current` points at. A TUI that started during a switch may have connected to that service.
     const noticeSwitch = async (endpoint: Endpoint) => {
-      const version = await runPromise(updater.switchedTo(endpoint))
+      const version = await runPromise(updater.switchedTo(endpoint)).catch(() => undefined)
       if (version) publish({ type: "switched", version })
     }
+    if (service) void noticeSwitch(server.endpoint)
     yield* run({
       app: {
         name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,

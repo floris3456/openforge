@@ -2,7 +2,7 @@ import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import type { UpgradeState } from "@opencode/client/promise"
 import { describe, expect, test } from "bun:test"
-import { Duration, Effect, Fiber, Schedule } from "effect"
+import { Duration, Effect, Exit, Fiber, Schedule } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { withEnsureTiming } from "../../../client/src/service-timing"
@@ -23,6 +23,7 @@ import {
   root,
   target,
   writeMigrations,
+  type Serve,
 } from "./fixture/fixture"
 
 const it = testEffect(NodeServices.layer)
@@ -117,7 +118,7 @@ const install = (
       happened: Effect.promise(() => happened(directory)),
       reported,
       current: ReleaseLayout.current(switching.layout).pipe(provide),
-      publish: (version: string, serve?: "ok" | "crash") =>
+      publish: (version: string, serve?: Serve) =>
         Effect.promise(async () => {
           releases[version] = await publish(directory, version, { serve })
         }),
@@ -427,6 +428,48 @@ describe("upgrade", () => {
       yield* updater.startup(test.notify)
       expect(yield* test.current).toBe("0.1.2")
       expect(Object.keys(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))).toEqual(["0.1.1"])
+    }),
+  )
+})
+
+describe("another screen", () => {
+  // Switches to 0.1.1, whose check waits for the test, while another screen's reconnect reaches its service: that
+  // takes the service as soon as it registers, still paused. Then the check passes or fails.
+  const reached = (check: string) =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1" })
+      yield* test.publish("0.1.1", "held")
+      const upgrading = yield* (yield* test.make())
+        .upgrade({ notify: test.notify })
+        .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }))
+      const endpoint = yield* Service.discovered({ file: test.switching.service.file, version: "0.1.1" })
+      // The screen runs 0.1.0 too, in a process of its own.
+      const restart = yield* (yield* test.make())
+        .switchedTo(endpoint)
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Effect.promise(() => fake(endpoint.url, check))
+      return {
+        ...test,
+        upgraded: yield* Fiber.join(upgrading).pipe(Effect.timeout("10 seconds")),
+        restart: Fiber.join(restart).pipe(Effect.timeout("10 seconds")),
+      }
+    })
+
+  it.live("restarts on the new release once the switch is done", () =>
+    Effect.gen(function* () {
+      const test = yield* reached("/fake/check")
+      expect(test.upgraded).toEqual(Exit.succeed({ type: "switched", from: "0.1.0", to: "0.1.1" }))
+      expect(yield* test.restart).toBe("0.1.1")
+    }),
+  )
+
+  it.live("does not restart on a new release whose switch then rolls back", () =>
+    Effect.gen(function* () {
+      const test = yield* reached("/fake/check?runner=lost")
+      expect(Exit.isFailure(test.upgraded)).toBe(true)
+      expect(yield* test.current).toBe("0.1.0")
+      expect(yield* test.reported).toBe("0.1.0")
+      expect(yield* test.restart).toBeUndefined()
     }),
   )
 })

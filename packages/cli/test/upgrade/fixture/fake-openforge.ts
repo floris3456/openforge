@@ -6,6 +6,8 @@
 //   FAKE_SERVE=wrong-version  answers with version 9.9.9
 //   FAKE_SERVE=unreadable     answers with its version but cannot read its database
 //   FAKE_SERVE=runner-lost    answers with its version but can't reach the tool runner of 0.1.0
+//   FAKE_SERVE=held           answers with its version, but its status, which a switch checks, waits for
+//                             POST /fake/check; with `?runner=lost` it then can't reach the tool runner of 0.1.0
 //   FAKE_PRINT                what --version prints instead of the version
 // The service records `m-<version>` in the database's migration journal, as a release migrating it would, and appends
 // what happens to it to FAKE_LOG: `<version> started [paused]`, `paused`, `resumed`, `stopped`, `prompt <id>`.
@@ -80,10 +82,10 @@ const publish = (type: string, data: unknown) =>
       streams.delete(controller)
     }
   })
-const runners =
-  process.env.FAKE_SERVE === "runner-lost"
-    ? [{ version: "0.1.0", reachable: false, reason: "it speaks no protocol this release knows" }]
-    : []
+const lost = { version: "0.1.0", reachable: false, reason: "it speaks no protocol this release knows" }
+let runners = process.env.FAKE_SERVE === "runner-lost" ? [lost] : []
+const checked = Promise.withResolvers<void>()
+if (process.env.FAKE_SERVE !== "held") checked.resolve()
 const status = () => ({ state, startedPaused, waiting: work, rested: [], active: [], runners })
 const reads = { status: 0, active: 0 }
 const readers = new Set<() => void>()
@@ -145,6 +147,7 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/api/experimental/persistent-pty/")) return Response.json({ handoff: null })
     if (url.pathname.startsWith(ServiceSwitch.path) && !pausable) return new Response(null, { status: 404 })
     if (url.pathname === "/api/experimental/service/status") {
+      await checked.promise
       read("status")
       return Response.json({ data: status() })
     }
@@ -223,6 +226,11 @@ const server = Bun.serve({
       const count = url.searchParams.get("count")
       if (count !== null) await readsOf(of, Number(count))
       return new Response(String(reads[of]))
+    }
+    if (url.pathname === "/fake/check") {
+      if (url.searchParams.get("runner") === "lost") runners = [lost]
+      checked.resolve()
+      return new Response("checked")
     }
     if (url.pathname === "/fake/work") {
       work = (await request.json()) as Work[]

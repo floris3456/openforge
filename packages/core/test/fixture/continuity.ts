@@ -36,7 +36,7 @@ export const record = (bus: Bus.Interface) =>
     return { events, of, waitFor }
   })
 
-export type Recorded = Effect.Success<ReturnType<typeof record>>
+type Recorded = Effect.Success<ReturnType<typeof record>>
 
 /** Resolves once the Session's execution has succeeded. */
 export const succeeded = (events: Recorded, sessionID: Session.ID) =>

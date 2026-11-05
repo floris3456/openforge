@@ -4,6 +4,14 @@ import { isShellNotFoundError, type OpenCodeClient, type ShellInfo } from "@open
 const BATCH_MS = 50
 const RETRY_MS = 1_000
 
+/** Runs `again` after a moment; the function it returns cancels that. */
+export type ShellOutputRetry = (again: () => void) => () => void
+
+const retryLater: ShellOutputRetry = (again) => {
+  const timer = setTimeout(again, RETRY_MS)
+  return () => clearTimeout(timer)
+}
+
 export type ShellOutputView = {
   /** Start over: discard what is shown. `omitted` says whether earlier output is left out. */
   reset: (omitted: boolean) => void
@@ -17,11 +25,11 @@ export type ShellOutputView = {
 /**
  * Follows a shell command's combined output as the server pushes it, from at most `limit` bytes
  * back, until the command has ended. A dropped connection, as across a server restart, picks up
- * where it left off. Returns a function that stops following.
+ * where it left off, after `input.retry` (a second by default). Returns a function that stops following.
  */
 export function followShellOutput(
   api: () => OpenCodeClient,
-  input: { id: string; location?: { directory: string }; limit: number },
+  input: { id: string; location?: { directory: string }; limit: number; retry?: ShellOutputRetry },
   view: ShellOutputView,
 ) {
   const aborted = new AbortController()
@@ -29,7 +37,7 @@ export function followShellOutput(
   let cursor: number | undefined
   let pending = ""
   let flush: ReturnType<typeof setTimeout> | undefined
-  let retry: ReturnType<typeof setTimeout> | undefined
+  let cancel: (() => void) | undefined
 
   const deliver = () => {
     clearTimeout(flush)
@@ -73,13 +81,13 @@ export function followShellOutput(
       deliver()
       const missing = isShellNotFoundError(cause)
       view.failed?.(missing)
-      if (!missing) retry = setTimeout(run, RETRY_MS)
+      if (!missing) cancel = (input.retry ?? retryLater)(run)
     })
   }
   run()
   return () => {
     aborted.abort()
     clearTimeout(flush)
-    clearTimeout(retry)
+    cancel?.()
   }
 }

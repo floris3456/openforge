@@ -1,17 +1,17 @@
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
-import { type LocationRef, type ShellInfo } from "@opencode/client"
+import type { LocationRef, ShellInfo } from "@opencode/client"
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
 import stripAnsi from "strip-ansi"
 import { useClient } from "../context/client"
 import { Keymap } from "../context/keymap"
 import { useTheme } from "../context/theme"
 import { DialogFooter, DialogHeader, DialogLayout, useDialog } from "../ui/dialog"
-import { followShellOutput } from "../util/shell-output"
+import { followShellOutput, type ShellOutputRetry } from "../util/shell-output"
 
 const PAGE_BYTES = 64 * 1024
 
-export function DialogShellOutput(props: { shell: ShellInfo; location: LocationRef }) {
+export function DialogShellOutput(props: { shell: ShellInfo; location: LocationRef; retry?: ShellOutputRetry }) {
   const client = useClient()
   const dialog = useDialog()
   const theme = useTheme().surface("dialog")
@@ -33,7 +33,7 @@ export function DialogShellOutput(props: { shell: ShellInfo; location: LocationR
     const location = { directory: props.location.directory }
     const stop = followShellOutput(
       () => client.api,
-      { id: props.shell.id, location, limit: PAGE_BYTES },
+      { id: props.shell.id, location, limit: PAGE_BYTES, retry: props.retry },
       {
         connected: () => setError(""),
         reset: (earlier) => {

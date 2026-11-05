@@ -222,9 +222,11 @@ function caches(home: string, env: Env, temp: readonly string[]) {
           ),
         ]
       : []
+  // Most of them are missing: checking first spares resolving each one's folders.
   return [...homeCaches.map((item) => path.join(home, item)), ...darwin, ...named]
+    .filter((item) => fs.existsSync(item))
     .map(real)
-    .filter((item) => fs.existsSync(item) && !inside(home, item))
+    .filter((item) => !inside(home, item))
 }
 
 /**

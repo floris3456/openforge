@@ -11,12 +11,6 @@ const annotations = (identifier: string, summary: string, description: string) =
     transform: (operation) => ({ ...operation, tags: ["experimental"] }),
   })
 
-/**
- * What a service that started paused answers a write with (status 503, `retry-after: 1`) until it is resumed, so a
- * rollback to the previous release cannot lose the write. A client resends it.
- */
-export const SERVICE_SWITCHING = { code: "service_switching", message: "switching, try again in 1 s" } as const
-
 const PausePayload = Schema.Struct({
   /** Milliseconds to wait for every execution to rest before giving up; 2 minutes by default. */
   timeout: Schema.Int.check(Schema.isGreaterThan(0)).pipe(Schema.optional),

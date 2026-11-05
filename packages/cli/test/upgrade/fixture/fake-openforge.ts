@@ -15,6 +15,7 @@
 // It counts the reads of its status and of its running chats, so a test can tell that a wait has read them again
 // after an event (POST /fake/reads).
 import { Database } from "bun:sqlite"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { randomUUID } from "node:crypto"
 import { appendFileSync, writeFileSync } from "node:fs"
 
@@ -130,7 +131,7 @@ const server = Bun.serve({
     if (url.pathname === "/api/info")
       return Response.json({ version: reported, pid: process.pid, urls: [], paths: { tmp: "/tmp" }, switching })
     if (url.pathname.startsWith("/api/experimental/persistent-pty/")) return Response.json({ handoff: null })
-    if (url.pathname.startsWith("/api/experimental/service/") && !pausable) return new Response(null, { status: 404 })
+    if (url.pathname.startsWith(ServiceSwitch.path) && !pausable) return new Response(null, { status: 404 })
     if (url.pathname === "/api/experimental/service/status") {
       read("status")
       return Response.json({ data: status() })
@@ -147,10 +148,7 @@ const server = Bun.serve({
       return Response.json({ data: status() })
     }
     if (request.method !== "GET" && startedPaused && !url.pathname.startsWith("/fake/"))
-      return Response.json(
-        { code: "service_switching", message: "switching, try again in 1 s" },
-        { status: 503, headers: { "retry-after": "1" } },
-      )
+      return Response.json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
     if (url.pathname === "/api/session") {
       if (process.env.FAKE_SERVE === "unreadable")
         return Response.json({ code: "database", message: "database disk image is malformed" }, { status: 500 })

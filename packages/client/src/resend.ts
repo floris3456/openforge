@@ -1,10 +1,10 @@
 // Writes that a release switch must not lose. While the service switches it cannot be reached for a moment, and
-// the new release refuses writes with 503 until it is resumed ("switching, try again in 1 s"), so that a rollback
-// cannot lose one. Neither kind of failure reached the service, so any write is sent again until the service takes
-// it, up to the resender's limit. A connection that drops after the request went out is different: the old service
-// may have taken it just before it stopped. Only a write the service may get twice and end up the same is resent
-// then: one that sets something, settles a request by its id, or carries an id the service ignores when it sees it
-// again.
+// the new release refuses writes with 503 until it is resumed (`ServiceSwitch.refused`), so that a rollback cannot
+// lose one. Neither kind of failure reached the service, so any write is sent again until the service takes it, up
+// to the resender's limit. A connection that drops after the request went out is different: the old service may have
+// taken it just before it stopped. Only a write the service may get twice and end up the same is resent then: one
+// that sets something, settles a request by its id, or carries an id the service ignores when it sees it again.
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { Product } from "@opencode/schema/product"
 import { spokenDuration } from "./continuity.js"
 
@@ -129,10 +129,10 @@ export function createResender(options: { readonly limit?: number } = {}) {
       const resending = (input: string | URL | Request, init?: RequestInit) => {
         const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase()
         // A request object or a streamed body cannot be sent twice; the generated clients send neither.
-        if (READS.has(method) || input instanceof Request || init?.body instanceof ReadableStream)
+        if (ServiceSwitch.reads.has(method) || input instanceof Request || init?.body instanceof ReadableStream)
           return fetch(input, init)
         // The switch's own pause and resume are never held back.
-        if (new URL(input).pathname.includes(SERVICE_PATH)) return fetch(input, init)
+        if (new URL(input).pathname.includes(ServiceSwitch.path)) return fetch(input, init)
         return send(fetch, input, init ?? {})
       }
       // Bun's fetch type carries preconnect; the clients never call it, and a browser's fetch has none.
@@ -143,7 +143,8 @@ export function createResender(options: { readonly limit?: number } = {}) {
       if (event.type === "server.connected" || event.type === "service.resumed") wake()
     },
     pending: () => pending,
-    subscribe(listener: (pending: number) => void) {
+    /** Calls `listener` with `pending()` whenever it changes. */
+    watchPending(listener: (pending: number) => void) {
       listeners.add(listener)
       return () => {
         listeners.delete(listener)
@@ -167,11 +168,9 @@ export function createResender(options: { readonly limit?: number } = {}) {
 /** One send: the service's answer, or why it was not taken. */
 type Attempt = { readonly response: Response } | { readonly cause: unknown }
 
-const READS = new Set(["GET", "HEAD", "OPTIONS"])
-const SERVICE_PATH = "/api/experimental/service/"
-
+// The service's 503 while it is paused, starting or stopping: the write never reached it.
 function switching(code: unknown) {
-  return code === "service_switching" || code === "service_starting" || code === "service_stopping"
+  return code === ServiceSwitch.refused.code || code === ServiceSwitch.starting || code === ServiceSwitch.stopping
 }
 
 // The connection was refused, so the request never reached a service.

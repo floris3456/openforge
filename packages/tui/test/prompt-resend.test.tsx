@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { createAppFixture } from "./fixture/app"
 import { directory, json } from "./fixture/tui-client"
 import { shows, until } from "./fixture/wait"
@@ -9,11 +10,7 @@ function chat() {
   const sessionID = `ses_resend_${crypto.randomUUID()}`
   const location = { directory, project: { id: "project", directory, canonical: directory } }
   const state = { up: false, models: 0, prompts: [] as { id: string; text: string }[] }
-  const switching = () =>
-    json(
-      { code: "service_switching", message: "switching, try again in 1 s" },
-      { status: 503, headers: { "retry-after": "1" } },
-    )
+  const switching = () => json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
   const fetch = async (url: URL, request: Request) => {
     if (url.pathname === `/api/session/${sessionID}`)
       return json({

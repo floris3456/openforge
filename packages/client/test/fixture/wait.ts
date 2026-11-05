@@ -13,7 +13,7 @@ export async function until(condition: () => boolean, timeout = 5_000, what = "t
 export function waiting(resender: Resender, count: number) {
   return new Promise<void>((resolve) => {
     if (resender.pending() === count) return resolve()
-    const stop = resender.subscribe((pending) => {
+    const stop = resender.watchPending((pending) => {
       if (pending !== count) return
       stop()
       resolve()

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { createServer, type Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { createResender, findResendTimeout, OpenCode } from "../src/promise"
@@ -25,7 +26,7 @@ async function service() {
       response.setHeader("connection", "close")
       if (phase === "paused") {
         response.writeHead(503, { "content-type": "application/json", "retry-after": "1" })
-        return response.end(JSON.stringify({ code: "service_switching", message: "switching, try again in 1 s" }))
+        return response.end(JSON.stringify(ServiceSwitch.refused))
       }
       if (path.endsWith("/revert/stage")) {
         response.writeHead(200, { "content-type": "application/json" })
@@ -87,7 +88,7 @@ test("a write the paused new release refuses is resent once it resumes", async (
   const fake = await service()
   const { resender, api } = client(fake.url)
   const counts: number[] = []
-  resender.subscribe((pending) => counts.push(pending))
+  resender.watchPending((pending) => counts.push(pending))
   await fake.set("paused")
   const sent = api.session.switchAgent({ sessionID: "ses_a", agent: "plan" })
   await waiting(resender, 1)
@@ -265,7 +266,7 @@ async function afterDrop(write: { readonly method: string; readonly path: string
     return new Response(null, { status: 204 })
   }
   // Once it waits, the stream reaches the next service.
-  resender.subscribe((pending) => {
+  resender.watchPending((pending) => {
     if (pending === 1) resender.observe(connected)
   })
   return resender

@@ -11,7 +11,7 @@ import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
 import { hasMcpClientTicketURL } from "@opencode/protocol/groups/mcp"
 import { isPairingConnectURL } from "@opencode/protocol/groups/server"
-import { SERVICE_SWITCHING } from "@opencode/protocol/groups/service"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { Global } from "@opencode/util/global"
 import { Cause, Context, Effect, Exit, Latch, Layer, Option, Ref, Scope } from "effect"
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
@@ -220,20 +220,17 @@ function dispatch(
   })
 }
 
-const READS = new Set(["GET", "HEAD", "OPTIONS"])
-const SERVICE_PATH = "/api/experimental/service/"
-
 /** A paused start answers reads, and the service routes that resume it, but refuses writes until it is resumed. */
 function refusingWrites(continuity: SessionContinuity.Interface, app: App): App {
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     if (
       !continuity.refusesWrites() ||
-      READS.has(request.method) ||
-      new URL(request.url, "http://localhost").pathname.startsWith(SERVICE_PATH)
+      ServiceSwitch.reads.has(request.method) ||
+      new URL(request.url, "http://localhost").pathname.startsWith(ServiceSwitch.path)
     )
       return yield* app
-    return HttpServerResponse.jsonUnsafe(SERVICE_SWITCHING, { status: 503, headers: { "retry-after": "1" } })
+    return HttpServerResponse.jsonUnsafe(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
   })
 }
 
@@ -264,7 +261,7 @@ function unavailable(status: Status.State) {
       { status: 503 },
     )
   return HttpServerResponse.jsonUnsafe(
-    { code: status.type === "stopping" ? "service_stopping" : "service_starting" },
+    { code: status.type === "stopping" ? ServiceSwitch.stopping : ServiceSwitch.starting },
     { status: 503, headers: { "retry-after": "1" } },
   )
 }

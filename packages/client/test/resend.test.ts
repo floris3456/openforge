@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { createRoot } from "solid-js"
 import { createData } from "../src/solid"
 import { createResender, findResendTimeout, OpenCode } from "../src/promise"
@@ -39,11 +40,7 @@ function fixture(answer: (request: Request, body: unknown) => Promise<Response> 
 }
 
 const resumed = { type: "service.resumed" }
-const switching = () =>
-  Response.json(
-    { code: "service_switching", message: "switching, try again in 1 s" },
-    { status: 503, headers: { "retry-after": "1" } },
-  )
+const switching = () => Response.json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
 // What the fake service reads from a write's body.
 const read = (body: unknown) => {
   const value = typeof body === "object" && body !== null ? body : {}

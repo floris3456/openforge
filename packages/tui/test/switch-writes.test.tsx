@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import type { OpenCodeEvent, UpgradeState } from "@opencode/client"
+import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { takeDraft } from "../src/component/prompt/draft-stash"
 import type { LogSink } from "../src/context/log"
 import { createAppFixture } from "./fixture/app"
@@ -33,11 +34,7 @@ function chat(options: { question?: boolean; transcript?: boolean } = {}) {
       },
     ],
   }
-  const switching = () =>
-    json(
-      { code: "service_switching", message: "switching, try again in 1 s" },
-      { status: 503, headers: { "retry-after": "1" } },
-    )
+  const switching = () => json(ServiceSwitch.refused, { status: 503, headers: { "retry-after": "1" } })
   const write = async (url: URL, request: Request, answer: () => Response) => {
     if (!state.up) {
       state.refused.push(url.pathname)

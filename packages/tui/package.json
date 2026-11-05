@@ -72,6 +72,7 @@
     "strip-ansi": "7.1.2"
   },
   "devDependencies": {
+    "@opencode/protocol": "workspace:*",
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
     "@typescript/native": "catalog:"

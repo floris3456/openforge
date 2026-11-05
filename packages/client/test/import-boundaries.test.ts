@@ -9,6 +9,8 @@ const schema = resolve(import.meta.dir, "../../schema")
 // The product's names, which the switch messages show. Plain constants that import nothing.
 const product = resolve(schema, "src/product.ts")
 const protocol = resolve(import.meta.dir, "../../protocol")
+// How the service answers during a release switch, which the resender reads. Plain constants that import nothing.
+const serviceSwitch = resolve(protocol, "src/service-switch.ts")
 const core = resolve(import.meta.dir, "../../core")
 const server = resolve(import.meta.dir, "../../server")
 
@@ -18,7 +20,7 @@ describe("public import boundaries", () => {
 
     expect(within(root.all, effect)).toEqual([])
     expect(within(root.all, schema)).toEqual([product])
-    expect(within(root.all, protocol)).toEqual([])
+    expect(within(root.all, protocol)).toEqual([serviceSwitch])
     expect(within(root.all, core)).toEqual([])
     expect(within(root.all, server)).toEqual([])
 
@@ -34,7 +36,7 @@ describe("public import boundaries", () => {
 
     expect(within(promiseService.all, effect)).toEqual([])
     expect(within(promiseService.all, schema)).toEqual([product])
-    expect(within(promiseService.all, protocol)).toEqual([])
+    expect(within(promiseService.all, protocol)).toEqual([serviceSwitch])
     expect(within(promiseService.all, core)).toEqual([])
     expect(within(promiseService.all, server)).toEqual([])
 

@@ -42,7 +42,7 @@ import { Tool } from "@opencode/core/tool"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { App } from "@opencode/core/app"
 import { offlineModels } from "./fixture/models"
-import { alive, machine } from "./fixture/runner"
+import { alive, eventually, machine } from "./fixture/runner"
 import { testEffect } from "./lib/effect"
 import { registerToolPlugin } from "./lib/tool"
 
@@ -145,12 +145,17 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
     const continuity = Context.get(context, SessionContinuity.Service)
     const restart = Context.get(context, SessionRestart.Service)
     // As the server does: the restart sweep runs once the gate is open.
-    yield* continuity.awaitOpen.pipe(Effect.andThen(restart.resumeSuspendedSessions), Effect.forkIn(scope))
+    const sweep = yield* continuity.awaitOpen.pipe(
+      Effect.andThen(restart.resumeSuspendedSessions),
+      Effect.forkIn(scope),
+    )
     const of = <D extends Event.Definition>(definition: D) =>
       events.filter((event): event is Event.Payload<D> => event.type === definition.type)
     return {
       of,
       continuity,
+      /** Settles once the restart sweep has picked up what the previous generation left. */
+      recovered: Fiber.join(sweep),
       sessions: Context.get(context, Session.Service),
       kv: Context.get(context, KV.Service),
       // The server marks the stop and leaves its shells to the runner before anything closes.
@@ -163,17 +168,10 @@ const start = (host: Host, options: { readonly paused?: boolean } = {}) =>
 
 type Generation = Effect.Success<ReturnType<typeof start>>
 
-const until = Effect.fnUntraced(function* (what: string, condition: () => boolean) {
-  const deadline = performance.now() + 15_000
-  while (!condition()) {
-    if (performance.now() > deadline) return yield* Effect.die(new Error(`${what} never happened within 15s`))
-    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)))
-  }
-})
-
 const succeeded = (generation: Generation, sessionID: Session.ID) =>
-  until("the turn's success", () =>
-    generation.of(SessionEvent.Execution.Succeeded).some((event) => event.data.sessionID === sessionID),
+  eventually(
+    () => generation.of(SessionEvent.Execution.Succeeded).some((event) => event.data.sessionID === sessionID),
+    "the turn's success",
   )
 
 const transcript = (generation: Generation, sessionID: Session.ID) =>
@@ -235,7 +233,7 @@ describe("a foreground shell tool call across a stop", () => {
           const chat = yield* setup(host, first)
           yield* shellTool(llm, chat.command.command)
           yield* first.sessions.prompt({ sessionID: chat.session.id, text: "run it" })
-          yield* until("the command's start", () => chat.command.runs() === 1)
+          yield* eventually(() => chat.command.runs() === 1, "the command's start")
 
           if (paused) {
             const result = yield* first.continuity.pause()
@@ -248,7 +246,7 @@ describe("a foreground shell tool call across a stop", () => {
 
           const second = yield* start(host, { paused })
           if (paused) yield* second.continuity.resume
-          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)))
+          yield* second.recovered
           expect(chat.command.runs()).toBe(1)
           chat.command.release()
           yield* succeeded(second, chat.session.id)
@@ -276,11 +274,11 @@ describe("a foreground shell tool call across a stop", () => {
       const chat = yield* setup(host, first)
       yield* shellTool(llm, chat.command.command)
       yield* first.sessions.prompt({ sessionID: chat.session.id, text: "run it" })
-      yield* until("the command's start", () => chat.command.runs() === 1)
+      yield* eventually(() => chat.command.runs() === 1, "the command's start")
       const pid = created(first)[0]?.pid ?? 0
       expect(alive(pid)).toBe(true)
       yield* first.sessions.interrupt(chat.session.id)
-      yield* until("the command's end", () => !alive(pid))
+      yield* eventually(() => !alive(pid), "the command's end")
     }),
   )
 })
@@ -299,7 +297,7 @@ describe("a `!` command across a stop", () => {
           const running = yield* first.sessions
             .shell({ sessionID: chat.session.id, command: chat.command.command })
             .pipe(Effect.forkChild({ startImmediately: true }))
-          yield* until("the command's start", () => chat.command.runs() === 1)
+          yield* eventually(() => chat.command.runs() === 1, "the command's start")
           yield* first.stop
           yield* Fiber.interrupt(running)
           const started = first.of(SessionEvent.Shell.Started).map((event) => event.data.shell.id)
@@ -308,16 +306,16 @@ describe("a `!` command across a stop", () => {
           if (finished) {
             chat.command.release()
             const file = created(first)[0]?.file ?? ""
-            yield* until("the command's exit file", () => fs.existsSync(RunnerPaths.exit(file)))
+            yield* eventually(() => fs.existsSync(RunnerPaths.exit(file)), "the command's exit file")
           }
 
           const second = yield* start(host)
           if (!finished) {
-            yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)))
+            yield* second.recovered
             expect(second.of(SessionEvent.Shell.Ended)).toEqual([])
             chat.command.release()
           }
-          yield* until("the command's end", () => second.of(SessionEvent.Shell.Ended).length > 0)
+          yield* eventually(() => second.of(SessionEvent.Shell.Ended).length > 0, "the command's end")
           const notices = yield* reported(second, chat.session.id)
           expect(notices).toHaveLength(1)
           expect(notices[0]).toContain("The following shell command was executed by the user")
@@ -331,7 +329,7 @@ describe("a `!` command across a stop", () => {
 
           // Reported: a later service does not report it again.
           const third = yield* start(host)
-          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 200)))
+          yield* third.recovered
           expect(third.of(SessionEvent.Shell.Ended)).toEqual([])
           expect(yield* reported(third, chat.session.id)).toHaveLength(1)
           expect(chat.command.runs()).toBe(1)
@@ -351,7 +349,7 @@ describe("a `!` command across a stop", () => {
         const running = yield* first.sessions
           .shell({ sessionID: chat.session.id, id, command: chat.command.command })
           .pipe(Effect.forkChild({ startImmediately: true }))
-        yield* until("the command's start", () => chat.command.runs() === 1)
+        yield* eventually(() => chat.command.runs() === 1, "the command's start")
         yield* first.stop
         yield* Fiber.interrupt(running)
 
@@ -360,7 +358,7 @@ describe("a `!` command across a stop", () => {
         yield* second.sessions.shell({ sessionID: chat.session.id, id, command: chat.command.command })
         expect(second.of(SessionEvent.Shell.Started)).toEqual([])
         chat.command.release()
-        yield* until("the command's end", () => second.of(SessionEvent.Shell.Ended).length > 0)
+        yield* eventually(() => second.of(SessionEvent.Shell.Ended).length > 0, "the command's end")
         expect(chat.command.runs()).toBe(1)
         expect(yield* reported(second, chat.session.id)).toHaveLength(1)
         const messages = yield* second.sessions.messages({ sessionID: chat.session.id })

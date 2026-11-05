@@ -15,6 +15,7 @@ import { SessionSchema } from "../schema.js"
 import { SessionStore } from "../store.js"
 import { ImageNotice } from "../../image/notice.js"
 import { ShellResult } from "../../shell/result.js"
+import { ShellTool } from "../../tool/plugin/shell.js"
 import { SubagentCompletion } from "../subagent-completion.js"
 
 const CONTINUE_AFTER_SERVER_RESTART =
@@ -109,10 +110,7 @@ export const layer = (options?: Options) =>
         return true
       })
 
-      const restartMessage = (
-        background: Job.Background,
-        recovery: Exclude<Job.Recovery, { kind: "subagent" }>,
-      ) => {
+      const restartMessage = (background: Job.Background, recovery: Exclude<Job.Recovery, { kind: "subagent" }>) => {
         const state = background.status === "running" ? "cancelled" : background.status
         if (recovery.kind === "shell") {
           const text =
@@ -191,7 +189,7 @@ export const layer = (options?: Options) =>
         const session = yield* sessions.get(recovery.sessionID).pipe(Effect.option)
         if (Option.isNone(session)) return yield* jobs.completeBackground(background.notificationID)
         const started = known.value
-        const settled = yield* Deferred.make<{ output: ReturnType<typeof ShellResult.output>; text: string }>()
+        const settled = yield* Deferred.make<ShellTool.Output>()
         yield* jobs.start({
           id: background.id,
           type: "shell",
@@ -199,54 +197,23 @@ export const layer = (options?: Options) =>
           metadata: { sessionID: recovery.sessionID, shellID: recovery.shellID },
           notificationID: background.notificationID,
           recovery,
-          run: Effect.gen(function* () {
-            const shell = yield* Shell.Service
-            return yield* Effect.gen(function* () {
-              const result = yield* shell.result(started)
-              if (!result.capture) return yield* new Shell.NotFoundError({ id: started.id })
-              const output = ShellResult.output(result)
-              const text = [output.output, ShellResult.notice(output), ShellResult.sandbox(result.info)]
-                .filter((text) => text)
-                .join("\n\n")
-              yield* Deferred.succeed(settled, { output, text })
-              return text
-            }).pipe(Effect.onInterrupt(() => shell.remove(started.id).pipe(Effect.ignore)))
-          }).pipe(instances.provide(session.value)),
+          // The timeout the call gave is not kept with the job.
+          run: Shell.Service.use((shell) => ShellTool.follow(shell, started, settled, undefined)).pipe(
+            instances.provide(session.value),
+          ),
         })
         yield* jobs.background(background.id)
-        const notify = jobs.wait({ id: background.id }).pipe(
-          Effect.flatMap(({ info }) =>
-            Effect.gen(function* () {
-              if (!info || info.status === "running") return
-              const done = info.status === "completed" ? yield* Deferred.await(settled) : undefined
-              const output = done?.output
-              const text = done ? done.text : info.status === "error" ? (info.error ?? "Command failed") : "Cancelled"
-              yield* sessions
-                .synthetic({
-                  id: background.notificationID,
-                  sessionID: recovery.sessionID,
-                  description: recovery.command,
-                  ...ShellResult.notification({
-                    jobID: background.id,
-                    shellID: recovery.shellID,
-                    command: recovery.command,
-                    state: info.status,
-                    text,
-                    output,
-                  }),
-                  ...(suspended.has(recovery.sessionID) ? { resume: false } : {}),
-                })
-                .pipe(
-                  Effect.catchTag("Session.NotFoundError", () => Effect.void),
-                  Effect.orDie,
-                )
-              yield* jobs.completeBackground(background.notificationID)
-            }),
-          ),
-        )
+        const notify = ShellTool.notifyWhenDone(jobs, sessions, {
+          sessionID: recovery.sessionID,
+          jobID: background.id,
+          shellID: recovery.shellID,
+          command: recovery.command,
+          settled,
+          resume: () => !suspended.has(recovery.sessionID),
+        })
         // A command that finished while no server ran is admitted now, before suspended Sessions resume.
-        if (started.status === "running") yield* notify.pipe(Effect.forkIn(scope))
-        else yield* notify
+        if (started.status !== "running") return yield* notify
+        yield* notify.pipe(Effect.forkIn(scope))
       })
 
       const recoverSubagent = Effect.fnUntraced(function* (

@@ -13,9 +13,15 @@ import { Shell } from "@opencode/core/shell"
 import { ShellRunner } from "@opencode/core/shell/runner"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
+import { until } from "../../../runner/test/fixture/runner"
 import { hostEnvironmentLayer } from "./environment"
 import { location } from "./location"
 import { tmpdirScoped } from "./tmpdir"
+
+export { alive } from "../../../runner/test/fixture/runner"
+
+/** Waits for `condition` without a fixed sleep; fails, naming `what`, after 15 s. */
+export const eventually = (condition: () => boolean, what?: string) => Effect.promise(() => until(condition, what))
 
 /** How long a test's runner waits for another command once nothing runs, instead of the real 10 s. */
 const GRACE = 200
@@ -68,12 +74,3 @@ export const machine = Effect.gen(function* () {
     ])
   return { tmp: tmp.path, project, ref, runners, global, service, state: root("state"), launch: hosted }
 })
-
-export function alive(pid: number) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}

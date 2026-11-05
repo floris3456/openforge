@@ -6,7 +6,7 @@ import { RunnerClient } from "@opencode/runner/client"
 import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { RunnerProtocol } from "@opencode/runner/protocol"
-import { RunnerServer } from "@opencode/runner/server"
+import type { RunnerServer } from "@opencode/runner/server"
 import { Continuity } from "@opencode/schema/continuity"
 import { Location } from "@opencode/schema/location"
 import { Shell } from "@opencode/schema/shell"
@@ -18,10 +18,9 @@ import { App } from "../app.js"
 import { Bus } from "../bus.js"
 
 export const DIRECTORY = "shell"
-export const STOPPED = "the tool runner stopped unexpectedly"
+const STOPPED = "the tool runner stopped unexpectedly"
 // Recent exited commands stay observable in memory per Location, including their file-backed output.
 const EXITED_LIMIT = 25
-const KILL_AFTER = 3_000
 // A live view never falls further behind than one page; it skips ahead instead.
 const LAG = RunnerOutput.CHUNK
 
@@ -43,6 +42,7 @@ const Meta = Schema.Struct({
   metadata: Shell.Metadata,
   started: Schema.Number,
   location: Location.Ref,
+  sandboxNote: Schema.optionalKey(Schema.String),
 })
 const decodeMeta = Schema.decodeUnknownOption(Meta)
 
@@ -58,9 +58,14 @@ export interface Control {
   readonly watch: (offset: number) => Stream.Stream<RunnerClient.WatchEvent, unknown>
 }
 
+/** How an attached command ended; the rest of its exit is known from its start. */
+export type Ended = Omit<RunnerProtocol.Exit, "id" | "pid" | "started" | "meta">
+
 export type StartInput = {
   readonly info: Shell.Info
   readonly location: Location.Ref
+  /** What the result of a sandboxed command that failed says about the sandbox. */
+  readonly sandboxNote?: string
   /** Final: already wrapped, for example in a sandbox. */
   readonly argv: readonly [string, ...string[]]
   readonly cwd: string
@@ -72,12 +77,16 @@ export type StartInput = {
 export interface Interface {
   /** Starts a command in this release's runner, starting the runner first when none runs. */
   readonly start: (input: StartInput) => Effect.Effect<Shell.Info, AppProcess.AppProcessError>
-  /** Registers a command run by someone else (a workspace's process); the returned effect reports its end. */
+  /**
+   * Registers a command this service runs itself (see `ShellInProcess`). The returned effect reports its end and,
+   * as a runner would, writes its exit file, or removes its files once it has been removed.
+   */
   readonly attach: (input: {
     readonly info: Shell.Info
     readonly location: Location.Ref
+    readonly sandboxNote?: string
     readonly control: Control
-  }) => Effect.Effect<(exit: RunnerProtocol.Exit) => Effect.Effect<void>>
+  }) => Effect.Effect<(ended: Ended) => Effect.Effect<void>>
   /** Also commands of an earlier service: adopted from a runner, or from their exit file once it has gone. */
   readonly get: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
   readonly wait: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError | RunnerStoppedError>
@@ -89,6 +98,8 @@ export interface Interface {
   readonly list: (location: Location.Ref) => Effect.Effect<Shell.Info[]>
   /** Newlines a finished command printed. */
   readonly lines: (id: Shell.ID) => Effect.Effect<number, NotFoundError>
+  /** What the result of a sandboxed command that failed says about the sandbox; undefined when unsandboxed. */
+  readonly sandboxNote: (id: Shell.ID) => Effect.Effect<string | undefined, NotFoundError>
   /** Locations with a running command. */
   readonly running: Effect.Effect<ReadonlyArray<Location.Ref>>
   /**
@@ -115,18 +126,19 @@ export type Options = {
 }
 
 /** Starts runners as `command <folder>`, detached from this process. */
-export const detached =
-  (command: ReadonlyArray<string>) =>
-  (directory: string): Effect.Effect<void, RunnerClient.RunnerError> =>
-    RunnerClient.launch([...command, directory], directory)
+export const detached = (command: ReadonlyArray<string>) => (directory: string) =>
+  RunnerClient.launch([...command, directory], directory)
 
 type Entry = {
   info: Shell.Info
   readonly location: Location.Ref
   readonly key: string
+  readonly sandboxNote: string | undefined
   readonly done: Deferred.Deferred<Shell.Info, NotFoundError | RunnerStoppedError>
   readonly pgid: number | undefined
   control: Control | undefined
+  /** The runner connection that reports its end, while it runs in a runner. */
+  remote: Remote | undefined
   exit: RunnerProtocol.Exit | undefined
   removed: boolean
 }
@@ -135,7 +147,6 @@ type Remote = {
   readonly directory: string
   readonly connection: RunnerClient.Connection
   readonly scope: Scope.Closeable
-  readonly entries: Set<Shell.ID>
   closed: boolean
 }
 
@@ -159,25 +170,31 @@ const layer = (options: Options) =>
       const remotes = new Map<string, Remote>()
       const starting = Semaphore.makeUnsafe(1)
       const adopted = yield* Deferred.make<void>()
-      const state = { detached: false, hosted: undefined as RunnerServer.Runner | undefined }
+      const runFork = Effect.runForkWith(yield* Effect.context())
+      let detaching = false
+      let hosted: RunnerServer.Runner | undefined
 
-      const hosted = Effect.tryPromise({
-        try: () =>
-          RunnerServer.serve({ directory: current, version: app.version }).then(
-            (runner) => void (state.hosted = runner),
-            (cause: unknown) => {
-              // Another process's runner serves the folder; connecting to it is all that is needed.
-              if (!(cause instanceof RunnerServer.LockedError)) throw cause
-            },
-          ),
-        catch: (cause) => new RunnerClient.RunnerError({ reason: "spawn", message: String(cause) }),
+      const host = Effect.tryPromise({
+        try: async () => {
+          const { RunnerServer } = await import("@opencode/runner/server")
+          // Another process's runner serves the folder; connecting to it is all that is needed.
+          hosted = await RunnerServer.serve({
+            directory: current,
+            version: app.version,
+            log: (line) => runFork(Effect.logWarning(line)),
+          }).catch((cause: unknown) => {
+            if (cause instanceof RunnerServer.LockedError) return undefined
+            throw cause
+          })
+        },
+        catch: (cause) => new RunnerClient.RunnerError({ reason: "spawn", message: RunnerProtocol.messageOf(cause) }),
       })
-      const launch = options.launch?.(current) ?? hosted
+      const launch = options.launch?.(current) ?? host
       yield* Effect.addFinalizer(() =>
         Effect.promise(async () => {
           // A runner hosted here ends with this service, as its commands would have without one.
-          if (!state.hosted) return
-          await state.hosted.shutdown()
+          if (!hosted) return
+          await hosted.shutdown()
           await rm(current, { recursive: true, force: true })
         }),
       )
@@ -203,8 +220,14 @@ const layer = (options: Options) =>
       })
 
       const discard = (file: string) =>
-        Effect.promise(() =>
-          Promise.all([rm(file, { force: true }), rm(RunnerPaths.exit(file), { force: true })]).then(() => undefined),
+        Effect.tryPromise(() =>
+          Promise.all([rm(file, { force: true }), rm(RunnerPaths.exit(file), { force: true })]),
+        ).pipe(Effect.catch((cause) => Effect.logWarning("cannot remove a shell command's files", { file, cause })))
+
+      // A command whose exit file can't be written still ends; a later service just won't know it.
+      const writeExit = (file: string, exit: RunnerProtocol.Exit) =>
+        Effect.tryPromise(() => RunnerOutput.writeAtomic(RunnerPaths.exit(file), JSON.stringify(exit))).pipe(
+          Effect.catch((cause) => Effect.logWarning("cannot write a shell command's exit file", { file, cause })),
         )
 
       const evict = Effect.fnUntraced(function* (entry: Entry) {
@@ -222,6 +245,7 @@ const layer = (options: Options) =>
         if (entry.exit) return
         entry.exit = exit
         entry.control = undefined
+        entry.remote = undefined
         if (entry.removed) return
         entry.info = terminal(entry.info, exit)
         // Evict before waking waiters, so one that looks at older commands next sees the retained set.
@@ -230,21 +254,22 @@ const layer = (options: Options) =>
         order.push(entry.info.id)
         while (order.length > EXITED_LIMIT) {
           const oldest = entries.get(order[0])
-          if (!oldest) order.shift()
-          else yield* evict(oldest)
+          if (!oldest) {
+            order.shift()
+            continue
+          }
+          yield* evict(oldest)
         }
-        if (exit.status === "failed")
-          yield* Deferred.fail(
-            entry.done,
-            new RunnerStoppedError({ id: entry.info.id, message: exit.error ?? STOPPED }),
-          )
-        else yield* Deferred.succeed(entry.done, entry.info)
+        yield* exit.status === "failed"
+          ? Deferred.fail(entry.done, new RunnerStoppedError({ id: entry.info.id, message: exit.error ?? STOPPED }))
+          : Deferred.succeed(entry.done, entry.info)
         if (announce) yield* publishExited(entry)
       })
 
       const register = (input: {
         info: Shell.Info
         location: Location.Ref
+        sandboxNote?: string
         pgid?: number
         control?: Control
         exit?: RunnerProtocol.Exit
@@ -254,9 +279,11 @@ const layer = (options: Options) =>
             info: input.info,
             location: input.location,
             key: key(input.location),
+            sandboxNote: input.sandboxNote,
             done: yield* Deferred.make<Shell.Info, NotFoundError | RunnerStoppedError>(),
             pgid: input.pgid,
             control: input.control,
+            remote: undefined,
             exit: undefined,
             removed: false,
           }
@@ -273,18 +300,8 @@ const layer = (options: Options) =>
         if (entry.pgid !== undefined) stop(entry.pgid)
         const now = Date.now()
         const printed = yield* Effect.promise(() => count(entry.info.file))
-        const failed: RunnerProtocol.Exit = {
-          id: entry.info.id,
-          status: "failed",
-          error: STOPPED,
-          pid: entry.info.pid ?? 0,
-          started: entry.info.time.started,
-          ended: now,
-          size: printed.size,
-          lines: printed.lines,
-          meta: meta(entry),
-        }
-        yield* Effect.promise(() => RunnerOutput.writeAtomic(RunnerPaths.exit(entry.info.file), JSON.stringify(failed)))
+        const failed = exitOf(entry, { status: "failed", error: STOPPED, ended: now, ...printed })
+        yield* writeExit(entry.info.file, failed)
         yield* finish(entry, failed)
       })
 
@@ -292,11 +309,10 @@ const layer = (options: Options) =>
         remote.closed = true
         if (remotes.get(remote.directory) === remote) remotes.delete(remote.directory)
         yield* Scope.close(remote.scope, Exit.void)
-        if (state.detached) return
-        const running = [...remote.entries].flatMap((id) => {
-          const entry = entries.get(id)
-          return entry && !entry.exit && !entry.removed ? [entry] : []
-        })
+        if (detaching) return
+        const running = [...entries.values()].filter(
+          (entry) => entry.remote === remote && !entry.exit && !entry.removed,
+        )
         if (running.length === 0) return
         // A dropped connection to a runner that still lives is picked up again.
         if (reason === "lost" && (yield* connectTo(remote.directory).pipe(Effect.option))._tag === "Some") return
@@ -329,7 +345,7 @@ const layer = (options: Options) =>
       })
 
       const track = Effect.fnUntraced(function* (remote: Remote, entry: Entry) {
-        remote.entries.add(entry.info.id)
+        entry.remote = remote
         yield* remote.connection.watch(entry.info.id, { offset: 0, output: false }).pipe(
           Stream.runForEach((event) => (event.type === "exit" ? finish(entry, event.exit) : Effect.void)),
           Effect.ignore,
@@ -357,6 +373,7 @@ const layer = (options: Options) =>
             const entry = yield* register({
               info,
               location: decoded.value.location,
+              sandboxNote: decoded.value.sandboxNote,
               pgid: command.pgid,
               control: command.exit ? undefined : control(remote, info.id, command.pgid, info.file),
               exit: command.exit,
@@ -378,7 +395,7 @@ const layer = (options: Options) =>
           Scope.provide(remoteScope),
           Effect.onError(() => Scope.close(remoteScope, Exit.void)),
         )
-        const remote: Remote = { directory, connection, scope: remoteScope, entries: new Set(), closed: false }
+        const remote: Remote = { directory, connection, scope: remoteScope, closed: false }
         remotes.set(directory, remote)
         yield* connection.closed.pipe(
           Effect.flatMap((reason) => closed(remote, reason)),
@@ -433,6 +450,7 @@ const layer = (options: Options) =>
           return yield* register({
             info: describe(id, decoded.value, exit.pid),
             location: decoded.value.location,
+            sandboxNote: decoded.value.sandboxNote,
             exit,
           })
         }
@@ -457,15 +475,7 @@ const layer = (options: Options) =>
           env: { ...input.env },
           deadline: input.deadline ?? null,
           output: input.info.file,
-          meta: {
-            command: input.info.command,
-            cwd: input.info.cwd,
-            shell: input.info.shell,
-            file: input.info.file,
-            metadata: input.info.metadata,
-            started: input.info.time.started,
-            location: input.location,
-          },
+          meta: meta(input.info, input.location, input.sandboxNote),
         }
         const attempt = runner.pipe(
           Effect.flatMap((remote) =>
@@ -473,7 +483,7 @@ const layer = (options: Options) =>
               Effect.map((started) => ({ remote, started })),
               Effect.tapError((error) =>
                 Effect.sync(() => {
-                  if (error.reason !== "closing" && error.reason !== "lost") return
+                  if (!exiting(error)) return
                   remote.closed = true
                   if (remotes.get(remote.directory) === remote) remotes.delete(remote.directory)
                 }),
@@ -483,15 +493,13 @@ const layer = (options: Options) =>
         )
         // A runner that is exiting because its last command ended refuses new ones; the next one takes them.
         const { remote, started } = yield* attempt.pipe(
-          Effect.catchIf(
-            (error) => error.reason === "closing" || error.reason === "lost",
-            () => attempt,
-          ),
+          Effect.catchIf(exiting, () => attempt),
           Effect.mapError(failure),
         )
         const entry = yield* register({
           info: { ...input.info, pid: started.command.pid },
           location: input.location,
+          sandboxNote: input.sandboxNote,
           pgid: started.command.pgid,
           control: control(remote, input.info.id, started.command.pgid, input.info.file),
         })
@@ -501,15 +509,20 @@ const layer = (options: Options) =>
       })
 
       const attach: Interface["attach"] = Effect.fnUntraced(function* (input) {
-        const entry = yield* register({ info: input.info, location: input.location, control: input.control })
+        const entry = yield* register(input)
         yield* bus.publish(Shell.Event.Created, { info: entry.info }, { location: input.location })
-        return (exit) => finish(entry, exit)
+        return (ended) =>
+          Effect.gen(function* () {
+            const exit = exitOf(entry, ended)
+            yield* entry.removed ? discard(entry.info.file) : writeExit(entry.info.file, exit)
+            yield* finish(entry, exit)
+          })
       })
 
       const output = Effect.fnUntraced(function* (id: Shell.ID, input?: Shell.OutputInput) {
         const entry = yield* require(id)
         const cursor = input?.cursor ?? 0
-        const limit = input?.limit ?? 65_536
+        const limit = input?.limit ?? RunnerOutput.CHUNK
         if (entry.control) {
           const page = yield* entry.control.read(cursor, limit)
           if (page)
@@ -593,14 +606,17 @@ const layer = (options: Options) =>
 
       const remove = Effect.fn("ShellRunner.remove")(function* (id: Shell.ID) {
         const entry = yield* require(id)
-        if (state.detached) return
-        const running = entry.control
+        if (detaching) return
+        const running = entry.exit ? undefined : entry.control
         yield* forget(entry)
-        if (running && !entry.exit) {
-          yield* running.signal("SIGTERM", true)
-          // Every shell reports exactly one exit; removing a running one ends it as killed.
-          yield* bus.publish(Shell.Event.Exited, { id, status: "killed" }, { location: entry.location })
-        } else yield* discard(entry.info.file)
+        // Every shell reports exactly one exit: removing a running one ends it as killed, and its files go once it has.
+        yield* running
+          ? running
+              .signal("SIGTERM", true)
+              .pipe(
+                Effect.andThen(bus.publish(Shell.Event.Exited, { id, status: "killed" }, { location: entry.location })),
+              )
+          : discard(entry.info.file)
         yield* bus.publish(Shell.Event.Deleted, { id }, { location: entry.location })
       })
 
@@ -626,6 +642,9 @@ const layer = (options: Options) =>
         lines: Effect.fnUntraced(function* (id) {
           return (yield* require(id)).exit?.lines ?? 0
         }),
+        sandboxNote: Effect.fnUntraced(function* (id) {
+          return (yield* require(id)).sandboxNote
+        }),
         running: Effect.sync(() =>
           [...entries.values()].flatMap((entry) => (!entry.exit && !entry.removed ? [entry.location] : [])),
         ),
@@ -634,7 +653,7 @@ const layer = (options: Options) =>
           Effect.map(() => [...found.values()]),
         ),
         detach: Effect.sync(() => {
-          state.detached = true
+          detaching = true
         }),
       })
     }),
@@ -659,17 +678,32 @@ function describe(id: string, meta: typeof Meta.Type, pid?: number): Shell.Info 
   }
 }
 
-function meta(entry: Entry) {
+// What the runner keeps for a later service, and what the exit file carries.
+function meta(info: Shell.Info, location: Location.Ref, sandboxNote: string | undefined): typeof Meta.Type {
   return {
-    command: entry.info.command,
-    cwd: entry.info.cwd,
-    shell: entry.info.shell,
-    file: entry.info.file,
-    metadata: entry.info.metadata,
-    started: entry.info.time.started,
-    location: entry.location,
+    command: info.command,
+    cwd: info.cwd,
+    shell: info.shell,
+    file: info.file,
+    metadata: info.metadata,
+    started: info.time.started,
+    location,
+    ...(sandboxNote ? { sandboxNote } : {}),
   }
 }
+
+function exitOf(entry: Entry, ended: Ended): RunnerProtocol.Exit {
+  return {
+    id: entry.info.id,
+    pid: entry.info.pid ?? 0,
+    started: entry.info.time.started,
+    ...ended,
+    meta: meta(entry.info, entry.location, entry.sandboxNote),
+  }
+}
+
+/** The runner is exiting, or its connection dropped: another attempt reaches the runner that takes over. */
+const exiting = (error: RunnerClient.RunnerError) => error.reason === "closing" || error.reason === "lost"
 
 // How a command's end reads as Shell.Info. Only a command that exited by itself reports its code or signal.
 function terminal(info: Shell.Info, exit: RunnerProtocol.Exit): Shell.Info {
@@ -700,7 +734,7 @@ async function count(file: string) {
   return { size: info.size, lines }
 }
 
-// SIGTERM to the group now and SIGKILL a moment later, as the runner itself would.
+// SIGTERM to the group now and SIGKILL a moment later, as the runner itself would. A group already gone is fine.
 function stop(pgid: number) {
   const kill = (signal: NodeJS.Signals) => {
     try {
@@ -708,5 +742,5 @@ function stop(pgid: number) {
     } catch {}
   }
   kill("SIGTERM")
-  setTimeout(() => kill("SIGKILL"), KILL_AFTER).unref()
+  setTimeout(() => kill("SIGKILL"), RunnerProtocol.KILL_AFTER).unref()
 }

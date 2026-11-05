@@ -2,25 +2,24 @@ import { describe, expect } from "bun:test"
 import fs from "fs"
 import net from "net"
 import path from "path"
-import { Effect, Fiber, Queue, Schedule, Stream } from "effect"
+import { Deferred, Effect, Fiber, Layer, Queue, Stream } from "effect"
 import { RunnerClient } from "@opencode/runner/client"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { Location } from "@opencode/core/location"
+import { AbsolutePath } from "@opencode/core/schema"
 import { Shell } from "@opencode/core/shell"
+import { ShellInProcess } from "@opencode/core/shell/in-process"
 import { ShellRunner } from "@opencode/core/shell/runner"
 import { Workspace } from "@opencode/core/workspace"
 import type { Shell as ShellSchema } from "@opencode/schema/shell"
-import { alive, machine } from "./fixture/runner"
+import { AppProcess } from "@opencode/util/process"
+import { hostEnvironmentLayer } from "./fixture/environment"
+import { alive, eventually, machine } from "./fixture/runner"
+import { tmpdirScoped } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 
 const gated = (release: string, before: string, after: string) =>
   `printf %s ${before}; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s ${after}`
-
-const until = (condition: () => boolean) =>
-  Effect.sync(condition).pipe(
-    Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("20 millis") }),
-    Effect.timeout("10 seconds"),
-  )
 
 // Takes watch events until the output so far reads `text` (or the command has exited); returns that output.
 const read = (events: Queue.Queue<ShellSchema.WatchEvent>, text: string) =>
@@ -77,8 +76,9 @@ describe("Shell through the tool runner", () => {
       // A runner that holds a command, which the next service reaches.
       yield* Effect.gen(function* () {
         const shell = yield* Shell.Service
+        const runner = yield* ShellRunner.Service
         yield* shell.create({ shell: "/bin/sh", command: gated(release, "a", "b"), timeout: 0 })
-        yield* (yield* ShellRunner.Service).detach
+        yield* runner.detach
       }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.0" })))
       // A folder left behind, with no runner in it.
       fs.mkdirSync(RunnerPaths.directory(host.state, "0.0.9"), { recursive: true })
@@ -94,9 +94,10 @@ describe("Shell through the tool runner", () => {
         () => Effect.sync(() => server.close()),
       )
 
-      const runners = yield* Effect.gen(function* () {
-        return yield* (yield* ShellRunner.Service).runners
-      }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.1" })))
+      const runners = yield* ShellRunner.Service.use((runner) => runner.runners).pipe(
+        Effect.scoped,
+        Effect.provide(host.service({ version: "0.1.1" })),
+      )
       expect(runners.toSorted((a, b) => a.version.localeCompare(b.version))).toEqual([
         { version: "0.1.0", reachable: true },
         { version: "9.0.0", reachable: false, reason: "the runner did not greet" },
@@ -138,7 +139,7 @@ describe("Shell through the tool runner", () => {
           time: { started: started.time.started },
         })
         expect((yield* shell.list()).map((info) => info.id)).toEqual([started.id])
-        yield* until(() => fs.existsSync(started.file) && fs.readFileSync(started.file, "utf8") === "before")
+        yield* eventually(() => fs.existsSync(started.file) && fs.readFileSync(started.file, "utf8") === "before")
         expect((yield* shell.output(started.id)).output).toBe("before")
         fs.writeFileSync(release, "")
         return yield* shell.result(started)
@@ -164,7 +165,7 @@ describe("Shell through the tool runner", () => {
         return info
       }).pipe(Effect.scoped, Effect.provide(host.service()))
       if (info.pid === undefined) throw new Error("expected a pid")
-      yield* until(() => !alive(info.pid ?? 0))
+      yield* eventually(() => !alive(info.pid ?? 0))
       expect(fs.existsSync(info.file)).toBe(false)
     }),
   )
@@ -197,8 +198,9 @@ describe("Shell through the tool runner", () => {
       const release = path.join(host.tmp, "release")
       const old = yield* Effect.gen(function* () {
         const shell = yield* Shell.Service
+        const runner = yield* ShellRunner.Service
         const info = yield* shell.create({ shell: "/bin/sh", command: gated(release, "old", "-done"), timeout: 0 })
-        yield* (yield* ShellRunner.Service).detach
+        yield* runner.detach
         return info
       }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.0" })))
 
@@ -232,7 +234,7 @@ describe("Shell through the tool runner", () => {
             cwd: host.tmp,
             timeout: 0,
           })
-          yield* until(() => fs.existsSync(ready))
+          yield* eventually(() => fs.existsSync(ready))
           const child = Number(fs.readFileSync(path.join(host.tmp, "child"), "utf8"))
           const waiting = yield* shell.wait(info.id).pipe(Effect.flip, Effect.forkScoped)
           const runner = yield* RunnerClient.connect(RunnerPaths.directory(host.state, "test")).pipe(Effect.scoped)
@@ -242,7 +244,7 @@ describe("Shell through the tool runner", () => {
           const error = yield* Fiber.join(waiting)
           expect(error).toBeInstanceOf(Shell.RunnerStoppedError)
           expect(error.message).toBe("the tool runner stopped unexpectedly")
-          yield* until(() => !alive(info.pid ?? 0) && !alive(child))
+          yield* eventually(() => !alive(info.pid ?? 0) && !alive(child))
           expect(yield* shell.get(info.id)).toMatchObject({ status: "killed" })
           expect(JSON.parse(fs.readFileSync(RunnerPaths.exit(info.file), "utf8"))).toMatchObject({
             status: "failed",
@@ -252,5 +254,90 @@ describe("Shell through the tool runner", () => {
         }).pipe(Effect.scoped, Effect.provide(host.service({ separate: true })))
       }),
     { timeout: 20_000 },
+  )
+})
+
+// A workspace's commands run in its own environment, from the service rather than the tool runner.
+describe("Shell run from the service", () => {
+  const workspace = (host: Effect.Success<typeof machine>) =>
+    Location.Ref.make({ directory: host.ref.directory, workspaceID: Workspace.ID.make("wrk_service") })
+
+  it.live("a command whose output can't be written fails to start, and runs nothing", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      const ran = path.join(host.tmp, "ran")
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const outputs = path.join(host.tmp, "data", Shell.DIRECTORY)
+        const folder = path.join(outputs, fs.readdirSync(outputs)[0])
+        fs.chmodSync(folder, 0o500)
+        const error = yield* shell
+          .create({ shell: "/bin/sh", command: `: > ${ran}`, timeout: 0 })
+          .pipe(
+            Effect.flip,
+            Effect.timeout("10 seconds"),
+            Effect.ensuring(Effect.sync(() => fs.chmodSync(folder, 0o700))),
+          )
+        expect(error).toBeInstanceOf(AppProcess.AppProcessError)
+        expect(fs.existsSync(ran)).toBe(false)
+        expect(yield* shell.list()).toEqual([])
+      }).pipe(Effect.scoped, Effect.provide(host.service({ location: workspace(host) })))
+    }),
+  )
+
+  it.live("a command whose exit file can't be written still ends, with its output", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      const release = path.join(host.tmp, "release")
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const info = yield* shell.create({ shell: "/bin/sh", command: gated(release, "one", "two"), timeout: 0 })
+        yield* eventually(() => fs.readFileSync(info.file, "utf8") === "one", "the command's first output")
+        const folder = path.dirname(info.file)
+        fs.chmodSync(folder, 0o500)
+        fs.writeFileSync(release, "")
+        const ended = yield* shell
+          .wait(info.id)
+          .pipe(Effect.timeout("10 seconds"), Effect.ensuring(Effect.sync(() => fs.chmodSync(folder, 0o700))))
+        expect(ended).toMatchObject({ status: "exited", exit: 0 })
+        expect(fs.existsSync(RunnerPaths.exit(info.file))).toBe(false)
+        expect((yield* shell.output(info.id)).output).toBe("onetwo")
+      }).pipe(Effect.scoped, Effect.provide(host.service({ location: workspace(host) })))
+    }),
+  )
+
+  it.live("once a command has ended, its output is read from its file, not live", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const attached = yield* Deferred.make<ShellRunner.Control>()
+      const ended = yield* Deferred.make<ShellRunner.Ended>()
+      const runner = Layer.mock(ShellRunner.Service, {
+        attach: (input) =>
+          Deferred.succeed(attached, input.control).pipe(
+            Effect.as((end: ShellRunner.Ended) => Deferred.succeed(ended, end).pipe(Effect.asVoid)),
+          ),
+      })
+      const id = Shell.ID.create()
+      yield* ShellInProcess.start({
+        info: {
+          id,
+          status: "running",
+          command: "printf hi",
+          cwd: tmp.path,
+          shell: "/bin/sh",
+          file: path.join(tmp.path, `${id}.out`),
+          metadata: {},
+          time: { started: Date.now() },
+        },
+        location: Location.Ref.make({ directory: AbsolutePath.make(tmp.path) }),
+        command: { argv: ["/bin/sh", "-c", "printf hi"], cwd: tmp.path, env: { PATH: process.env.PATH ?? "" } },
+        deadline: undefined,
+      }).pipe(Effect.provide(yield* Layer.build(Layer.merge(runner, hostEnvironmentLayer))))
+      const control = yield* Deferred.await(attached)
+      // The live view ends with the command.
+      yield* control.watch(0).pipe(Stream.runDrain)
+      expect(yield* control.read(0, 100)).toBeUndefined()
+      expect(yield* Deferred.await(ended)).toMatchObject({ status: "exited", code: 0, size: 2 })
+    }),
   )
 })

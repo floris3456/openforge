@@ -45,6 +45,10 @@ else
   fail "sha256sum or shasum is needed to check the download."
 fi
 
+if [ -e "$bin/openforge" ] && [ ! -L "$bin/openforge" ]; then
+  fail "$bin/openforge exists and is not a link; remove it and run the installer again."
+fi
+
 mkdir -p "$data/releases"
 work="$(mktemp -d "$data/releases/.install-XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -97,9 +101,6 @@ mv -T "$link" "$data/current" 2>/dev/null || mv -h "$link" "$data/current" 2>/de
 }
 
 mkdir -p "$bin"
-if [ -e "$bin/openforge" ] && [ ! -L "$bin/openforge" ]; then
-  fail "$bin/openforge exists and is not a link; remove it and run the installer again."
-fi
 ln -sfn "$data/current/openforge" "$bin/openforge"
 
 printf 'openforge %s is installed: %s\n' "$version" "$bin/openforge"

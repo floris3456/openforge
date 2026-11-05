@@ -91,6 +91,32 @@ describe("install.sh", () => {
     }),
   )
 
+  it.live("refuses to run while ~/.local/bin/openforge is a regular file, before it changes the install", () =>
+    Effect.gen(function* () {
+      const home = yield* root
+      const server = yield* releaseServer({
+        "0.0.1": yield* Effect.promise(() => publish(home, "0.0.1")),
+        "0.0.2": yield* Effect.promise(() => publish(home, "0.0.2")),
+      })
+      expect((yield* run(home, server.url, ["0.0.1"])).code).toBe(0)
+      const command = path.join(home, ".local", "bin", "openforge")
+      yield* Effect.promise(() => fs.rm(command))
+      yield* Effect.promise(() => fs.writeFile(command, "#!/bin/sh\n"))
+      const requests = server.requests.length
+
+      const refused = yield* run(home, server.url, ["0.0.2"])
+      expect(refused.code).toBe(1)
+      expect(refused.stderr).toBe(
+        `openforge install: ${command} exists and is not a link; remove it and run the installer again.\n`,
+      )
+      const data = path.join(home, ".local", "share", "openforge")
+      expect(yield* Effect.promise(() => fs.readlink(path.join(data, "current")))).toBe("releases/0.0.1")
+      expect(yield* Effect.promise(() => fs.readdir(path.join(data, "releases")))).toEqual(["0.0.1"])
+      expect(yield* Effect.promise(() => fs.readFile(command, "utf8"))).toBe("#!/bin/sh\n")
+      expect(server.requests.length).toBe(requests)
+    }),
+  )
+
   it.live("refuses a download whose SHA-256 does not match SHA256SUMS and leaves nothing installed", () =>
     Effect.gen(function* () {
       const home = yield* root

@@ -1,5 +1,8 @@
 import type { WidthMethod } from "@opentui/core"
-import { appendPrompt, parsePromptInfo, type PromptInfo } from "../../prompt/history"
+import { AgentAttachment } from "@opencode/schema/prompt"
+import { PromptInput } from "@opencode/schema/prompt-input"
+import { Schema } from "effect"
+import { appendPrompt, type PromptInfo } from "../../prompt/history"
 import type { PromptRef } from "./index"
 
 // Holds one in-progress draft per tab across Prompt remounts. A draft is
@@ -19,8 +22,34 @@ export function saveDraft(sessionID: string | undefined, entry: DraftEntry) {
   byTab.set(sessionID, entry)
 }
 
-/** A tab's draft as it outlives the process: no `sessionID` for the home screen's composer. */
-export type CarriedDraft = { readonly sessionID?: string; readonly prompt: PromptInfo; readonly cursor: number | null }
+const PastedText = Schema.Struct({
+  text: Schema.String,
+  source: Schema.Struct({ start: Schema.Finite, end: Schema.Finite, text: Schema.String }),
+})
+
+const CarriedPrompt = Schema.Struct({
+  text: Schema.String,
+  files: Schema.optional(
+    Schema.mutable(
+      Schema.Array(Schema.Struct({ ...PromptInput.FileAttachment.fields, path: Schema.optional(Schema.String) })),
+    ),
+  ),
+  agents: Schema.optional(Schema.mutable(Schema.Array(AgentAttachment))),
+  skills: Schema.optional(Schema.mutable(Schema.Array(PromptInput.SkillAttachment))),
+  pasted: Schema.mutable(Schema.Array(PastedText)),
+  mode: Schema.optional(Schema.Literals(["normal", "shell"])),
+})
+
+/**
+ * A tab's draft as it outlives the process: no `sessionID` for the home screen's composer, and a `null` cursor at the
+ * end of the text, which JSON writes for Infinity.
+ */
+export const CarriedDraft = Schema.Struct({
+  sessionID: Schema.optional(Schema.String),
+  prompt: CarriedPrompt,
+  cursor: Schema.NullOr(Schema.Finite),
+})
+export type CarriedDraft = typeof CarriedDraft.Type
 
 /**
  * Every stashed draft, for this screen to carry over when it restarts on a new release. Composers stash what they
@@ -28,24 +57,15 @@ export type CarriedDraft = { readonly sessionID?: string; readonly prompt: Promp
  */
 export function stashedDrafts(): CarriedDraft[] {
   return Array.from(byTab, ([sessionID, entry]) => ({
-    ...(sessionID === undefined ? {} : { sessionID }),
+    sessionID,
     prompt: entry.prompt,
-    // JSON has no Infinity, which means "at the end".
     cursor: Number.isFinite(entry.cursor) ? entry.cursor : null,
   })).filter((draft) => draft.prompt.text !== "")
 }
 
 /** Stashes drafts carried over from before a restart, for their composers to take when they mount. */
-export function stashDrafts(drafts: unknown) {
-  if (!Array.isArray(drafts)) return
-  for (const draft of drafts) {
-    if (!draft || typeof draft !== "object") continue
-    const sessionID = "sessionID" in draft && typeof draft.sessionID === "string" ? draft.sessionID : undefined
-    const prompt = "prompt" in draft ? parsePromptInfo(draft.prompt) : undefined
-    if (!prompt?.text) continue
-    const cursor = "cursor" in draft && typeof draft.cursor === "number" ? draft.cursor : Infinity
-    byTab.set(sessionID, { prompt, cursor })
-  }
+export function stashDrafts(drafts: ReadonlyArray<CarriedDraft>) {
+  drafts.forEach((draft) => byTab.set(draft.sessionID, { prompt: draft.prompt, cursor: draft.cursor ?? Infinity }))
 }
 
 const composers = new Map<string | undefined, PromptRef>()

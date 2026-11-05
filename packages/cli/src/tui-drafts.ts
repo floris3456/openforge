@@ -1,12 +1,16 @@
 // Half-typed prompts a TUI hands to itself when it restarts on a new release: written to a file only this user can
 // read, named in the restarted process's environment, and read and removed once.
-import { Effect, FileSystem, Option } from "effect"
+import { CarriedDraft } from "@opencode/tui"
+import { Effect, FileSystem, Option, Schema } from "effect"
 import path from "node:path"
 
 export const variable = "OPENFORGE_TUI_DRAFTS"
 
+const Drafts = Schema.Struct({ drafts: Schema.Array(CarriedDraft) })
+const decodeDrafts = Schema.decodeUnknownOption(Schema.fromJsonString(Drafts))
+
 /** Writes `drafts` for the restarted process; returns the file to name in its environment, if there is anything. */
-export const keep = Effect.fnUntraced(function* (folder: string, drafts: ReadonlyArray<unknown>) {
+export const keep = Effect.fnUntraced(function* (folder: string, drafts: ReadonlyArray<CarriedDraft>) {
   if (drafts.length === 0) return undefined
   const fs = yield* FileSystem.FileSystem
   const file = path.join(folder, `${process.pid}.json`)
@@ -22,16 +26,11 @@ export const keep = Effect.fnUntraced(function* (folder: string, drafts: Readonl
 export const take = Effect.fnUntraced(function* (folder: string, env: Record<string, string | undefined>) {
   const file = env[variable]
   delete env[variable]
-  if (!file || path.dirname(path.resolve(file)) !== path.resolve(folder)) return undefined
+  if (!file || path.dirname(path.resolve(file)) !== path.resolve(folder)) return []
   const fs = yield* FileSystem.FileSystem
   const text = yield* fs.readFileString(file).pipe(Effect.option)
   yield* fs.remove(file).pipe(Effect.ignore)
-  if (Option.isNone(text)) return undefined
-  try {
-    return (JSON.parse(text.value) as { drafts?: unknown } | null)?.drafts
-  } catch {
-    return undefined
-  }
+  return Option.getOrUndefined(Option.flatMap(text, decodeDrafts))?.drafts ?? []
 })
 
 export * as TuiDrafts from "./tui-drafts"

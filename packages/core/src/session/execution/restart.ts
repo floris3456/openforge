@@ -82,6 +82,7 @@ export const layer = (options?: Options) =>
       const continuity = yield* SessionContinuity.Service
       const scope = yield* Effect.scope
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+      const release = SessionExecution.release(store, continuity)
 
       const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, rested: boolean) {
         // A stop after a completed pause cut nothing off: every execution continues where it rested, without a
@@ -92,13 +93,9 @@ export const layer = (options?: Options) =>
         const attempts = yield* store.countResume(sessionID)
         if (attempts === undefined) return false
         if (attempts > maxAttempts) {
-          // Terminalize instead: the release hook clears the claim and resets the
-          // counter atomically with the terminal event.
-          yield* bus.publish(
-            SessionEvent.Execution.Failed,
-            { sessionID, error: RESUME_EXHAUSTED },
-            { commit: () => store.release(sessionID) },
-          )
+          // Terminalize instead: as any terminal, it clears the claim, resets the counter and drops the step the
+          // turn would have resumed, atomically with the terminal event.
+          yield* bus.publish(SessionEvent.Execution.Failed, { sessionID, error: RESUME_EXHAUSTED }, release(sessionID))
           return false
         }
         yield* bus.publish(SessionEvent.Synthetic, {

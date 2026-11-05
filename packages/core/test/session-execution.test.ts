@@ -321,6 +321,48 @@ describe("SessionExecution lifecycle", () => {
     }),
   )
 
+  it.effect("a turn that exhausts its resume budget leaves nothing to resume, so the next prompt starts afresh", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const bus = yield* Bus.Service
+      const kv = yield* KV.Service
+      const sessionID = Session.ID.make("ses_resume_exhausted_rest")
+      yield* seedSessions(database, [sessionID], { time_suspended: Date.now(), resume_attempts: 2 })
+      const scope = yield* Scope.make()
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+      const continuity = Context.get(
+        yield* Layer.buildWithScope(
+          SessionContinuity.layer().pipe(
+            Layer.provide(Layer.succeed(Database.Service, database)),
+            Layer.provide(Layer.succeed(Bus.Service, bus)),
+            Layer.provide(Layer.succeed(KV.Service, kv)),
+          ),
+          scope,
+        ),
+        SessionContinuity.Service,
+      )
+      // The step the turn kept dying in rested with its tools: a resume would run it again.
+      yield* continuity.save(sessionID, {
+        kind: "tools",
+        step: 3,
+        assistantMessageID: SessionMessage.ID.create(),
+        finish: { finish: "tool-calls" },
+      })
+      const restored: Effect.Success<ReturnType<SessionContinuity.Interface["restored"]>>[] = []
+      const context = yield* buildExecution(
+        scope,
+        ({ sessionID: id }) => continuity.restored(id).pipe(Effect.map((found) => void restored.push(found))),
+        { maxAttempts: 2 },
+      )
+      yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
+      expect(restored).toEqual([])
+
+      // The next prompt's drain finds no step to resume.
+      yield* Context.get(context, SessionExecution.Service).resume(sessionID)
+      expect(restored).toEqual([{ tools: new Map() }])
+    }),
+  )
+
   it.effect("counts every resume durably and never consumes the claim it recovers", () =>
     Effect.gen(function* () {
       const database = yield* Database.Service

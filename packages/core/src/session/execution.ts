@@ -51,6 +51,12 @@ export function terminal(exit: Exit.Exit<void, SessionRunner.RunError>, reason?:
   return { type: "failed" as const, error: toSessionError(Cause.squash(exit.cause)) }
 }
 
+/** A terminal's commit: it releases the claim and drops the records a restart would have continued from. */
+export const release =
+  (store: SessionStore.Interface, continuity: SessionContinuity.Interface) => (sessionID: SessionSchema.ID) => ({
+    commit: () => store.release(sessionID).pipe(Effect.andThen(continuity.clear(sessionID))),
+  })
+
 /** Process-local execution: drains run in this process using the selected instance. */
 export const layer = Layer.effect(
   Service,
@@ -80,10 +86,7 @@ export const layer = Layer.effect(
     const claimOnCommit = (sessionID: SessionSchema.ID) => ({
       commit: () => store.claim(sessionID),
     })
-    // A terminal also drops the records a restart would have continued from.
-    const releaseOnCommit = (sessionID: SessionSchema.ID) => ({
-      commit: () => store.release(sessionID).pipe(Effect.andThen(continuity.clear(sessionID))),
-    })
+    const releaseOnCommit = release(store, continuity)
     const drain = Effect.fnUntraced(function* (
       sessionID: SessionSchema.ID,
       force: boolean,

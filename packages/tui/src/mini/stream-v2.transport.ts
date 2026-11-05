@@ -44,6 +44,8 @@ type StreamInput = {
   sdk: OpenCodeClient
   reconnect?: (signal: AbortSignal) => Promise<OpenCodeClient>
   onClient?: (sdk: OpenCodeClient) => void
+  /** Hears every event of the stream, from each connection's `server.connected` on. */
+  onEvent?: (event: RunV2Event) => void
   readTextFile?: (url: string) => Promise<string>
   location?: LocationRef
   sessionID: string
@@ -1026,8 +1028,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     if (!current(attempt)) return
     const client = attempt.client
     if (catalogEvents.has(event.type)) {
-      if (input.location && event.location && event.location.directory !== input.location.directory)
-        return
+      if (input.location && event.location && event.location.directory !== input.location.directory) return
       void refreshCatalog(attempt)
       return
     }
@@ -1506,12 +1507,14 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         try {
           const first = await nextEvent(stream, connection.signal)
           if (first.done || first.value.type !== "server.connected") throw new Error("Event stream disconnected")
+          input.onEvent?.(first.value)
           const buffered: RunV2Event[] = []
           let booting = true
           const consume = (async () => {
             while (true) {
               const next = await nextEvent(stream, connection.signal)
               if (next.done) throw new Error("Event stream disconnected")
+              input.onEvent?.(next.value)
               if (booting) buffered.push(next.value)
               else receive(attempt, next.value)
             }

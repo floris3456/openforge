@@ -166,6 +166,62 @@ describe("run interactive runtime", () => {
     await task
   })
 
+  test("passes the session stream's events to whoever listens, as the resender of mini does", async () => {
+    const sdk = OpenCode.make({ baseUrl: "https://opencode.test" })
+    const api = footer()
+    const onEvent = () => {}
+    const passed = defer<unknown>()
+    stubCatalogLists(sdk)
+    const task = runInteractiveDeferredMode(
+      {
+        host: host(),
+        sdk,
+        directory: "/tmp",
+        onEvent,
+        target: async () => ({
+          sessionID: "ses_root",
+          location: { directory: "/tmp", project: { id: "pro-1", directory: "/tmp", canonical: "/tmp" } },
+          agent: "build",
+          model: undefined,
+          variant: undefined,
+          resume: false,
+        }),
+        agent: "build",
+        model: undefined,
+        variant: undefined,
+        files: [],
+      },
+      {
+        createRuntimeLifecycle: async () => ({
+          footer: api,
+          onResize: () => () => {},
+          refreshTheme: () => {},
+          setTitle: () => {},
+          resetForReplay: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        }),
+        streamTransport: Promise.resolve({
+          createSessionTransport: async (input) => {
+            passed.resolve(input.onEvent)
+            return {
+              runPromptTurn: async () => {},
+              admitPromptTurn: async () => {},
+              waitForIdle: async () => {},
+              interruptActiveTurn: async () => {},
+              selectSubagent: () => {},
+              replayOnResize: async () => false,
+              close: async () => {},
+            }
+          },
+          formatUnknownError: (error: unknown) => String(error),
+        }),
+      },
+    )
+    expect(await passed.promise).toBe(onEvent)
+    api.close()
+    await task
+  })
+
   test("routes form responses to their owners with global location and local settlement", async () => {
     const sdk = OpenCode.make({ baseUrl: "https://opencode.test" })
     const api = footer()

@@ -9,7 +9,7 @@
 //      local sessions,
 //   4. runs the prompt queue until the footer closes.
 import { SessionMessage } from "@opencode/schema/session-message"
-import type { LocationRef } from "@opencode/client/promise"
+import type { LocationRef, OpenCodeEvent } from "@opencode/client/promise"
 import type { Config } from "../config"
 import { newSessionLocation } from "../config/new-session-location"
 import { errorMessage } from "../util/error"
@@ -48,6 +48,7 @@ type CreateSessionInput = {
 
 type CreateSession = (sdk: RunInput["sdk"], input: CreateSessionInput, signal?: AbortSignal) => Promise<ResolvedSession>
 type Reconnect = (signal: AbortSignal) => Promise<RunInput["sdk"]>
+type OnEvent = (event: OpenCodeEvent) => void
 
 type RunRuntimeInput = {
   host: MiniHost
@@ -56,6 +57,7 @@ type RunRuntimeInput = {
   resolveSession: (sdk: RunInput["sdk"], signal: AbortSignal) => Promise<ResolvedSession>
   createSession?: CreateSession
   reconnect?: Reconnect
+  onEvent?: OnEvent
   files: RunInput["files"]
   initialInput?: string
   replay?: boolean
@@ -69,6 +71,8 @@ export type RunDeferredInput = {
   host: MiniHost
   sdk: RunInput["sdk"]
   reconnect?: Reconnect
+  /** Hears every event of the session's stream, as a resender must to know when to send again. */
+  onEvent?: OnEvent
   directory: string
   target: (sdk: RunInput["sdk"], signal: AbortSignal) => Promise<ResolvedSession>
   createSession?: CreateSession
@@ -275,7 +279,10 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     onFormReply: async (next) => {
       if (state.demo?.formReply(next)) return
       try {
-        await state.sdk.session.form.reply(next, formRequestOptions(next.sessionID === "global" ? next.location : undefined))
+        await state.sdk.session.form.reply(
+          next,
+          formRequestOptions(next.sessionID === "global" ? next.location : undefined),
+        )
       } catch (error) {
         if (!formAlreadySettled(error)) throw error
       }
@@ -284,7 +291,10 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     onFormCancel: async (next) => {
       if (state.demo?.formCancel(next)) return
       try {
-        await state.sdk.session.form.cancel(next, formRequestOptions(next.sessionID === "global" ? next.location : undefined))
+        await state.sdk.session.form.cancel(
+          next,
+          formRequestOptions(next.sessionID === "global" ? next.location : undefined),
+        )
       } catch (error) {
         if (!formAlreadySettled(error)) throw error
       }
@@ -794,6 +804,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       const handle = await mod.createSessionTransport({
         sdk: state.sdk,
         reconnect: input.reconnect,
+        onEvent: input.onEvent,
         onClient: updateClient,
         readTextFile: input.host.files.readText,
         location: state.location,
@@ -1108,6 +1119,7 @@ export async function runInteractiveDeferredMode(input: RunDeferredInput, deps?:
       tuiConfig: input.tuiConfig,
       config: input.config,
       reconnect: input.reconnect,
+      onEvent: input.onEvent,
       resolveSession: input.target,
       createSession: input.createSession,
       boot: async () => {

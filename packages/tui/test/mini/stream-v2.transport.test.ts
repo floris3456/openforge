@@ -1994,6 +1994,35 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
+  // A resender listens through it: the next connection, or the new release resuming, sends a waiting write again.
+  test("passes every event of each connection on, from its server.connected", async () => {
+    const first = feed()
+    const second = feed()
+    first.push(connected("evt_connected_1"))
+    second.push(connected("evt_connected_2"))
+    const heard: string[] = []
+    const reconnected = defer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [first, second] }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: footer().api,
+      onEvent: (event) => {
+        heard.push(`${event.type} ${event.id}`)
+        if (event.id === "evt_connected_2") reconnected.resolve()
+      },
+    })
+    first.push({ id: "evt_resumed", created: 1, type: "service.resumed", data: {} })
+    first.close()
+    await reconnected.promise
+    expect(heard).toEqual([
+      "server.connected evt_connected_1",
+      "service.resumed evt_resumed",
+      "server.connected evt_connected_2",
+    ])
+    await transport.close()
+  })
+
   test("reconnects even when catalog refresh hangs", async () => {
     const first = feed()
     const second = feed()

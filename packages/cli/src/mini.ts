@@ -116,6 +116,7 @@ export async function runMini(input: MiniCommandInput) {
           directory,
           target: resolveTarget,
           reconnect: connection.reconnect,
+          onEvent: connection.resender.observe,
           createSession: create,
           agent: input.agent,
           model,

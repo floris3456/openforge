@@ -26,8 +26,6 @@ import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
 
-export { Continuity }
-
 const PAUSE_TIMEOUT = 120_000
 /** Written when a pause completes, so the next start knows its executions rested and adds no restart notice. */
 const RESTED = "continuity.rested"
@@ -66,7 +64,7 @@ const Tools = Schema.Struct({
   }),
 })
 
-export const Rest = Schema.Union([Boundary, Retry, Tools])
+const Rest = Schema.Union([Boundary, Retry, Tools])
 export type Rest = typeof Rest.Type
 export type RetryRest = typeof Retry.Type
 export type ToolsRest = typeof Tools.Type
@@ -114,7 +112,10 @@ export class Activity {
     if (this.resting > 0) return true
     if (!this.streamed) return false
     const tools = Array.from(this.tools.values())
-    return tools.some((tool) => tool.state === "gated" || tool.state === "waiting") && tools.every((tool) => tool.state !== "busy")
+    return (
+      tools.some((tool) => tool.state === "gated" || tool.state === "waiting") &&
+      tools.every((tool) => tool.state !== "busy")
+    )
   }
 
   /** What keeps this execution from resting. */
@@ -237,13 +238,21 @@ export interface Interface {
   /** A wait with a stored deadline, such as a retry backoff: the execution rests while it runs. */
   readonly idle: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   /** Runs a tool call registered on the activity, once the gate is open. */
-  readonly tool: <A, E, R>(activity: Activity, entry: ToolEntry, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+  readonly tool: <A, E, R>(
+    activity: Activity,
+    entry: ToolEntry,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>
   /**
    * A wait inside a tool call that survives a stop: a permission or question, a subagent, a runner command. The call
    * stops counting as busy, and its checkpoint `data` is stored for the next process. Plain `effect` for calls that
    * cannot be continued.
    */
-  readonly wait: <A, E, R>(callID: string | undefined, effect: Effect.Effect<A, E, R>, data?: unknown) => Effect.Effect<A, E, R>
+  readonly wait: <A, E, R>(
+    callID: string | undefined,
+    effect: Effect.Effect<A, E, R>,
+    data?: unknown,
+  ) => Effect.Effect<A, E, R>
   /** Whether a wait inside this tool call would survive a stop. */
   readonly survives: (callID: string | undefined) => Effect.Effect<boolean>
   /** The checkpoint data handed back to a tool call that a restart continues. */
@@ -318,62 +327,66 @@ export const layer = (options: Options = {}) =>
         }),
       )
 
-      const settle = Effect.gen(function* () {
-        let published = ""
-        while (state === "pausing") {
-          const signal = changes
-          const left = waiting()
-          if (left.length === 0) return true
-          const key = JSON.stringify(left)
-          if (key !== published) {
-            published = key
-            yield* bus.publish(Continuity.Event.Pausing, { deadline: deadline ?? 0, waiting: left })
-          }
-          yield* Deferred.await(signal)
-        }
-        return false
-      })
-
-      const run = (timeout: number) =>
+      // Until nothing keeps the pause `result` waiting, or it is no longer the pause in progress.
+      const settle = (result: Deferred.Deferred<Continuity.PauseResult>, until: number) =>
         Effect.gen(function* () {
-          const done = yield* settle.pipe(Effect.timeoutOption(timeout))
-          if (state === "pausing" && Option.isSome(done) && done.value) {
+          let published = ""
+          while (outcome === result) {
+            const signal = changes
+            const left = waiting()
+            if (left.length === 0) return
+            const key = JSON.stringify(left)
+            if (key !== published) {
+              published = key
+              yield* bus.publish(Continuity.Event.Pausing, { deadline: until, waiting: left })
+            }
+            yield* Deferred.await(signal)
+          }
+        })
+
+      const run = (result: Deferred.Deferred<Continuity.PauseResult>, until: number, timeout: number) =>
+        Effect.gen(function* () {
+          const settled = yield* settle(result, until).pipe(Effect.timeoutOption(timeout))
+          // Resumed meanwhile, and maybe paused again: that resume or pause decides the state.
+          if (outcome !== result) return { paused: false as const, waiting: waiting() }
+          if (Option.isSome(settled)) {
             state = "paused"
             deadline = undefined
             const sessions = rested()
-            yield* kv.set(RESTED, { at: yield* Clock.currentTimeMillis, sessions })
+            yield* kv.set(RESTED, true)
             yield* bus.publish(Continuity.Event.Paused, { rested: sessions })
             return { paused: true as const, rested: sessions }
           }
           const left = waiting()
-          if (state === "pausing") {
-            state = "running"
-            deadline = undefined
-            gate.openUnsafe()
-            yield* bus.publish(Continuity.Event.Expired, { waiting: left })
-          }
+          state = "running"
+          deadline = undefined
+          gate.openUnsafe()
+          yield* bus.publish(Continuity.Event.Expired, { waiting: left })
           return { paused: false as const, waiting: left }
         })
 
       const pause: Interface["pause"] = (input) =>
         Effect.gen(function* () {
           if (state === "paused") return { paused: true as const, rested: rested() }
-          if (state === "running" || outcome === undefined) {
-            const timeout = input?.timeout ?? PAUSE_TIMEOUT
-            state = "pausing"
-            deadline = (yield* Clock.currentTimeMillis) + timeout
-            gate.closeUnsafe()
-            const result = Deferred.makeUnsafe<Continuity.PauseResult>()
-            outcome = result
-            // The pause outlives the request that asked for it, so a dropped connection cannot leave the gate shut.
-            yield* run(timeout).pipe(
-              Effect.flatMap((value) => Deferred.succeed(result, value)),
-              Effect.ensuring(Effect.sync(() => (outcome === result ? (outcome = undefined) : undefined))),
-              Effect.forkIn(scope, { startImmediately: true }),
-            )
-            return yield* Deferred.await(result)
-          }
-          return yield* Deferred.await(outcome)
+          if (state === "pausing" && outcome) return yield* Deferred.await(outcome)
+          const timeout = input?.timeout ?? PAUSE_TIMEOUT
+          const result = Deferred.makeUnsafe<Continuity.PauseResult>()
+          const until = (yield* Clock.currentTimeMillis) + timeout
+          state = "pausing"
+          deadline = until
+          outcome = result
+          gate.closeUnsafe()
+          // The pause outlives the request that asked for it, so a dropped connection cannot leave the gate shut.
+          yield* run(result, until, timeout).pipe(
+            Effect.flatMap((value) => Deferred.succeed(result, value)),
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (outcome === result) outcome = undefined
+              }),
+            ),
+            Effect.forkIn(scope, { startImmediately: true }),
+          )
+          return yield* Deferred.await(result)
         })
 
       const resume = Effect.gen(function* () {
@@ -382,6 +395,8 @@ export const layer = (options: Options = {}) =>
         state = "running"
         startedPaused = false
         deadline = undefined
+        // Ends a pause in progress: its loop sees it is no longer the current one.
+        outcome = undefined
         gate.openUnsafe()
         const signal = changes
         changes = Deferred.makeUnsafe()
@@ -475,7 +490,11 @@ export const layer = (options: Options = {}) =>
           if (activity === undefined || activity.rested) yield* gate.await
           return {
             acquire: Effect.sync(() => {
-              const work: Continuity.Work = { ...(activity ? { sessionID: activity.sessionID } : {}), kind: "model", name }
+              const work: Continuity.Work = {
+                ...(activity ? { sessionID: activity.sessionID } : {}),
+                kind: "model",
+                name,
+              }
               models.add(work)
               changed()
               return work
@@ -592,14 +611,18 @@ export const layer = (options: Options = {}) =>
             .where(eq(PendingRequestTable.id, id))
             .run()
             .pipe(Effect.orDie, Effect.asVoid),
-        remove: (id) => db.delete(PendingRequestTable).where(eq(PendingRequestTable.id, id)).run().pipe(Effect.orDie, Effect.asVoid),
+        remove: (id) =>
+          db.delete(PendingRequestTable).where(eq(PendingRequestTable.id, id)).run().pipe(Effect.orDie, Effect.asVoid),
         get: (id) =>
           db
             .select()
             .from(PendingRequestTable)
             .where(eq(PendingRequestTable.id, id))
             .get()
-            .pipe(Effect.orDie, Effect.map((row) => (row === undefined ? undefined : pendingRequest(row)))),
+            .pipe(
+              Effect.orDie,
+              Effect.map((row) => (row === undefined ? undefined : pendingRequest(row))),
+            ),
         find: (kind, source) =>
           db
             .select()
@@ -613,7 +636,10 @@ export const layer = (options: Options = {}) =>
               ),
             )
             .get()
-            .pipe(Effect.orDie, Effect.map((row) => (row === undefined ? undefined : pendingRequest(row)))),
+            .pipe(
+              Effect.orDie,
+              Effect.map((row) => (row === undefined ? undefined : pendingRequest(row))),
+            ),
       }
 
       return Service.of({

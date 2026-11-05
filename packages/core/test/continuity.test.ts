@@ -887,6 +887,58 @@ describe("SessionContinuity", () => {
     }),
   )
 
+  // When a resume and a new pause both land before the earlier pause's loop runs again.
+  it.effect("a pause asked again right after a resume keeps its own limit", () =>
+    Effect.gen(function* () {
+      const database = yield* Database.Service
+      const services = yield* Layer.build(
+        LayerNode.compile(LayerNode.group([Bus.node, KV.node]), {
+          replacements: [Database.node.replace(Layer.succeed(Database.Service, database))],
+        }),
+      )
+      const bus = Context.get(services, Bus.Service)
+      const publishing = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      let held = false
+      // The earlier pause's loop stays in its first notice until the resume and the later pause are in.
+      const holding: Bus.Interface = {
+        ...bus,
+        publish: (definition, data, options) =>
+          (definition.type !== Continuity.Event.Pausing.type || held
+            ? Effect.void
+            : Effect.sync(() => {
+                held = true
+              }).pipe(Effect.andThen(Deferred.succeed(publishing, undefined)), Effect.andThen(Deferred.await(release)))
+          ).pipe(Effect.andThen(bus.publish(definition, data, options))),
+      }
+      const continuity = Context.get(
+        yield* Layer.build(
+          SessionContinuity.layer().pipe(
+            Layer.provide(Layer.succeed(Bus.Service, holding)),
+            Layer.provide(Layer.succeedContext(services)),
+          ),
+        ),
+        SessionContinuity.Service,
+      )
+      const sessionID = Session.ID.create()
+      const activity = continuity.activity(sessionID)
+      activity.attempt()
+      activity.register({ id: "call_hold", name: "hold", messageID: SessionMessage.ID.create(), survives: true })
+
+      const earlier = yield* continuity.pause({ timeout: 1_000 }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.await(publishing)
+      yield* continuity.resume
+      const later = yield* continuity.pause({ timeout: 5_000 }).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      // The earlier pause ended with the resume; its limit does not end the later one.
+      yield* TestClock.adjust("1 second")
+      expect((yield* continuity.status).state).toBe("pausing")
+      expect(yield* Fiber.join(earlier)).toMatchObject({ paused: false })
+      yield* TestClock.adjust("4 seconds")
+      expect(yield* Fiber.join(later)).toEqual({ paused: false, waiting: [{ sessionID, kind: "tool", name: "hold" }] })
+    }),
+  )
+
   // Such as a title, a plugin's own call, or a compaction that runs on its own.
   it.effect("a model call outside a turn holds a pause until it ends, and waits while paused", () =>
     Effect.gen(function* () {

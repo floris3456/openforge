@@ -23826,6 +23826,9 @@
           },
           "retry": {
             "$ref": "#/components/schemas/Session.Message.Assistant.Retry"
+          },
+          "proxyRequestID": {
+            "type": "string"
           }
         },
         "required": ["id", "time", "type", "agent", "model", "content"],

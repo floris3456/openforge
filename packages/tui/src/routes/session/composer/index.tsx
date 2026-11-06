@@ -7,6 +7,7 @@ import { Keymap } from "../../../context/keymap"
 import { SubagentsTab } from "./subagents-tab"
 import { ShellTab } from "./shell-tab"
 import { TerminalsTab } from "./terminals-tab"
+import { RequestsTab } from "./requests-tab"
 import { ComposerContext, type ComposerTab } from "./context"
 
 export type ComposerProps = {
@@ -26,7 +27,7 @@ export function Composer(props: ComposerProps) {
     active: "",
   })
 
-  const tabList = createMemo(() => Object.values(store.tabs))
+  const tabList = createMemo(() => Object.values(store.tabs).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)))
   const activeTab = createMemo(() => tabList().find((t) => t.id === store.active))
   const footerHints = createMemo(() => activeTab()?.hints?.() ?? [])
 
@@ -129,6 +130,7 @@ export function Composer(props: ComposerProps) {
             <Show when={props.terminals}>
               <TerminalsTab sessionID={props.sessionID} visibleTerminalID={props.visibleTerminalID} />
             </Show>
+            <RequestsTab sessionID={props.sessionID} />
             <box flexDirection="row" gap={2} paddingLeft={1} flexShrink={0}>
               <For each={footerHints()}>
                 {(hint) => (

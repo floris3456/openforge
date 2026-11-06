@@ -15,6 +15,7 @@ export type Kind = typeof Kind.Type
 
 /** The kinds a player can ask a test occurrence of. */
 export const testKinds = ["done", "subagent_done", "question", "permission", "error"] as const satisfies readonly Kind[]
+export type TestKind = (typeof testKinds)[number]
 
 /** A sound: a built-in one by name, or a sound file named in the TUI's settings on the service's machine. */
 export interface Sound extends Schema.Schema.Type<typeof Sound> {}

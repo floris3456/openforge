@@ -7,12 +7,13 @@ import { ServerInfo } from "../server-info"
 // A player that falls this far behind loses the newest occurrences rather than holding up the TUI that reports them.
 const PLAYER_BACKLOG = 64
 
-const TEST_MESSAGES: Record<(typeof Attention.testKinds)[number], string> = {
-  done: "Test: a chat is done",
-  subagent_done: "Test: a subagent is done",
-  question: "Test: a question waits for an answer",
-  permission: "Test: a permission waits for an answer",
-  error: "Test: a chat failed",
+// A test reads as one: its title is "openforge test".
+const TEST_MESSAGES: Record<Attention.TestKind, string> = {
+  done: "A chat is done",
+  subagent_done: "A subagent is done",
+  question: "A question waits for an answer",
+  permission: "A permission waits for an answer",
+  error: "A chat failed",
 }
 
 /**
@@ -39,14 +40,14 @@ export const makeAttention = Effect.sync(() => {
         deliver({ type: "occurrence", occurrence })
         return { data: connected() }
       }),
-    test: (kind: (typeof Attention.testKinds)[number]) =>
+    test: (kind: Attention.TestKind) =>
       Effect.sync(() => {
         deliver({
           type: "occurrence",
           test: true,
           occurrence: {
             kind,
-            title: Product.name,
+            title: `${Product.name} test`,
             message: TEST_MESSAGES[kind],
             notify: true,
             sound: { name: kind },

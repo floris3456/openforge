@@ -59,8 +59,8 @@ it.live("a report reaches every following player and says which kinds of player 
         test: true,
         occurrence: {
           kind: "question",
-          title: "openforge",
-          message: "Test: a question waits for an answer",
+          title: "openforge test",
+          message: "A question waits for an answer",
           notify: true,
           sound: { name: "question" },
           focused: false,

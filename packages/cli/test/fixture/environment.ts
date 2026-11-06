@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Product } from "@opencode/schema/product"
@@ -37,6 +37,40 @@ export function isolatedEnv(root: string, overrides: Record<string, string | und
     XDG_DATA_HOME: path.join(root, "data"),
     XDG_STATE_HOME: path.join(root, "state"),
     ...overrides,
+  }
+}
+
+/**
+ * Stops every process still running from an isolated home, found by its OPENCODE_TEST_HOME, and answers what they
+ * were, and each call of `openforge` from PATH, so the test that started them fails. Only Linux lists processes'
+ * environments (/proc); elsewhere only the calls are found.
+ */
+export function stopLeftovers(root: string) {
+  const calls = existsSync(fromPathLog(root))
+    ? readFileSync(fromPathLog(root), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((args) => `ran ${Product.binary} from PATH: ${args}`)
+    : []
+  if (process.platform !== "linux") return calls
+  const mark = `OPENCODE_TEST_HOME=${root}`
+  const processes = readdirSync("/proc")
+    .filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid)
+    .filter((pid) => readProc(pid, "environ").split("\0").includes(mark))
+    .map((pid) => {
+      const command = readProc(pid, "cmdline").replaceAll("\0", " ").trim()
+      process.kill(Number(pid), "SIGKILL")
+      return `${pid} ${command}`
+    })
+  return [...calls, ...processes]
+}
+
+// A process can end between listing and reading.
+function readProc(pid: string, file: string) {
+  try {
+    return readFileSync(path.join("/proc", pid, file), "utf8")
+  } catch {
+    return ""
   }
 }
 

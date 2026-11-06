@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdir, readdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { Attention } from "@opencode/schema/attention"
 import { SessionID } from "@opencode/schema/session-id"
@@ -8,10 +8,21 @@ import { Follow } from "../src/notify/follow"
 import { Player } from "../src/notify/player"
 import { Relay } from "../src/notify/relay"
 import { Speaker } from "../src/notify/speaker"
-import { isolatedEnv } from "./fixture/environment"
+import { isolatedEnv, stopLeftovers } from "./fixture/environment"
 import { tmpdir } from "./fixture/tmpdir"
 
 // `openforge notify`: the relay's lines, playing the same occurrence once, reconnecting, and never starting a service.
+
+/**
+ * A PATH with only sh and sleep, for the stand-ins of the other machine: their openforge is the one a test puts in
+ * ~/.local/bin, never one installed on this machine.
+ */
+async function tools(root: string) {
+  const bin = path.join(root, "tools")
+  await mkdir(bin, { recursive: true })
+  for (const name of ["sh", "sleep"]) await symlink(Bun.which(name)!, path.join(bin, name))
+  return bin
+}
 
 const occurrence = (input: Partial<Attention.Occurrence> = {}): Attention.Occurrence => ({
   kind: "done",
@@ -88,13 +99,14 @@ describe("relay lines", () => {
     async () => {
       // Windows has no POSIX sh for the script; the relay runs on the machine the service runs on.
       await using dir = await tmpdir()
-      const bin = path.join(dir.path, ".local", "bin")
-      await mkdir(bin, { recursive: true })
-      await writeFile(path.join(bin, "openforge"), '#!/bin/sh\necho "found $*"\n')
-      await chmod(path.join(bin, "openforge"), 0o755)
+      const local = path.join(dir.path, ".local", "bin")
+      await mkdir(local, { recursive: true })
+      await writeFile(path.join(local, "openforge"), '#!/bin/sh\necho "found $*"\n')
+      await chmod(path.join(local, "openforge"), 0o755)
+      const bin = await tools(dir.path)
       const run = async (home: string) => {
         const child = Bun.spawn(["sh", "-c", Relay.script(["--desktop"])], {
-          env: { HOME: home, PATH: "/usr/bin:/bin" },
+          env: { HOME: home, PATH: bin },
           stdout: "pipe",
           stderr: "pipe",
         })
@@ -411,7 +423,7 @@ describe("following", () => {
       const stop = new AbortController()
       await Follow.remote(
         {
-          route: { via: ["env", `HOME=${dir.path}`, "PATH=/usr/bin:/bin"] },
+          route: { via: ["env", `HOME=${dir.path}`, `PATH=${await tools(dir.path)}`] },
           label: "the container",
           desktop: true,
           verbose: false,
@@ -451,6 +463,7 @@ describe("following", () => {
       await using dir = await tmpdir()
       const bin = path.join(dir.path, ".local", "bin")
       await mkdir(bin, { recursive: true })
+      const tooled = await tools(dir.path)
       const run = async (body: string) => {
         await writeFile(path.join(bin, "openforge"), `#!/bin/sh\n${body}\n`)
         await chmod(path.join(bin, "openforge"), 0o755)
@@ -459,7 +472,7 @@ describe("following", () => {
         await Follow.remote(
           {
             route: {
-              via: ["env", `HOME=${body === "" ? path.join(dir.path, "nobody") : dir.path}`, "PATH=/usr/bin:/bin"],
+              via: ["env", `HOME=${body === "" ? path.join(dir.path, "nobody") : dir.path}`, `PATH=${tooled}`],
             },
             label: "mac",
             desktop: false,
@@ -492,8 +505,29 @@ describe("following", () => {
 
 describe("the command", () => {
   const cli = path.join(import.meta.dir, "../src/index.ts")
+  const decoder = new TextDecoder()
   const registrations = async (root: string) =>
     (await readdir(path.join(root, "state", "openforge")).catch(() => [])).filter((name) => name.startsWith("service"))
+  // Bun's own timeout would abandon a test and leave what its CLI started running, so a test bounds its wait itself.
+  const ANSWER_MS = 20_000
+  const within = async (what: string, run: () => Promise<void>) => {
+    const timer = { id: undefined as ReturnType<typeof setTimeout> | undefined }
+    const late = new Promise<never>((_, reject) => {
+      timer.id = setTimeout(() => reject(new Error(`no ${what} within ${ANSWER_MS / 1_000} s`)), ANSWER_MS)
+    })
+    await Promise.race([run(), late]).finally(() => clearTimeout(timer.id))
+  }
+  const readUntil = async (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    output: { text: string },
+    done: (text: string) => boolean,
+  ) => {
+    while (!done(output.text)) {
+      const chunk = await reader.read()
+      if (chunk.done) return
+      output.text += decoder.decode(chunk.value, { stream: true })
+    }
+  }
 
   test("the relay says it waits for a service, starts none, and ends when its stdin closes", async () => {
     await using dir = await tmpdir()
@@ -503,19 +537,23 @@ describe("the command", () => {
       stdout: "pipe",
       stderr: "pipe",
     })
-    const reader = child.stdout.getReader()
-    const state = { text: "" }
-    while (!state.text.includes('"status"')) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      state.text += new TextDecoder().decode(chunk.value)
+    const output = { text: "" }
+    try {
+      await within("status line and end", async () => {
+        const reader = child.stdout.getReader()
+        await readUntil(reader, output, (text) => text.includes('"status"'))
+        child.stdin.end()
+        await readUntil(reader, output, () => false)
+        await child.exited
+      })
+    } finally {
+      child.kill("SIGKILL")
+      expect(stopLeftovers(dir.path)).toEqual([])
     }
-    child.stdin.end()
-    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
-    expect(stderr).toBe("")
-    expect(code).toBe(0)
+    expect(await new Response(child.stderr).text()).toBe("")
+    expect(child.exitCode).toBe(0)
     expect(
-      state.text
+      output.text
         .trim()
         .split("\n")
         .map((line) => Relay.decode(line)),
@@ -534,22 +572,21 @@ describe("the command", () => {
       stdout: "pipe",
       stderr: "pipe",
     })
-    const reader = child.stdout.getReader()
-    const state = { text: "" }
-    while (!state.text.includes("waiting for one to start")) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      state.text += new TextDecoder().decode(chunk.value)
-    }
-    child.kill("SIGINT")
-    await child.exited
-    while (true) {
-      const chunk = await reader.read()
-      if (chunk.done) break
-      state.text += new TextDecoder().decode(chunk.value)
+    const output = { text: "" }
+    try {
+      await within("wait and stop", async () => {
+        const reader = child.stdout.getReader()
+        await readUntil(reader, output, (text) => text.includes("waiting for one to start"))
+        child.kill("SIGINT")
+        await readUntil(reader, output, () => false)
+        await child.exited
+      })
+    } finally {
+      child.kill("SIGKILL")
+      expect(stopLeftovers(dir.path)).toEqual([])
     }
     expect(await new Response(child.stderr).text()).toBe("")
-    expect(state.text.split("\n").map((line) => line.slice(13))).toEqual([
+    expect(output.text.split("\n").map((line) => line.slice(13))).toEqual([
       "No openforge service runs here; waiting for one to start.",
       "Stopped.",
       "",

@@ -24,11 +24,15 @@ const Pings = Schema.Struct({
   stopped: maybe(Schema.String),
 })
 
-/** A chat's requests at CPP, and the generation of its account (a move starts a new one). */
+/**
+ * A chat's requests at CPP, the generation of its account (a move starts a new one), and when its own settings last
+ * changed (`settings_at`, since CPP 2026-11-06; null while it holds none).
+ */
 const Marks = Schema.Struct({
   requests: maybe(Schema.Number),
   last_at: maybe(Schema.Number),
   generation: maybe(Schema.Number),
+  settings_at: maybe(Schema.Number),
 })
 
 /** `GET|PATCH /pacer/v1/sessions/{id}`: one chat's state. */
@@ -76,12 +80,14 @@ const Listed = Schema.Struct({
 export type Listed = typeof Listed.Type
 
 /**
- * What moves a chat's view where the session list can't show it: its requests (pings and compactions too) and its
- * account generation. Undefined when CPP sends none of them.
+ * What moves a chat's view where the session list can't show it: its requests (pings and compactions too), its account
+ * generation, and a write to its own settings (its switches, label or model, by anyone, a removal too), which CPP tells
+ * as the chat's `session` notice, not `settings`. Undefined when CPP sends none of them.
  */
 export function marks(item: typeof Marks.Type) {
-  if (item.requests == null && item.last_at == null && item.generation == null) return undefined
-  return `${item.requests ?? ""}/${item.last_at ?? ""}/${item.generation ?? ""}`
+  if (item.requests == null && item.last_at == null && item.generation == null && item.settings_at == null)
+    return undefined
+  return `${item.requests ?? ""}/${item.last_at ?? ""}/${item.generation ?? ""}/${item.settings_at ?? ""}`
 }
 export const Sessions = Schema.Struct({ items: Items })
 
@@ -164,7 +170,10 @@ const PromptRow = Schema.Struct({
   kind: Schema.String,
   summary: maybe(Schema.String),
   chars: maybe(Schema.Number),
-  /** first, new, same, marker or changed. */
+  /**
+   * first, new, same, marker or changed; since CPP 2026-11-06 also billing: Claude Code's billing block, which differs
+   * on every request and the cache counts as no change.
+   */
   change: Schema.String,
   error: maybe(Schema.Boolean),
 })
@@ -270,8 +279,9 @@ export function live(
 
 /**
  * A chat's view in openforge's shape; `alias` names an account by its `auth_index`. CPP names the next and the forced
- * account as a client sees it: the alias its meters carry, else (an account without a label) its `auth_index`, which
- * `alias` names as the accounts do.
+ * account as a client sees it: the alias its meters carry, which since CPP 2026-11-06 an account without a label has
+ * too (`<provider> <six hex digits>`). Before, CPP gave such an account's `auth_index`, which `alias` names as the
+ * accounts do.
  */
 export function chat(
   view: View,

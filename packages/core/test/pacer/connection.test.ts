@@ -162,7 +162,9 @@ const fakeCpp = (now: () => number) =>
             effective.pings_enabled = settings["pings.enabled"]
           if ("warming.compact_before_cold" in settings && settings["warming.compact_before_cold"] !== null)
             effective.compact_before_cold = settings["warming.compact_before_cold"]
-          const next = { ...view, settings, effective }
+          // A write to the chat's scope stamps each setting it still holds (cpa-pacer settings.rs, `written_scope`).
+          const holds = Object.values(settings).some((value) => value !== null)
+          const next = { ...view, settings, effective, settings_at: holds ? time() : null }
           cpp.views.set(session, next)
           return answer(next)
         }
@@ -1651,6 +1653,77 @@ describe("PacerConnection chats", () => {
       expect((yield* h.connection.chat(id))?.sessionID).toBe(id)
       yield* until("read again", () => seen(h, viewPath(id)).length === 2)
     }),
+  )
+
+  it.effect(
+    "marks a chat's view stale when CPP lists its settings written since, read once when asked; after its own write, the notice reads nothing",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const id = yield* chat(h)
+        const uuid = PacerSessionID.make(id)
+        const now = h.cpp.time()
+        h.cpp.views.set(uuid, chatView(uuid, now, { requests: 5, last_at: now, settings_at: null }))
+        yield* step(h, id)
+        yield* ask(h, id)
+        expect((yield* h.connection.chat(id))?.switches.warming).toBe(true)
+        const listed = (settingsAt: number | null) => ({
+          id: uuid,
+          session_id: 7,
+          requests: 5,
+          last_at: now,
+          generation: 1,
+          warm: true,
+          warm_until: now + 300_000,
+          pings: chatView(uuid, now).pings,
+          settings_at: settingsAt,
+        })
+
+        // CPP's own page turns the chat's warming off. Since CPP 2026-11-06 that is the chat's `session` notice, not
+        // `settings`, and the list says when: its requests and generation are as held.
+        h.cpp.views.set(
+          uuid,
+          chatView(uuid, now, {
+            requests: 5,
+            last_at: now,
+            settings_at: now + 1,
+            settings: { "pings.enabled": false },
+            effective: { pings_enabled: false, compact_before_cold: false },
+          }),
+        )
+        h.cpp.listed = [listed(now + 1)]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 1 })
+        yield* until("listed", () => seen(h, "/pacer/v1/sessions").length === 1)
+        yield* settle
+        // The notice read only the list.
+        expect(seen(h, viewPath(id))).toHaveLength(1)
+        // Asked for, the held view is answered at once and read again beside it, once however often asked.
+        expect((yield* h.connection.chat(id))?.switches.warming).toBe(true)
+        yield* h.connection.chat(id)
+        yield* until("read again", () => seen(h, viewPath(id)).length === 2)
+        yield* until("told", () => toldChat(h, id)?.switches.warming === false)
+        yield* h.connection.chat(id)
+        yield* settle
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+
+        // The TUI turns it on again: the write's answer is the view, with the time CPP stamped, so the notice that
+        // write sends lists nothing new and nothing is read for it.
+        yield* TestClock.adjust("1 second")
+        const updated = yield* h.connection.update(id, { warming: true })
+        expect(updated.switches.warming).toBe(true)
+        const stamped = h.cpp.views.get(uuid)?.settings_at
+        expect(typeof stamped).toBe("number")
+        h.cpp.listed = [listed(stamped as number)]
+        h.cpp.notice("session", { keys: [1], at: 2 })
+        yield* until("listed twice", () => seen(h, "/pacer/v1/sessions").length === 2)
+        yield* settle
+        yield* h.connection.chat(id)
+        yield* settle
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+        expect(seen(h, viewPath(id), "PATCH")).toHaveLength(1)
+      }),
   )
 
   it.effect("tells CPP each chat event once per change", () =>

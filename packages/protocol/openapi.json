@@ -22227,6 +22227,9 @@
       "Pacer.Account": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -22276,6 +22279,9 @@
             "type": "string"
           },
           "account": {
+            "type": "string"
+          },
+          "accountID": {
             "type": "string"
           },
           "warm": {

@@ -54,6 +54,35 @@ describe("the Account section", () => {
     expect(colorOf(setup.app, "max-2")).toEqual(setup.theme.text.base.toInts())
   })
 
+  test("of two logins of one address, which CPP names alike, the windows of the one serving the chat", async () => {
+    // As the owner's CPP listed them on 2026-11-06 (run/evidence/v0.0.7/live-owner-3): the first login read hours ago,
+    // the second serving the chat and current.
+    const both = accounts({ id: "login-current" })
+    const old = {
+      id: "login-old",
+      alias: "max-2",
+      provider: "claude",
+      windows: [
+        {
+          label: "5h",
+          scope: "all",
+          seconds: 18_000,
+          left: 100,
+          readAt: NOW - 5 * 3_600_000,
+          state: "awaiting-confirmation" as const,
+          stale: true,
+          staleAt: NOW - 4 * 3_600_000,
+        },
+      ],
+    }
+    await using setup = await sidebar({
+      view: chat({ accountID: "login-current" }),
+      accounts: { ...both, items: [old, ...both.items] },
+    })
+    const frame = await setup.frame((frame) => frame.includes("5h") && frame.includes("7d"))
+    expect(lines(frame)).toEqual(["Account", "max-2", "5h  62% left · resets 1:20", "7d  80% left · resets ~3d 4h"])
+  })
+
   test("after the chat's step, where it goes next as the new view says, the held one until then", async () => {
     const fake = pacerFake({ delay: 100 })
     fake.status = status("on")

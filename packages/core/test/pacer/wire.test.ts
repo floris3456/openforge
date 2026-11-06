@@ -41,6 +41,7 @@ describe("PacerWire", () => {
       model: "model-a",
       provider: "prova",
       account: "alias of auth-a",
+      accountID: "auth-a",
       warm: true,
       warmUntil: 9_995_000,
       coldAt: 9_995_000 + 2 * 240_000,
@@ -113,6 +114,7 @@ describe("PacerWire", () => {
     ])
     const accounts = PacerWire.accounts(meters, { offset: 0, now })
     expect(accounts.items).toHaveLength(1)
+    expect(accounts.items[0]).toMatchObject({ id: meters[0].auth_index })
     expect(accounts.items[0].windows.map((window) => [window.label, window.state, window.stale])).toEqual([
       ["5h", "estimated", false],
       ["7d opus", "current", true],

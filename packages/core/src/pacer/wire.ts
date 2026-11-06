@@ -281,7 +281,8 @@ export function live(
  * A chat's view in openforge's shape; `alias` names an account by its `auth_index`. CPP names the next and the forced
  * account as a client sees it: the alias its meters carry, which since CPP 2026-11-06 an account without a label has
  * too (`<provider> <six hex digits>`). Before, CPP gave such an account's `auth_index`, which `alias` names as the
- * accounts do.
+ * accounts do. The serving account also goes by its `auth_index` (`accountID`): CPP names two logins of one address
+ * alike, and the meters list both, each with its own readings.
  */
 export function chat(
   view: View,
@@ -295,7 +296,7 @@ export function chat(
     sessionID,
     ...(view.model ? { model: view.model } : {}),
     ...(view.provider ? { provider: view.provider } : {}),
-    ...(view.account ? { account: context.alias(view.account) } : {}),
+    ...(view.account ? { account: context.alias(view.account), accountID: view.account } : {}),
     ...live(view, context),
     ...(compactAt !== undefined && (reason === "before-cold" || reason === "cold")
       ? { compactAt, compactReason: reason }
@@ -327,10 +328,11 @@ const windowStates = new Set<string>([
 ] satisfies Pacer.WindowState[])
 const isWindowState = (state: string): state is Pacer.WindowState => windowStates.has(state)
 
-/** Every account of the meters, with the windows that apply to it. */
+/** Every account of the meters, by its `auth_index` and alias, with the windows that apply to it. */
 export function accounts(items: ReadonlyArray<Meter>, context: Context): Pacer.Accounts {
   return {
     items: items.map((meter) => ({
+      id: meter.auth_index,
       alias: meter.label || meter.auth_index,
       provider: meter.provider,
       ...(meter.plan ? { plan: meter.plan } : {}),

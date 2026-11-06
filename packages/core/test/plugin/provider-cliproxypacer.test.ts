@@ -403,7 +403,7 @@ const delays = (decisions: ReadonlyArray<{ readonly retry: boolean; readonly del
   decisions.map((decision) => (decision.retry ? (decision.delay ?? 0) / 1000 : undefined))
 
 describe("CLIProxyPacer's answers (spec, section 2)", () => {
-// The first retry is the second attempt.
+  // The first retry is the second attempt.
   it.effect("503 pacer_transient_wait: waits its Retry-After, then tries again", () =>
     Effect.gen(function* () {
       const { decisions } = yield* answered(

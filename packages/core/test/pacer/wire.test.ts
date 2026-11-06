@@ -194,6 +194,8 @@ describe("PacerWire", () => {
       removed: ["messages[9]"],
       rows: [
         { path: "model", kind: "option", summary: "model", chars: 5, change: "same" },
+        // Claude Code's billing block, new on every request; the cache counts it as no change (CPP 2026-11-06).
+        { path: "system[0]", kind: "system", summary: "x-anthropic-billing-header: …", chars: 80, change: "billing" },
         { path: "messages[1]", kind: "dropped", chars: 50, change: "changed" },
         { path: "messages[2]", kind: "result", summary: "error", chars: 9, change: "new", error: true },
         { path: "messages[3]", kind: "prompt", summary: "hi", chars: 2, change: "marker", marker: true },
@@ -210,7 +212,7 @@ describe("PacerWire", () => {
         { path: "messages[3]", kind: "prompt", summary: "hi", chars: 2, change: "marker", error: false },
       ],
       removed: ["messages[9]"],
-      unchanged: 1,
+      unchanged: 2,
       asOf: 7,
     })
     expect(PacerWire.promptChange(undefined, shaped, undefined, { offset: 0, now: 0 })).toMatchObject({

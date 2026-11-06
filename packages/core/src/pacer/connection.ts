@@ -58,8 +58,9 @@ export interface Interface {
   /**
    * The chat's view, held from the last read (its `asOf` says when), answered at once: never waits on CPP. Views are
    * read on demand (spec section 3): when the held one may be out of date (after a step of the chat through CPP, CPP
-   * listing it with requests the view hasn't seen or leaving it out of its list, a compaction, a reconnect, CPP's
-   * `reading` or `settings` notices) or none is held, and the pacer is on, this starts one read in the background,
+   * listing it with requests, an account generation or a settings time the view hasn't seen or leaving it out of its
+   * list, a compaction, a reconnect, CPP's `reading` or `settings` notices) or none is held, and the pacer is on, this
+   * starts one read in the background,
    * through the chats' queue, and `pacer.chat.updated` follows if it changed. A TUI showing the chat asks at each of
    * its step ends; a step itself reads nothing. One openforge compacted drops its "compacts at" at once. Undefined when
    * none is held, and from then on when CPP knows nothing of the chat.
@@ -160,12 +161,12 @@ interface Chat {
   raw: PacerWire.View | undefined
   view: Pacer.Chat | undefined
   /**
-   * The view may be out of date: a step went through CPP, CPP listed it with new requests, it was compacted, or a notice
-   * said so. It is read again only when asked for (spec section 3); a read clears it as it starts, so a step that ends
+   * The view may be out of date: a step went through CPP, CPP listed it with other marks (`PacerWire.marks`), it was
+   * compacted, or a notice said so. It is read again only when asked for (spec section 3); a read clears it as it starts, so a step that ends
    * while it runs leaves the view stale.
    */
   stale: boolean
-  /** CPP's requests and account generation for it as last read or listed (`PacerWire.marks`). */
+  /** CPP's requests, account generation and settings time for it as last read or listed (`PacerWire.marks`). */
   marks: string | undefined
   /** A read of the view is due. */
   read: boolean
@@ -465,8 +466,9 @@ export const layer = Layer.effect(
 
     /**
      * Merges the live part of a chat CPP listed into its held view. What the list doesn't carry (when it compacts, the
-     * next use, a forced move) changes with a request, a ping or a compaction among them, or a move: a chat whose
-     * requests or generation moved is stale, read again when asked for (spec section 3).
+     * next use, a forced move, the switches) changes with a request, a ping or a compaction among them, a move, or a
+     * write to its settings: a chat whose requests, generation or settings time moved is stale, read again when asked
+     * for (spec section 3).
      */
     const merge = Effect.fnUntraced(function* (item: PacerWire.Listed) {
       const uuid = item.id.toLowerCase()
@@ -834,10 +836,13 @@ export const layer = Layer.effect(
 
     const notice = Effect.fnUntraced(function* (event: string, data: string) {
       if (event === "request") return requests()
+      // A chat's own settings written, by anyone, come as its `session` notice since CPP 2026-11-06: the list's
+      // `settings_at` marks its view stale (`merge`).
       if (event === "session") return listing()
       if (event === "reading") return meters()
-      // Settings change what CPP answers for the chats (and CPP sends one for a chat's own writes too); capabilities and
-      // prices have notices of their own. A stale view costs nothing until a chat is asked for.
+      // The server's and the key's settings change what CPP answers for every chat (and a CPP before 2026-11-06 sends
+      // one for a chat's own writes too); capabilities and prices have notices of their own. A stale view costs nothing
+      // until a chat is asked for.
       if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
       if (event === "resync") return everything()

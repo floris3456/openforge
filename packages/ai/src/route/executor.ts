@@ -10,6 +10,7 @@ import {
 import { HttpContext, HttpRateLimitDetails, AIError, TransportError } from "../schema/index.js"
 import { classifyProviderFailure, providerErrorMessage } from "../provider-error.js"
 import { headerDetails, responseHttp, Service, type HttpMiddleware, type Interface } from "./executor-service.js"
+import { refusedHeader } from "./refused-header.js"
 
 export { responseHttp, Service } from "./executor-service.js"
 export type { HttpHandler, HttpMiddleware, Interface, RequestExecutorService } from "./executor-service.js"
@@ -189,6 +190,8 @@ const httpError = (input: {
 
   if (Cause.isTimeoutError(input.error) || Cause.isTimeoutError(source))
     return transportError({ message: message ?? "HTTP transport timed out", code: code ?? "Timeout" })
+  const refused = input.operation === "request" ? refusedHeader(request.headers, source) : undefined
+  if (refused !== undefined) return refused
   if (!HttpClientError.isHttpClientError(input.error))
     return transportError({ message: message ?? "HTTP transport failed", code })
   // Effect reports every response body read failure as a DecodeError, but the raw byte stream decodes

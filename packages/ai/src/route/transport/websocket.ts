@@ -8,6 +8,7 @@ import {
   type HttpContext,
   type TransportOperation,
 } from "../../schema/index.js"
+import { refusedHeader } from "../refused-header.js"
 import type { ChannelObservation, WebSocketChannelExecutor } from "./websocket-channel.js"
 
 export interface WebSocketRequest {
@@ -181,6 +182,7 @@ export const open = (input: WebSocketRequest) =>
     const ws = yield* Effect.try({
       try: () => constructor(input.url, { headers: input.headers }),
       catch: (error) =>
+        refusedHeader(input.headers, error) ??
         transportError(error instanceof Error ? error.message : "Failed to construct WebSocket", {
           cause: error,
           url: input.url,

@@ -8,7 +8,7 @@ import { Model } from "./model.js"
 import { Project } from "./project.js"
 import { AbsolutePath, DateTimeUtcFromMillis, optional, RelativePath, statics } from "./schema.js"
 import { SessionEvent } from "./session-event.js"
-import { SessionID } from "./session-id.js"
+import { NewSessionID, SessionID } from "./session-id.js"
 import { SessionMetadata } from "./session-metadata.js"
 import { Money } from "./money.js"
 import { Permission } from "./permission.js"
@@ -18,6 +18,8 @@ import { SessionFork } from "./session-fork.js"
 
 export const ID = SessionID
 export type ID = SessionID
+export const NewID = NewSessionID
+export type NewID = typeof NewSessionID.Type
 
 export const Metadata = SessionMetadata
 export type Metadata = SessionMetadata

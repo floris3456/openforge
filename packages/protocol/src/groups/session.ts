@@ -164,7 +164,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
     .add(
       HttpApiEndpoint.post("session.create", "/api/session", {
         payload: Schema.Struct({
-          id: Session.ID.pipe(Schema.optional),
+          id: Session.NewID.pipe(Schema.optional),
           parentID: Session.ID.pipe(Schema.optional),
           title: Schema.String.pipe(Schema.optional),
           agent: Agent.ID.pipe(Schema.optional),

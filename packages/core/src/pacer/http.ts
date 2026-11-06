@@ -96,7 +96,7 @@ export interface StreamAnswer {
 export interface Options {
   /** The endpoint to call; defaults to the current one. */
   readonly endpoint?: PacerEndpoint.Endpoint
-  /** For a stream, until its headers arrive. Default 10 seconds. */
+  /** How long the call may take; for a stream, until its headers arrive. Default 10 seconds. */
   readonly timeout?: Duration.Input
   readonly headers?: Readonly<Record<string, string>>
 }

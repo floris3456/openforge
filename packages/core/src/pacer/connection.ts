@@ -24,8 +24,9 @@ import { PacerWire } from "./wire.js"
 // What it costs: the session events of every chat reach it, and a chat CPP does not know costs one map lookup per
 // event. All of CPP's reads and writes run beside the chats, never in a step's path: a chat with work is put on one
 // queue (once, however often it is marked), which `READERS` fibers drain; a chat's work runs in order and reads its
-// view at most once per drain, so the reads after many steps coalesce. Notices coalesce the same way, one pending read
-// per kind. Nothing runs on a timer while CPP is up: when no chat runs, the only traffic is the open stream.
+// view only when one was asked for, at most once per drain, so a view asked for many times costs one read. A step
+// reads nothing. Notices coalesce the same way, one pending read per kind. Nothing runs on a timer while CPP is up:
+// when no chat runs, the only traffic is the open stream.
 
 /** CPP can't answer now: it isn't set up, is unreachable, or has no pacer, and nothing read before can stand in. */
 export class Unavailable extends Schema.TaggedError<Unavailable>()("PacerConnection.Unavailable", {
@@ -57,11 +58,11 @@ export interface Interface {
   /**
    * The chat's view, held from the last read (its `asOf` says when), answered at once: never waits on CPP. Views are
    * read on demand (spec section 3): when the held one may be out of date (after a step of the chat through CPP, CPP
-   * listing it with requests the view hasn't seen, a compaction, a reconnect, CPP's `reading` or `settings` notices)
-   * or none is held, and the pacer is on, this starts one read in the background, through the chats' queue, and
-   * `pacer.chat.updated` follows if it changed. A TUI showing the chat asks at each of its step ends; a step itself
-   * reads nothing. One openforge compacted drops its "compacts at" at once. Undefined when none is held, and from then
-   * on when CPP knows nothing of the chat.
+   * listing it with requests the view hasn't seen or leaving it out of its list, a compaction, a reconnect, CPP's
+   * `reading` or `settings` notices) or none is held, and the pacer is on, this starts one read in the background,
+   * through the chats' queue, and `pacer.chat.updated` follows if it changed. A TUI showing the chat asks at each of
+   * its step ends; a step itself reads nothing. One openforge compacted drops its "compacts at" at once. Undefined when
+   * none is held, and from then on when CPP knows nothing of the chat.
    */
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */

@@ -62,8 +62,8 @@ export function formatCost(cost: number) {
 }
 
 /**
- * The toolbar's cache item (section 4). `countdown` counts down to `until`; the item prints it after `text`, padded
- * so that its width holds while it counts.
+ * The toolbar's cache item (section 4). With `until`, it counts down to it: the item prints what is left after `text`,
+ * padded, so that its width and its form hold while it counts.
  */
 export interface CacheLabel {
   readonly text: string

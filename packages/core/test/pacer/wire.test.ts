@@ -47,8 +47,8 @@ describe("PacerWire", () => {
       pings: { active: true, nextAt: 9_895_000, left: 2, sent: 1, intervalMs: 240_000, failed: false },
       compactAt: 9_795_000,
       compactReason: "before-cold",
-      nextUse: { account: "account-b", reason: "forced_move" },
-      forceUse: { account: "account-b", when: "soon" },
+      nextUse: { account: "alias of account-b", reason: "forced_move" },
+      forceUse: { account: "alias of account-b", when: "soon" },
       switches: { warming: false, compactBeforeCold: true },
       asOf: 1,
     })

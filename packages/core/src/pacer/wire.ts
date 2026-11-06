@@ -268,7 +268,11 @@ export function live(
   }
 }
 
-/** A chat's view in openforge's shape; `alias` names an account by its `auth_index`. */
+/**
+ * A chat's view in openforge's shape; `alias` names an account by its `auth_index`. CPP names the next and the forced
+ * account as a client sees it: the alias its meters carry, else (an account without a label) its `auth_index`, which
+ * `alias` names as the accounts do.
+ */
 export function chat(
   view: View,
   sessionID: SessionID,
@@ -286,9 +290,11 @@ export function chat(
     ...(compactAt !== undefined && (reason === "before-cold" || reason === "cold")
       ? { compactAt, compactReason: reason }
       : {}),
-    ...(view.next_use ? { nextUse: { account: view.next_use.credential, reason: view.next_use.reason ?? "" } } : {}),
+    ...(view.next_use
+      ? { nextUse: { account: context.alias(view.next_use.credential), reason: view.next_use.reason ?? "" } }
+      : {}),
     ...(view.force_use && (when === "now" || when === "soon")
-      ? { forceUse: { account: view.force_use.credential, when } }
+      ? { forceUse: { account: context.alias(view.force_use.credential), when } }
       : {}),
     switches: {
       warming: view.effective?.pings_enabled === true,

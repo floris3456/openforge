@@ -1108,6 +1108,32 @@ describe("PacerConnection notices", () => {
 })
 
 describe("PacerConnection chats", () => {
+  it.effect("names the next and the forced account as the accounts do, never by an auth_index the meters name", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.meters = [meter(h.cpp.time())]
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      // CPP names a credential without a label of its own by its auth_index, which the meters may name; else by the
+      // alias its meters carry.
+      h.cpp.views.set(
+        uuid,
+        chatView(uuid, h.cpp.time(), {
+          next_use: { credential: "auth-a", reason: "cold_move", window_values: [] },
+          force_use: { credential: "account-b", when: "now", window_values: [] },
+        }),
+      )
+      yield* step(h, id)
+      yield* until("read", () => toldChat(h, id) !== undefined)
+      expect(yield* h.connection.chat(id)).toMatchObject({
+        account: "account-a",
+        nextUse: { account: "account-a", reason: "cold_move" },
+        forceUse: { account: "account-b", when: "now" },
+      })
+    }),
+  )
+
   it.effect("reads a chat's view once after its step, beside it, and corrects CPP's times by Date", () =>
     Effect.gen(function* () {
       const h = yield* harness()

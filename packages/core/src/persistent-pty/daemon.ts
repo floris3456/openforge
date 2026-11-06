@@ -172,10 +172,15 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
   let registration: Registration | undefined
   let owner: Awaited<ReturnType<typeof openOwner>> | undefined
   let closed = false
+  // Ends each open subscription, as its daemon closing it would.
+  const subscriptions = new Set<() => void>()
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       closed = true
       owner?.socket.destroy()
+      // A daemon handed on to the next server keeps running, and so would these: their clients would stay attached
+      // to this one after it stopped, and hold its HTTP server's close.
+      for (const end of subscriptions) end()
     }),
   )
 
@@ -396,8 +401,8 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
   ) {
     const attempt = Effect.gen(function* () {
       const current = yield* connect(false)
-      return yield* Effect.tryPromise({
-        try: () => subscribePromise(current, terminalID, input),
+      const attachment = yield* Effect.tryPromise({
+        try: () => subscribePromise(current, terminalID, input, subscriptions),
         catch: (cause) => (cause instanceof DaemonError ? cause : failure("connect", cause)),
       }).pipe(
         Effect.catch((error) => {
@@ -405,6 +410,9 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
           return Effect.fail(error)
         }),
       )
+      if (!closed) return attachment
+      attachment.detach()
+      return yield* Effect.fail(new DaemonError({ kind: "connect", message: "PTY owner scope is closed" }))
     })
     return yield* attempt.pipe(Effect.catch((error) => (error.kind === "registration" ? attempt : Effect.fail(error))))
   })
@@ -563,6 +571,7 @@ async function subscribePromise(
   registration: Registration,
   id: number,
   input: Parameters<DaemonTransport["subscribe"]>[1],
+  subscriptions: Set<() => void>,
 ): Promise<DaemonAttachment> {
   const socket = net.createConnection(registration.socket)
   const frames = decoder(socket)
@@ -635,10 +644,20 @@ async function subscribePromise(
           }
         }
       } finally {
+        subscriptions.delete(end)
         if (!detached) input.onEnd()
       }
     }
     let activated = false
+    // The transport is closing: an active pump reports the end when its socket closes, an inactive one never runs.
+    const end = () => {
+      socket.destroy()
+      if (activated || detached) return
+      detached = true
+      subscriptions.delete(end)
+      input.onEnd()
+    }
+    subscriptions.add(end)
     return {
       terminal: response.terminal,
       role: response.role,
@@ -658,6 +677,7 @@ async function subscribePromise(
       detach() {
         if (detached) return
         detached = true
+        subscriptions.delete(end)
         socket.destroy()
       },
     }

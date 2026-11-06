@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { Effect } from "effect"
+import { Effect, Exit, Scope } from "effect"
 import { makeDaemonTransport } from "../src/persistent-pty/daemon"
 import { listen, pong, temporaryDirectory, terminal, writeRegistration } from "./fixture/persistent-pty-daemon"
 import { it } from "./lib/effect"
@@ -261,6 +261,56 @@ it.live("stops a discovered inherited daemon when adoption fails", () =>
       expiresAt: Date.now() + 60_000,
     })
     expect(shutdowns).toBe(1)
+  }),
+)
+
+// A daemon handed on to the next server keeps running, as this fake one does: only the transport can end the
+// subscriptions it opened, so their clients do not stay attached to a stopped server.
+it.live("ends its subscriptions when it closes, while their daemon keeps running", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    let open = 0
+    yield* listen(socketPath, (socket, request) => {
+      if (request.op === "ping") return pong
+      if (request.op !== "subscribe") return { type: "terminals", terminals: [] }
+      open++
+      socket.once("close", () => open--)
+      return {
+        type: "attached",
+        terminal: terminal(1),
+        role: "observer",
+        generation: 1,
+        requested_offset: 0,
+        available_offset: 0,
+        end_offset: 0,
+        truncated: false,
+        replay_base64: "",
+      }
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const scope = yield* Scope.fork(yield* Scope.Scope)
+    const daemon = yield* makeDaemonTransport(root, "daemon").pipe(Scope.provide(scope))
+    const ended: string[] = []
+    const subscribe = (attachmentID: string) =>
+      daemon.subscribe(1, {
+        cursor: 0,
+        attachmentID,
+        role: "observer",
+        onEvent: () => {},
+        onEnd: () => ended.push(attachmentID),
+      })
+    const active = yield* subscribe("active")
+    active.activate()
+    yield* subscribe("inactive")
+    const detached = yield* subscribe("detached")
+    detached.detach()
+
+    yield* Scope.close(scope, Exit.void)
+    const deadline = Date.now() + 5_000
+    while ((ended.length < 2 || open > 0) && Date.now() < deadline) yield* Effect.promise(() => Bun.sleep(10))
+    expect(ended.toSorted()).toEqual(["active", "inactive"])
+    expect(open).toBe(0)
   }),
 )
 

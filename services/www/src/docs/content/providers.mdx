@@ -125,11 +125,12 @@ gives, if any, and no price.
 
 ### What openforge does on CPP's answers
 
-| CPP answers                            | openforge does                                                                                                                                                                                                                                                                                                        |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPP answers | openforge does |
+| --- | --- |
 | `409`, asking to compact before a move | Writes a summary of the chat with the first model CPP suggests that the chat can use, else the chat's own model, then sends the step again. A chat with nothing to summarize yet is sent again at once. After three asks in one step, the error shows. CPP asks only while [automatic compaction](/compaction) is on. |
-| `503` or `429` with `Retry-After`      | Waits at least that long, with the usual retry countdown, and tries again.                                                                                                                                                                                                                                            |
-| `502`                                  | Tries again after about 2, 4 and 8 seconds, then every 10 seconds, up to 10 times. A `502` from CPP itself with `Retry-After` waits at least that long.                                                                                                                                                               |
+| `429`, or a `503` other than "CPP is down", with `Retry-After` | Waits at least that long, with the usual retry countdown, and tries again, up to 10 times. |
+| `502` | The first in a row is tried again after about 2 seconds: CPP sends it when one instance of a pair could not reach the other, and the next request usually reaches the one that serves. A second in a row waits CPP's `Retry-After`. |
+| no answer: a refused connection, a `502` or `504`, or a `503` "CPP is down" | Keeps trying, every 10 seconds or after CPP's `Retry-After`, for up to 30 minutes from the first failure, also across a restart of the service. Then the error shows. |
 
 openforge's own keep-alive ([Warming](/warming)) skips chats on CPP, which pings them itself. What the toolbar,
 sidebar and **Requests** tab show is on [CLIProxyPacer in the TUI](/cli/cliproxypacer).

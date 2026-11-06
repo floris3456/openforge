@@ -16,10 +16,11 @@ import { useComposerTab } from "./context"
 
 // The Requests tab (spec cliproxypacer-step-1, section 7): the shown chat's requests at CPP with its subagents',
 // newest first, after Terminals, for chats on CPP. It draws what the store holds and reads nothing when it opens:
-// the store read the first page of both filters when the chat was shown. Rows keep one line. A cursor on the newest
-// row stays on the newest, so requests arriving while the tab is watched come in under it; on any other row it is
-// anchored by the request's ID, so a new request at the top never moves it to another one. Only the rows on screen
-// are mounted, so 500 rows scroll as 6 do. Ctrl+Enter or Alt+Enter shows what changed in place of the list.
+// the store read the first page of both filters when the chat was shown, and what changed for their newest rows, where
+// the tab opens. Rows keep one line. A cursor on the newest row stays on the newest, so requests arriving while the
+// tab is watched come in under it; on any other row it is anchored by the request's ID, so a new request at the top
+// never moves it to another one. Only the rows on screen are mounted, so 500 rows scroll as 6 do. Ctrl+Enter or
+// Alt+Enter shows what changed in place of the list.
 
 /** Rows on screen; the list mounts no more than these. */
 const LIST_ROWS = 6
@@ -139,7 +140,8 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
       setView("selected", which(), next === 0 ? undefined : list[next]!.id)
       setView("top", which(), top === 0 ? undefined : list[top]!.id)
     })
-    // What changed is read ahead for the row the cursor reaches; opening the tab reads nothing.
+    // What changed is read ahead for the row the cursor reaches; the newest row's, where the tab opens, was read with
+    // the first page, so opening the tab reads nothing.
     props.pacer.cursor(list[next]!.id)
     if (next >= list.length - MORE_AHEAD) props.pacer.more(props.sessionID, which())
   }

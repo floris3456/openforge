@@ -32,7 +32,8 @@ import { useRoute } from "./route"
 // status says CPP is set up and the shown chat is on it, nothing is read, ticked or drawn, and an event for another
 // chat costs one comparison. Instant screens come from holding data before it is asked for: the shown chat's view
 // and the first page of its requests for both filters are read when the chat is shown, never when a key opens a
-// screen, and what changed is read ahead for every miss held.
+// screen, and what changed is read ahead for each first page's newest row (where the Requests tab opens) and for
+// every miss held.
 
 /** The provider CPP's models are under (part 1, `PacerEndpoint.id`). */
 export const PACER_PROVIDER = "cliproxypacer"
@@ -43,7 +44,7 @@ export type PacerFilter = "all" | "misses"
 const HELD_CHATS = 8
 /** What-changed answers held, by request ID. */
 const HELD_PROMPTS = 200
-/** What-changed reads ahead at once; one asked for now may run beside them. */
+/** What-changed reads ahead at once; a first page's newest row and one asked for now may run beside them. */
 const PROMPT_READS = 3
 
 /** A value as read, with the connection's epoch it was read in: one read before CPP came back is stale. */
@@ -147,6 +148,7 @@ function createPacer(input: { clock: Clock }) {
         held.splice(0)
         promptOrder.splice(0)
         ahead.clear()
+        promptNone.clear()
         cursorWant = undefined
         return
       }
@@ -281,7 +283,7 @@ function createPacer(input: { clock: Clock }) {
         if (index >= 0) setStore("chats", sessionID, "pages", "misses", "items", index, reconcile(item))
       })
     })
-    readAhead(fresh.items)
+    readAhead(fresh.items, page.items[0])
     if (filter === "all" && misses && fresh.items.some((item) => item.miss && !missIDs.has(item.id)))
       readFirst(sessionID, "misses")
   }
@@ -347,18 +349,26 @@ function createPacer(input: { clock: Clock }) {
       })
   }
 
-  // What changed, read ahead: every miss held, the row under the cursor, and the row asked for now. Each ID is read
-  // once; a read that failed is tried again only when asked for.
+  // What changed, read ahead: each first page's newest row at once, as the tab opens on it (Ctrl+Enter right after
+  // opening it finds its answer held); then the row under the cursor, then every miss held; and the row asked for now.
+  // Each ID is read once; a read that failed is tried again only when asked for or reached by the cursor. An answer
+  // read ahead that CPP kept no prompt isn't held: CPP may store a prompt just after its request's row, and the newest
+  // row is read as soon as it is listed. It is read again only when asked for, and that answer is held whatever it is.
   const promptOrder: string[] = []
   const promptReads = new Map<string, Promise<PacerPromptChange | null>>()
   const promptFailed = new Set<string>()
+  const promptNone = new Set<string>()
+  /** Reads someone waits on: their answer is held whatever it is. */
+  const asked = new Set<string>()
   const ahead = new Set<string>()
   let cursorWant: string | undefined
   const known = (requestID: string) => requestID in unwrap(store.prompts) || promptReads.has(requestID)
-  const readAhead = (items: readonly PacerRequest[]) => {
+  const wanted = (requestID: string) => !known(requestID) && !promptFailed.has(requestID) && !promptNone.has(requestID)
+  const readAhead = (items: readonly PacerRequest[], first?: PacerRequest) => {
     if (state() !== "on") return
+    if (first && wanted(first.id)) readPrompt(first.id)
     items.forEach((item) => {
-      if (item.miss && !known(item.id) && !promptFailed.has(item.id)) ahead.add(item.id)
+      if (item.miss && wanted(item.id)) ahead.add(item.id)
     })
     pump()
   }
@@ -376,6 +386,11 @@ function createPacer(input: { clock: Clock }) {
       (change) => {
         promptFailed.delete(requestID)
         if (state() === "unset") return change
+        if (change?.kept === "none" && !asked.has(requestID)) {
+          promptNone.add(requestID)
+          return change
+        }
+        promptNone.delete(requestID)
         batch(() => {
           setStore("prompts", requestID, change)
           promptOrder.push(requestID)
@@ -395,14 +410,16 @@ function createPacer(input: { clock: Clock }) {
       .catch(() => undefined)
       .finally(() => {
         promptReads.delete(requestID)
+        asked.delete(requestID)
         pump()
       })
     return read
   }
-  /** What changed in a request: held at once, else read now, beside the reads ahead. */
+  /** What changed in a request: held at once, else read now, beside the reads ahead; its answer is then held. */
   const prompt = (requestID: string): Promise<PacerPromptChange | null> => {
     const answer = unwrap(store.prompts)[requestID]
     if (answer !== undefined) return Promise.resolve(answer)
+    asked.add(requestID)
     return promptReads.get(requestID) ?? readPrompt(requestID)
   }
 
@@ -434,9 +451,9 @@ function createPacer(input: { clock: Clock }) {
     /** What changed in a request, if held: null when CPP has no such request. */
     held: (requestID: string) => store.prompts[requestID],
     prompt,
-    /** The row under the cursor: read ahead next, unless it is held. */
+    /** The row under the cursor: read ahead next, unless it is held or was read ahead without a prompt kept. */
     cursor(requestID: string) {
-      if (state() !== "on" || known(requestID)) return
+      if (state() !== "on" || known(requestID) || promptNone.has(requestID)) return
       cursorWant = requestID
       pump()
     },

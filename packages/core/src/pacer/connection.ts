@@ -100,6 +100,8 @@ export const CHATS = 1_000
 export const LISTED = 100
 /** What-changed answers held. */
 export const PROMPTS = 50
+/** Request rows held from the chats' pages, so that what changed knows which request it is compared with. */
+export const ROWS = 1_000
 /** CPP's UUIDs of chats with new requests this service didn't know yet, held at most. */
 export const UNNAMED = 200
 
@@ -244,6 +246,9 @@ export const layer = Layer.effect(
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
+    // Request rows as CPP last answered them, by CPP's number, and CPP's number by request ID.
+    const heldRows = new Map<number, PacerWire.Row>()
+    const heldIDs = new Map<string, number>()
     // A chat's first requests can reach CPP, and its notice this service, before the chat's step is published here: a
     // new chat's title and first step, or a chat continued after a restart.
     const unnamed = new Set<string>()
@@ -856,6 +861,8 @@ export const layer = Layer.effect(
       link.active = new Set()
       link.newest = undefined
       prompts.clear()
+      heldRows.clear()
+      heldIDs.clear()
       unnamed.clear()
       // Another CPP knows nothing of what this one said.
       for (const chat of chats.values()) {
@@ -1152,11 +1159,37 @@ export const layer = Layer.effect(
       }
     }
 
+    /** Holds the newest `ROWS` rows read. */
+    const keepRows = (items: ReadonlyArray<PacerWire.Row>) => {
+      for (const row of items) {
+        heldRows.delete(row.id)
+        heldRows.set(row.id, row)
+        heldIDs.set(row.ext, row.id)
+      }
+      for (const [id, row] of heldRows) {
+        if (heldRows.size <= ROWS) break
+        heldRows.delete(id)
+        if (heldIDs.get(row.ext) === id) heldIDs.delete(row.ext)
+      }
+    }
+
     const oneRow = (request: string | number) =>
       get(
         `/pacer/v1/monitor/requests?request=${encodeURIComponent(String(request))}&limit=1&from=0`,
         PacerWire.Rows,
-      ).pipe(Effect.map((answer) => PacerWire.rows(answer.items)[0]))
+      ).pipe(
+        Effect.map((answer) => {
+          const found = PacerWire.rows(answer.items)
+          keepRows(found)
+          return found[0]
+        }),
+      )
+
+    /** The row a what-changed is compared with: held, else read; none when it can't be read. */
+    const baseRow = (id: number) => {
+      const held = heldRows.get(id)
+      return held ? Effect.succeed(held) : oneRow(id).pipe(Effect.orElseSucceed(() => undefined))
+    }
 
     return Service.of({
       status: () =>
@@ -1212,10 +1245,11 @@ export const layer = Layer.effect(
           const answer = yield* get(`/pacer/v1/monitor/requests?${query}`, PacerWire.Rows).pipe(
             Effect.mapError(unavailable),
           )
-          const rows = PacerWire.rows(answer.items)
-          const sender = yield* senders(chat, rows)
+          const listed = PacerWire.rows(answer.items)
+          keepRows(listed)
+          const sender = yield* senders(chat, listed)
           return {
-            items: rows.map((row) => PacerWire.request(row, sender(row), now)),
+            items: listed.map((row) => PacerWire.request(row, sender(row), now)),
             ...(answer.next ? { cursor: answer.next } : {}),
             asOf: now.now,
           }
@@ -1228,19 +1262,25 @@ export const layer = Layer.effect(
             return held
           }
           yield* requireOn
-          const [prompt, row] = yield* Effect.all(
+          // What it is compared with is the request its row names (`cache_base`), else the one its prompt names
+          // (`previous`): that read needs one of their answers. A request the chat's pages listed names it before
+          // anything is read, so that row is read beside them in one round trip, or not at all when it was listed too.
+          // Its own row is read again: CPP may refine a verdict after listing it.
+          const listed = heldIDs.get(requestID)
+          const early = listed === undefined ? undefined : (heldRows.get(listed)?.cache_base ?? undefined)
+          const [prompt, row, guessed] = yield* Effect.all(
             [
               get(`/pacer/v1/prompts/${encodeURIComponent(requestID)}?rows=1`, PacerWire.Prompt).pipe(
                 Effect.catchTag("PacerHttp.NotFound", () => Effect.succeed(undefined)),
               ),
               oneRow(requestID),
+              early === undefined ? Effect.succeed(undefined) : baseRow(early),
             ],
             { concurrency: "unbounded" },
           ).pipe(Effect.mapError(unavailable))
           if (!row) return undefined
           const compared = row.cache_base ?? prompt?.previous ?? undefined
-          const base =
-            compared === undefined ? undefined : yield* oneRow(compared).pipe(Effect.orElseSucceed(() => undefined))
+          const base = compared === undefined ? undefined : compared === early ? guessed : yield* baseRow(compared)
           const sessionID = row.session_ext ? byUuid.get(row.session_ext.toLowerCase()) : undefined
           const sender = yield* senders(sessionID && chats.get(sessionID), [row])
           const now = yield* context()

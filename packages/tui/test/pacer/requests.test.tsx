@@ -81,9 +81,11 @@ async function requestsTab(
     prompts?: Record<string, ReturnType<typeof promptChange>>
     width?: number
     height?: number
+    /** CPP is far from the start, the first pages too. */
+    far?: boolean
   } = {},
 ) {
-  const fake = pacerFake()
+  const fake = pacerFake({ delay: input.far ? FAR : 0 })
   Object.assign(fake.prompts, input.prompts)
   fake.status = status(input.state ?? "on")
   fake.chats[CHAT] = chat()
@@ -344,19 +346,88 @@ describe("what changed", () => {
   })
 
   test("Ctrl+Enter on a row not held keeps the list until it is, then shows it in one frame", async () => {
+    // Row 2, a hit, isn't read ahead before the cursor reaches it.
     await using setup = await requestsTab({
       requests,
-      prompts: { req_0: promptChange(request(0), { comparedWith: undefined }) },
+      prompts: { req_2: promptChange(request(2), { comparedWith: undefined }) },
     })
     await clickCacheItem(setup)
     await setup.frame((frame) => rowsOf(frame).length > 0)
     using recorder = recordFrames(setup.app)
+    setup.app.mockInput.pressArrow("down")
+    setup.app.mockInput.pressArrow("down")
     const start = performance.now()
     setup.app.mockInput.pressEnter({ ctrl: true })
     await setup.frame((frame) => frame.includes("compared with no earlier request"))
     const drawn = recorder.frames.find((frame) => frame.text.includes("compared with no earlier request"))!
     expect(drawn.at - start).toBeGreaterThanOrEqual(FAR - 5)
     finished(recorder, [list(range(0, 4)), (frame) => frame.includes("compared with no earlier request")])
+    expect(setup.fake.calls.filter((call) => call.path === "prompt/req_2")).toHaveLength(1)
+  })
+
+  test("opening the tab and Ctrl+Enter at once draws what changed for the newest row within 100 ms, CPP at 300 ms from the start", async () => {
+    // Found live: the first Ctrl+Enter on the newest row, a hit, waited for its read: only misses were read ahead,
+    // and the tab opens on the newest row.
+    const many = [request(0), ...Array.from({ length: 9 }, (_, index) => miss(index + 1))]
+    await using setup = await requestsTab({ requests: many, far: true, prompts: { req_0: promptChange(request(0)) } })
+    // Read with the first pages, at once: not behind the misses read ahead, three at a time.
+    await until(() => setup.pacer.held("req_0") !== undefined, FAR + 200, "the newest row read ahead")
+    using recorder = recordFrames(setup.app)
+    const start = performance.now()
+    await clickCacheItem(setup)
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const detail = await setup.frame((frame) => frame.includes("compared with req_prev"))
+    const drawn = recorder.frames.find((frame) => frame.text.includes("compared with req_prev"))!
+    console.log(
+      `What changed: on screen ${(drawn.at - start).toFixed(1)} ms after the click and Ctrl+Enter (CPP at ${FAR} ms)`,
+    )
+    expect(drawn.at - start).toBeLessThan(100)
+    expect(setup.fake.since(start)).toEqual([])
+    expect(detail).toContain("hit")
+    expect(detail).toContain("45 unchanged")
+    finished(recorder, [closed, list(range(0, 6)), (frame) => frame.includes("compared with req_prev")])
+  })
+
+  test("read ahead before CPP stored its prompt, the newest row isn't held as not kept: Ctrl+Enter reads it again", async () => {
+    // CPP may store a prompt just after its request's row, and the newest row is read ahead as soon as it is listed.
+    await using setup = await requestsTab({
+      requests,
+      delay: 0,
+      prompts: { req_0: promptChange(request(0), { kept: "none", items: [] }) },
+    })
+    const reads = () => setup.fake.calls.filter((call) => call.path === "prompt/req_0")
+    await until(() => reads().some((call) => call.done !== undefined), 5_000, "the newest row read ahead")
+    await setup.settle()
+    expect(setup.pacer.held("req_0")).toBeUndefined()
+    setup.fake.prompts.req_0 = promptChange(request(0))
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    // The cursor coming back to it doesn't read it again: only asking does.
+    setup.app.mockInput.pressArrow("down")
+    setup.app.mockInput.pressArrow("up")
+    await setup.settle()
+    expect(reads()).toHaveLength(1)
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const frame = await setup.frame((frame) => frame.includes("compared with req_prev"))
+    expect(frame).toContain("45 unchanged")
+    expect(frame).not.toContain("prompt no longer kept")
+    expect(reads()).toHaveLength(2)
+  })
+
+  test("Ctrl+Enter while the newest row is read ahead waits for that read, and shows its answer whatever it is", async () => {
+    await using setup = await requestsTab({
+      requests,
+      far: true,
+      prompts: { req_0: promptChange(request(0), { kept: "none", items: [] }) },
+    })
+    const reads = () => setup.fake.calls.filter((call) => call.path === "prompt/req_0")
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(reads().map((call) => call.done)).toEqual([undefined])
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const frame = await setup.frame((frame) => frame.includes("prompt no longer kept"))
+    expect(frame).toContain("compared with req_prev")
+    expect(reads()).toHaveLength(1)
   })
 
   test("prompt no longer kept", async () => {

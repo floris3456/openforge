@@ -811,6 +811,8 @@ export type ConnectionCredentialInfo = {
 
 export type ConnectionEnvInfo = { type: "env"; name: string; status?: ConnectionStatus }
 
+export type ConnectionConfigInfo = { type: "config"; status?: ConnectionStatus }
+
 export type IntegrationAttempt = {
   attemptID: IntegrationAttemptID
   url: string
@@ -2298,7 +2300,7 @@ export type VoiceSessionResponse = { data: { transport: VoiceTransport } }
 
 export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
 
-export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
+export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo | ConnectionConfigInfo
 
 export type PtyCreated = {
   id: EventID

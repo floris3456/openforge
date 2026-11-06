@@ -143,6 +143,7 @@ export const dict = {
   "dialog.provider.connected": "Connected",
   "dialog.provider.connections.count.one": "{{count}} connection",
   "dialog.provider.connections.count.other": "{{count}} connections",
+  "dialog.provider.connection.config": "Config",
   "dialog.provider.tag.recommended": "Recommended",
   "dialog.provider.opencode.note": "Curated models including Claude, GPT, Gemini and more",
   "dialog.provider.opencode.tagline": "Reliable optimized models",

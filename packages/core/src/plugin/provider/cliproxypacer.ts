@@ -2,6 +2,7 @@ import { Effect, Option, Stream } from "effect"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Form } from "@opencode/schema/form"
 import { Money } from "@opencode/schema/money"
+import { Integration } from "../../integration.js"
 import { Model } from "../../model.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
 import { PacerModels } from "../../pacer/models.js"
@@ -47,6 +48,10 @@ export const CLIProxyPacerPlugin = define({
     )
 
     const current = { endpoint: yield* endpoints.get(), built: models(yield* catalogs.get(), yield* endpoints.get()) }
+    // Set up through config alone, with nothing stored, CPP is as connected as with a stored key: its integration
+    // lists a config connection, so whatever reads connections agrees with PacerEndpoint.
+    const integrations = yield* Integration.Service
+    yield* integrations.transform((editor) => editor.config(PacerEndpoint.id, current.endpoint?.keyFrom === "config"))
     yield* ctx.provider.transform((providers) => {
       const endpoint = current.endpoint
       providers.update(providerID, (provider) => {
@@ -80,8 +85,10 @@ export const CLIProxyPacerPlugin = define({
       const endpoint = yield* endpoints.get()
       const built = models(yield* catalogs.get(), endpoint)
       if (PacerEndpoint.same(endpoint, current.endpoint) && built.hash === current.built.hash) return
+      const connection = (endpoint?.keyFrom === "config") !== (current.endpoint?.keyFrom === "config")
       current.endpoint = endpoint
       current.built = built
+      if (connection) yield* integrations.reload()
       yield* ctx.provider.reload()
     })
     yield* Stream.merge(endpoints.changes(), catalogs.changes()).pipe(

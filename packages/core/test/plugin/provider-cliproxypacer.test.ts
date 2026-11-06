@@ -353,6 +353,34 @@ describe("CLIProxyPacerPlugin", () => {
       yield* eventually(listed, (models) => models.length === 0)
     }),
   )
+
+  it.live("is connected through config while its key is config's, and through a stored key once there is one", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCPP(configKey, catalog)
+      yield* addPlugin(cpp)
+      const integrations = yield* Integration.Service
+      const connections = integrations
+        .get(PacerEndpoint.id)
+        .pipe(Effect.map((info) => (info?.connections ?? []).map((connection) => connection.type)))
+      expect(yield* connections).toEqual(["config"])
+      // Requests carry config's key in the models' settings, so the connection resolves to no stored credential.
+      const active = yield* integrations.connection.active(PacerEndpoint.id)
+      expect(active).toEqual({ type: "config" })
+      expect(yield* integrations.connection.resolve(required(active))).toBeUndefined()
+      yield* cpp.setEndpoint(undefined)
+      yield* eventually(connections, (types) => types.length === 0)
+      yield* cpp.setEndpoint(configKey)
+      yield* eventually(connections, (types) => types.join() === "config")
+      // A stored key wins over config's, as PacerEndpoint has it, and is the only connection.
+      const credentials = yield* Credential.Service
+      yield* credentials.create({
+        integrationID: PacerEndpoint.id,
+        value: Credential.Key.make({ type: "key", key: "stored-key" }),
+      })
+      yield* cpp.setEndpoint(storedKey)
+      yield* eventually(connections, (types) => types.join() === "credential")
+    }),
+  )
 })
 
 /** CPP's answer, as its source writes it (`pacer_routing.rs`, `dispatch.rs`, `pair_forward.rs`). */

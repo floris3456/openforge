@@ -36,8 +36,9 @@ const list = Effect.fn("cli.auth.list")(function* (input) {
   const rows = integrations.flatMap((integration) =>
     integration.connections.map((connection) => ({
       integration: integration.name,
-      source: connection.type === "credential" ? connection.label : connection.name,
-      type: connection.type === "credential" ? "stored" : "environment",
+      source:
+        connection.type === "credential" ? connection.label : connection.type === "env" ? connection.name : "config",
+      type: connection.type === "credential" ? "stored" : connection.type === "env" ? "environment" : "config",
     })),
   )
   if (rows.length === 0) {

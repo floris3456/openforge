@@ -28,6 +28,7 @@ const keys: Record<string, string> = {
 // A ChatGPT sign-in can't start voice sessions, so resolving one fails the test; an OpenCode Console sign-in can.
 const resolveCredential: Integration.Interface["connection"]["resolve"] = (connection) => {
   if (connection.type === "env") return Effect.succeed(Credential.Key.make({ type: "key", key: keys[connection.name] }))
+  if (connection.type === "config") return Effect.succeed(undefined)
   if (connection.id === "chatgpt") return Effect.die("a ChatGPT sign-in was resolved")
   if (connection.id === "console")
     return Effect.succeed(

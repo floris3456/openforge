@@ -78,4 +78,10 @@ describe("connectionSummary", () => {
       ),
     ).toBe("2 connections")
   })
+
+  test("names a key that config gives", () => {
+    expect(
+      connectionSummary(integration({ id: "cliproxypacer", name: "CLIProxyPacer", connections: [{ type: "config" }] })),
+    ).toBe("Config")
+  })
 })

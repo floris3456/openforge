@@ -1,9 +1,14 @@
-import { expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, setSystemTime, test } from "bun:test"
 import type { SessionMessageInfo } from "@opencode/client"
 import { createAppFixture } from "../fixture/app"
 import { waitForHighlightedFrame } from "../fixture/frame"
 import { json } from "../fixture/tui-client"
 import { CHAT, chat, accounts, NOW, pacerFake, request, sessionInfo, status } from "./fixture"
+
+// The fixture's chats and accounts are as of NOW, and the whole app's countdowns run on the wall clock (WallClock):
+// it stands at NOW, or the chat's 5 minutes of warmth would have run out since 2026-11-06 14:07.
+beforeEach(() => setSystemTime(NOW))
+afterEach(() => setSystemTime())
 
 // The whole TUI with CLIProxyPacer's screens mounted where they show: the toolbar's cache item in the prompt's
 // footer, the Account section where Context was, the Requests tab in the composer, and Enter moving the transcript.

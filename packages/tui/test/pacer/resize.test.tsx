@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
 import type { SessionMessageInfo } from "@opencode/client"
 import type { Config } from "../../src/config"
 import { createAppFixture } from "../fixture/app"
@@ -7,6 +7,11 @@ import { recordFrames, type RecordedFrame } from "../fixture/frames"
 import { json } from "../fixture/tui-client"
 import { until } from "../fixture/wait"
 import { CHAT, chat, accounts, NOW, pacerFake, request, sessionInfo, status } from "./fixture"
+
+// The fixture's chats and accounts are as of NOW, and the whole app's countdowns run on the wall clock (WallClock):
+// it stands at NOW, or the chat's 5 minutes of warmth would have run out since 2026-11-06 14:07.
+beforeEach(() => setSystemTime(NOW))
+afterEach(() => setSystemTime())
 
 // The first frame drawn at a new size has the new width's layout (backlog cpp-step-1-tui, item 13). The session's
 // width came from its pane's onSizeChange, which OpenTUI calls while it draws that frame, and text and <Show> branches

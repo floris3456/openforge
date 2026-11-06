@@ -68,6 +68,7 @@ export const docsSections: DocsSection[] = [
           { title: "Settings", slug: "cli/config" },
           { title: "Web", slug: "cli/web" },
           { title: "Providers", slug: "cli/providers" },
+          { title: "CLIProxyPacer", slug: "cli/cliproxypacer" },
           { title: "Commands", slug: "cli/commands" },
           { title: "ACP", slug: "cli/acp" },
           { title: "Theme", slug: "cli/theme" },

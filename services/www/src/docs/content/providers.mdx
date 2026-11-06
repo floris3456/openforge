@@ -56,6 +56,84 @@ enabled.
 }
 ```
 
+## CLIProxyPacer
+
+CLIProxyPacer (CPP) is a proxy in front of your model accounts. It paces chats across the accounts, keeps their prompt
+caches warm with pings, and asks for a compaction before it moves a chat to another account. It is built in as the
+provider **CLIProxyPacer**, with the ID `cliproxypacer`. Connect it with CPP's address and a client key you made for
+openforge in CPP.
+
+```text
+/connect
+# Select CLIProxyPacer, enter its address, then paste the client key.
+/models
+```
+
+The same from the command line:
+
+```bash
+openforge auth login cliproxypacer
+```
+
+The key is saved as a provider account in the server's database, like any API key (see
+[Provider accounts](/cli/providers#storage)). It is sent only to CPP's address, as a bearer token, and never to where a
+redirect to another address points.
+
+### Address
+
+The address may end in `/v1` or not; `https://cliproxy.example.com` and `https://cliproxy.example.com/v1` are the same.
+To skip the address question, set it in your global config; `/connect` then asks only for the key.
+
+```jsonc title="~/.config/openforge/opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "cliproxypacer": {
+      "settings": { "baseURL": "https://cliproxy.example.com" },
+    },
+  },
+}
+```
+
+- Only the global config counts, never a project's: the background service keeps one connection to CPP for every
+  project.
+- An address in config wins over the one `/connect` saved.
+- `settings.apiKey` works as a fallback when no account is saved, but then the key sits in a file; prefer `/connect`.
+
+### CPP's models
+
+The models are CPP's own list (`/v1/models`), as `cliproxypacer/<model>`. Their context and output limits come from
+CPP's capabilities, and their prices from CPP, so the cost openforge shows is what CPP counts. A model CPP has no price
+for costs nothing.
+
+```text
+/models
+# CLIProxyPacer: cliproxypacer/claude-sonnet-5-5, cliproxypacer/gpt-6-luna, …
+```
+
+- Claude models speak Anthropic Messages (`/v1/messages`); every other model speaks OpenAI Responses (`/v1/responses`).
+- Both go over HTTP, never a WebSocket.
+- The list is read when the service connects and when CPP announces a change. Opening the model picker reads CPP's model
+  list again.
+
+### Without the pacer
+
+Pointed at a proxy without the pacer, such as a plain CLIProxyAPI, the provider still lists that proxy's models and
+chats normally. The extras have nothing to show: the toolbar shows no cache timer, the sidebar's Account section says
+"no pacer", and the **Requests** tab says the proxy keeps no request records. Models get the limits the proxy's list
+gives, if any, and no price.
+
+### What openforge does on CPP's answers
+
+| CPP answers                            | openforge does                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `409`, asking to compact before a move | Writes a summary of the chat with the first model CPP suggests that the chat can use, else the chat's own model, then sends the step again. A chat with nothing to summarize yet is sent again at once. After three asks in one step, the error shows. CPP asks only while [automatic compaction](/compaction) is on. |
+| `503` or `429` with `Retry-After`      | Waits at least that long, with the usual retry countdown, and tries again.                                                                                                                                                                                                                                            |
+| `502`                                  | Tries again after about 2, 4 and 8 seconds, then every 10 seconds, up to 10 times. A `502` from CPP itself with `Retry-After` waits at least that long.                                                                                                                                                               |
+
+openforge's own keep-alive ([Warming](/warming)) skips chats on CPP, which pings them itself. What the toolbar,
+sidebar and **Requests** tab show is on [CLIProxyPacer in the TUI](/cli/cliproxypacer).
+
 ## Custom
 
 Add a provider when its API is not already in the catalog. This OpenAI-compatible example defines the credential,

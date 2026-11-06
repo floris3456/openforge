@@ -1276,6 +1276,34 @@ describe("PacerConnection chats", () => {
     }),
   )
 
+  it.effect("tells a chat's label once, after its first step through CPP streamed, without reading its view", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      yield* h.sessions.rename({ sessionID: id, title: "A titled chat" })
+      const labels = () => seen(h, `${viewPath(id)}/events`, "POST").map((item) => item.body as Json)
+      const assistantMessageID = SessionMessage.ID.create()
+      yield* h.bus.publish(SessionEvent.Step.Started, {
+        sessionID: id,
+        assistantMessageID,
+        agent: Agent.ID.make("build"),
+        model: cppModel,
+        started: 0,
+      })
+      // Nothing goes to CPP for it while the step's own request does.
+      yield* settle
+      expect(labels()).toEqual([])
+      yield* h.bus.publish(SessionEvent.Step.Streamed, { sessionID: id, assistantMessageID })
+      yield* until("labelled", () => labels().length === 1)
+      yield* step(h, id)
+      yield* step(h, id)
+      yield* settle
+      expect(labels()).toEqual([{ type: "label", label: "A titled chat" }])
+      expect(seen(h, viewPath(id))).toEqual([])
+    }),
+  )
+
   it.effect("reads no view for 200 chats of 5 steps each that nobody asks for", () =>
     Effect.gen(function* () {
       const h = yield* harness()

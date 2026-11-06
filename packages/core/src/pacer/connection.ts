@@ -167,6 +167,8 @@ interface Chat {
   reading: boolean
   /** Its label was read from CPP or told in this process, or there was none to tell. */
   labelled: boolean
+  /** A step of it through CPP streamed in this process (since CPP was last reached): its label may be told. */
+  streamed: boolean
   /** CPP knew nothing of it at the last read. */
   missing: boolean
   /** CPP's number for it, for the request reads. */
@@ -364,6 +366,7 @@ export const layer = Layer.effect(
         read: false,
         reading: false,
         labelled: false,
+        streamed: false,
         missing: false,
         storeID: undefined,
         calls: new Map(),
@@ -627,9 +630,9 @@ export const layer = Layer.effect(
     const work = Effect.fnUntraced(function* (chat: Chat) {
       if (!on()) return
       if (chat.info === undefined) chat.info = yield* lookup(chat.sessionID)
-      // Its label is told without reading its view, once in this process: CPP keeps a label it is told for a chat it
-      // doesn't know yet. A rename tells it again.
-      if (!chat.labelled && chat.on) {
+      // Its label is told without reading its view, once in this process, after its first step through CPP streamed:
+      // the step's own request goes first, never behind it. A rename tells it again.
+      if (!chat.labelled && chat.streamed) {
         chat.labelled = true
         const label = labelOf(chat)
         if (label && label !== chat.label) tell(chat, { type: "label", label })
@@ -862,6 +865,7 @@ export const layer = Layer.effect(
         chat.marks = undefined
         chat.read = false
         chat.labelled = false
+        chat.streamed = false
         chat.missing = false
         chat.storeID = undefined
         chat.duration = undefined
@@ -981,14 +985,17 @@ export const layer = Layer.effect(
           chat.on = true
           chat.missing = false
           chat.stopped.clear()
-          if (chat.info === undefined || !chat.labelled) mark(chat)
+          if (chat.info === undefined) mark(chat)
           return
         }
         case "session.step.streamed": {
           // The step's request moved CPP's view of the chat. Only the chats someone looks at cost a read (spec
-          // section 3): a TUI showing it asks at each of its step ends.
+          // section 3): a TUI showing it asks at each of its step ends. Its first step here also tells its label.
           const chat = chats.get(sessionID)
-          if (chat?.step && chat.raw) chat.stale = true
+          if (!chat?.step) return
+          if (chat.raw) chat.stale = true
+          chat.streamed = true
+          if (!chat.labelled) mark(chat)
           return
         }
         case "session.tool.input.started": {

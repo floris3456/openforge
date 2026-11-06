@@ -210,7 +210,11 @@ export interface Request extends Schema.Schema.Type<typeof Request> {}
 export const Request = Schema.Struct({
   /** CPP's request ID: the `proxyRequestID` of the assistant message whose step sent it. */
   id: Schema.String,
-  /** When CPP received it. */
+  /**
+   * When CPP received it. Held once answered, for the last 1,000 rows read: later answers give the same time, though
+   * the correction of CPP's clock narrows. A row read again after 1,000 others, after a restart or from another CPP is
+   * corrected anew, so its time may move (by about a second, unless CPP's clock jumped).
+   */
   at: Instant,
   /** The chat that sent it: the subagent's own for a subagent's request; absent when it isn't one of this service's. */
   sessionID: SessionID.pipe(optional),
@@ -292,6 +296,7 @@ export const PromptChange = Schema.Struct({
   comparedWith: Schema.Struct({
     /** CPP's request ID, as `Request.id`. */
     id: Schema.String,
+    /** When CPP received it, held as `Request.at`. */
     at: Instant,
   }).pipe(optional),
   /**
@@ -313,11 +318,19 @@ export const PromptChange = Schema.Struct({
 const StatusChanged = ephemeral({ type: "pacer.status", schema: { status: Status } })
 /** The accounts were read again and changed. */
 const AccountsUpdated = ephemeral({ type: "pacer.accounts.updated", schema: { accounts: Accounts } })
-/** A chat's view was read again and changed. */
+/**
+ * A chat's view changed (apart from `asOf`), with the new one: when a read of the view answered it, or a write of its
+ * switches or of its pings' duration; when CPP's state or chat list (read at each connect, on `resync` and `session`
+ * notices, and on a `compact` notice for many chats) brought new warmth, pings, account or model for a view held; and
+ * when a compaction of the chat ended while its view had a `compactAt`, which goes at once. Dropping a view sends none.
+ */
 const ChatUpdated = ephemeral({ type: "pacer.chat.updated", schema: { chat: Chat } })
 /**
- * CPP recorded new requests for the chat or one of its subagents; without `sessionID`, for chats the service couldn't
- * name. A TUI holding a page of that chat's requests reads its first page again.
+ * CPP recorded new requests for a chat or one of its subagents: one event for the chat and one for each of its
+ * parents. Requests of a chat this service doesn't hold yet are told once it does, for the newest 200 such chats.
+ * Without `sessionID` when CPP had more new requests than one read takes (50 on the first read, 500 after): any chat
+ * may have some. A TUI showing a chat whose requests it holds reads their first page again when the event names that
+ * chat, or none.
  */
 const RequestsUpdated = ephemeral({
   type: "pacer.requests.updated",

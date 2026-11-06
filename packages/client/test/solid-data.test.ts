@@ -165,6 +165,61 @@ test("keeps the previous model in a live variant notice until the projected mess
   }
 })
 
+test("keeps a live step's proxy request ID, as the stored message has it", async () => {
+  const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init)
+      if (new URL(request.url).pathname === "/api/session/ses_refresh/message")
+        return Response.json({ data: [], cursor: {} })
+      throw new Error(`Unexpected request: ${request.url}`)
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({
+      api: () => api,
+      directory: "/project",
+      event: {
+        on: () => () => {},
+        listen(handler) {
+          listeners.add(handler)
+          return () => listeners.delete(handler)
+        },
+      },
+    }),
+    dispose,
+  }))
+  const started = (seq: number, proxyRequestID?: string): OpenCodeEvent => ({
+    id: `evt_step_${seq}`,
+    created: seq,
+    type: "session.step.started",
+    durable: { aggregateID: "ses_refresh", seq, version: 1 },
+    data: {
+      sessionID: "ses_refresh",
+      assistantMessageID: "msg_step",
+      agent: "build",
+      model: { providerID: "cliproxypacer", id: "claude" },
+      started: seq,
+      ...(proxyRequestID === undefined ? {} : { proxyRequestID }),
+    },
+  })
+  const emit = (event: OpenCodeEvent) => listeners.forEach((listener) => listener({ name: event.type, details: event }))
+
+  try {
+    await setup.data.session.message.sync("ses_refresh")
+    emit(started(1, "req-first"))
+    expect(setup.data.session.message.get("ses_refresh", "msg_step")).toMatchObject({ proxyRequestID: "req-first" })
+    // A step tried again keeps its latest attempt's ID, and an attempt without one keeps none.
+    emit(started(2, "req-again"))
+    expect(setup.data.session.message.get("ses_refresh", "msg_step")).toMatchObject({ proxyRequestID: "req-again" })
+    emit(started(3))
+    expect(setup.data.session.message.get("ses_refresh", "msg_step")).not.toHaveProperty("proxyRequestID", "req-again")
+  } finally {
+    setup.dispose()
+  }
+})
+
 test("reconciles a stale running tool when execution settles", async () => {
   const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
   let completed = false

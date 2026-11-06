@@ -4,7 +4,7 @@ import { existsSync } from "node:fs"
 import path from "node:path"
 import { PacerAccount } from "../../src/pacer/account"
 import { builtins } from "../../src/plugin/builtins"
-import { accounts, CHAT, chat, colorOf, NOW, pacerFake, renderPacer, status } from "./fixture"
+import { accounts, CHAT, chat, colorOf, NOW, pacerFake, renderPacer, status, styleOf } from "./fixture"
 
 // Section 5 of spec cliproxypacer-step-1: the sidebar's Account section, where Context was.
 
@@ -80,6 +80,8 @@ describe("the Account section", () => {
   test("greyed with as of while CPP is unreachable, and back in one frame once it answers again", async () => {
     await using setup = await sidebar({})
     await setup.frame((frame) => frame.includes("5h  62% left"))
+    const current = styleOf(setup.app, "5h  62%")
+    expect(current).toEqual({ fg: setup.theme.text.muted.toInts(), dim: false })
     setup.clock.advance(60_000)
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW + 60_000 }) } })
     const greyed = await setup.frame((frame) => frame.includes("as of 14:03"))
@@ -91,13 +93,16 @@ describe("the Account section", () => {
       "7d  80% left · resets ~3d 3h",
       "as of 14:03",
     ])
-    expect(colorOf(setup.app, "5h  62%")).toEqual(setup.theme.text.faint.toInts())
+    // Greyed: faint and dimmed, unlike the current lines also where the theme's faint text is its muted text.
+    for (const text of ["max-2", "5h  62%", "7d  80%", "as of 14:03"])
+      expect(styleOf(setup.app, text)).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
+    expect(styleOf(setup.app, "5h  62%")).not.toEqual(current)
     expect(setup.pacer.ticking()).toBe(false)
     // CPP comes back: the view is read again, and the section turns current when it is there.
     setup.fake.chats[CHAT] = chat({ account: "max-1" })
     setup.emit({ type: "pacer.status", data: { status: status("on", { since: NOW + 120_000 }) } })
     await setup.frame((frame) => frame.includes("max-1") && !frame.includes("as of"))
-    expect(colorOf(setup.app, "max-1")).toEqual(setup.theme.text.base.toInts())
+    expect(styleOf(setup.app, "max-1")).toEqual({ fg: setup.theme.text.base.toInts(), dim: false })
   })
 
   test("no pacer on a plain proxy", async () => {

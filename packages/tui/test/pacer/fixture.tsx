@@ -9,6 +9,7 @@ import type {
   SessionMessageInfo,
 } from "@opencode/client"
 import type { Plugin } from "@opencode/plugin/tui"
+import { TextAttributes } from "@opentui/core"
 import { ManualClock } from "@opentui/core/testing"
 import { testRender } from "@opentui/solid"
 import { onMount, type JSX } from "solid-js"
@@ -233,6 +234,7 @@ export function pacerFake(input: { delay?: number } = {}) {
     const parts = call.path.split("/")
     if (call.path === "status") return json({ data: fake.status })
     if (call.path === "accounts") return json({ data: fake.accounts })
+    if (call.path === "refresh" && call.method === "POST") return new Response(null, { status: 204 })
     if (parts[0] === "chat" && parts.length === 2 && call.method === "GET")
       return json({ data: fake.chats[parts[1]!] ?? null })
     if (parts[0] === "chat" && parts.length === 2 && call.method === "PATCH") {
@@ -318,12 +320,13 @@ export async function renderPacer(input: {
   width?: number
   height?: number
   keybinds?: Partial<TuiKeybind.Keybinds>
-  clock?: ManualClock
+  /** `"default"`: the store's own clock, as the app has it. */
+  clock?: ManualClock | "default"
 }) {
   const state = await tmpdir()
   const events = createEventStream()
-  const clock = input.clock ?? new ManualClock()
-  if (!input.clock) clock.setTime(NOW)
+  const clock = input.clock === "default" ? undefined : (input.clock ?? new ManualClock())
+  if (!input.clock) clock!.setTime(NOW)
   const sessions = input.sessions ?? { [CHAT]: { providerID: "cliproxypacer" } }
   const ready = Promise.withResolvers<void>()
   const calls = createFetch(async (url, request) => {
@@ -376,16 +379,16 @@ export async function renderPacer(input: {
                       <DataProvider directory={directory}>
                         <LocationProvider>
                           <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
-                            <DialogProvider>
-                              <PacerProvider clock={clock}>
+                            <PacerProvider clock={clock}>
+                              <DialogProvider>
                                 <Probe />
                                 {input.content({
                                   get pacer() {
                                     return pacer
                                   },
                                 })}
-                              </PacerProvider>
-                            </DialogProvider>
+                              </DialogProvider>
+                            </PacerProvider>
                           </ThemeProvider>
                         </LocationProvider>
                       </DataProvider>
@@ -406,7 +409,8 @@ export async function renderPacer(input: {
   return {
     app,
     events,
-    clock,
+    /** Undefined with the store's own clock. */
+    clock: clock as ManualClock,
     get pacer() {
       return pacer
     },
@@ -450,4 +454,13 @@ export function colorOf(app: Awaited<ReturnType<typeof testRender>>, text: strin
     .lines.flatMap((line) => line.spans)
     .find((span) => span.text.includes(text))
     ?.fg.toInts()
+}
+
+/** How the first span holding the text is drawn: its colour, and whether it is dimmed. */
+export function styleOf(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+  const span = app
+    .captureSpans()
+    .lines.flatMap((line) => line.spans)
+    .find((span) => span.text.includes(text))
+  return span && { fg: span.fg.toInts(), dim: (span.attributes & TextAttributes.DIM) !== 0 }
 }

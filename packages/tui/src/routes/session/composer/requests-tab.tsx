@@ -16,8 +16,9 @@ import { useComposerTab } from "./context"
 
 // The Requests tab (spec cliproxypacer-step-1, section 7): the shown chat's requests at CPP with its subagents',
 // newest first, after Terminals, for chats on CPP. It draws what the store holds and reads nothing when it opens:
-// the store read the first page of both filters when the chat was shown. Rows keep one line and are anchored by
-// their request ID, so a new request at the top never moves the selection to another one; only the rows on screen
+// the store read the first page of both filters when the chat was shown. Rows keep one line. A cursor on the newest
+// row stays on the newest, so requests arriving while the tab is watched come in under it; on any other row it is
+// anchored by the request's ID, so a new request at the top never moves it to another one. Only the rows on screen
 // are mounted, so 500 rows scroll as 6 do. Ctrl+Enter or Alt+Enter shows what changed in place of the list.
 
 /** Rows on screen; the list mounts no more than these. */
@@ -120,14 +121,12 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
   const shownRows = createMemo(() => items().slice(topIndex(), topIndex() + height()))
   const selected = () => items()[selectedIndex()]
 
-  // A tab that opens selects the newest row; from then on the selection holds its request, wherever rows arrive.
+  // A tab opens on the newest row, and while the cursor stays there it is on the newest row: requests arriving as the
+  // tab is watched come in under it, on the top line. Moved to another row, the selection holds that request wherever
+  // rows arrive. No selection held means the newest.
   createEffect(() => {
-    if (!active()) {
-      setView({ selected: {}, top: {}, detail: undefined, pending: undefined, detailTop: 0 })
-      return
-    }
-    const first = items()[0]
-    if (first && view.selected[which()] === undefined) setView("selected", which(), first.id)
+    if (active()) return
+    setView({ selected: {}, top: {}, detail: undefined, pending: undefined, detailTop: 0 })
   })
 
   const moveTo = (index: number) => {
@@ -137,7 +136,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     const top = listTop(topIndex(), next, Math.min(LIST_ROWS, list.length), list.length)
     batch(() => {
       setView("pending", undefined)
-      setView("selected", which(), list[next]!.id)
+      setView("selected", which(), next === 0 ? undefined : list[next]!.id)
       setView("top", which(), top === 0 ? undefined : list[top]!.id)
     })
     // What changed is read ahead for the row the cursor reaches; opening the tab reads nothing.
@@ -160,6 +159,8 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     }
     const request = selected()
     if (!request) return
+    // Back from what changed is on the same row, even if newer requests came meanwhile.
+    setView("selected", which(), request.id)
     if (props.pacer.held(request.id) !== undefined) {
       setView({ detail: request.id, detailTop: 0, pending: undefined })
       return
@@ -246,7 +247,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
             updateFilter((draft) => (draft.misses = next === "misses"))
             setView("pending", undefined)
             setView("top", next, undefined)
-            setView("selected", next, keep?.id)
+            setView("selected", next, keep === list[0] ? undefined : keep?.id)
           })
           if (keep) props.pacer.cursor(keep.id)
         },
@@ -386,7 +387,11 @@ function RequestRow(props: {
       backgroundColor={props.selected ? theme.background.action.primary.focused : theme.background.action.primary.base}
       onMouseUp={props.onSelect}
     >
-      <text fg={fg()} attributes={props.selected ? TextAttributes.BOLD : undefined} wrapMode="none">
+      <text
+        fg={fg()}
+        attributes={props.selected ? TextAttributes.BOLD : props.stale ? TextAttributes.DIM : undefined}
+        wrapMode="none"
+      >
         {text()}
       </text>
     </box>

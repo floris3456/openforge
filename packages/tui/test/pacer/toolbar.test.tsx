@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test"
 import { recordFrames } from "../fixture/frames"
 import { until } from "../fixture/wait"
-import { CHAT, chat, colorOf, NOW, OTHER, pacerFake, renderPacer, status, step, Toolbar } from "./fixture"
+import { CHAT, chat, colorOf, NOW, OTHER, pacerFake, renderPacer, status, step, styleOf, Toolbar } from "./fixture"
 
 // Section 4 of spec cliproxypacer-step-1: the toolbar's cache item, under the prompt, after the context and cost.
 
@@ -35,6 +35,22 @@ async function toolbar(input: {
 const line = (setup: { app: { captureCharFrame: () => string } }) => setup.app.captureCharFrame().split("\n")[0]!
 
 describe("the cache item", () => {
+  test("counts down on the wall clock with the store's own clock, as in the app", async () => {
+    // CPP's times are Unix ms; OpenTUI's SystemClock counts from the start of the process.
+    const fake = pacerFake()
+    fake.status = status("on")
+    fake.chats[CHAT] = chat({ coldAt: Date.now() + 23 * 60_000 + 41_000 })
+    await using setup = await renderPacer({
+      fake,
+      width: 100,
+      height: 3,
+      clock: "default",
+      content: () => <Toolbar sessionID={CHAT} />,
+    })
+    await setup.app.waitForFrame((frame) => /warm \d/.test(frame))
+    expect(line(setup)).toMatch(/warm 23:4[12] /)
+  })
+
   test("pings run: warm 23:41", async () => {
     await using setup = await toolbar({})
     await setup.app.waitForFrame((frame) => frame.includes("warm 23:41"))
@@ -87,10 +103,16 @@ describe("the cache item", () => {
     expect(setup.pacer.ticking()).toBe(true)
     setup.clock.advance(65_000)
     await setup.app.waitForFrame((frame) => frame.includes("warm 22:36"))
+    const current = styleOf(setup.app, "warm 22:36")
+    expect(current).toEqual({ fg: setup.theme.text.muted.toInts(), dim: false })
     // CPP last answered at 14:02:00, the moment the countdown said 23:41.
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW }) } })
     await setup.frame((frame) => frame.includes("warm 23:41 · as of 14:02"))
-    expect(colorOf(setup.app, "warm 23:41 · as of 14:02")).toEqual(setup.theme.text.faint.toInts())
+    // Greyed: faint and dimmed, so it looks unlike the current item also where the theme's faint text is its muted
+    // text, as in the default theme.
+    const greyed = styleOf(setup.app, "warm 23:41 · as of 14:02")
+    expect(greyed).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
+    expect(greyed).not.toEqual(current)
     expect(setup.pacer.ticking()).toBe(false)
     expect(setup.clock.pendingTimerCount).toBe(0)
   })

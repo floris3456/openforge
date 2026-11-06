@@ -2637,6 +2637,9 @@ export type ExperimentalPacerChatRequestsOperation<E = never> = (
   input: ExperimentalPacerChatRequestsInput,
 ) => Effect.Effect<ExperimentalPacerChatRequestsOutput, E>
 
+export type ExperimentalPacerRefreshOutput = void
+export type ExperimentalPacerRefreshOperation<E = never> = () => Effect.Effect<ExperimentalPacerRefreshOutput, E>
+
 export type ExperimentalPacerPromptInput = { readonly requestID: string }
 export type ExperimentalPacerPromptOutput = Pacer.PromptChange | null
 export type ExperimentalPacerPromptOperation<E = never> = (
@@ -2690,6 +2693,7 @@ export interface ExperimentalApi<E = never> {
       readonly update: ExperimentalPacerChatUpdateOperation<E>
       readonly requests: ExperimentalPacerChatRequestsOperation<E>
     }
+    readonly refresh: ExperimentalPacerRefreshOperation<E>
     readonly prompt: ExperimentalPacerPromptOperation<E>
   }
 }

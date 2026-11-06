@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
 import type { PacerRequest, SessionMessageInfo } from "@opencode/client"
-import { TextRenderable, type Renderable } from "@opentui/core"
+import { TextAttributes, TextRenderable, type Renderable } from "@opentui/core"
 import { Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../src/context/route"
@@ -20,6 +20,7 @@ import {
   request,
   status,
   step,
+  styleOf,
   SUBAGENT,
   Toolbar,
 } from "./fixture"
@@ -256,6 +257,53 @@ describe("the list", () => {
     // The selection holds its request on every frame.
     for (const frame of recorder.frames) expect(selected(frame)).toBe(time(2))
   })
+
+  test("watched from the newest row, new requests come in under the cursor on the top line, past the six rows", async () => {
+    // Found live: a cursor left on the newest row was pushed down by each new request until the view followed it
+    // off the top, and the newest requests stopped showing.
+    await using setup = await requestsTab({ delay: 20 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    {
+      // Spans are read from the recorded frames only: reading them while the renderer draws one fails.
+      using recorder = recordFrames(setup.app)
+      for (const index of [-1, -2, -3, -4, -5, -6, -7]) {
+        setup.fake.requests[CHAT] = [request(index), ...setup.fake.requests[CHAT]!]
+        setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+        await setup.frame((frame) => rowsOf(frame)[0] === time(index))
+      }
+      await setup.settle()
+      // On every frame the six rows are the newest and the selection is the top one.
+      finished(
+        recorder,
+        [-1, -2, -3, -4, -5, -6, -7].map((index) => list(range(index, index + 6))),
+      )
+      for (const frame of recorder.frames) expect(selected(frame)).toBe(rowsOf(frame.text)[0])
+    }
+    expect(rowsOf(setup.app.captureCharFrame())).toEqual(range(-7, -1))
+    await setup.frame(() => selectedTime(setup) === time(-7))
+    // Moved off the newest row, the selection holds its request.
+    setup.app.mockInput.pressArrow("down")
+    await setup.frame(() => selectedTime(setup) === time(-6))
+    setup.fake.requests[CHAT] = [request(-8), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-8))
+    await setup.settle()
+    await setup.frame(() => selectedTime(setup) === time(-6))
+    // Back on the newest row, what changed and Esc come back to that row, not to one that came meanwhile.
+    setup.app.mockInput.pressArrow("up")
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame(() => selectedTime(setup) === time(-8))
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    setup.fake.requests[CHAT] = [request(-9), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await until(() => setup.pacer.page(CHAT, "all")!.items[0]!.id === "req_-9", 5_000)
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-9))
+    await setup.settle()
+    await setup.frame(() => selectedTime(setup) === time(-8))
+  })
 })
 
 describe("what changed", () => {
@@ -365,13 +413,13 @@ describe("CPP going away and coming back", () => {
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW }) } })
     const greyed = await setup.frame((frame) => frame.includes("CPP unreachable · as of 14:02"))
     expect(rowsOf(greyed)).toEqual(range(0, 6))
-    expect(rowColor(setup, time(3))).toEqual(setup.theme.text.faint.toInts())
+    expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
     // Back: a new request came meanwhile; the page is read again in 300 ms, and swapped in one frame.
     setup.fake.requests[CHAT] = [request(-1), ...setup.fake.requests[CHAT]!]
     setup.emit({ type: "pacer.status", data: { status: status("on", { since: NOW + 60_000 }) } })
     await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
     expect(setup.app.captureCharFrame()).not.toContain("CPP unreachable")
-    expect(rowColor(setup, time(3))).toEqual(setup.theme.text.base.toInts())
+    expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.base.toInts(), dim: false })
     const notice = (frame: string) => frame.includes("CPP unreachable · as of 14:02")
     finished(recorder, [
       (frame) => list(range(0, 6))(frame) && !notice(frame),
@@ -381,7 +429,12 @@ describe("CPP going away and coming back", () => {
     // Greyed rows are never drawn without the notice, nor the notice over current rows.
     for (const frame of recorder.frames) {
       const grey = frame.lines.some((line) =>
-        line.spans.some((span) => span.text.includes(time(3)) && span.fg.equals(setup.theme.text.faint)),
+        line.spans.some(
+          (span) =>
+            span.text.includes(time(3)) &&
+            span.fg.equals(setup.theme.text.faint) &&
+            (span.attributes & TextAttributes.DIM) !== 0,
+        ),
       )
       expect(grey).toBe(notice(frame.text))
     }
@@ -517,22 +570,23 @@ function selected(frame: RecordedFrame) {
     .match(KIND)?.[1]
 }
 
-/** The time of the row drawn selected (bold) now. */
+/**
+ * The time of the row drawn selected (bold) now; undefined while the renderer writes a frame, when its spans can't be
+ * read (OpenTUI's `OutputBusy`), so wait on it with `setup.frame`.
+ */
 function selectedTime(setup: Setup) {
-  return setup.app
-    .captureSpans()
-    .lines.find((line) => line.spans.some((span) => KIND.test(span.text) && span.attributes & 1))
+  let spans: ReturnType<Setup["app"]["captureSpans"]>
+  try {
+    spans = setup.app.captureSpans()
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("OutputBusy")) return undefined
+    throw error
+  }
+  return spans.lines
+    .find((line) => line.spans.some((span) => KIND.test(span.text) && span.attributes & 1))
     ?.spans.map((span) => span.text)
     .join("")
     .match(KIND)?.[1]
-}
-
-function rowColor(setup: Setup, at: string) {
-  return setup.app
-    .captureSpans()
-    .lines.flatMap((line) => line.spans)
-    .find((span) => span.text.includes(at))
-    ?.fg.toInts()
 }
 
 function mountedRows(node: Renderable): number {

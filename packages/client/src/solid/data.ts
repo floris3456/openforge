@@ -1029,6 +1029,7 @@ export function createData(config: CreateDataInput) {
             existing.finish = undefined
             existing.rawFinish = undefined
             existing.native = undefined
+            existing.proxyRequestID = event.data.proxyRequestID
             existing.time.created = event.data.started
             existing.time.streamed = undefined
             existing.time.completed = undefined
@@ -1049,6 +1050,7 @@ export function createData(config: CreateDataInput) {
             content: [],
             snapshot: event.data.snapshot ? { start: event.data.snapshot } : undefined,
             time: { created: event.data.started },
+            ...(event.data.proxyRequestID === undefined ? {} : { proxyRequestID: event.data.proxyRequestID }),
           })
         })
         return

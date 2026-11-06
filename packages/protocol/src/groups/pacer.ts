@@ -1,7 +1,7 @@
 import { Pacer } from "@opencode/schema/pacer"
 import { Session } from "@opencode/schema/session"
 import { Schema } from "effect"
-import { HttpApiEndpoint, OpenApi } from "effect/http-api"
+import { HttpApiEndpoint, HttpApiSchema, OpenApi } from "effect/http-api"
 import { ServiceUnavailableError } from "../errors.js"
 
 const EXPERIMENTAL = "Experimental: may change without compatibility guarantees."
@@ -82,6 +82,15 @@ export const PacerEndpoints = [
       "chat.requests",
       "List a chat's CLIProxyPacer requests",
       "One page of the requests CPP recorded for the chat and its subagents, newest first. Read from CPP; unavailable unless the pacer is on.",
+    ),
+  ),
+  HttpApiEndpoint.post("pacer.refresh", "/api/experimental/pacer/refresh", {
+    success: HttpApiSchema.NoContent,
+  }).annotateMerge(
+    annotations(
+      "refresh",
+      "Read CLIProxyPacer's models again",
+      "Start reading CPP's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up.",
     ),
   ),
   HttpApiEndpoint.get("pacer.prompt", "/api/experimental/pacer/prompt/:requestID", {

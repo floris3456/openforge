@@ -285,6 +285,7 @@ import type {
   ExperimentalPacerChatUpdateOutput,
   ExperimentalPacerChatRequestsInput,
   ExperimentalPacerChatRequestsOutput,
+  ExperimentalPacerRefreshOutput,
   ExperimentalPacerPromptInput,
   ExperimentalPacerPromptOutput,
   ShellListInput,
@@ -1834,6 +1835,9 @@ const EndpointExperimentalPacerChatRequests =
       ),
     )
 
+const EndpointExperimentalPacerRefresh = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerRefreshOutput>()(raw["pacer.refresh"]({}).pipe(Effect.mapError(mapClientError)))
+
 const EndpointExperimentalPacerPrompt =
   (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerPromptInput) =>
     preserveEffect<ExperimentalPacerPromptOutput>()(
@@ -1890,6 +1894,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
       update: EndpointExperimentalPacerChatUpdate(raw),
       requests: EndpointExperimentalPacerChatRequests(raw),
     },
+    refresh: EndpointExperimentalPacerRefresh(raw),
     prompt: EndpointExperimentalPacerPrompt(raw),
   },
 })

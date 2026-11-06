@@ -310,6 +310,8 @@ export async function renderPacer(input: {
     {
       providerID: string
       parentID?: string
+      /** No model selected for it, as for a chat on the default model; `providerID` is then its answers'. */
+      unselected?: boolean
       messages?: SessionMessageInfo[]
       /** Messages before `messages`, on the next page of the history. */
       older?: SessionMessageInfo[]
@@ -334,7 +336,11 @@ export async function renderPacer(input: {
     if (pacer) return pacer
     const sessionID = url.pathname.match(/^\/api\/session\/([^/]+)$/)?.[1]
     const known = sessionID === undefined ? undefined : sessions[sessionID]
-    if (sessionID && known) return json({ data: sessionInfo(sessionID, known.providerID, known.parentID, known.cost) })
+    if (sessionID && known) {
+      const info = sessionInfo(sessionID, known.providerID, known.parentID, known.cost)
+      const { model: _model, ...unselected } = info
+      return json({ data: known.unselected ? unselected : info })
+    }
     const messagesOf = url.pathname.match(/^\/api\/session\/([^/]+)\/message$/)?.[1]
     if (messagesOf) {
       const known = sessions[messagesOf]

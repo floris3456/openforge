@@ -51,6 +51,40 @@ describe("the cache item", () => {
     expect(line(setup)).toMatch(/warm 23:4[12] /)
   })
 
+  test("on the default model, it follows the chat's last answer: shown after one through CPP, not after another's", async () => {
+    for (const [providerID, shown] of [
+      ["cliproxypacer", true],
+      ["openai", false],
+    ] as const) {
+      const fake = pacerFake()
+      fake.status = status("on")
+      fake.chats[CHAT] = chat()
+      await using setup = await renderPacer({
+        fake,
+        width: 100,
+        height: 3,
+        sessions: {
+          [CHAT]: {
+            providerID,
+            unselected: true,
+            messages: [
+              step("msg_cpp", { created: NOW - 120_000 }),
+              step("msg_last", { created: NOW - 60_000, providerID }),
+            ],
+          },
+        },
+        content: () => <Toolbar sessionID={CHAT} />,
+      })
+      if (shown) await setup.app.waitForFrame((frame) => frame.includes("warm 23:41"))
+      else {
+        // Its first answer went through CPP: its view is read for the Requests tab, and the item still draws nothing.
+        await until(() => fake.calls.some((call) => call.path === `chat/${CHAT}`), 5_000)
+        await setup.settle()
+        expect(line(setup)).not.toContain("warm")
+      }
+    }
+  })
+
   test("pings run: warm 23:41", async () => {
     await using setup = await toolbar({})
     await setup.app.waitForFrame((frame) => frame.includes("warm 23:41"))

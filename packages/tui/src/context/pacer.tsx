@@ -101,6 +101,15 @@ function createPacer(input: { clock: Clock }) {
     const sessionID = shown()
     return sessionID !== undefined && state() !== "unset" && onCPP(sessionID)
   })
+  // Its model now is one of CPP's: the one selected for it, else its last answer's (a chat on the default model
+  // selects none). One moved to another provider keeps its requests, not CPP's cache, account or switches.
+  const nowOnCPP = (sessionID: string) => {
+    const selected = data.session.get(sessionID)?.model
+    if (selected) return selected.providerID === PACER_PROVIDER
+    const last = data.session.message.list(sessionID).findLast((message) => message.type === "assistant")
+    return last?.type === "assistant" && last.model.providerID === PACER_PROVIDER
+  }
+  const shownNowOnCPP = createMemo(() => shownOnCPP() && nowOnCPP(shown()!))
 
   // One countdown clock for every screen, running only while a countdown is on screen. It ticks on the clock's whole
   // seconds and says the second, so a late tick still shows the right digits.
@@ -395,8 +404,13 @@ function createPacer(input: { clock: Clock }) {
     countdown,
     /** Whether the countdown clock runs, for tests. */
     ticking: () => timer !== undefined,
-    /** The chat is shown, CPP is set up and the chat is on it: its screens draw. */
+    /** The chat is shown, CPP is set up and the chat used it: its requests show (the Requests tab). */
     active: (sessionID: string | undefined) => sessionID !== undefined && sessionID === shown() && shownOnCPP(),
+    /**
+     * {@link active}, and the chat's model is still one of CPP's: the toolbar's cache item, the Account section and the
+     * switches draw.
+     */
+    current: (sessionID: string | undefined) => sessionID !== undefined && sessionID === shown() && shownNowOnCPP(),
     view: (sessionID: string) => store.chats[sessionID]?.view,
     accounts: () => store.accounts,
     page: (sessionID: string, filter: PacerFilter) => store.chats[sessionID]?.pages[filter],

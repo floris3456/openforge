@@ -479,13 +479,15 @@ describe("empty and hidden", () => {
     }
   })
 
-  test("a chat that used CPP on an earlier step shows the tab", async () => {
+  test("a chat that used CPP on an earlier step shows the tab, not the cache item: its model is another's", async () => {
     await using setup = await requestsTab({
       providerID: "anthropic",
       messages: [step("msg_1", { created: NOW - 9_000, proxyRequestID: "req_9", providerID: "cliproxypacer" })],
     })
     await until(() => setup.pacer.page(CHAT, "all") !== undefined, 5_000, "the chat's page")
-    await clickCacheItem(setup)
+    await setup.settle()
+    expect(setup.app.captureCharFrame()).not.toContain("warm")
+    setup.pacer.openRequests(CHAT)
     await setup.frame((frame) => rowsOf(frame).length > 0)
   })
 })

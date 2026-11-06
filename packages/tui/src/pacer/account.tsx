@@ -7,7 +7,7 @@ import { clockTime, forceUseLine, nextUseLine, windowLine } from "./format"
 // The sidebar's Account section (spec cliproxypacer-step-1, section 5), where Context was: the account serving the
 // chat, or the one that served it last, its windows, where the chat goes next once its cache is cold, and a forced
 // move. Greyed with "as of" while CPP is unreachable, "no pacer" on a plain proxy, hidden for chats on other
-// providers and when no CPP is set up.
+// providers (also once a chat moves to one) and when no CPP is set up.
 
 export function PacerAccount(props: { sessionID: string }) {
   const pacer = usePacer()
@@ -16,7 +16,7 @@ export function PacerAccount(props: { sessionID: string }) {
 
 function AccountSection(props: { pacer: Pacer; sessionID: string }) {
   const theme = useTheme()
-  const active = () => props.pacer.active(props.sessionID)
+  const active = () => props.pacer.current(props.sessionID)
   const noPacer = () => props.pacer.state() === "no-pacer"
   const view = () => (active() && !noPacer() ? props.pacer.view(props.sessionID) : undefined)
   const account = createMemo(() => {

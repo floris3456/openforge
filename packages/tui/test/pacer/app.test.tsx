@@ -34,6 +34,9 @@ function messages(providerID: string): SessionMessageInfo[] {
   ]
 }
 
+/** The model a chat moves to, off CPP. */
+const OTHER_MODEL = { id: "gpt-5", providerID: "openai" }
+
 async function app(input: { state: Parameters<typeof status>[0]; providerID: string }) {
   const fake = pacerFake()
   fake.status = status(input.state)
@@ -52,6 +55,10 @@ async function app(input: { state: Parameters<typeof status>[0]; providerID: str
       if (url.pathname === `/api/session/${CHAT}`)
         return json({ data: sessionInfo(CHAT, input.providerID, undefined, 1.23) })
       if (url.pathname === `/api/session/${CHAT}/message`) return json({ data: transcript.toReversed(), cursor: {} })
+      // The message a model switch adds, read back after its event.
+      const switched = url.pathname.match(/^\/api\/session\/[^/]+\/message\/(msg_[^/]+)$/)?.[1]
+      if (switched)
+        return json({ data: { id: switched, type: "model-switched", model: OTHER_MODEL, time: { created: NOW } } })
       if (url.pathname === `/api/session/${CHAT}/inbox` || url.pathname === `/api/session/${CHAT}/permission`)
         return json({ data: [] })
     },
@@ -88,6 +95,29 @@ test("on CPP: the cache item in the toolbar, Account where Context was, and the 
     { maxPasses: 200 },
   )
   expect(moved).not.toContain("Long reply start")
+})
+
+test("moved to another provider: the cache item and Account go, the Requests tab stays", async () => {
+  const { setup } = await app({ state: "on", providerID: "cliproxypacer" })
+  await using _ = setup
+  await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame) && frame.includes("max-2"), {
+    maxPasses: 200,
+  })
+  setup.events.emit({
+    id: "evt_model_other",
+    created: NOW,
+    type: "session.model.selected",
+    durable: { aggregateID: CHAT, seq: 1, version: 1 },
+    data: { sessionID: CHAT, model: OTHER_MODEL },
+  })
+  const frame = await waitForHighlightedFrame(setup, (frame) => frame.includes("$1.23") && !frame.includes("warm"), {
+    maxPasses: 200,
+  })
+  expect(frame).not.toContain("Account")
+  expect(frame).not.toContain("max-2")
+  // Its requests went through CPP: they still show.
+  setup.mockInput.pressArrow("down")
+  await setup.waitForFrame((frame) => frame.includes("Subagents") && frame.includes("Requests"), { maxPasses: 100 })
 })
 
 test("without CPP: no cache item, no Account, no Requests tab, and no Context either", async () => {

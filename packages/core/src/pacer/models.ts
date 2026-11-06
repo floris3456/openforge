@@ -16,6 +16,8 @@ import { PacerHttp } from "./http.js"
 export interface Pacer {
   /** `pacer.compact_tokens`: the `X-Pacer-Compact` tokens the server reads. */
   readonly compactTokens: ReadonlyArray<string>
+  /** Whether the server has the web tools: `pacer.web_tools` names their list's path (`tools`). */
+  readonly webTools: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -119,10 +121,15 @@ const Capable = Schema.Struct({
   display_name: maybe(Schema.String),
   routes: Items,
 })
+// `web_tools` is read on its own (`webTools`), so a block this version does not understand leaves the rest alone.
 const CapabilitiesAnswer = Schema.Struct({
-  pacer: Schema.NullOr(Schema.Struct({ compact_tokens: maybe(Schema.Array(Schema.String)) })),
+  pacer: Schema.NullOr(
+    Schema.Struct({ compact_tokens: maybe(Schema.Array(Schema.String)), web_tools: Schema.optional(Schema.Unknown) }),
+  ),
   models: Items,
 })
+const WebTools = Schema.Struct({ tools: Schema.String })
+const decodeWebTools = Schema.decodeUnknownOption(WebTools)
 
 const RatesAnswer = Schema.Struct({
   input: maybe(Schema.Number),
@@ -215,7 +222,10 @@ export const layer = Layer.effect(
         yield* Clock.currentTimeMillis,
         each(list.body.data, decodeListed),
         pacer ? capable(capabilities?.models) : new Map(),
-        pacer && { compactTokens: pacer.compact_tokens ?? [] },
+        pacer && {
+          compactTokens: pacer.compact_tokens ?? [],
+          webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
+        },
         prices,
       )
     })

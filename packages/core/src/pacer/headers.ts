@@ -28,10 +28,17 @@ export function make(input: Input): Readonly<Record<string, string>> {
   if (input.providerID !== provider) return {}
   const kind = input.kind === "title" || input.kind === "generate" ? "title" : input.kind
   return {
-    "X-Pacer-Session": PacerSessionID.make(input.sessionID),
-    ...(input.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(input.parentID) } : {}),
+    ...chat(input),
     ...(kind === "primary"
       ? { "X-Pacer-Compact": input.auto ? "auto, before-cold" : "before-cold" }
       : { "X-Pacer-Kind": kind }),
+  }
+}
+
+/** The chat a request belongs to, and its parent for a subagent: on model requests, tool list reads and tool calls. */
+export function chat(input: { readonly sessionID: SessionID; readonly parentID?: SessionID }) {
+  return {
+    "X-Pacer-Session": PacerSessionID.make(input.sessionID),
+    ...(input.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(input.parentID) } : {}),
   }
 }

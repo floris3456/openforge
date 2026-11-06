@@ -6,8 +6,8 @@ import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
 
-// Until the connection's node is registered, the server has no connection to CPP and answers as one where CPP is not
-// set up. The routes with a connection are tested with the connection.
+// The server runs the connection to CPP; with no CPP set up it answers as such. The routes' answers with CPP are tested
+// with the connection, against a fake CPP (core's test/pacer/connection.test.ts).
 
 const server = Effect.gen(function* () {
   const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-pacer-endpoint-")))

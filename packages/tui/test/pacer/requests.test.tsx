@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
 import type { PacerRequest, SessionMessageInfo } from "@opencode/client"
-import { TextRenderable, type Renderable } from "@opentui/core"
+import { TextAttributes, TextRenderable, type Renderable } from "@opentui/core"
 import { Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../src/context/route"
@@ -20,6 +20,7 @@ import {
   request,
   status,
   step,
+  styleOf,
   SUBAGENT,
   Toolbar,
 } from "./fixture"
@@ -412,13 +413,13 @@ describe("CPP going away and coming back", () => {
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW }) } })
     const greyed = await setup.frame((frame) => frame.includes("CPP unreachable · as of 14:02"))
     expect(rowsOf(greyed)).toEqual(range(0, 6))
-    expect(rowColor(setup, time(3))).toEqual(setup.theme.text.faint.toInts())
+    expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
     // Back: a new request came meanwhile; the page is read again in 300 ms, and swapped in one frame.
     setup.fake.requests[CHAT] = [request(-1), ...setup.fake.requests[CHAT]!]
     setup.emit({ type: "pacer.status", data: { status: status("on", { since: NOW + 60_000 }) } })
     await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
     expect(setup.app.captureCharFrame()).not.toContain("CPP unreachable")
-    expect(rowColor(setup, time(3))).toEqual(setup.theme.text.base.toInts())
+    expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.base.toInts(), dim: false })
     const notice = (frame: string) => frame.includes("CPP unreachable · as of 14:02")
     finished(recorder, [
       (frame) => list(range(0, 6))(frame) && !notice(frame),
@@ -428,7 +429,12 @@ describe("CPP going away and coming back", () => {
     // Greyed rows are never drawn without the notice, nor the notice over current rows.
     for (const frame of recorder.frames) {
       const grey = frame.lines.some((line) =>
-        line.spans.some((span) => span.text.includes(time(3)) && span.fg.equals(setup.theme.text.faint)),
+        line.spans.some(
+          (span) =>
+            span.text.includes(time(3)) &&
+            span.fg.equals(setup.theme.text.faint) &&
+            (span.attributes & TextAttributes.DIM) !== 0,
+        ),
       )
       expect(grey).toBe(notice(frame.text))
     }
@@ -581,14 +587,6 @@ function selectedTime(setup: Setup) {
     ?.spans.map((span) => span.text)
     .join("")
     .match(KIND)?.[1]
-}
-
-function rowColor(setup: Setup, at: string) {
-  return setup.app
-    .captureSpans()
-    .lines.flatMap((line) => line.spans)
-    .find((span) => span.text.includes(at))
-    ?.fg.toInts()
 }
 
 function mountedRows(node: Renderable): number {

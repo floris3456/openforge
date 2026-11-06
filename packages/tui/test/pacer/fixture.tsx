@@ -9,6 +9,7 @@ import type {
   SessionMessageInfo,
 } from "@opencode/client"
 import type { Plugin } from "@opencode/plugin/tui"
+import { TextAttributes } from "@opentui/core"
 import { ManualClock } from "@opentui/core/testing"
 import { testRender } from "@opentui/solid"
 import { onMount, type JSX } from "solid-js"
@@ -453,4 +454,13 @@ export function colorOf(app: Awaited<ReturnType<typeof testRender>>, text: strin
     .lines.flatMap((line) => line.spans)
     .find((span) => span.text.includes(text))
     ?.fg.toInts()
+}
+
+/** How the first span holding the text is drawn: its colour, and whether it is dimmed. */
+export function styleOf(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+  const span = app
+    .captureSpans()
+    .lines.flatMap((line) => line.spans)
+    .find((span) => span.text.includes(text))
+  return span && { fg: span.fg.toInts(), dim: (span.attributes & TextAttributes.DIM) !== 0 }
 }

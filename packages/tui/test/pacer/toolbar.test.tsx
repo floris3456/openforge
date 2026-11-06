@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test"
 import { recordFrames } from "../fixture/frames"
 import { until } from "../fixture/wait"
-import { CHAT, chat, colorOf, NOW, OTHER, pacerFake, renderPacer, status, step, Toolbar } from "./fixture"
+import { CHAT, chat, colorOf, NOW, OTHER, pacerFake, renderPacer, status, step, styleOf, Toolbar } from "./fixture"
 
 // Section 4 of spec cliproxypacer-step-1: the toolbar's cache item, under the prompt, after the context and cost.
 
@@ -103,10 +103,16 @@ describe("the cache item", () => {
     expect(setup.pacer.ticking()).toBe(true)
     setup.clock.advance(65_000)
     await setup.app.waitForFrame((frame) => frame.includes("warm 22:36"))
+    const current = styleOf(setup.app, "warm 22:36")
+    expect(current).toEqual({ fg: setup.theme.text.muted.toInts(), dim: false })
     // CPP last answered at 14:02:00, the moment the countdown said 23:41.
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW }) } })
     await setup.frame((frame) => frame.includes("warm 23:41 · as of 14:02"))
-    expect(colorOf(setup.app, "warm 23:41 · as of 14:02")).toEqual(setup.theme.text.faint.toInts())
+    // Greyed: faint and dimmed, so it looks unlike the current item also where the theme's faint text is its muted
+    // text, as in the default theme.
+    const greyed = styleOf(setup.app, "warm 23:41 · as of 14:02")
+    expect(greyed).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
+    expect(greyed).not.toEqual(current)
     expect(setup.pacer.ticking()).toBe(false)
     expect(setup.clock.pendingTimerCount).toBe(0)
   })

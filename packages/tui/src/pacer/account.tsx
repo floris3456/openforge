@@ -1,3 +1,4 @@
+import { TextAttributes } from "@opentui/core"
 import { createMemo, For, Show } from "solid-js"
 import { usePacer, type Pacer } from "../context/pacer"
 import { useTheme } from "../context/theme"
@@ -35,7 +36,9 @@ function AccountSection(props: { pacer: Pacer; sessionID: string }) {
       asOf() === undefined &&
       (account()?.windows.some((window) => window.resetsAt !== undefined || window.staleAt !== undefined) ?? false),
   )
+  // Greyed as the toolbar's item is: faint, dimmed.
   const fg = (color: "base" | "muted") => (asOf() === undefined ? theme.text[color] : theme.text.faint)
+  const attributes = () => (asOf() === undefined ? 0 : TextAttributes.DIM)
 
   return (
     <Show when={active() && (noPacer() || view())}>
@@ -44,19 +47,44 @@ function AccountSection(props: { pacer: Pacer; sessionID: string }) {
           <b>Account</b>
         </text>
         <Show when={!noPacer()} fallback={<text fg={theme.text.muted}>no pacer</text>}>
-          <Show when={view()?.value.account}>{(alias) => <text fg={fg("base")}>{alias()}</text>}</Show>
-          <For each={windows()}>{(line) => <text fg={fg("muted")}>{line}</text>}</For>
-          <Show when={view()?.value.nextUse}>{(next) => <text fg={fg("muted")}>{nextUseLine(next())}</text>}</Show>
+          <Show when={view()?.value.account}>
+            {(alias) => (
+              <text fg={fg("base")} attributes={attributes()}>
+                {alias()}
+              </text>
+            )}
+          </Show>
+          <For each={windows()}>
+            {(line) => (
+              <text fg={fg("muted")} attributes={attributes()}>
+                {line}
+              </text>
+            )}
+          </For>
+          <Show when={view()?.value.nextUse}>
+            {(next) => (
+              <text fg={fg("muted")} attributes={attributes()}>
+                {nextUseLine(next())}
+              </text>
+            )}
+          </Show>
           <Show when={view()?.value.forceUse}>
             {(force) => (
               <text
                 fg={asOf() === undefined && force().when === "now" ? theme.text.feedback.warning.base : fg("muted")}
+                attributes={attributes()}
               >
                 {forceUseLine(force())}
               </text>
             )}
           </Show>
-          <Show when={asOf()}>{(time) => <text fg={theme.text.faint}>as of {clockTime(time())}</text>}</Show>
+          <Show when={asOf()}>
+            {(time) => (
+              <text fg={theme.text.faint} attributes={TextAttributes.DIM}>
+                as of {clockTime(time())}
+              </text>
+            )}
+          </Show>
         </Show>
       </box>
     </Show>

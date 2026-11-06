@@ -387,7 +387,11 @@ function RequestRow(props: {
       backgroundColor={props.selected ? theme.background.action.primary.focused : theme.background.action.primary.base}
       onMouseUp={props.onSelect}
     >
-      <text fg={fg()} attributes={props.selected ? TextAttributes.BOLD : undefined} wrapMode="none">
+      <text
+        fg={fg()}
+        attributes={props.selected ? TextAttributes.BOLD : props.stale ? TextAttributes.DIM : undefined}
+        wrapMode="none"
+      >
         {text()}
       </text>
     </box>

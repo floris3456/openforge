@@ -675,11 +675,45 @@ function testDirectory() {
     }),
     (fixture) =>
       Effect.promise(async () => {
+        const leaked = await stopLeakedDaemons(fixture.root)
         await fs.rm(fixture.root, { recursive: true, force: true })
         restore("OPENCODE_PTY_BIN", fixture.environment.binary)
         restore("SHELL", fixture.environment.shell)
+        if (leaked.length > 0)
+          throw new Error(`opencode-pty daemons outlived the test and were killed:\n${leaked.join("\n")}`)
       }),
   )
+}
+
+// Every daemon a test starts runs with a runtime directory under its fixture root, and the test's servers have
+// closed by the time the fixture is released. A daemon stops soon after its owner leaves, unless the owner prepared
+// a handoff: then it waits up to 120 s for a successor, long after the test.
+async function stopLeakedDaemons(root: string) {
+  // Without the binary (Windows) no test starts a daemon, and there is no ps to ask.
+  if (binary === undefined) return []
+  const deadline = Date.now() + 2_000
+  let running = await daemonsUnder(root)
+  while (running.length > 0 && Date.now() < deadline) {
+    await Bun.sleep(50)
+    running = await daemonsUnder(root)
+  }
+  for (const daemon of running) {
+    try {
+      process.kill(daemon.pid, "SIGKILL")
+    } catch {}
+  }
+  return running.map((daemon) => `pid ${daemon.pid}: ${daemon.args}`)
+}
+
+async function daemonsUnder(root: string) {
+  const child = Bun.spawn(["ps", "-A", "-ww", "-o", "pid=", "-o", "args="], { stdout: "pipe" })
+  const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited])
+  if (code !== 0) throw new Error(`ps failed (${code})`)
+  const marker = ` daemon --runtime-dir ${root}${path.sep}`
+  return output.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s(.*)$/.exec(line)
+    return match && match[2].includes(marker) ? [{ pid: Number(match[1]), args: match[2] }] : []
+  })
 }
 
 function waitForExit(pid: number) {

@@ -36,8 +36,9 @@ export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", 
 }
 
 /**
- * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), or capabilities with
- * `pacer: null`. CPP's 503 `unavailable` (its pacer store not open yet) is {@link Unreachable}: it passes.
+ * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API). Capabilities that say
+ * `pacer: null` make the catalog's `pacer` null (`PacerModels`) rather than this error. CPP's 503 `unavailable` (its
+ * pacer store not open yet) is {@link Unreachable}: it passes.
  */
 export class NoPacer extends Schema.TaggedError<NoPacer>()("PacerHttp.NoPacer", {
   status: Schema.optional(Schema.Number),
@@ -119,13 +120,6 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerHttp") {}
-
-/** Fails with NoPacer when CPP's capabilities say `pacer: null`, as a proxy without a pacer store answers. */
-export function requirePacer<B extends { readonly pacer: unknown }>(answer: Answer<B>) {
-  const pacer = answer.body.pacer
-  if (pacer === null) return Effect.fail(new NoPacer({ reason: "its capabilities say pacer: null" }))
-  return Effect.succeed({ ...answer, body: { ...answer.body, pacer } })
-}
 
 const defaultTimeout = "10 seconds"
 

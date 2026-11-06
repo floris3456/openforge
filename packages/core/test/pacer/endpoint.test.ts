@@ -117,6 +117,11 @@ describe("PacerEndpoint.resolve", () => {
 
 const it = testEffect(Layer.empty)
 
+function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value")
+  return value
+}
+
 /** The endpoint service with real config files under `root` and an in-memory credential store. */
 const services = (root: string) => {
   const watcher = Watcher.testLayer
@@ -293,6 +298,32 @@ describe("PacerEndpoint.Service", () => {
     ),
   )
 
+  it.live("says whether its config gives CPP's address, not a login's, and follows a change", () =>
+    scenario(
+      (root) => writeConfig(root, { providers: { cliproxypacer: { settings: { baseURL: "https://a.test" } } } }),
+      (root) =>
+        Effect.gen(function* () {
+          const watcher = yield* Watcher.Test
+          const endpoints = yield* PacerEndpoint.Service
+          const credentials = yield* Credential.Service
+          const address = (want: boolean) =>
+            required(endpoints.configuredAddress)().pipe(
+              Stream.filter((configured) => configured === want),
+              Stream.runHead,
+              Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.die(new Error(`never ${want}`)) }),
+            )
+          yield* address(true)
+          yield* credentials.create({ integrationID: PacerEndpoint.id, value: key("k-login", "https://login.test") })
+          yield* until((endpoint) => endpoint?.root === "https://a.test")
+          yield* writeConfig(root, {})
+          yield* watcher.emit({ type: "update", path: path.join(root, "config", "opencode.json") })
+          // The login's address takes over, but it is the form's answer, not config's.
+          yield* until((endpoint) => endpoint?.root === "https://login.test")
+          yield* address(false)
+        }),
+    ),
+  )
+
   it.live("never reads a project's config", () =>
     scenario(
       // Above the global config folder, where a project walk from it would find it.
@@ -309,6 +340,7 @@ describe("PacerEndpoint.Service", () => {
         Effect.gen(function* () {
           const endpoints = yield* PacerEndpoint.Service
           expect(yield* endpoints.get()).toBeUndefined()
+          expect(yield* required(endpoints.configuredAddress)().pipe(Stream.runHead)).toEqual(Option.some(false))
         }),
     ),
   )

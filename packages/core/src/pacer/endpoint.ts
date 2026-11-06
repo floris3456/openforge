@@ -39,6 +39,11 @@ export interface Interface {
   readonly get: () => Effect.Effect<Endpoint | undefined>
   /** The endpoint now, then each change of it. */
   readonly changes: () => Stream.Stream<Endpoint | undefined>
+  /**
+   * Whether config gives CPP's address, read where `get` reads it: now, then each change. The login form asks for the
+   * address only when not, so the form and the endpoint never disagree. Absent in stand-ins; the form then asks.
+   */
+  readonly configuredAddress?: () => Stream.Stream<boolean>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerEndpoint") {}
@@ -121,15 +126,18 @@ export function layer(options?: Config.Options) {
         // Integration.connection.active, a location service, picks the same one: Credential.list orders the active
         // credential last, and the integration takes the reversed list's first (resolveConnections).
         const credential = (yield* credentials.list(id)).at(-1)
-        return resolve(settings, credential?.value)
+        // Config's address wins over the one a login stored, as in `resolve`.
+        return { endpoint: resolve(settings, credential?.value), address: text(settings?.baseURL) !== undefined }
       })
       const current = yield* SubscriptionRef.make<Endpoint | undefined>(undefined)
+      const address = yield* SubscriptionRef.make(false)
       const lock = Semaphore.makeUnsafe(1)
       const refresh = Effect.fn("PacerEndpoint.refresh")(
         function* () {
           const next = yield* load()
-          if (same(next, yield* SubscriptionRef.get(current))) return
-          yield* SubscriptionRef.set(current, next)
+          if (next.address !== (yield* SubscriptionRef.get(address))) yield* SubscriptionRef.set(address, next.address)
+          if (same(next.endpoint, yield* SubscriptionRef.get(current))) return
+          yield* SubscriptionRef.set(current, next.endpoint)
         },
         (effect) => lock.withPermit(effect),
       )
@@ -143,6 +151,7 @@ export function layer(options?: Config.Options) {
       return Service.of({
         get: () => SubscriptionRef.get(current),
         changes: () => SubscriptionRef.changes(current),
+        configuredAddress: () => SubscriptionRef.changes(address),
       })
     }),
   )

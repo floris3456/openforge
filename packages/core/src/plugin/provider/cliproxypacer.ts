@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Option, Stream } from "effect"
 import { define } from "@opencode/plugin/effect/plugin"
 import { Form } from "@opencode/schema/form"
 import { Money } from "@opencode/schema/money"
@@ -8,7 +8,6 @@ import { PacerModels } from "../../pacer/models.js"
 import { Provider } from "../../provider.js"
 import { Variant } from "../../variant.js"
 import type { PluginInternal } from "../internal.js"
-import { configuredSettings } from "./configured.js"
 
 export const providerID = Provider.ID.make(PacerEndpoint.id)
 const name = "CLIProxyPacer"
@@ -25,29 +24,27 @@ export const CLIProxyPacerPlugin = define({
   effect: Effect.fn(function* (ctx) {
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
-    const configured = yield* configuredSettings(providerID)
-    // The login form asks for the address unless config gives one; its answer is kept as credential metadata.
-    const form =
-      typeof configured?.baseURL === "string"
-        ? undefined
-        : Form.Fields.make([
-            {
-              type: "string",
-              key: "baseURL",
-              title: "CLIProxyPacer address",
-              placeholder: "https://cliproxy.example.com",
-              required: true,
-            },
-          ])
+    // The login form asks for the address unless the config PacerEndpoint reads (global, never a project's) gives
+    // one, and follows it; the form's answer is kept as credential metadata.
+    const addresses = () => endpoints.configuredAddress?.() ?? Stream.make(false)
+    const address = { configured: Option.getOrElse(yield* Stream.runHead(addresses()), () => false) }
     yield* ctx.integration.transform((integrations) => {
       integrations.update(PacerEndpoint.id, (integration) => {
         integration.name = name
       })
       integrations.method.update({
         integrationID: PacerEndpoint.id,
-        method: { type: "key", label: "Client key", form },
+        method: { type: "key", label: "Client key", form: address.configured ? undefined : form },
       })
     })
+    yield* addresses().pipe(
+      Stream.runForEach((configured) => {
+        if (configured === address.configured) return Effect.void
+        address.configured = configured
+        return ctx.integration.reload()
+      }),
+      Effect.forkScoped({ startImmediately: true }),
+    )
 
     const current = { endpoint: yield* endpoints.get(), built: models(yield* catalogs.get(), yield* endpoints.get()) }
     yield* ctx.provider.transform((providers) => {
@@ -93,6 +90,16 @@ export const CLIProxyPacerPlugin = define({
     )
   }),
 } satisfies PluginInternal.InternalPlugin)
+
+const form = Form.Fields.make([
+  {
+    type: "string",
+    key: "baseURL",
+    title: "CLIProxyPacer address",
+    placeholder: "https://cliproxy.example.com",
+    required: true,
+  },
+])
 
 /** The settings every model carries: CPP's address, and config's key, which only a credential replaces. */
 function pinned(endpoint: PacerEndpoint.Endpoint, claude: boolean): Record<string, string> {

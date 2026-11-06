@@ -72,15 +72,19 @@ const catalog: PacerModels.Catalog = {
   ],
 }
 
+/** `address`: whether the config PacerEndpoint reads gives CPP's address. */
 const fakeCPP = Effect.fn(function* (
   endpoint: PacerEndpoint.Endpoint | undefined,
   models: PacerModels.Catalog | undefined,
+  address = false,
 ) {
   const endpoints = yield* SubscriptionRef.make(endpoint)
   const catalogs = yield* SubscriptionRef.make(models)
+  const addresses = yield* SubscriptionRef.make(address)
   return {
     setEndpoint: (next: PacerEndpoint.Endpoint | undefined) => SubscriptionRef.set(endpoints, next),
     setCatalog: (next: PacerModels.Catalog | undefined) => SubscriptionRef.set(catalogs, next),
+    setAddress: (next: boolean) => SubscriptionRef.set(addresses, next),
     provide: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(
         Effect.provideService(
@@ -88,6 +92,7 @@ const fakeCPP = Effect.fn(function* (
           PacerEndpoint.Service.of({
             get: () => SubscriptionRef.get(endpoints),
             changes: () => SubscriptionRef.changes(endpoints),
+            configuredAddress: () => SubscriptionRef.changes(addresses),
           }),
         ),
         Effect.provideService(
@@ -177,21 +182,46 @@ describe("CLIProxyPacerPlugin", () => {
     }),
   )
 
-  it.effect("asks for no address when config gives one", () =>
+  it.effect("asks for no address when the config PacerEndpoint reads gives one", () =>
     Effect.gen(function* () {
-      const cpp = yield* fakeCPP(undefined, undefined)
-      yield* addPlugin(cpp).pipe(
+      yield* addPlugin(yield* fakeCPP(undefined, undefined, true))
+      const integration = required(yield* (yield* Integration.Service).get(Integration.ID.make("cliproxypacer")))
+      expect(integration.methods).toEqual([{ type: "key", label: "Client key" }])
+    }),
+  )
+
+  it.effect("asks for the address when only a project's config gives one, which PacerEndpoint never reads", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(yield* fakeCPP(undefined, undefined, false)).pipe(
         Effect.provide(
           Config.testLayer([
             new Document({
               type: "document",
-              info: decodeConfig({ providers: { cliproxypacer: { settings: { baseURL: "https://cpp.test" } } } }),
+              info: decodeConfig({ providers: { cliproxypacer: { settings: { baseURL: "https://project.test" } } } }),
             }),
           ]),
         ),
       )
       const integration = required(yield* (yield* Integration.Service).get(Integration.ID.make("cliproxypacer")))
-      expect(integration.methods).toEqual([{ type: "key", label: "Client key" }])
+      expect(
+        integration.methods.map((method) => method.type === "key" && method.form?.map((field) => field.key)),
+      ).toEqual([["baseURL"]])
+    }),
+  )
+
+  it.live("asks for the address again when config stops giving one, and not once it gives one", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCPP(undefined, undefined, false)
+      yield* addPlugin(cpp)
+      const integrations = yield* Integration.Service
+      const asks = integrations
+        .get(Integration.ID.make("cliproxypacer"))
+        .pipe(Effect.map((integration) => integration?.methods.some((method) => method.type === "key" && method.form)))
+      expect(yield* asks).toBe(true)
+      yield* cpp.setAddress(true)
+      yield* eventually(asks, (value) => value === false)
+      yield* cpp.setAddress(false)
+      yield* eventually(asks, (value) => value === true)
     }),
   )
 

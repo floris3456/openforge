@@ -509,14 +509,18 @@ export const layer = Layer.effect(
       chat.compact = undefined
       if (ask === "check" && chat.view?.compactAt === undefined) return
       const why = yield* leftAlone(chat.sessionID)
-      if (why) return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${why}`)
-      yield* sessions
-        .compact({ sessionID: chat.sessionID })
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("could not compact a chat CLIProxyPacer asked to", { reason: error.message }),
-          ),
-        )
+      if (why)
+        return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${why}`, {
+          sessionID: chat.sessionID,
+        })
+      yield* sessions.compact({ sessionID: chat.sessionID }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("could not compact a chat CLIProxyPacer asked to", {
+            sessionID: chat.sessionID,
+            reason: error.message,
+          }),
+        ),
+      )
     })
 
     /** The chat and its parents, from the store where not held: a subagent's requests are also its parents'. */

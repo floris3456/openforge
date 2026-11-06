@@ -217,11 +217,16 @@ function createPacer(input: { clock: Clock }) {
     }),
   )
 
+  // The service answers the view it holds at once, and reads a new one beside it when that may be out of date: the
+  // new one comes as `pacer.chat.updated`, maybe before this answer. An answer older than the view held is dropped, so
+  // the held view stays until a newer one replaces it.
   const readView = (sessionID: string) => {
     const epoch = store.epoch
     void client.api.experimental.pacer.chat.get({ sessionID }).then(
       (view) => {
-        if (view === null || !store.chats[sessionID]) return
+        const chat = store.chats[sessionID]
+        if (view === null || !chat) return
+        if (chat.view && chat.view.epoch >= epoch && chat.view.value.asOf > view.asOf) return
         setView(view, epoch)
       },
       () => undefined,
@@ -295,6 +300,15 @@ function createPacer(input: { clock: Clock }) {
     event.on("pacer.chat.updated", (event) => {
       if (!store.chats[event.data.chat.sessionID]) return
       setView(event.data.chat, store.epoch)
+    }),
+  )
+  // Views are read on demand (spec section 3): at each step end of the chat shown, the step-end signal the service had,
+  // this asks for its view without waiting. No other chat costs a read.
+  onCleanup(
+    event.on("session.step.streamed", (event) => {
+      const sessionID = shown()
+      if (event.data.sessionID !== sessionID || !shownOnCPP() || state() !== "on" || !store.chats[sessionID]) return
+      readView(sessionID)
     }),
   )
   onCleanup(

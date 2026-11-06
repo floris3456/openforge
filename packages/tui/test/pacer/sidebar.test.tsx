@@ -4,6 +4,8 @@ import { existsSync } from "node:fs"
 import path from "node:path"
 import { PacerAccount } from "../../src/pacer/account"
 import { builtins } from "../../src/plugin/builtins"
+import { recordFrames } from "../fixture/frames"
+import { until } from "../fixture/wait"
 import { accounts, CHAT, chat, colorOf, NOW, pacerFake, renderPacer, status, styleOf } from "./fixture"
 
 // Section 5 of spec cliproxypacer-step-1: the sidebar's Account section, where Context was.
@@ -50,6 +52,44 @@ describe("the Account section", () => {
       "next: max-1, once its cache is cold",
     ])
     expect(colorOf(setup.app, "max-2")).toEqual(setup.theme.text.base.toInts())
+  })
+
+  test("after the chat's step, where it goes next as the new view says, the held one until then", async () => {
+    const fake = pacerFake({ delay: 100 })
+    fake.status = status("on")
+    fake.chats[CHAT] = chat({ nextUse: { account: "max-1", reason: "cold_move" } })
+    fake.accounts = accounts()
+    await using setup = await renderPacer({
+      fake,
+      width: 40,
+      height: 12,
+      content: () => (
+        <box width={37}>
+          <PacerAccount sessionID={CHAT} />
+        </box>
+      ),
+    })
+    await setup.frame((frame) => frame.includes("next: max-1"))
+    await setup.settle()
+    const asks = () => fake.calls.filter((call) => call.method === "GET" && call.path === `chat/${CHAT}`).length
+    const asked = asks()
+    using recorder = recordFrames(setup.app)
+    setup.emit({ type: "session.step.streamed", data: { sessionID: CHAT, assistantMessageID: "msg_next" } })
+    await until(() => asks() === asked + 1, 5_000)
+    setup.emit({
+      type: "pacer.chat.updated",
+      data: { chat: chat({ nextUse: { account: "max-3", reason: "cold_move" }, asOf: NOW + 1_000 }) },
+    })
+    await setup.frame((frame) => frame.includes("next: max-3"))
+    await setup.settle()
+    await Bun.sleep(50)
+    await setup.app.renderOnce()
+    expect(setup.app.captureCharFrame()).toContain("next: max-3")
+    expect(recorder.missed).toBe(0)
+    const nexts = recorder.frames.map((frame) => frame.text.match(/next: (max-\d)/)?.[1])
+    expect(nexts.every((next) => next !== undefined)).toBe(true)
+    const replaced = nexts.indexOf("max-3")
+    expect(nexts.slice(replaced).every((next) => next === "max-3")).toBe(true)
   })
 
   test("a stale window, and one that turns stale while it shows", async () => {

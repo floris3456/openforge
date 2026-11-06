@@ -85,6 +85,52 @@ describe("the cache item", () => {
     }
   })
 
+  test("asks for the shown chat's view at each of its step ends, no other's; the new view replaces the held one in one frame, a slow old answer never brings it back", async () => {
+    const fake = pacerFake({ delay: 200 })
+    fake.status = status("on")
+    fake.chats[CHAT] = chat()
+    fake.chats[OTHER] = chat({ sessionID: OTHER })
+    await using setup = await renderPacer({
+      fake,
+      width: 100,
+      height: 3,
+      sessions: {
+        [CHAT]: { providerID: "cliproxypacer", messages: [step("msg_chat", { created: NOW - 60_000 })] },
+        [OTHER]: { providerID: "cliproxypacer", messages: [step("msg_other", { created: NOW - 60_000 })] },
+      },
+      content: () => <Toolbar sessionID={CHAT} />,
+    })
+    await setup.frame((frame) => frame.includes("warm 23:41"))
+    await setup.settle()
+    const asks = (id: string) => fake.calls.filter((call) => call.method === "GET" && call.path === `chat/${id}`).length
+    const shown = asks(CHAT)
+    using recorder = recordFrames(setup.app)
+    for (let round = 1; round <= 3; round++) {
+      for (const sessionID of [CHAT, OTHER])
+        setup.emit({
+          type: "session.step.streamed",
+          data: { sessionID, assistantMessageID: `msg_${sessionID}_${round}` },
+        })
+      await until(() => asks(CHAT) === shown + round, 5_000)
+    }
+    // The service answers the view it holds, slowly here, and its read beside it comes as an event first.
+    setup.emit({ type: "pacer.chat.updated", data: { chat: chat({ coldAt: NOW + 40 * 60_000, asOf: NOW + 1_000 }) } })
+    await setup.frame((frame) => frame.includes("warm 40:00"))
+    await setup.settle()
+    await Bun.sleep(50)
+    await setup.app.renderOnce()
+    expect(line(setup)).toContain("warm 40:00")
+    expect(asks(CHAT)).toBe(shown + 3)
+    expect(asks(OTHER)).toBe(0)
+    // Every frame has the item: the held view until the new one, then the new one only.
+    expect(recorder.missed).toBe(0)
+    const lines = recorder.frames.map((frame) => frame.text.split("\n")[0]!)
+    const replaced = lines.findIndex((text) => text.includes("warm 40:00"))
+    expect(replaced).toBeGreaterThanOrEqual(0)
+    expect(lines.slice(0, replaced).every((text) => text.includes("warm 23:41"))).toBe(true)
+    expect(lines.slice(replaced).every((text) => text.includes("warm 40:00"))).toBe(true)
+  })
+
   test("pings run: warm 23:41", async () => {
     await using setup = await toolbar({})
     await setup.app.waitForFrame((frame) => frame.includes("warm 23:41"))

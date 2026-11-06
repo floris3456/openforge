@@ -2,8 +2,9 @@ import { expect } from "bun:test"
 import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir, stat, writeFile } from "node:fs/promises"
+import type { Socket } from "node:net"
 import path from "node:path"
-import { Effect } from "effect"
+import { Effect, Exit, Fiber, Scope } from "effect"
 import { makeDaemonTransport } from "../src/persistent-pty/daemon"
 import { listen, pong, temporaryDirectory, terminal, writeRegistration } from "./fixture/persistent-pty-daemon"
 import { it } from "./lib/effect"
@@ -261,6 +262,115 @@ it.live("stops a discovered inherited daemon when adoption fails", () =>
       expiresAt: Date.now() + 60_000,
     })
     expect(shutdowns).toBe(1)
+  }),
+)
+
+// A daemon handed on to the next server keeps running, as this fake one does: only the transport can end the
+// subscriptions it opened, so their clients do not stay attached to a stopped server.
+it.live("ends its subscriptions when it closes, while their daemon keeps running", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    let open = 0
+    yield* listen(socketPath, (socket, request) => {
+      if (request.op === "ping") return pong
+      if (request.op !== "subscribe") return { type: "terminals", terminals: [] }
+      open++
+      socket.once("close", () => open--)
+      return {
+        type: "attached",
+        terminal: terminal(1),
+        role: "observer",
+        generation: 1,
+        requested_offset: 0,
+        available_offset: 0,
+        end_offset: 0,
+        truncated: false,
+        replay_base64: "",
+      }
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const scope = yield* Scope.fork(yield* Scope.Scope)
+    const daemon = yield* makeDaemonTransport(root, "daemon").pipe(Scope.provide(scope))
+    const ended: string[] = []
+    const subscribe = (attachmentID: string) =>
+      daemon.subscribe(1, {
+        cursor: 0,
+        attachmentID,
+        role: "observer",
+        onEvent: () => {},
+        onEnd: () => ended.push(attachmentID),
+      })
+    const active = yield* subscribe("active")
+    active.activate()
+    yield* subscribe("inactive")
+    const detached = yield* subscribe("detached")
+    detached.detach()
+
+    yield* Scope.close(scope, Exit.void)
+    const deadline = Date.now() + 5_000
+    while ((ended.length < 2 || open > 0) && Date.now() < deadline) yield* Effect.promise(() => Bun.sleep(10))
+    expect(ended.toSorted()).toEqual(["active", "inactive"])
+    expect(open).toBe(0)
+  }),
+)
+
+it.live("fails a subscription its daemon accepts only after it closed, and closes its socket", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    let open = 0
+    let held: Socket | undefined
+    yield* listen(socketPath, (socket, request) => {
+      if (request.op === "ping") return pong
+      if (request.op !== "subscribe") return { type: "terminals", terminals: [] }
+      open++
+      socket.once("close", () => open--)
+      held = socket
+      return undefined
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const scope = yield* Scope.fork(yield* Scope.Scope)
+    const daemon = yield* makeDaemonTransport(root, "daemon").pipe(Scope.provide(scope))
+    let ended = false
+    const subscribing = yield* daemon
+      .subscribe(1, {
+        cursor: 0,
+        attachmentID: "late",
+        role: "observer",
+        onEvent: () => {},
+        onEnd: () => {
+          ended = true
+        },
+      })
+      .pipe(Effect.forkChild)
+    const asked = Date.now() + 5_000
+    while (!held && Date.now() < asked) yield* Effect.promise(() => Bun.sleep(10))
+    if (!held) throw new Error("the subscription never reached the daemon")
+
+    yield* Scope.close(scope, Exit.void)
+    const attached = Buffer.from(
+      JSON.stringify({
+        type: "attached",
+        terminal: terminal(1),
+        role: "observer",
+        generation: 1,
+        requested_offset: 0,
+        available_offset: 0,
+        end_offset: 0,
+        truncated: false,
+        replay_base64: "",
+      }),
+    )
+    const length = Buffer.alloc(4)
+    length.writeUInt32BE(attached.length)
+    held.write(Buffer.concat([length, attached]))
+    const error = yield* Fiber.join(subscribing).pipe(Effect.flip)
+    expect(error.message).toBe("PTY owner scope is closed")
+    const deadline = Date.now() + 5_000
+    while (open > 0 && Date.now() < deadline) yield* Effect.promise(() => Bun.sleep(10))
+    expect(open).toBe(0)
+    expect(ended).toBeFalse()
   }),
 )
 

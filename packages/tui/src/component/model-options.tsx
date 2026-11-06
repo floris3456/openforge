@@ -64,7 +64,8 @@ export function ModelDetail(props: {
   const facts = () =>
     [
       props.model.capabilities.input.map(modality).join(", "),
-      tokens(props.model.limit.context),
+      // A limit of 0 is an unknown context window.
+      ...(props.model.limit.context > 0 ? [tokens(props.model.limit.context)] : []),
       ...(props.model.variants.length > 0 ? ["Reasoning"] : []),
     ].filter(Boolean)
   const list = (items: string[]) => (

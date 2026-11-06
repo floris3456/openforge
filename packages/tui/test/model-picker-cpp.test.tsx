@@ -27,6 +27,12 @@ const models = [
     { tier: { type: "context", size: 200_000 }, ...rate(6, 22.5) },
   ]),
   model("cliproxypacer", "plain-1", "Plain One", []),
+  // A context of 0 is one CPP does not know.
+  {
+    ...model("cliproxypacer", "window-1", "Unknown Window", [rate(1, 2)]),
+    capabilities: { tools: true, input: ["text", "pdf"], output: ["text"] },
+    limit: { context: 0, output: 0 },
+  },
   model("opencode", "big-pickle", "Big Pickle", [rate(0, 0)]),
 ]
 
@@ -122,6 +128,20 @@ test("the detail row shows a priced CLIProxyPacer model's price, and no price fo
     }
     for (const _ of query) setup.mockInput.pressBackspace()
   }
+})
+
+test("the detail row leaves out a context window that is unknown", async () => {
+  await using fixture = await picker({ newDesigns: true, connections: stored })
+  const setup = fixture.setup
+  await setup.waitForFrame((frame) => frame.includes("Search models"))
+  await setup.mockInput.typeText("Unknown Window")
+  const frame = await setup.waitForFrame(
+    (frame) =>
+      models.every((item) => item.name === "Unknown Window" || line(frame, item.name) === "") &&
+      line(frame, "Text, PDF") !== "",
+  )
+  // Its price, then its input, and nothing for the context.
+  expect(line(frame, "Text, PDF").trim()).toMatch(/^\$1\/\$2 +Text, PDF$/)
 })
 
 test("the free picker, before anything is connected, offers no CLIProxyPacer model as free", async () => {

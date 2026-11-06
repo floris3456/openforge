@@ -422,17 +422,28 @@ const layer = Layer.effect(
       return [...credentials, ...env]
     }
 
-    const project = (entry: Entry, connections: IntegrationConnection.Info[]): Info =>
-      Info.make({
+    // Info.make validates an integration's whole definition, and each step lists every integration several times
+    // (Provider.snapshot). A built entry is never edited, since each rebuild of the registry makes new entries, so an
+    // entry's Info is made again only when its connections, read anew on every call, differ.
+    const projections = new WeakMap<Entry, { connections: string; info: Info }>()
+    const project = (entry: Entry, connections: IntegrationConnection.Info[]): Info => {
+      const projected = connections.map((connection) => {
+        const status = statuses.get(statusKey(entry.ref.id, connection))
+        return status ? { ...connection, status } : connection
+      })
+      const key = JSON.stringify(projected)
+      const cached = projections.get(entry)
+      if (cached?.connections === key) return cached.info
+      const info = Info.make({
         id: entry.ref.id,
         name: entry.ref.name,
         ...(entry.ref.metadata === undefined ? {} : { metadata: entry.ref.metadata }),
         methods: entry.methods,
-        connections: connections.map((connection) => {
-          const status = statuses.get(statusKey(entry.ref.id, connection))
-          return status ? { ...connection, status } : connection
-        }),
+        connections: projected,
       })
+      projections.set(entry, { connections: key, info })
+      return info
+    }
 
     const authorize = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(Effect.mapError((cause) => new AuthorizationError({ cause })))

@@ -13,6 +13,8 @@ const defaults = {
   duration: Duration.minutes(30),
 }
 
+type Entry = { last: number; expires: number; settings: typeof defaults }
+
 export const Plugin = define({
   id: "opencode.warming",
   effect: Effect.fn(function* (ctx) {
@@ -28,7 +30,7 @@ export const Plugin = define({
     })
 
     const scope = yield* Scope.Scope
-    const sessions = new Map<Session.ID, { last: number; expires: number; settings: typeof defaults }>()
+    const sessions = new Map<Session.ID, Entry>()
     // A ping during a model request would compete with the request it keeps warm, which stalls single-slot local models.
     // A request counts from its context hook, because `session.step.started` waits for the first response chunk.
     const requesting = new Set<Session.ID>()
@@ -54,16 +56,18 @@ export const Plugin = define({
         ),
         Effect.forkScoped({ startImmediately: true }),
       )
-    const loop: (sessionID: Session.ID) => Effect.Effect<void> = Effect.fn("WarmingPlugin.loop")(
-      function* (sessionID) {
+    // A loop warms the entry it was started for, and ends once its session's entry is another one (warming was turned
+    // off and on again, say), which the loop started for that entry warms.
+    const loop: (sessionID: Session.ID, entry: Entry) => Effect.Effect<void> = Effect.fn("WarmingPlugin.loop")(
+      function* (sessionID, entry) {
         const current = sessions.get(sessionID)
-        if (!current) return
+        if (current !== entry) return
 
         const now = yield* Clock.currentTimeMillis
         const next = Math.min(current.last + Duration.toMillis(current.settings.interval), current.expires)
         if (now < next) {
           yield* Effect.sleep(Duration.millis(next - now))
-          return yield* loop(sessionID)
+          return yield* loop(sessionID, entry)
         }
         if (now >= current.expires) {
           sessions.delete(sessionID)
@@ -71,7 +75,7 @@ export const Plugin = define({
         }
         if (requesting.has(sessionID)) {
           yield* Effect.sleep(current.settings.interval)
-          return yield* loop(sessionID)
+          return yield* loop(sessionID, entry)
         }
 
         const last = current.last
@@ -81,7 +85,7 @@ export const Plugin = define({
           .pipe(Effect.catchCause((cause) => Effect.logWarning("failed to warm session", { sessionID, cause })))
         const latest = sessions.get(sessionID)
         if (latest === current && latest.last === last) latest.last = yield* Clock.currentTimeMillis
-        return yield* loop(sessionID)
+        return yield* loop(sessionID, entry)
       },
     )
 
@@ -122,13 +126,14 @@ export const Plugin = define({
           active.settings = settings
           return
         }
-        sessions.set(event.sessionID, { last: now, expires: now + duration, settings })
+        const entry = { last: now, expires: now + duration, settings }
+        sessions.set(event.sessionID, entry)
         yield* Effect.logInfo("scheduled session warming", {
           sessionID: event.sessionID,
           interval: settings.interval,
           expires: now + duration,
         })
-        yield* loop(event.sessionID).pipe(
+        yield* loop(event.sessionID, entry).pipe(
           Effect.catchCause((cause) =>
             Effect.logError("session warming loop failed", { sessionID: event.sessionID, cause }),
           ),

@@ -150,7 +150,7 @@ export type SessionListOutput = {
 export type SessionListOperation<E = never> = (input?: SessionListInput) => Effect.Effect<SessionListOutput, E>
 
 export type SessionCreateInput = {
-  readonly id?: Session.ID | undefined
+  readonly id?: Session.NewID | undefined
   readonly parentID?: Session.ID | undefined
   readonly title?: string | undefined
   readonly agent?: Agent.ID | undefined

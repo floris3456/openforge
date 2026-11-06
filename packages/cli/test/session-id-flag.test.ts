@@ -39,13 +39,20 @@ describe("--session", () => {
     })
 
     test(`${name}: refuses an ID with a line break, a space, a control character, a non-ASCII character or no ses`, async () => {
-      // As a script's capture of the ID gave it twice, one line under the other.
-      for (const value of [`${id}\n${id}`, `${id} ${id}`, `${id}\t`, "ses_a\u0001", "ses_\u00fc", id.slice(4)])
+      const expected = [
+        // As a script's capture of the ID gave it twice, one line under the other.
+        ...[`${id}\n${id}`, `${id} ${id}`, `${id}\t`, "ses_a\u0001", "ses_\u00fc"].map((value) => ({
+          value,
+          message: `Expected a session ID: "ses" and then letters, digits or ASCII punctuation, without spaces, line breaks, other control characters or characters outside ASCII`,
+        })),
+        { value: id.slice(4), message: `Expected a string starting with "ses"` },
+      ]
+      for (const { value, message } of expected)
         for (const flag of ["-s", "--session"]) {
           const { sessions, errors } = await parse(name, [flag, value])
           expect(sessions).toEqual([])
           expect(errors).toEqual([
-            `Invalid value for flag --session: "${value}". Expected a session ID: "ses" and then letters, digits or ASCII punctuation, without spaces, line breaks, other control characters or characters outside ASCII (this one, as JSON: ${JSON.stringify(value)})`,
+            `Invalid value for flag --session: "${value}". ${message} (this one, as JSON: ${JSON.stringify(value)})`,
           ])
         }
     })

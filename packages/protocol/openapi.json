@@ -1174,7 +1174,7 @@
                   "id": {
                     "anyOf": [
                       {
-                        "$ref": "#/components/schemas/Session.ID"
+                        "$ref": "#/components/schemas/Session.NewID"
                       },
                       {
                         "type": "null"
@@ -24921,6 +24921,15 @@
       },
       "Session.Metadata": {
         "type": "object"
+      },
+      "Session.NewID": {
+        "type": "string",
+        "pattern": "^ses",
+        "allOf": [
+          {
+            "pattern": "^ses[\\x21-\\x7e]*$"
+          }
+        ]
       },
       "Session.Revert": {
         "type": "object",

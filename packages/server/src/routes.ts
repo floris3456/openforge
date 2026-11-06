@@ -33,6 +33,9 @@ import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { LocationActivity } from "@opencode/core/location-activity"
 import { ModelsDev } from "@opencode/core/models-dev"
+import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerHttp } from "@opencode/core/pacer/http"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Schedule } from "@opencode/core/schedule"
 import { PluginUpdate } from "@opencode/core/plugin/update"
@@ -89,6 +92,9 @@ const applicationServiceNodes = [
   Schedule.node,
   Workspace.node,
   FileWatch.node,
+  PacerEndpoint.node,
+  PacerHttp.node,
+  PacerModels.node,
 ] as const
 const applicationServices = LayerNode.group(applicationServiceNodes)
 
@@ -146,6 +152,9 @@ function makeRoutes<AuthError, AuthServices>(
         file: options.config?.file,
         content: options.config?.content,
       }),
+    ),
+    PacerEndpoint.node.replace(
+      PacerEndpoint.configured({ file: options.config?.file, content: options.config?.content }),
     ),
     InstructionDiscovery.node.replace(InstructionDiscovery.configured({ project: options.config?.project })),
     ShellSelect.node.replace(ShellSelect.configured({ gitbash: options.windows?.gitbash })),

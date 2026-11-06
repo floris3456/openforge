@@ -55,6 +55,8 @@ import { Location } from "../location.js"
 import { ModelsDev } from "../models-dev.js"
 import { Mcp } from "../mcp/index.js"
 import { Npm } from "@opencode/util/npm"
+import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerModels } from "../pacer/models.js"
 import { Permission } from "../permission.js"
 import { Reference } from "../reference.js"
 import { WebSearch } from "../websearch.js"
@@ -144,6 +146,8 @@ const services = [
   ModelsDev.Service,
   Mcp.Service,
   Npm.Service,
+  PacerEndpoint.Service,
+  PacerModels.Service,
   Permission.Service,
   Form.Service,
   ReadToolFileSystem.Service,
@@ -201,6 +205,8 @@ export const requirements = LayerNode.group([
   ModelsDev.node,
   Mcp.node,
   Npm.node,
+  PacerEndpoint.node,
+  PacerModels.node,
   Permission.node,
   Form.node,
   ReadToolFileSystem.node,

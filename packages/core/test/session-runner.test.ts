@@ -3698,6 +3698,60 @@ describe("SessionRunnerLLM", () => {
     })
   })
 
+  // A summary held from the background is written by the compaction agent's model when one is set; a compaction whose
+  // item names the models to write it takes that summary only when the model it names wrote it.
+  for (const ask of ["compact notice", "move ask"] as const)
+    for (const agentModel of [true, false])
+      scenario(
+        agentModel
+          ? `on CLIProxyPacer's ${ask}, writes the summary with the model it names, not the compaction agent's held one`
+          : `on CLIProxyPacer's ${ask}, takes the summary held from the background when the model it names wrote it`,
+        function* (s) {
+          s.currentModel = pacedModel
+          const compaction = yield* SessionCompaction.Service
+          yield* compaction.transform((editor) => editor.configure({ precompute: true }))
+          if (agentModel) {
+            const agents = yield* Agent.Service
+            yield* agents.transform((editor) =>
+              editor.update(Agent.ID.make("compaction"), (agent) => {
+                agent.model = { id: ID.make("replacement"), providerID: Provider.ID.make("fake") }
+              }),
+            )
+          }
+          // 160k of the 170k ceiling is past the 85 % at which everything before the answer is summarized in the
+          // background and held, and short of compacting.
+          yield* s.llm.push(
+            TestLLM.textWithUsage("Earlier answer", "text-earlier", 160_000),
+            TestLLM.text("## Objective\n- Held summary", "text-held-summary"),
+          )
+          yield* s.runPrompt("Earlier question")
+          yield* s.llm.wait(2)
+          expect(isSummaryRequest(s.requests[1]!)).toBe(true)
+          expect(s.requests[1]?.model).toBe(agentModel ? replacementModel : pacedModel)
+          s.requests.length = 0
+
+          const named = agentModel ? [TestLLM.text("## Objective\n- Named summary", "text-named-summary")] : []
+          if (ask === "compact notice") {
+            yield* s.llm.push(...named)
+            yield* s.session.compact({
+              sessionID,
+              models: [{ id: ID.make("recovery"), providerID: Provider.ID.make("cliproxypacer") }],
+            })
+            yield* s.resume
+          } else {
+            yield* s.llm.push(Stream.fail(pacerMoveAsk(["recovery"])), ...named, TestLLM.text("Moved", "text-moved"))
+            yield* s.runPrompt("Continue")
+          }
+          expect(s.requests.filter(isSummaryRequest).map((request) => request.model)).toEqual(
+            agentModel ? [pacedModel] : [],
+          )
+          expect((yield* s.context)[0]).toMatchObject({
+            type: "compaction",
+            summary: agentModel ? "## Objective\n- Named summary" : "## Objective\n- Held summary",
+          })
+        },
+      )
+
   scenario("sends the step again at once on a move ask before the chat's first answer", function* (s) {
     s.currentModel = pacedModel
     yield* s.llm.push(Stream.fail(pacerMoveAsk(["claude-e2e-mini"])), TestLLM.text("Moved", "text-moved-new-chat"))

@@ -1,7 +1,7 @@
 export * as PacerConnection from "./connection.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { Clock, Context, Effect, Layer, Queue, Result, Schema, Stream } from "effect"
+import { Clock, Context, Effect, Exit, Layer, Queue, Result, Schema, Stream } from "effect"
 import { makeParser } from "effect/encoding/Sse"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import type { Model } from "@opencode/schema/model"
@@ -55,13 +55,13 @@ export interface Interface {
    */
   readonly accounts: () => Effect.Effect<Pacer.Accounts | undefined>
   /**
-   * The chat's view, held from the last read (its `asOf` says when). A held view is answered at once; when it is out
-   * of date (after a reconnect, or CPP's `reading` or `settings` notices) and the pacer is on, it is read again in the
-   * background, and `pacer.chat.updated` follows if it changed. A held chat that CPP's list shows with requests the
-   * view hasn't seen (a ping, a compaction, another client's step) is read again at once; one openforge compacted
-   * drops its "compacts at" at once. With none held, a chat CPP is known to have is read now; any other is answered
-   * undefined at once and looked up in the background (`pacer.chat.updated` when CPP has it). Undefined when CPP
-   * knows nothing of the chat, or nothing was read while CPP can't answer.
+   * The chat's view, held from the last read (its `asOf` says when), answered at once: never waits on CPP. Views are
+   * read on demand (spec section 3): when the held one may be out of date (after a step of the chat through CPP, CPP
+   * listing it with requests the view hasn't seen, a compaction, a reconnect, CPP's `reading` or `settings` notices)
+   * or none is held, and the pacer is on, this starts one read in the background, through the chats' queue, and
+   * `pacer.chat.updated` follows if it changed. A TUI showing the chat asks at each of its step ends; a step itself
+   * reads nothing. One openforge compacted drops its "compacts at" at once. Undefined when none is held, and from then
+   * on when CPP knows nothing of the chat.
    */
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
@@ -153,12 +153,22 @@ interface Chat {
   /** CPP's view as last read or merged, and the same in openforge's shape. */
   raw: PacerWire.View | undefined
   view: Pacer.Chat | undefined
-  /** The view may be out of date. */
+  /**
+   * The view may be out of date: a step went through CPP, CPP listed it with new requests, it was compacted, or a notice
+   * said so. It is read again only when asked for (spec section 3); a read clears it as it starts, so a step that ends
+   * while it runs leaves the view stale.
+   */
   stale: boolean
   /** CPP's requests and account generation for it as last read or listed (`PacerWire.marks`). */
   marks: string | undefined
   /** A read of the view is due. */
   read: boolean
+  /** A read of the view is under way: one asked for meanwhile waits for it. */
+  reading: boolean
+  /** Its label was read from CPP or told in this process, or there was none to tell. */
+  labelled: boolean
+  /** A step of it through CPP streamed in this process (since CPP was last reached): its label may be told. */
+  streamed: boolean
   /** CPP knew nothing of it at the last read. */
   missing: boolean
   /** CPP's number for it, for the request reads. */
@@ -354,6 +364,9 @@ export const layer = Layer.effect(
         stale: false,
         marks: undefined,
         read: false,
+        reading: false,
+        labelled: false,
+        streamed: false,
         missing: false,
         storeID: undefined,
         calls: new Map(),
@@ -421,11 +434,11 @@ export const layer = Layer.effect(
       if (changed) yield* bus.publish(Pacer.Event.ChatUpdated, { chat: next })
     })
 
-    /** Holds a view CPP answered. */
+    /** Holds a view CPP answered (`fresh` cleared its staleness as it was asked for). */
     const hold = Effect.fnUntraced(function* (chat: Chat, view: PacerWire.View) {
       chat.raw = view
       chat.on = true
-      chat.stale = false
+      chat.labelled = true
       chat.marks = PacerWire.marks(view) ?? chat.marks
       chat.missing = false
       if (typeof view.session_id === "number") chat.storeID = view.session_id
@@ -442,7 +455,7 @@ export const layer = Layer.effect(
     /**
      * Merges the live part of a chat CPP listed into its held view. What the list doesn't carry (when it compacts, the
      * next use, a forced move) changes with a request, a ping or a compaction among them, or a move: a chat whose
-     * requests or generation moved is read again, through the chats' queue, once however often it is listed.
+     * requests or generation moved is stale, read again when asked for (spec section 3).
      */
     const merge = Effect.fnUntraced(function* (item: PacerWire.Listed) {
       const uuid = item.id.toLowerCase()
@@ -463,8 +476,7 @@ export const layer = Layer.effect(
       const marks = PacerWire.marks(item)
       if (marks !== undefined && marks !== chat.marks) {
         chat.marks = marks
-        chat.read = true
-        mark(chat)
+        chat.stale = true
       }
       chat.raw = {
         ...chat.raw,
@@ -483,26 +495,52 @@ export const layer = Layer.effect(
         ? Effect.succeed(false)
         : Effect.logWarning(`CLIProxyPacer refused ${what}`, { reason: error.message }).pipe(Effect.as(true))
 
+    /**
+     * Runs a request whose answer is the chat's view: it is no longer stale as the request goes out, and stale again
+     * when no view came back, unless CPP has none.
+     */
+    const fresh = <A, E, R>(chat: Chat, request: Effect.Effect<A, E, R>) =>
+      Effect.suspend(() => {
+        const stale = chat.stale
+        chat.stale = false
+        chat.reading = true
+        return request.pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              chat.reading = false
+              // `false`: CPP did not answer.
+              if (!chat.missing && !(Exit.isSuccess(exit) && exit.value !== false)) chat.stale ||= stale
+            }),
+          ),
+        )
+      })
+
     const readView = (chat: Chat) =>
-      get(sessionPath(chat), PacerWire.View).pipe(
-        Effect.flatMap((view) => hold(chat, view)),
-        Effect.as(true),
-        Effect.catchTag("PacerHttp.NotFound", () =>
-          Effect.sync(() => {
-            chat.missing = true
-            chat.raw = undefined
-            chat.view = undefined
-            return true
-          }),
+      fresh(
+        chat,
+        get(sessionPath(chat), PacerWire.View).pipe(
+          Effect.flatMap((view) => hold(chat, view)),
+          Effect.as(true),
+          Effect.catchTag("PacerHttp.NotFound", () =>
+            Effect.sync(() => {
+              chat.missing = true
+              chat.raw = undefined
+              chat.view = undefined
+              return true
+            }),
+          ),
+          Effect.catch(answered("a chat's view")),
         ),
-        Effect.catch(answered("a chat's view")),
       )
 
     const patch = (chat: Chat, body: Record<string, unknown>) =>
-      send("patch", sessionPath(chat), body, PacerWire.View).pipe(
-        Effect.flatMap((view) => hold(chat, view)),
-        Effect.as(true),
-        Effect.catch(answered("a chat's settings")),
+      fresh(
+        chat,
+        send("patch", sessionPath(chat), body, PacerWire.View).pipe(
+          Effect.flatMap((view) => hold(chat, view)),
+          Effect.as(true),
+          Effect.catch(answered("a chat's settings")),
+        ),
       )
 
     const post = (chat: Chat, event: ChatEvent) =>
@@ -592,6 +630,13 @@ export const layer = Layer.effect(
     const work = Effect.fnUntraced(function* (chat: Chat) {
       if (!on()) return
       if (chat.info === undefined) chat.info = yield* lookup(chat.sessionID)
+      // Its label is told without reading its view, once in this process, after its first step through CPP streamed:
+      // the step's own request goes first, never behind it. A rename tells it again.
+      if (!chat.labelled && chat.streamed) {
+        chat.labelled = true
+        const label = labelOf(chat)
+        if (label && label !== chat.label) tell(chat, { type: "label", label })
+      }
       if (chat.requests) {
         chat.requests = false
         yield* requestsUpdated(yield* lineage(chat.sessionID))
@@ -819,6 +864,8 @@ export const layer = Layer.effect(
         chat.stale = false
         chat.marks = undefined
         chat.read = false
+        chat.labelled = false
+        chat.streamed = false
         chat.missing = false
         chat.storeID = undefined
         chat.duration = undefined
@@ -942,10 +989,14 @@ export const layer = Layer.effect(
           return
         }
         case "session.step.streamed": {
+          // The step's request moved CPP's view of the chat. Only the chats someone looks at cost a read (spec
+          // section 3): a TUI showing it asks at each of its step ends. Its first step here also tells its label.
           const chat = chats.get(sessionID)
           if (!chat?.step) return
-          chat.read = true
-          return mark(chat)
+          if (chat.raw) chat.stale = true
+          chat.streamed = true
+          if (!chat.labelled) mark(chat)
+          return
         }
         case "session.tool.input.started": {
           const chat = chats.get(sessionID)
@@ -1029,11 +1080,10 @@ export const layer = Layer.effect(
         case "session.compaction.ended": {
           const chat = known(sessionID)
           if (!chat) return
-          // CPP's view is read again for what it plans next; one through another provider is told first, CPP saw one
-          // that went through it.
-          chat.read = true
-          if (event.data.model?.providerID === provider) mark(chat)
-          else tell(chat, { type: "compacted" })
+          // What CPP plans next is read when asked for; one through another provider is told, CPP saw one that went
+          // through it.
+          if (chat.raw) chat.stale = true
+          if (event.data.model?.providerID !== provider) tell(chat, { type: "compacted" })
           // The compaction CPP planned is done: "compacts at" goes at once, not when CPP's view says so.
           if (!chat.raw?.warming?.compact_at) return
           chat.raw = { ...chat.raw, warming: { ...chat.raw.warming, compact_at: null, compact_reason: null } }
@@ -1113,38 +1163,33 @@ export const layer = Layer.effect(
         Effect.sync(() => (on() && link.contact !== undefined ? { ...link.status, asOf: link.contact } : link.status)),
       accounts: () => Effect.sync(() => link.accounts),
       chat: (sessionID) =>
-        Effect.gen(function* () {
+        Effect.sync(() => {
           const chat = touch(sessionID)
-          if (chat.view) {
-            if (chat.stale && on()) {
-              chat.read = true
-              mark(chat)
-            }
-            return chat.view
-          }
-          if (!on() || chat.missing) return undefined
-          if (!chat.on && !link.active.has(chat.uuid)) {
+          // The held view at once; one read beside it, through the chats' queue, when it may be out of date or none is
+          // held. It comes as `pacer.chat.updated` when it changed.
+          if (on() && !chat.missing && !chat.reading && (chat.stale || !chat.view)) {
             chat.read = true
             mark(chat)
-            return undefined
           }
-          yield* readView(chat)
           return chat.view
         }),
       update: (sessionID, input) =>
         Effect.gen(function* () {
           yield* requireOn
           const chat = touch(sessionID)
-          const view = yield* send(
-            "patch",
-            sessionPath(chat),
-            {
-              ...(input.warming !== undefined ? { "pings.enabled": input.warming } : {}),
-              ...(input.compactBeforeCold !== undefined
-                ? { "warming.compact_before_cold": input.compactBeforeCold }
-                : {}),
-            },
-            PacerWire.View,
+          const view = yield* fresh(
+            chat,
+            send(
+              "patch",
+              sessionPath(chat),
+              {
+                ...(input.warming !== undefined ? { "pings.enabled": input.warming } : {}),
+                ...(input.compactBeforeCold !== undefined
+                  ? { "warming.compact_before_cold": input.compactBeforeCold }
+                  : {}),
+              },
+              PacerWire.View,
+            ),
           ).pipe(Effect.mapError(unavailable))
           yield* hold(chat, view)
           return chat.view ?? PacerWire.chat(view, sessionID, { ...(yield* context()), alias })

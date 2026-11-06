@@ -63,7 +63,8 @@ export type Trigger =
   /**
    * `inputID` is the `/compact` inbox item, whose message shows the outcome. `models`, when the item names them, write
    * the summary as a move's do: CLIProxyPacer's `compact` notice names the chat's own model, the one whose prompt
-   * cache is warm, never the compaction agent's.
+   * cache is warm, never the compaction agent's. A summary held from the background is taken then only when the model
+   * picked wrote it.
    */
   | {
       readonly reason: "manual"
@@ -74,8 +75,9 @@ export type Trigger =
   /**
    * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
    * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
-   * own model. Always a summary written here, never a provider's native compaction. Skipped before the chat's first
-   * finished step, when there is nothing to summarize but the prompt.
+   * own model. Always a summary written here, never a provider's native compaction, and a summary held from the
+   * background only when the model picked wrote it. Skipped before the chat's first finished step, when there is
+   * nothing to summarize but the prompt.
    */
   | {
       readonly reason: "move"
@@ -136,6 +138,8 @@ type Precomputed = {
   readonly firstID: SessionMessage.ID | undefined
   readonly keepID: SessionMessage.ID
   readonly model: SessionContext.Loaded["model"]["ref"]
+  /** The model writing it: the compaction agent's when one is set, else the chat's. */
+  readonly writer: SessionContext.Loaded["model"]["ref"]
   readonly initial: string
   /** The longest tail since `keepID` that compaction still accepts beside this summary. */
   readonly tailLimit: number
@@ -339,12 +343,8 @@ export const layer = Layer.effect(
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
       const native = trigger.reason !== "move" && context.model.compaction?.type === "native"
-      const model = yield* selectModel(
-        context,
-        settings.buffer,
-        native,
-        trigger.reason === "move" || trigger.reason === "manual" ? trigger.models : undefined,
-      )
+      const picks = trigger.reason === "move" || trigger.reason === "manual" ? trigger.models : undefined
+      const model = yield* selectModel(context, settings.buffer, native, picks)
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
       const budget =
         trigger.reason === "overflow"
@@ -356,7 +356,11 @@ export const layer = Layer.effect(
       // opens here, before any wait, so a background summary still being written shows as a running compaction.
       if (trigger.reason !== "manual")
         yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: context.session.id, reason: "auto" })
-      const swapped = held ? yield* usePrecomputed(selected, held, budget, settings) : undefined
+      // A compaction whose item names the models to write it (CLIProxyPacer's compact notice, a move) takes a summary
+      // held from the background only when the model it picked wrote it, not the compaction agent's.
+      const usable = held && (picks === undefined || sameRef(held.writer, model.context.model.ref)) ? held : undefined
+      if (held && !usable) yield* Fiber.interrupt(held.fiber)
+      const swapped = usable ? yield* usePrecomputed(selected, usable, budget, settings) : undefined
       const compaction = swapped
         ? Effect.succeed(swapped)
         : native
@@ -422,6 +426,7 @@ export const layer = Layer.effect(
         firstID: context.messages[0]?.id,
         keepID: anchor.id,
         model: context.model.ref,
+        writer: model.context.model.ref,
         initial: Instructions.join(context.initial),
         tailLimit: tailLimit(settings.keep, model.cap),
         failures,
@@ -1285,4 +1290,8 @@ const estimateMedia = (mime: string) => {
   if (type.startsWith("image/")) return IMAGE_TOKEN_ESTIMATE
   if (type === "application/pdf") return PDF_TOKEN_ESTIMATE
   return 0
+}
+
+function sameRef(a: SessionContext.Loaded["model"]["ref"], b: SessionContext.Loaded["model"]["ref"]) {
+  return a.id === b.id && a.providerID === b.providerID && a.variant === b.variant
 }

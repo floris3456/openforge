@@ -572,6 +572,89 @@ smoke(
   30_000,
 )
 
+// The daemon outlives a server that handed it on, and so did the server's subscriptions to it: an attached
+// client's WebSocket stayed open, and the HTTP server waited for it until its 20 s graceful shutdown timeout.
+smoke(
+  "closes its terminal sockets when it stops after a handoff, and the terminal lives on in the next server",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* testDirectory()
+      const scope = yield* Scope.Scope
+      const originalScope = yield* Scope.fork(scope)
+      const options = {
+        hostname: "127.0.0.1",
+        port: 0,
+        password: "secret",
+        app: { version: "test-version" },
+        database: { path: fixture.database },
+        pty: { root: fixture.directory },
+        fs: { filewatcher: false },
+      }
+      const original = yield* ServerProcess.start<never, never>(options).pipe(
+        Effect.provideService(Scope.Scope, originalScope),
+      )
+      const base = HttpServer.formatAddress(original.address)
+      const sessionID = Session.ID.make("ses_persistent_pty_stop")
+      const first = Schema.decodeUnknownSync(PersistentPty.Info)(
+        (yield* request(base, "POST", `/api/experimental/session/${sessionID}/terminal`, {
+          command: "/bin/sh",
+          args: ["-c", "stty -echo; printf before-stop; exec cat"],
+          cwd: process.cwd(),
+          title: "attached",
+          env: {},
+        })).data,
+      )
+      expect(yield* waitForText(base, first.id, "before-stop")).toContain("before-stop")
+      const attached = yield* Effect.acquireRelease(
+        Effect.promise(() => openTerminalSocket(base, first.id, "attached-at-stop")),
+        (connection) => Effect.sync(() => connection.socket.close()),
+      )
+      let closeCode: number | undefined
+      attached.socket.addEventListener("close", (event) => {
+        closeCode = event.code
+      })
+      const handoff = Schema.decodeUnknownSync(PersistentPty.Handoff)(
+        (yield* request(base, "POST", "/api/experimental/persistent-pty/handoff")).handoff,
+      )
+      const registration = Schema.decodeUnknownSync(Schema.Struct({ pid: Schema.Number }))(
+        yield* Effect.promise(() => Bun.file(path.join(handoff.directory, "service.json")).json()),
+      )
+
+      const stopping = Date.now()
+      yield* Scope.close(originalScope, Exit.void)
+      expect(Date.now() - stopping).toBeLessThan(5_000)
+      yield* Effect.promise(async () => {
+        for (let attempt = 0; attempt < 100 && !attached.closed; attempt++) await Bun.sleep(20)
+      })
+      expect(attached.closed).toBeTrue()
+      expect(closeCode).toBe(1000)
+      expect(process.kill(registration.pid, 0)).toBeTrue()
+      expect(process.kill(first.pid, 0)).toBeTrue()
+
+      const replacementScope = yield* Scope.fork(scope)
+      const replacement = yield* ServerProcess.start<never, never>({
+        ...options,
+        pty: { ...options.pty, handoff },
+      }).pipe(Effect.provideService(Scope.Scope, replacementScope))
+      const replacementBase = HttpServer.formatAddress(replacement.address)
+      expect(
+        (yield* request(replacementBase, "GET", `/api/experimental/session/${sessionID}/terminal`)).data,
+      ).toMatchObject([{ id: first.id, pid: first.pid }])
+      const reattached = yield* Effect.acquireRelease(
+        Effect.promise(() => openTerminalSocket(replacementBase, first.id, "attached-after-stop")),
+        (connection) => Effect.sync(() => connection.socket.close()),
+      )
+      expect(reattached.output).toContain("before-stop")
+      reattached.socket.send(inputFrame(80, 24, "after-stop\n"))
+      yield* Effect.promise(() => waitForSocketOutput([reattached], "after-stop"))
+
+      yield* Scope.close(replacementScope, Exit.void)
+      yield* waitForExit(registration.pid)
+      yield* waitForExit(first.pid)
+    }),
+  30_000,
+)
+
 smoke(
   "migrates a legacy runtime directory on restart and boots fresh when the registration is gone",
   () =>

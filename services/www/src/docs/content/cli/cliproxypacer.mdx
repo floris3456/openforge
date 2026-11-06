@@ -1,0 +1,126 @@
+---
+title: "CLIProxyPacer"
+description: "What the TUI shows for a chat on CLIProxyPacer: the cache timer, the account, the chat's requests, and two switches."
+---
+
+A chat on the [CLIProxyPacer provider](/providers#cliproxypacer) gets four extras in the TUI: a cache item in the
+toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and two switches. A chat counts as on
+CLIProxyPacer (CPP) when its model is one of CPP's or one of its steps went through CPP. Without CPP set up, none of the
+extras shows.
+
+```text
+warm 23:41
+```
+
+The keys are listed on [Keybinds](/cli/keybinds#cliproxypacer).
+
+## Toolbar
+
+The toolbar under the prompt shows one cache item after the context and cost. It counts down to when the chat's prompt
+cache goes cold if nothing more is sent, including the pings CPP still plans.
+
+| It shows                                         | When                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------ |
+| `warm 23:41`                                     | the cache is warm and CPP pings it                                 |
+| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm               |
+| `cache cold`                                     | the cache went cold, shown as a warning                            |
+| `keep-alive stopped · warm 2:10`                 | CPP's pings stopped on a failure, shown as a warning               |
+| `compacts at 14:32`                              | compact before cold is on, and CPP has set the time it asks for it |
+| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning   |
+| `warm`                                           | the cache is warm and CPP gives no time                            |
+| nothing                                          | the proxy has no pacer, or CPP knows nothing of the chat yet       |
+
+- While CPP is unreachable the item keeps its last text, greyed, with the time it is from: `warm 12:05 · as of 14:02`.
+  It stops counting until CPP answers again.
+- In a narrow window the shortcuts go first, then the context and cost; the cache item goes last.
+- Click it to open the footer at the **Requests** tab.
+
+## Sidebar
+
+The **Account** section, above the sidebar's other sections, shows the account CPP serves the chat from, or the one that
+served it last while the chat is idle. The sidebar's **Context** section is gone; the toolbar shows the same.
+
+```text
+Account
+claude-max-2
+5h  62% left · resets 1:20
+7d  88% left · resets ~3d 4h
+next: claude-max-1, once its cache is cold
+```
+
+- Each line under the account is one of its usage windows. `~` marks a reset CPP estimates, `· stale` a reading CPP no
+  longer counts on (older than an hour), `not started` a window nothing has used since it last reset, and
+  `reset, awaiting a reading` one whose reset has passed with no reading since.
+- `next:` says where the chat goes once its cache is cold, and why.
+- `forced move to <account> now` (a warning) or `… soon` says CPP must move the chat.
+- While CPP is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it says
+  `no pacer`.
+
+## Requests tab
+
+The **Requests** tab lists the chat's requests at CPP, with its subagents', newest at the top. Press **↓** from the
+prompt to open the footer, then **←/→** to reach the tab after **Terminals**, or click the toolbar's cache item.
+
+```text
+time      kind        model               account       read/write    verdict                             cost
+14:02:13  step        claude-sonnet-5-5   claude-max-2  48.2K/1.0K    hit                              $0.0312
+14:01:40  explore     claude-haiku-5-5    claude-max-2  0/12.5K       miss · tools changed · tools[0]  $0.0451
+14:00:02  title       claude-haiku-5-5    claude-max-2  0/0                                            $0.0004
+```
+
+- **kind** is `step`, the agent of a subagent's step, `ping`, `title` or `compaction`.
+- **read/write** are the tokens read from and written to the prompt cache.
+- **verdict** is CPP's cache verdict. A miss shows its cause and the part of the prompt that changed, as a warning; a
+  failed or refused request shows as an error.
+- In a narrow window the model goes first, then the account, then read/write.
+- More rows are read as you near the end of the list.
+
+| Key                             | Does                                                                                                                                                                          |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **↑/↓**, **Page Up/Down**       | Move between requests; **↑** on the newest closes the footer.                                                                                                                 |
+| **Ctrl+A**                      | Shows only cache misses, or all requests again. The TUI remembers it until it exits, as it does the Subagents filter.                                                         |
+| **Enter**                       | Moves the chat to where the request ended: the end of that step's reply. A subagent's request opens the subagent's chat there; a ping or a title goes to the reply before it. |
+| **Ctrl+Enter** or **Alt+Enter** | Shows what changed in the request's prompt, in place of the list. The same key or **Esc** goes back to the same row.                                                          |
+
+What changed shows CPP's verdict and its cause, how many tokens were written to the cache again and what the miss cost,
+and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only had their
+cache marker moved. It scrolls with **↑/↓**, and the footer grows to at most half the window. When CPP no longer keeps
+the prompt, it says `prompt no longer kept`.
+
+```text
+miss · tools changed · tools[0] changed
+12.5K tokens written again · the miss cost $0.0389
+compared with 1793911200-claude-max-2-7f3a of 14:00:02
+changed  tool       tools[0]  1.2K chars  read: Read a file from the local filesystem
+14 unchanged
+```
+
+**Inside tmux use Alt+Enter.** tmux passes a modified Enter on only with its `extended-keys` option; without it,
+Ctrl+Enter can arrive as a plain Enter, which moves the chat to the request instead. Alt+Enter gets through. In macOS
+Terminal it needs **Use Option as Meta key** in the profile's keyboard settings.
+
+The tab says why it is empty: `No requests yet`, `No cache misses yet`, `CPP unreachable · as of 14:02` above the last
+rows, greyed, or `This proxy has no pacer, so it keeps no request records`. It is hidden when CPP isn't set up or the
+chat never used it.
+
+## Switches
+
+Two switches change how CPP treats the chat. The leader is **Ctrl+X** unless you changed it, so `<leader>k` is
+**Ctrl+X**, then **K**. Each is also in the command palette (**Ctrl+P**), under CLIProxyPacer.
+
+| Key         | Palette                           | Switches                                                                    |
+| ----------- | --------------------------------- | --------------------------------------------------------------------------- |
+| `<leader>k` | Cache warming for this chat       | CPP's pings for the chat, which keep its prompt cache warm while you pause. |
+| `<leader>j` | Compact before cold for this chat | Whether CPP asks to compact the idle chat before its cache goes cold.       |
+
+```text
+Cache warming off for this chat
+```
+
+- A toast says the new state, and the toolbar shows it at once.
+- Before the chat's first reply, CPP knows nothing of it yet: switch it after that reply.
+- On a proxy without the pacer, neither the keys nor the palette entries exist.
+- When CPP asks to compact, openforge compacts the chat unless a step runs, a prompt is queued, or a revert is staged.
+
+**Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
+asks CPP to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't count.

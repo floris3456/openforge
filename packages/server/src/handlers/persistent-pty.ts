@@ -20,6 +20,7 @@ import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
 import { makeMediaGet } from "./media"
+import { makePacer } from "./pacer"
 import { type Outbound, runPtySocket } from "./pty-socket"
 import { makeSchedule } from "./schedule"
 import { makeService } from "./service"
@@ -33,6 +34,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
     const service = yield* makeService
+    const pacer = yield* makePacer
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -52,6 +54,12 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("service.status", () => service.status)
       .handle("service.pause", (ctx) => service.pause(ctx.payload.timeout))
       .handle("service.resume", () => service.resume)
+      .handle("pacer.status", () => pacer.status)
+      .handle("pacer.accounts", () => pacer.accounts)
+      .handle("pacer.chat.get", (ctx) => pacer.chat(ctx.params.sessionID))
+      .handle("pacer.chat.update", (ctx) => pacer.update(ctx.params.sessionID, ctx.payload))
+      .handle("pacer.chat.requests", (ctx) => pacer.requests(ctx.params.sessionID, ctx.query))
+      .handle("pacer.prompt", (ctx) => pacer.prompt(ctx.params.requestID))
       .handle(
         "persistentPty.read",
         Effect.fn(function* (ctx) {

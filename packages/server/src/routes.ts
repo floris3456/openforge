@@ -27,6 +27,7 @@ import { ShellWrap } from "@opencode/core/shell/wrap"
 import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
 import { Mcp } from "@opencode/core/mcp/index"
+import { PacerConnection } from "@opencode/core/pacer/connection"
 import { Global } from "@opencode/util/global"
 import { FSUtil } from "@opencode/util/fs-util"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
@@ -89,6 +90,7 @@ const applicationServiceNodes = [
   ShellRunner.node,
   SessionRestart.node,
   SessionContinuity.node,
+  PacerConnection.node,
   Schedule.node,
   Workspace.node,
   FileWatch.node,

@@ -271,6 +271,16 @@ import type {
   ExperimentalServicePauseInput,
   ExperimentalServicePauseOutput,
   ExperimentalServiceResumeOutput,
+  ExperimentalPacerStatusOutput,
+  ExperimentalPacerAccountsOutput,
+  ExperimentalPacerChatGetInput,
+  ExperimentalPacerChatGetOutput,
+  ExperimentalPacerChatUpdateInput,
+  ExperimentalPacerChatUpdateOutput,
+  ExperimentalPacerChatRequestsInput,
+  ExperimentalPacerChatRequestsOutput,
+  ExperimentalPacerPromptInput,
+  ExperimentalPacerPromptOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1730,6 +1740,64 @@ const EndpointExperimentalServiceResume = (raw: RawClient["server.experimental"]
     ),
   )
 
+const EndpointExperimentalPacerStatus = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerStatusOutput>()(
+    raw["pacer.status"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalPacerAccounts = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerAccountsOutput>()(
+    raw["pacer.accounts"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalPacerChatGet =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatGetInput) =>
+    preserveEffect<ExperimentalPacerChatGetOutput>()(
+      raw["pacer.chat.get"]({ params: { sessionID: input["sessionID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalPacerChatUpdate =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatUpdateInput) =>
+    preserveEffect<ExperimentalPacerChatUpdateOutput>()(
+      raw["pacer.chat.update"]({
+        params: { sessionID: input["sessionID"] },
+        payload: { warming: input["warming"], compactBeforeCold: input["compactBeforeCold"] },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalPacerChatRequests =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatRequestsInput) =>
+    preserveEffect<ExperimentalPacerChatRequestsOutput>()(
+      raw["pacer.chat.requests"]({
+        params: { sessionID: input["sessionID"] },
+        query: { filter: input["filter"], cursor: input["cursor"], limit: input["limit"] },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalPacerPrompt =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerPromptInput) =>
+    preserveEffect<ExperimentalPacerPromptOutput>()(
+      raw["pacer.prompt"]({ params: { requestID: input["requestID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1763,6 +1831,16 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     status: EndpointExperimentalServiceStatus(raw),
     pause: EndpointExperimentalServicePause(raw),
     resume: EndpointExperimentalServiceResume(raw),
+  },
+  pacer: {
+    status: EndpointExperimentalPacerStatus(raw),
+    accounts: EndpointExperimentalPacerAccounts(raw),
+    chat: {
+      get: EndpointExperimentalPacerChatGet(raw),
+      update: EndpointExperimentalPacerChatUpdate(raw),
+      requests: EndpointExperimentalPacerChatRequests(raw),
+    },
+    prompt: EndpointExperimentalPacerPrompt(raw),
   },
 })
 

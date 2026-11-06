@@ -287,6 +287,7 @@ import type {
   ExperimentalPacerChatUpdateOutput,
   ExperimentalPacerChatRequestsInput,
   ExperimentalPacerChatRequestsOutput,
+  ExperimentalPacerRefreshOutput,
   ExperimentalPacerPromptInput,
   ExperimentalPacerPromptOutput,
   ShellListInput,
@@ -1849,6 +1850,17 @@ export function make(options: ClientOptions) {
               requestOptions,
             ).then((value) => value.data),
         },
+        refresh: (requestOptions?: RequestOptions) =>
+          request<ExperimentalPacerRefreshOutput>(
+            {
+              method: "POST",
+              path: `/api/experimental/pacer/refresh`,
+              successStatus: 204,
+              declaredStatuses: [400, 401],
+              empty: true,
+            },
+            requestOptions,
+          ),
         prompt: (input: ExperimentalPacerPromptInput, requestOptions?: RequestOptions) =>
           request<{ readonly data: ExperimentalPacerPromptOutput }>(
             {

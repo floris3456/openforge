@@ -4954,6 +4954,8 @@ export type ExperimentalPacerChatRequestsInput = {
 
 export type ExperimentalPacerChatRequestsOutput = { data: PacerRequests }["data"]
 
+export type ExperimentalPacerRefreshOutput = void
+
 export type ExperimentalPacerPromptInput = { readonly requestID: string }
 
 export type ExperimentalPacerPromptOutput = { data: PacerPromptChange | null }["data"]

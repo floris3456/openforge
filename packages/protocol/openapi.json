@@ -14800,6 +14800,41 @@
         "summary": "List a chat's CLIProxyPacer requests"
       }
     },
+    "/api/experimental/pacer/refresh": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.refresh",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Start reading CPP's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up. Experimental: may change without compatibility guarantees.",
+        "summary": "Read CLIProxyPacer's models again"
+      }
+    },
     "/api/experimental/pacer/prompt/{requestID}": {
       "get": {
         "tags": ["experimental"],

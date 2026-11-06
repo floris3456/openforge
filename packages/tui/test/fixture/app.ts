@@ -37,7 +37,11 @@ export async function createAppFixture(
   const events = createEventStream()
   const calls = createFetch(input.fetch, events)
   // Updates apply to a copy, as a config file would, so preference writes persist for the rest of the test.
-  let config: Config.Info = structuredClone(input.config ?? { animations: false })
+  // Notifications and sounds are on by default; a test that is not about them makes none.
+  let config: Config.Info = structuredClone({
+    attention: { notifications: false, sound: false },
+    ...(input.config ?? { animations: false }),
+  })
   const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
   const task = Effect.runPromise(
     run({

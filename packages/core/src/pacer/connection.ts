@@ -92,6 +92,8 @@ export const READERS = 4
 export const CHATS = 1_000
 /** What-changed answers held. */
 export const PROMPTS = 50
+/** CPP's UUIDs of chats with new requests this service didn't know yet, held at most. */
+export const UNNAMED = 200
 
 const provider: string = PacerEndpoint.id
 
@@ -173,6 +175,8 @@ interface Chat {
   compact: "named" | "check" | undefined
   /** Its subagents were looked up for its request rows. */
   children: boolean
+  /** CPP recorded requests of it before this service knew it: the TUIs are told once its parents are known. */
+  requests: boolean
 }
 
 /** The connection's own state. */
@@ -217,6 +221,9 @@ export const layer = Layer.effect(
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
+    // A chat's first requests can reach CPP, and its notice this service, before the chat's step is published here: a
+    // new chat's title and first step, or a chat continued after a restart.
+    const unnamed = new Set<string>()
 
     const on = () => link.status.state === "on"
     const context = () => Effect.map(Clock.currentTimeMillis, (now) => ({ offset: link.offset, now }))
@@ -294,6 +301,7 @@ export const layer = Layer.effect(
     }
 
     const pending = (chat: Chat) =>
+      chat.requests ||
       chat.events.length > 0 ||
       chat.read ||
       chat.ended ||
@@ -316,9 +324,10 @@ export const layer = Layer.effect(
         chats.set(sessionID, found)
         return found
       }
+      const uuid = PacerSessionID.make(sessionID)
       const chat: Chat = {
         sessionID,
-        uuid: PacerSessionID.make(sessionID),
+        uuid,
         on: false,
         step: false,
         info: undefined,
@@ -340,9 +349,11 @@ export const layer = Layer.effect(
         removed: false,
         compact: undefined,
         children: false,
+        requests: unnamed.delete(uuid),
       }
       chats.set(sessionID, chat)
       byUuid.set(chat.uuid, sessionID)
+      if (chat.requests) mark(chat)
       if (chats.size > CHATS)
         for (const held of chats.values()) {
           if (chats.size <= CHATS) break
@@ -508,10 +519,31 @@ export const layer = Layer.effect(
         )
     })
 
+    /** The chat and its parents, from the store where not held: a subagent's requests are also its parents'. */
+    const lineage = Effect.fnUntraced(function* (sessionID: SessionID) {
+      const ids: SessionID[] = []
+      for (let id: SessionID | undefined = sessionID; id && ids.length < 8; ) {
+        ids.push(id)
+        const held = chats.get(id)
+        if (held && held.info === undefined) held.info = yield* lookup(id)
+        id = held?.info?.parentID
+      }
+      return ids
+    })
+
+    const requestsUpdated = (sessionIDs: Iterable<SessionID>) =>
+      Effect.forEach(sessionIDs, (sessionID) => bus.publish(Pacer.Event.RequestsUpdated, { sessionID }), {
+        discard: true,
+      })
+
     /** One chat's work, in order: its events, its waits' duration, a read of its view, a compaction. */
     const work = Effect.fnUntraced(function* (chat: Chat) {
       if (!on()) return
       if (chat.info === undefined) chat.info = yield* lookup(chat.sessionID)
+      if (chat.requests) {
+        chat.requests = false
+        yield* requestsUpdated(yield* lineage(chat.sessionID))
+      }
       if (chat.ended) {
         chat.ended = false
         if (chat.info.parentID) close(chat)
@@ -609,25 +641,28 @@ export const layer = Layer.effect(
       const answer = yield* get(`/pacer/v1/monitor/requests?${query}&from=0`, PacerWire.Rows)
       const rows = PacerWire.rows(answer.items)
       link.newest = Math.max(link.newest ?? 0, ...rows.map((row) => row.id))
-      const named = new Set<SessionID>()
-      // More rows than one read takes, or a subagent's this service can't name: every TUI reads again.
-      let everyone = typeof answer.next === "string"
-      for (const row of rows) {
-        const sessionID = row.session_ext ? byUuid.get(row.session_ext.toLowerCase()) : undefined
-        if (!sessionID) {
-          everyone ||= row.subagent === true
-          continue
-        }
-        // A subagent's requests are also its parents'.
-        for (let id: SessionID | undefined = sessionID, depth = 0; id && depth < 8; depth++) {
-          named.add(id)
-          id = chats.get(id)?.info?.parentID
+      const found = new Set<SessionID>()
+      // Oldest first, so that the newest stay held.
+      for (const row of rows.toReversed()) {
+        const uuid = row.session_ext?.toLowerCase()
+        if (!uuid) continue
+        const sessionID = byUuid.get(uuid)
+        if (sessionID) found.add(sessionID)
+        else {
+          // Told once this service holds the chat (Chat.requests); another client's chats stay here until pushed out.
+          unnamed.delete(uuid)
+          unnamed.add(uuid)
+          for (const oldest of unnamed) {
+            if (unnamed.size <= UNNAMED) break
+            unnamed.delete(oldest)
+          }
         }
       }
-      yield* Effect.forEach(named, (sessionID) => bus.publish(Pacer.Event.RequestsUpdated, { sessionID }), {
-        discard: true,
-      })
-      if (everyone) yield* bus.publish(Pacer.Event.RequestsUpdated, {})
+      const named = new Set<SessionID>()
+      for (const sessionID of found) for (const id of yield* lineage(sessionID)) named.add(id)
+      yield* requestsUpdated(named)
+      // More rows than one read takes: every TUI reads again.
+      if (typeof answer.next === "string") yield* bus.publish(Pacer.Event.RequestsUpdated, {})
     })
 
     const readState = Effect.gen(function* () {
@@ -713,6 +748,7 @@ export const layer = Layer.effect(
       link.active = new Set()
       link.newest = undefined
       prompts.clear()
+      unnamed.clear()
       // Another CPP knows nothing of what this one said.
       for (const chat of chats.values()) {
         chat.raw = undefined
@@ -726,6 +762,7 @@ export const layer = Layer.effect(
         chat.model = undefined
         chat.events = []
         chat.compact = undefined
+        chat.requests = false
       }
     }
 

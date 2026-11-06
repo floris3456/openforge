@@ -738,6 +738,48 @@ describe("PacerConnection notices", () => {
     }),
   )
 
+  it.effect(
+    "tells of a chat's requests CPP recorded before its step was seen here, for the newest 200 such chats",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const parent = yield* chat(h)
+        const child = yield* chat(h, parent)
+        const early = yield* chat(h)
+        yield* step(h, parent)
+        yield* until("the parent held", () => h.lookups.count >= 1)
+        // A first read, so that the next takes up to 500 new rows.
+        h.cpp.notice("request", { keys: [1], at: 1 })
+        yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+        // The subagent's first request reached CPP before its step's start was published here; another client's 200
+        // chats come after the early chat's request.
+        h.cpp.rows = [
+          row(1, { session_ext: PacerSessionID.make(early) }),
+          ...Array.from({ length: PacerConnection.UNNAMED }, (_, index) =>
+            row(2 + index, { session_ext: `another-client-${index}` }),
+          ),
+          row(500, { session_ext: PacerSessionID.make(child), subagent: true }),
+        ]
+        h.published.length = 0
+        const told = () =>
+          h.published.filter((event) => event.type === "pacer.requests.updated").map((event) => event.data)
+        h.cpp.notice("request", { keys: [1], at: 2 })
+        yield* until("read again", () => seen(h, "/pacer/v1/monitor/requests").length === 2)
+        yield* settle
+        expect(seen(h, "/pacer/v1/monitor/requests")[1].query.get("limit")).toBe("500")
+        expect(told()).toEqual([])
+
+        yield* step(h, child)
+        yield* until("told", () => told().length === 2)
+        expect(told()).toEqual([{ sessionID: child }, { sessionID: parent }])
+        // Pushed out by the newer ones.
+        yield* step(h, early)
+        yield* settle
+        expect(told()).toHaveLength(2)
+      }),
+  )
+
   it.effect("merges a session notice's list into the held views", () =>
     Effect.gen(function* () {
       const h = yield* harness()

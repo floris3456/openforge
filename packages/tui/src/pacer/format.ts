@@ -161,43 +161,48 @@ export function requestTone(request: PacerRequest): "base" | "warning" | "error"
   return "base"
 }
 
-// Column widths, two spaces apart. The verdict takes what is left; a narrow window drops the model first, then the
-// account, then the cache read and write, so the verdict keeps room for a miss's cause.
+// Columns two spaces apart, sized to the rows (section 7). Each column first gets what its widest value needs, so a
+// value is cut only when the line has no blank room left for it; a narrow window drops the model first, then the
+// account, then the cache read and write, keeping the verdict room for a miss's cause when one needs it. Room to
+// spare widens the columns to their usual widths, so a longer value arriving later still fits, and the rest goes to
+// the verdict, which keeps the cost at the right edge.
 const TIME = 8
-const KIND = 10
-const ACCOUNT = 12
-const CACHE = 12
-const COST = 7
 const GAP = 2
+/** The kind column at most: a subagent's agent name is cut beyond it. */
+const KIND = 12
+/** The room the verdict keeps for a miss's cause, when a verdict needs it, before a column is added. */
 const VERDICT = 28
-const MODEL = 18
+/** The fewest cells the account and the model are shown in, cut. */
+const ACCOUNT = 10
+const MODEL = 12
+/** The usual widths, which room to spare widens the columns to, in this order. */
+const USUAL = { verdict: 28, kind: 10, account: 12, model: 18, cache: 12, cost: 7 } as const
 
-/** The columns a row of `width` cells has room for, and the widths of the model and the verdict. */
-export function requestColumns(width: number) {
-  const base = width - (TIME + KIND + COST + 3 * GAP)
-  const cache = base - (CACHE + GAP) >= VERDICT
-  const account = cache && base - (CACHE + ACCOUNT + 2 * GAP) >= VERDICT
-  const rest = base - (cache ? CACHE + GAP : 0) - (account ? ACCOUNT + GAP : 0)
-  const model = account && rest - GAP - VERDICT >= 12 ? Math.min(MODEL, rest - GAP - VERDICT) : 0
-  return { cache, account, model, verdict: Math.max(0, rest - (model ? model + GAP : 0)) }
+/** The width of each column of a row `width` cells wide; a column 0 cells wide isn't shown. */
+export interface RequestLayout {
+  readonly width: number
+  readonly kind: number
+  readonly model: number
+  readonly account: number
+  readonly cache: number
+  readonly verdict: number
+  readonly cost: number
 }
 
-/** The header over the rows, in the same columns. */
-export function requestHeader(width: number) {
-  return requestLine(width, {
-    time: "time",
-    kind: "kind",
-    model: "model",
-    account: "account",
-    cache: "read/write",
-    verdict: "verdict",
-    cost: "cost",
-  })
+type Cells = Record<"time" | "kind" | "model" | "account" | "cache" | "verdict" | "cost", string>
+
+const HEADER: Cells = {
+  time: "time",
+  kind: "kind",
+  model: "model",
+  account: "account",
+  cache: "read/write",
+  verdict: "verdict",
+  cost: "cost",
 }
 
-/** One row of the Requests tab, exactly `width` cells wide (section 7). */
-export function requestRow(request: PacerRequest, width: number) {
-  return requestLine(width, {
+function requestCells(request: PacerRequest): Cells {
+  return {
     time: clockSeconds(request.at),
     kind: requestKind(request),
     model: request.model,
@@ -205,25 +210,71 @@ export function requestRow(request: PacerRequest, width: number) {
     cache: `${Locale.number(request.tokens.cacheRead)}/${Locale.number(request.tokens.cacheWrite)}`,
     verdict: requestVerdict(request),
     cost: request.cost === undefined ? "" : formatCost(request.cost),
-  })
+  }
 }
 
-function requestLine(
-  width: number,
-  cells: { time: string; kind: string; model: string; account: string; cache: string; verdict: string; cost: string },
-) {
-  const columns = requestColumns(width)
+/** The columns of rows `width` cells wide for `requests`: their widest values, as far as the width allows. */
+export function requestLayout(width: number, requests: readonly PacerRequest[]): RequestLayout {
+  const widest = { kind: 0, model: 0, account: 0, cache: 0, verdict: 0, cost: 0 }
+  const keys = Object.keys(widest) as (keyof typeof widest)[]
+  for (const cells of [HEADER, ...requests.map(requestCells)])
+    for (const key of keys) widest[key] = Math.max(widest[key], stringWidth(cells[key]))
+  const layout = {
+    width,
+    kind: Math.min(widest.kind, KIND),
+    model: 0,
+    account: 0,
+    cache: 0,
+    verdict: Math.min(widest.verdict, VERDICT),
+    cost: widest.cost,
+  }
+  const shown = () => [layout.model, layout.account, layout.cache].filter((size) => size > 0).length
+  const left = () =>
+    width -
+    (TIME + layout.kind + layout.model + layout.account + layout.cache + layout.verdict + layout.cost) -
+    GAP * (3 + shown())
+  // The columns a narrow window drops, in the order they are kept, each while it fits.
+  for (const [key, least] of [
+    ["cache", widest.cache],
+    ["account", Math.min(widest.account, ACCOUNT)],
+    ["model", Math.min(widest.model, MODEL)],
+  ] as const) {
+    if (left() < least + GAP) break
+    layout[key] = least
+  }
+  const grow = (key: keyof typeof widest, to: number) => {
+    if (layout[key] > 0) layout[key] = Math.max(layout[key], Math.min(to, layout[key] + left()))
+  }
+  grow("verdict", widest.verdict)
+  grow("account", widest.account)
+  grow("model", widest.model)
+  for (const key of Object.keys(USUAL) as (keyof typeof USUAL)[]) grow(key, USUAL[key])
+  layout.verdict = Math.max(0, layout.verdict + left())
+  return layout
+}
+
+/** The header over the rows, in the same columns. */
+export function requestHeader(layout: RequestLayout) {
+  return requestLine(layout, HEADER)
+}
+
+/** One row of the Requests tab, exactly `layout.width` cells wide (section 7). */
+export function requestRow(request: PacerRequest, layout: RequestLayout) {
+  return requestLine(layout, requestCells(request))
+}
+
+function requestLine(layout: RequestLayout, cells: Cells) {
   const fit = (text: string, size: number) => pad(Locale.truncateWidth(text, size), size)
   const line = [
     fit(cells.time, TIME),
-    fit(cells.kind, KIND),
-    ...(columns.model ? [fit(cells.model, columns.model)] : []),
-    ...(columns.account ? [fit(cells.account, ACCOUNT)] : []),
-    ...(columns.cache ? [fit(cells.cache, CACHE)] : []),
-    fit(cells.verdict, columns.verdict),
-    padStart(Locale.truncateWidth(cells.cost, COST), COST),
+    fit(cells.kind, layout.kind),
+    ...(layout.model ? [fit(cells.model, layout.model)] : []),
+    ...(layout.account ? [fit(cells.account, layout.account)] : []),
+    ...(layout.cache ? [fit(cells.cache, layout.cache)] : []),
+    fit(cells.verdict, layout.verdict),
+    padStart(Locale.truncateWidth(cells.cost, layout.cost), layout.cost),
   ].join(" ".repeat(GAP))
-  return fit(line, width)
+  return fit(line, layout.width)
 }
 
 function pad(text: string, size: number) {

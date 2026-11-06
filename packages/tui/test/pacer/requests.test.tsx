@@ -260,6 +260,54 @@ describe("the list", () => {
     for (const frame of recorder.frames) expect(selected(frame)).toBe(time(2))
   })
 
+  test("the columns hold while rows arrive; one with a longer value is cut until the tab opens again or the window resizes", async () => {
+    await using setup = await requestsTab({ delay: 20, width: 100 })
+    await clickCacheItem(setup)
+    const before = await setup.frame((frame) => rowsOf(frame).length > 0)
+    const header = (frame: string) => frame.split("\n").find((line) => /time +kind/.test(line))
+    const line = (frame: string, at: string) => frame.split("\n").find((text) => text.includes(at))
+    const longer = { model: "claude-sonnet-4-5-20250929", account: "claude-apikey-2" }
+    {
+      using recorder = recordFrames(setup.app)
+      setup.fake.requests[CHAT] = [request(-1, longer), ...setup.fake.requests[CHAT]!]
+      setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+      await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
+      await setup.settle()
+      expect(recorder.missed).toBe(0)
+      // On every frame the header and the rows held before stay where they were, cell for cell.
+      for (const frame of recorder.frames) {
+        expect(header(frame.text)).toBe(header(before)!)
+        for (const at of range(0, 5)) expect(line(frame.text, at)).toBe(line(before, at)!)
+      }
+    }
+    const cut = line(setup.app.captureCharFrame(), time(-1))!
+    expect(cut).toContain("claude-sonnet-…")
+    expect(cut).not.toContain(longer.account)
+    // Opened again, the columns fit it.
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame((frame) => rowsOf(frame).length === 0)
+    await clickCacheItem(setup)
+    const again = await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(line(again, time(-1))).toContain(longer.model)
+    expect(line(again, time(-1))).toContain(longer.account)
+    expect(header(again)).not.toBe(header(before))
+    // A narrower window sizes them again, to its width.
+    setup.app.resize(80, 30)
+    const narrow = await setup.frame((frame) => rowsOf(frame).length > 0 && !frame.includes(longer.model))
+    expect(header(narrow)).toMatch(/time +kind +account +read\/write +verdict +cost/)
+    expect(line(narrow, time(-1))).toContain(longer.account)
+  })
+
+  test("opened with no rows yet, the columns are sized to the first rows that arrive", async () => {
+    await using setup = await requestsTab({ requests: [], delay: 20, width: 100 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => frame.includes("No requests yet"))
+    setup.fake.requests[CHAT] = [request(0, { model: "claude-sonnet-4-5-20250929", account: "claude-apikey-2" })]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    const frame = await setup.frame((frame) => rowsOf(frame).length === 1)
+    expect(frame).toContain("claude-sonnet-4-5-20250929  claude-apikey-2")
+  })
+
   test("watched from the newest row, new requests come in under the cursor on the top line, past the six rows", async () => {
     // Found live: a cursor left on the newest row was pushed down by each new request until the view followed it
     // off the top, and the newest requests stopped showing.

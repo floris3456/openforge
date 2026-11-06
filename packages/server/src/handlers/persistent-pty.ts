@@ -19,6 +19,7 @@ import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
+import { makeAttention } from "./attention"
 import { makeMediaGet } from "./media"
 import { type Outbound, runPtySocket } from "./pty-socket"
 import { makeSchedule } from "./schedule"
@@ -33,6 +34,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
     const service = yield* makeService
+    const attention = yield* makeAttention
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -52,6 +54,9 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("service.status", () => service.status)
       .handle("service.pause", (ctx) => service.pause(ctx.payload.timeout))
       .handle("service.resume", () => service.resume)
+      .handle("attention.occurrence", (ctx) => attention.occurrence(ctx.payload))
+      .handle("attention.test", (ctx) => attention.test(ctx.payload.kind))
+      .handleRaw("attention.follow", (ctx) => attention.follow(ctx.query.desktop === true))
       .handle(
         "persistentPty.read",
         Effect.fn(function* (ctx) {

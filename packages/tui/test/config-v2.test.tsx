@@ -113,6 +113,30 @@ test("shows resolved tab defaults in settings", () => {
   })
 })
 
+// openforge: notifications and sounds are on by default; the notification protocol is detected unless it is set.
+test("turns notifications and sounds on by default, and detects the notification protocol", () => {
+  expect(resolve({}, { terminalSuspend: true, environment: {} }).attention).toEqual({
+    notifications: true,
+    sound: true,
+    volume: 0.4,
+    sound_pack: "opencode.default",
+    sounds: {},
+    protocol: "auto",
+  })
+  expect(
+    resolve({ attention: { notifications: false, sound: false, protocol: "osc777" } }, { terminalSuspend: true })
+      .attention,
+  ).toMatchObject({ notifications: false, sound: false, protocol: "osc777" })
+  for (const protocol of ["auto", "osc99", "osc777", "osc9"] as const)
+    expect(decodeInfo({ attention: { protocol } })).toEqual({ attention: { protocol } })
+  expect(() => decodeInfo({ attention: { protocol: "none" } })).toThrow()
+  expect(
+    ["notifications", "sound", "protocol"].map(
+      (key) => settings.find((setting) => setting.path.join(".") === `attention.${key}`)?.default,
+    ),
+  ).toEqual([true, true, "auto"])
+})
+
 test("shows the new session location default in settings", () => {
   expect(settings.find((setting) => setting.path.join(".") === "session.new_location")?.default).toBe("launch")
 })

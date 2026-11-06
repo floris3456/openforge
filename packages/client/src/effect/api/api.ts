@@ -2547,6 +2547,58 @@ export type ExperimentalServiceResumeOutput = {
 }
 export type ExperimentalServiceResumeOperation<E = never> = () => Effect.Effect<ExperimentalServiceResumeOutput, E>
 
+export type ExperimentalAttentionOccurrenceInput = {
+  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+  readonly sessionID?: Session.ID | undefined
+  readonly title: string
+  readonly message: string
+  readonly notify: boolean
+  readonly sound?:
+    | {
+        readonly name: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+        readonly file?: string | undefined
+      }
+    | undefined
+  readonly focused: boolean
+}
+export type ExperimentalAttentionOccurrenceOutput = { readonly sound: boolean; readonly desktop: boolean }
+export type ExperimentalAttentionOccurrenceOperation<E = never> = (
+  input: ExperimentalAttentionOccurrenceInput,
+) => Effect.Effect<ExperimentalAttentionOccurrenceOutput, E>
+
+export type ExperimentalAttentionFollowInput = { readonly desktop?: boolean | undefined }
+export type ExperimentalAttentionFollowOutput =
+  | { readonly type: "following"; readonly version: string }
+  | {
+      readonly type: "occurrence"
+      readonly occurrence: {
+        readonly kind: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+        readonly sessionID?: Session.ID | undefined
+        readonly title: string
+        readonly message: string
+        readonly notify: boolean
+        readonly sound?:
+          | {
+              readonly name: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+              readonly file?: string | undefined
+            }
+          | undefined
+        readonly focused: boolean
+      }
+      readonly test?: true | undefined
+    }
+export type ExperimentalAttentionFollowOperation<E = never> = (
+  input?: ExperimentalAttentionFollowInput,
+) => Stream.Stream<ExperimentalAttentionFollowOutput, E>
+
+export type ExperimentalAttentionTestInput = {
+  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error"
+}
+export type ExperimentalAttentionTestOutput = { readonly sound: boolean; readonly desktop: boolean }
+export type ExperimentalAttentionTestOperation<E = never> = (
+  input: ExperimentalAttentionTestInput,
+) => Effect.Effect<ExperimentalAttentionTestOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2580,6 +2632,11 @@ export interface ExperimentalApi<E = never> {
     readonly status: ExperimentalServiceStatusOperation<E>
     readonly pause: ExperimentalServicePauseOperation<E>
     readonly resume: ExperimentalServiceResumeOperation<E>
+  }
+  readonly attention: {
+    readonly occurrence: ExperimentalAttentionOccurrenceOperation<E>
+    readonly follow: ExperimentalAttentionFollowOperation<E>
+    readonly test: ExperimentalAttentionTestOperation<E>
   }
 }
 

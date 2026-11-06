@@ -208,9 +208,15 @@ const result = await context.attention.notify({
   message: "Session done",
   notification: { when: "blurred" },
   sound: { name: "done", volume: 0.5, when: "always" },
+  sessionID,
 })
 console.log(result.ok, result.notification, result.sound, result.skipped)
 ```
+
+Each request also goes to the service, for the players that follow it ([`openforge notify`](/cli/commands#notify)).
+While one is connected, it plays the sound instead of the TUI, and with `--desktop` shows the notification: then
+`sound` or `notification` is `false` and `ok` is `true`. Pass `sessionID` when the request is about a session, so two
+TUIs on that session make one sound.
 
 ## Theme and renderer
 

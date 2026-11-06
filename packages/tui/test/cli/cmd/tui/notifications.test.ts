@@ -131,6 +131,7 @@ const formNotification: AttentionNotifyOptions = {
   message: "Input needs response",
   notification: { when: "blurred" },
   sound: { name: "question", when: "always" },
+  sessionID: "session",
 }
 
 const titledFormNotification: AttentionNotifyOptions = {
@@ -141,6 +142,7 @@ const titledFormNotification: AttentionNotifyOptions = {
 const globalFormNotification: AttentionNotifyOptions = {
   ...formNotification,
   title: "demo-mcp is requesting input",
+  sessionID: "global",
 }
 
 const permissionNotification: AttentionNotifyOptions = {
@@ -148,6 +150,7 @@ const permissionNotification: AttentionNotifyOptions = {
   message: "Permission needs input",
   notification: { when: "blurred" },
   sound: { name: "permission", when: "always" },
+  sessionID: "session",
 }
 
 describe("internal notifications TUI plugin", () => {
@@ -273,12 +276,14 @@ describe("internal notifications TUI plugin", () => {
         message: "Session done",
         notification: { when: "blurred" },
         sound: { name: "done", when: "always" },
+        sessionID: "session",
       },
       {
         title: "Demo session",
         message: "Session done",
         notification: { when: "blurred" },
         sound: { name: "done", when: "always" },
+        sessionID: "session",
       },
     ])
   })
@@ -301,12 +306,14 @@ describe("internal notifications TUI plugin", () => {
         message: "Input needs response",
         notification: false,
         sound: { name: "question", when: "always" },
+        sessionID: "subagent",
       },
       {
         title: "Subagent session",
         message: "Session done",
         notification: false,
         sound: { name: "subagent_done", when: "always" },
+        sessionID: "subagent",
       },
     ])
   })
@@ -333,6 +340,7 @@ describe("internal notifications TUI plugin", () => {
         message: "Session done",
         notification: { when: "blurred" },
         sound: { name: "done", when: "always" },
+        sessionID: "session",
       },
     ])
   })
@@ -350,6 +358,7 @@ describe("internal notifications TUI plugin", () => {
         message: "boom",
         notification: { when: "blurred" },
         sound: { name: "error", when: "always" },
+        sessionID: "session",
       },
     ])
   })

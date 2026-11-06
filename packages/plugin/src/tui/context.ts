@@ -303,6 +303,8 @@ export interface AttentionNotifyOptions {
   readonly message: string
   readonly notification?: AttentionNotification
   readonly sound?: AttentionSound
+  /** The session it is about. */
+  readonly sessionID?: string
 }
 
 export type AttentionNotifySkipReason =

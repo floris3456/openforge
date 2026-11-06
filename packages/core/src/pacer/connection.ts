@@ -48,9 +48,9 @@ export interface Interface {
   /** The connection now. Never waits on CPP. */
   readonly status: () => Effect.Effect<Pacer.Status>
   /**
-   * Every account the key sees, as last held: the meters are read at connect and after CPP's `reading` notices, so
-   * the held answer is never waited for. Read from CPP only while none is held and the pacer is on; undefined before
-   * the first read since CPP was set up.
+   * Every account the key sees, as last held. Never waits on CPP: the meters come with the state read at each connect,
+   * before the pacer is on, and are read again after CPP's `reading` notices. Undefined before the first read since
+   * CPP was set up.
    */
   readonly accounts: () => Effect.Effect<Pacer.Accounts | undefined>
   /**
@@ -996,12 +996,7 @@ export const layer = Layer.effect(
     return Service.of({
       status: () =>
         Effect.sync(() => (on() && link.contact !== undefined ? { ...link.status, asOf: link.contact } : link.status)),
-      accounts: () =>
-        Effect.gen(function* () {
-          if (link.accounts || !on()) return link.accounts
-          yield* readMeters.pipe(Effect.ignore)
-          return link.accounts
-        }),
+      accounts: () => Effect.sync(() => link.accounts),
       chat: (sessionID) =>
         Effect.gen(function* () {
           const chat = touch(sessionID)

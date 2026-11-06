@@ -57,7 +57,7 @@ export const PacerEndpoints = [
     annotations(
       "chat.get",
       "Get a chat on CLIProxyPacer",
-      "How CPP sees the chat: its account, cache, pings, next use, forced move and switches. Read from CPP only when the last read is out of date and the pacer is on, else as last read; null when CPP knows nothing of the chat.",
+      "How CPP sees the chat: its account, cache, pings, next use, forced move and switches. A view held from the last read is answered at once; when it is out of date and the pacer is on, it is read again in the background and `pacer.chat.updated` follows if it changed. With none held, read from CPP when CPP is known to have the chat. Null when CPP knows nothing of the chat.",
     ),
   ),
   HttpApiEndpoint.patch("pacer.chat.update", "/api/experimental/pacer/chat/:sessionID", {

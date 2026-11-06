@@ -29,8 +29,6 @@ export interface Price {
   readonly rates: Rates
   /** For a request whose input is above `above` tokens, the rates it sets replace `rates`'. */
   readonly context: ReadonlyArray<{ readonly above: number; readonly rates: Rates }>
-  /** The rates of the `fast` or `priority` service tier, where it differs. */
-  readonly fast?: Rates
 }
 
 /** Thinking controls every route of the model accepts. */
@@ -60,9 +58,6 @@ export interface Model {
   readonly input?: ReadonlyArray<string>
   readonly output?: ReadonlyArray<string>
   readonly reasoning?: Reasoning
-  /** Capabilities' `remote_compaction` and `in_request_compaction`; `mixed` where routes disagree. */
-  readonly remoteCompaction?: string
-  readonly inRequestCompaction?: string
   /** Undefined when CPP has no price for it; `/pacer/v1/models` prices only the models used in the last 30 days. */
   readonly price?: Price
 }
@@ -120,8 +115,6 @@ type Route = typeof Route.Type
 const Capable = Schema.Struct({
   id: Schema.String,
   display_name: maybe(Schema.String),
-  remote_compaction: maybe(Schema.String),
-  in_request_compaction: maybe(Schema.String),
   routes: Items,
 })
 const CapabilitiesAnswer = Schema.Struct({
@@ -143,7 +136,6 @@ const Priced = Schema.Struct({
     Schema.Struct({
       rates: RatesAnswer,
       context: maybe(Schema.Array(Schema.Struct({ above: Schema.Number, rates: RatesAnswer }))),
-      fast: maybe(RatesAnswer),
     }),
   ),
 })
@@ -172,7 +164,7 @@ const decodeSetting = Schema.decodeUnknownOption(Setting)
 const each = <A>(items: ReadonlyArray<unknown> | null | undefined, decode: (item: unknown) => Option.Option<A>) =>
   (items ?? []).flatMap((item) => Option.toArray(decode(item)))
 
-type Capability = typeof Capable.Type & { readonly routes: ReadonlyArray<Route> }
+type Capability = Omit<typeof Capable.Type, "routes"> & { readonly routes: ReadonlyArray<Route> }
 
 /** What `/pacer/v1/models` says, decoded. */
 interface Prices {
@@ -246,7 +238,12 @@ export const layer = Layer.effect(
       (effect) => lock.withPermit(effect),
     )
 
-    yield* endpoints.changes().pipe(Stream.runForEach(refresh), Effect.forkScoped({ startImmediately: true }))
+    // A new endpoint interrupts a read of the old one, which could otherwise hold the lock until its timeout.
+    yield* endpoints.changes().pipe(
+      Stream.switchMap(() => Stream.fromEffect(refresh())),
+      Stream.runDrain,
+      Effect.forkScoped({ startImmediately: true }),
+    )
 
     return Service.of({
       get: () => SubscriptionRef.get(current),
@@ -309,8 +306,6 @@ function model(
     (base && pinned && text(base.display_name) && `${base.display_name} (${pinned.provider})`) ??
     text(setting?.display_name) ??
     text(listed.display_name)
-  const remoteCompaction = text((exact ?? base)?.remote_compaction)
-  const inRequestCompaction = text((exact ?? base)?.in_request_compaction)
   const context = facts.context ?? positive(listed.context_length)
   const maxOutput = facts.maxOutput ?? positive(setting?.max_output) ?? positive(listed.max_completion_tokens)
   const price = prices && lookup(prices, lower, pinned, routes[0]?.provider.toLowerCase())
@@ -323,8 +318,6 @@ function model(
     ...(facts.input ? { input: facts.input } : {}),
     ...(facts.output ? { output: facts.output } : {}),
     ...(facts.reasoning ? { reasoning: facts.reasoning } : {}),
-    ...(remoteCompaction ? { remoteCompaction } : {}),
-    ...(inRequestCompaction ? { inRequestCompaction } : {}),
     ...(price ? { price } : {}),
   }
 }
@@ -373,7 +366,7 @@ function lookup(
   pinned: { readonly provider: string; readonly model: string } | undefined,
   provider: string | undefined,
 ): Price | undefined {
-  const same = (item: { readonly provider: string; readonly model: string }, model: string) =>
+  const same = (item: typeof Priced.Type, model: string) =>
     item.model.toLowerCase() === model && item.price !== null && item.price !== undefined
   const candidates = prices.models.filter((item) => same(item, lower))
   const found =
@@ -387,7 +380,6 @@ function lookup(
       context: (found.price.context ?? [])
         .map((tier) => ({ above: tier.above, rates: rates(tier.rates) }))
         .toSorted((a, b) => a.above - b.above),
-      ...(found.price.fast ? { fast: rates(found.price.fast) } : {}),
     }
   const manual = prices.manual.find((item) => [lower, pinned?.model].includes(item.model.toLowerCase()))
   return manual && { rates: rates(manual), context: [] }

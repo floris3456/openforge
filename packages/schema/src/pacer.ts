@@ -174,7 +174,8 @@ export const Chat = Schema.Struct({
   warmUntil: Instant.pipe(optional),
   /**
    * When the cache goes cold if nothing more is sent, the toolbar's countdown: `warmUntil` plus the pings left times
-   * their interval while pings are planned, else `warmUntil`. Unlike `warmUntil` it doesn't move at each ping.
+   * their interval while pings are planned and warming is on, else `warmUntil`. Unlike `warmUntil` it doesn't move at each
+   * ping.
    */
   coldAt: Instant.pipe(optional),
   pings: Pings,

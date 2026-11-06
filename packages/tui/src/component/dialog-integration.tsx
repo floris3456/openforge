@@ -93,7 +93,6 @@ export function connectionSummary(integration: IntegrationInfo) {
   if (connections.length > 1) return `${connections.length} connections`
   const connection = connections[0]
   if (!connection) return ""
-  if (connection.type === "config") return "Config"
   return connection.type === "credential" ? connection.label : `$${connection.name}`
 }
 

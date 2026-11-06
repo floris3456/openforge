@@ -36,10 +36,7 @@ const models = [
   model("opencode", "big-pickle", "Big Pickle", [rate(0, 0)]),
 ]
 
-// CLIProxyPacer's connection: a stored client key.
-const stored = [{ type: "credential", method: "key", id: "cred_cpp", label: "CLIProxyPacer" }]
-
-async function picker(input: { newDesigns: boolean; connections: readonly unknown[] }) {
+async function picker(input: { newDesigns: boolean; connected: boolean }) {
   const state = await tmpdir()
   const setup = await createAppFixture({
     width: 110,
@@ -66,7 +63,9 @@ async function picker(input: { newDesigns: boolean; connections: readonly unknow
               id: "cliproxypacer",
               name: "CLIProxyPacer",
               methods: [],
-              connections: input.connections,
+              connections: input.connected
+                ? [{ type: "credential", method: "key", id: "cred_cpp", label: "CLIProxyPacer" }]
+                : [],
             },
           ],
         })
@@ -94,7 +93,7 @@ function line(frame: string, text: string) {
 }
 
 test("the model list marks OpenCode's free model Free, and neither of CLIProxyPacer's", async () => {
-  await using fixture = await picker({ newDesigns: false, connections: stored })
+  await using fixture = await picker({ newDesigns: false, connected: true })
   const frame = await fixture.setup.waitForFrame(
     (frame) => frame.includes("Select model") && models.every((item) => line(frame, item.name) !== ""),
   )
@@ -104,7 +103,7 @@ test("the model list marks OpenCode's free model Free, and neither of CLIProxyPa
 })
 
 test("the detail row shows a priced CLIProxyPacer model's price, and no price for an unpriced one", async () => {
-  await using fixture = await picker({ newDesigns: true, connections: stored })
+  await using fixture = await picker({ newDesigns: true, connected: true })
   const setup = fixture.setup
   // The detail row is the selected model's: its price, then its input and context.
   const detail = (frame: string) => line(frame, "Text · 200K")
@@ -145,16 +144,8 @@ test("the detail row leaves out a context window that is unknown", async () => {
 })
 
 test("the free picker, before anything is connected, offers no CLIProxyPacer model as free", async () => {
-  await using fixture = await picker({ newDesigns: true, connections: [] })
+  await using fixture = await picker({ newDesigns: true, connected: false })
   const frame = await fixture.setup.waitForFrame((frame) => line(frame, "Big Pickle") !== "")
   expect(line(frame, "Plain One")).toBe("")
   expect(line(frame, "Claude Test 1")).toBe("")
-})
-
-test("CLIProxyPacer set up through config alone is connected: the model picker lists its models", async () => {
-  await using fixture = await picker({ newDesigns: true, connections: [{ type: "config" }] })
-  const frame = await fixture.setup.waitForFrame(
-    (frame) => line(frame, "Claude Test 1") !== "" && line(frame, "Plain One") !== "",
-  )
-  expect(frame).not.toContain("Free models")
 })

@@ -19202,20 +19202,6 @@
         "required": ["_tag", "message"],
         "additionalProperties": false
       },
-      "Connection.ConfigInfo": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["config"]
-          },
-          "status": {
-            "$ref": "#/components/schemas/Connection.Status"
-          }
-        },
-        "required": ["type"],
-        "additionalProperties": false
-      },
       "Connection.CredentialInfo": {
         "type": "object",
         "properties": {
@@ -19264,9 +19250,6 @@
           },
           {
             "$ref": "#/components/schemas/Connection.EnvInfo"
-          },
-          {
-            "$ref": "#/components/schemas/Connection.ConfigInfo"
           }
         ]
       },

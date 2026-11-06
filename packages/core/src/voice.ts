@@ -62,11 +62,7 @@ export const layer = Layer.effect(
       integrations
         .get(Integration.ID.make(provider))
         .pipe(
-          Effect.map((info) =>
-            info?.connections.find(
-              (item) => item.type === "env" || (item.type === "credential" && methods.includes(item.method)),
-            ),
-          ),
+          Effect.map((info) => info?.connections.find((item) => item.type === "env" || methods.includes(item.method))),
         )
 
     // Where an engine's sessions start: its provider with the server's key or, for GPT-Live without an OpenAI key,

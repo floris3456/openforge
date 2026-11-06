@@ -239,7 +239,12 @@ export const OpencodePlugin = define<HttpClient.HttpClient | Bus.Service | Confi
       execute: (input: WebSearch.ProviderInput) =>
         Effect.gen(function* () {
           const active = yield* ctx.integration.connection.active("opencode")
-          if (!active || IntegrationConnection.key(active) !== IntegrationConnection.key(connection)) {
+          if (
+            !active ||
+            (connection.type === "credential"
+              ? active.type !== "credential" || active.id !== connection.id
+              : active.type !== "env" || active.name !== connection.name)
+          ) {
             return yield* Effect.fail(new Error("OpenCode Console connection changed"))
           }
           const credential = yield* ctx.integration.connection.resolve(active)

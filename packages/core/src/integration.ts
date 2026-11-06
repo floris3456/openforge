@@ -149,7 +149,6 @@ type Entry = {
   ref: Types.DeepMutable<Ref>
   methods: Method[]
   implementations: Map<MethodID, OAuthImplementation>
-  config?: boolean
 }
 
 type Data = {
@@ -161,8 +160,6 @@ export type Editor = {
   get: (id: ID) => Types.DeepMutable<Ref> | undefined
   update: (id: ID, update: (integration: Types.DeepMutable<Ref>) => void) => void
   remove: (id: ID) => void
-  /** Whether config gives an existing integration's key: a `config` connection, after credentials and env vars. */
-  config: (id: ID, present: boolean) => void
   method: {
     list: (integrationID: ID) => readonly Method[]
     update: (implementation: Implementation) => void
@@ -334,10 +331,6 @@ const layer = Layer.effect(
           current.ref.id = id
         },
         remove: (id) => editor.integrations.delete(id),
-        config: (id, present) => {
-          const current = editor.integrations.get(id)
-          if (current) current.config = present
-        },
         method: {
           list: (integrationID) => editor.integrations.get(integrationID)?.methods ?? [],
           update: (implementation) => {
@@ -426,7 +419,7 @@ const layer = Layer.effect(
         .filter((method) => method.type === "env")
         .flatMap((method) => method.names.filter((name) => process.env[name]))
         .map((name) => ({ type: "env" as const, name }))
-      return [...credentials, ...env, ...(entry?.config ? [{ type: "config" as const }] : [])]
+      return [...credentials, ...env]
     }
 
     const project = (entry: Entry, connections: IntegrationConnection.Info[]): Info =>
@@ -748,8 +741,6 @@ const layer = Layer.effect(
           return resolveConnections(entry, yield* credentials.list(id))[0]
         }),
         resolve: Effect.fn("Integration.connection.resolve")(function* (connection) {
-          // Config's key reaches requests through the provider's settings.
-          if (connection.type === "config") return undefined
           if (connection.type === "env") {
             const key = process.env[connection.name]
             return key ? Credential.Key.make({ type: "key", key }) : undefined

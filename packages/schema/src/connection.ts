@@ -32,14 +32,7 @@ export const EnvInfo = Schema.Struct({
   status: optional(Status),
 }).annotate({ identifier: "Connection.EnvInfo" })
 
-/** The integration's key comes from config, where nothing stores or removes it. Only CLIProxyPacer reports one. */
-export interface ConfigInfo extends Schema.Schema.Type<typeof ConfigInfo> {}
-export const ConfigInfo = Schema.Struct({
-  type: Schema.Literal("config"),
-  status: optional(Status),
-}).annotate({ identifier: "Connection.ConfigInfo" })
-
-export const Info = Schema.Union([CredentialInfo, EnvInfo, ConfigInfo])
+export const Info = Schema.Union([CredentialInfo, EnvInfo])
   .pipe(Schema.toTaggedUnion("type"))
   .annotate({ identifier: "Connection.Info" })
 export type Info = typeof Info.Type

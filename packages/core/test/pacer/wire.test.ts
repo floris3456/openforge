@@ -187,7 +187,6 @@ describe("PacerWire", () => {
 
   test("says what changed in a prompt, and whether CPP still holds it", () => {
     const [request] = PacerWire.rows([{ id: 3, at: 1, ext: "req-3" }])
-    const [base] = PacerWire.rows([{ id: 2, at: 900, ext: "req-2" }])
     const shaped = PacerWire.request(request, {}, { offset: 0, now: 0 })
     const prompt = Schema.decodeUnknownSync(PacerWire.Prompt)({
       kept: false,
@@ -200,7 +199,8 @@ describe("PacerWire", () => {
         { path: "messages[3]", kind: "prompt", summary: "hi", chars: 2, change: "marker", marker: true },
       ],
     })
-    expect(PacerWire.promptChange(prompt, shaped, base, { offset: 100, now: 7 })).toEqual({
+    // The request it was compared with comes on the service's clock, at the time the connection holds for it.
+    expect(PacerWire.promptChange(prompt, shaped, { id: "req-2", at: 800 }, { offset: 100, now: 7 })).toEqual({
       request: shaped,
       comparedWith: { id: "req-2", at: 800 },
       kept: "part",

@@ -1739,6 +1739,112 @@ describe("PacerConnection reads", () => {
     }),
   )
 
+  it.effect("a request's time never changes once answered, as the offset to CPP's clock narrows", () =>
+    Effect.gen(function* () {
+      // Found in a load run: the TUI's newest row read 09:20:42, the same request on the page read a moment later
+      // 09:20:41.
+      const h = yield* harness()
+      const offset = 120_000
+      // CPP's clock reads .900 of a second, two minutes ahead: its clock minus this one lies in
+      // [offset - 900, offset + 100], the middle offset - 400.
+      yield* TestClock.setTime(1_800_000_000_900)
+      h.cpp.offset = offset
+      yield* online(h)
+      const parent = yield* chat(h)
+      const uuid = PacerSessionID.make(parent)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+      // By that middle, request 1 started at .200 of a second, request 2 (compared with it) five seconds later.
+      const second = 1_800_000_010_000
+      const cpp = (at: number) => at + offset - 400
+      h.cpp.rows = [
+        row(1, { session_ext: uuid, at: cpp(second + 200) }),
+        row(2, { session_ext: uuid, at: cpp(second + 5_200), cache_base: 1 }),
+      ]
+      h.cpp.prompts.set("req-2", { kept: true, previous: 1, rows: [] })
+      const first = yield* h.connection.requests(parent, { filter: "all" })
+      expect(first.items.map((item) => [item.id, item.at])).toEqual([
+        ["req-2", second + 5_200],
+        ["req-1", second + 200],
+      ])
+
+      // A tenth of a second later CPP's answers come at .000: together [offset, offset + 100], the middle offset + 50,
+      // by which the two would now start at .750 of the second before.
+      yield* TestClock.adjust("100 millis")
+      const change = yield* h.connection.prompt("req-2")
+      h.cpp.rows = [...h.cpp.rows, row(3, { session_ext: uuid, at: cpp(second + 9_200) })]
+      const again = yield* h.connection.requests(parent, { filter: "all" })
+      // A request first answered now is on the narrowed offset; the two answered before keep their times, in the list
+      // and in what changed, its own and the one it was compared with.
+      expect(again.items.map((item) => [item.id, item.at])).toEqual([
+        ["req-3", second + 9_200 - 450],
+        ["req-2", second + 5_200],
+        ["req-1", second + 200],
+      ])
+      expect(change?.request.at).toBe(second + 5_200)
+      expect(change?.comparedWith).toEqual({ id: "req-1", at: second + 200 })
+    }),
+  )
+
+  it.effect("holds the last ROWS rows read, with their times: one more pushes out the one read longest ago", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const offset = 120_000
+      // As in the test above: the middle of CPP's offset is offset - 400 at first, offset + 50 once narrowed.
+      yield* TestClock.setTime(1_800_000_000_900)
+      h.cpp.offset = offset
+      yield* online(h)
+      const parent = yield* chat(h)
+      const uuid = PacerSessionID.make(parent)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+      const rows = PacerConnection.ROWS
+      const second = 1_800_000_010_000
+      // ROWS rows on two pages, newest first, so the newest is read first; the one before it is compared with it, and
+      // row 950, the first row after the 50 newest, starts at .200 of a second.
+      h.cpp.rows = Array.from({ length: rows }, (_, index) =>
+        row(index + 1, {
+          session_ext: uuid,
+          ...(index + 1 === rows - 1 ? { cache_base: rows } : {}),
+          ...(index + 1 === rows - 50 ? { at: second + 200 + offset - 400 } : {}),
+        }),
+      )
+      const page = yield* h.connection.requests(parent, { filter: "all", limit: 500 })
+      const next = yield* h.connection.requests(parent, { filter: "all", limit: 500, cursor: page.cursor })
+      expect(page.items.length + next.items.length).toBe(rows)
+      expect(page.items.find((item) => item.id === `req-${rows - 50}`)?.at).toBe(second + 200)
+      const reads = (from: number) =>
+        h.cpp.seen
+          .slice(from)
+          .map((item) => item.query.get("request") ?? item.path)
+          .toSorted()
+
+      // All of them held: the row it is compared with isn't read.
+      let from = h.cpp.seen.length
+      expect((yield* h.connection.prompt(`req-${rows - 1}`))?.comparedWith?.id).toBe(`req-${rows}`)
+      expect(reads(from)).toEqual([`/pacer/v1/prompts/req-${rows - 1}`, `req-${rows - 1}`])
+
+      // The offset narrows, and the first page is read again, as a TUI showing the chat does: its rows are the last
+      // read.
+      yield* TestClock.adjust("100 millis")
+      yield* h.connection.requests(parent, { filter: "all" })
+      h.cpp.rows = [
+        ...h.cpp.rows,
+        row(rows + 1, { session_ext: uuid, cache_base: rows - 50 }),
+        row(rows + 2, { session_ext: uuid, cache_base: rows }),
+      ]
+      // One row more pushes out the row read longest ago, 950, the first after the 50 read again. 950 is read again when it is
+      // needed, as new: its time on the offset now.
+      from = h.cpp.seen.length
+      expect((yield* h.connection.prompt(`req-${rows + 1}`))?.comparedWith).toEqual({
+        id: `req-${rows - 50}`,
+        at: second + 200 - 450,
+      })
+      expect(reads(from)).toEqual([`/pacer/v1/prompts/req-${rows + 1}`, String(rows - 50), `req-${rows + 1}`])
+      from = h.cpp.seen.length
+      expect((yield* h.connection.prompt(`req-${rows + 2}`))?.comparedWith?.id).toBe(`req-${rows}`)
+      expect(reads(from)).toEqual([`/pacer/v1/prompts/req-${rows + 2}`, `req-${rows + 2}`])
+    }),
+  )
+
   it.effect("what changed of a listed request reads the request it is compared with beside it, in one round trip", () =>
     Effect.gen(function* () {
       const h = yield* harness()

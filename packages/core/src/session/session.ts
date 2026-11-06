@@ -305,7 +305,12 @@ export const make = Effect.fn("Session.make")(function* () {
   })
   const compact = Effect.fn("Session.compact")(function* (
     sessionID: SessionSchema.ID,
-    input: { id?: SessionMessage.ID; delivery?: SessionInbox.Delivery },
+    input: {
+      id?: SessionMessage.ID
+      delivery?: SessionInbox.Delivery
+      /** The models to write the summary, first choice first, in place of the compaction agent's. */
+      models?: ReadonlyArray<Model.Ref>
+    },
   ) {
     const session = yield* get(sessionID)
     if (session.revert) yield* SessionRevert.commit(bus, session)
@@ -315,6 +320,7 @@ export const make = Effect.fn("Session.make")(function* () {
         id: inputID,
         sessionID,
         delivery: input.delivery ?? "steer",
+        ...(input.models ? { models: input.models } : {}),
       })
       .pipe(
         Effect.catchTag("SessionInbox.LifecycleConflict", () => new CompactionConflictError({ sessionID, inputID })),

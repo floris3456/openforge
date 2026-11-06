@@ -101,7 +101,14 @@ const fakeCpp = (now: () => number) =>
             body: text ? JSON.parse(text) : undefined,
             at: now(),
           })
+          // Decided as the request arrives, answered after any hold: a slow answer says what was so when asked.
           const failure = cpp.failure
+          const view = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
+          const counted = failure === undefined && view !== undefined && request.method === "GET"
+          if (counted) cpp.inflight.most = Math.max(cpp.inflight.most, ++cpp.inflight.now)
+          if ([...cpp.holds].some((prefix) => path.startsWith(prefix)))
+            await new Promise<void>((resolve) => waiting.push(resolve))
+          if (counted) cpp.inflight.now--
           if (failure === "plain") return new Response("404 page not found", { status: 404 })
           if (failure)
             return answer(
@@ -109,12 +116,6 @@ const fakeCpp = (now: () => number) =>
               failure.status,
               failure.retryAfter ? { "retry-after": String(failure.retryAfter) } : {},
             )
-          const view = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
-          const counted = view !== undefined && request.method === "GET"
-          if (counted) cpp.inflight.most = Math.max(cpp.inflight.most, ++cpp.inflight.now)
-          if ([...cpp.holds].some((prefix) => path.startsWith(prefix)))
-            await new Promise<void>((resolve) => waiting.push(resolve))
-          if (counted) cpp.inflight.now--
           return route(request.method, path, url.searchParams, text ? JSON.parse(text) : undefined)
         },
       })
@@ -495,6 +496,11 @@ const status = (h: Harness) => Effect.runSync(h.connection.status())
 const seen = (h: Harness, path: string, method = "GET") =>
   h.cpp.seen.filter((item) => item.method === method && item.path === path)
 const viewPath = (sessionID: SessionID) => `/pacer/v1/sessions/${PacerSessionID.make(sessionID)}`
+/** The chat as the last `pacer.chat.updated` told it. */
+const toldChat = (h: Harness, sessionID: SessionID) =>
+  h.published
+    .flatMap((event) => (event.type === "pacer.chat.updated" ? [(event.data as { chat: Pacer.Chat }).chat] : []))
+    .findLast((item) => item.sessionID === sessionID)
 
 /** Sends CPP's heartbeat and waits until the connection heard it. */
 const heartbeat = Effect.fnUntraced(function* (h: Harness) {
@@ -595,6 +601,44 @@ describe("PacerConnection states", () => {
     }),
   )
 
+  it.effect("leaves no pacer for a catalog read that found the pacer while the failing try was under way", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.failure = "plain"
+      h.cpp.holds.add("/pacer/v1/state")
+      yield* h.connect()
+      yield* until("asked", () => seen(h, "/pacer/v1/state").length === 1)
+      // The pacer is back, and a catalog read finds it, before the try's plain 404 comes.
+      h.cpp.failure = undefined
+      yield* SubscriptionRef.set(h.catalog, catalog(yield* Clock.currentTimeMillis))
+      h.cpp.release()
+      yield* until("on", () => status(h).state === "on" && h.cpp.streams() === 1)
+      expect(seen(h, "/pacer/v1/state")).toHaveLength(2)
+      expect(h.published.filter((event) => event.type === "pacer.status").map((event) => event.data)).toMatchObject([
+        { status: { state: "no-pacer" } },
+        { status: { state: "on" } },
+      ])
+    }),
+  )
+
+  it.effect("is unreachable while CPP's pacer store is not open (503 unavailable), and on once it is", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.failure = { status: 503, type: "unavailable" }
+      yield* h.connect()
+      yield* until("unreachable", () => status(h).state === "unreachable")
+      expect(status(h)).toMatchObject({ state: "unreachable", refused: false })
+      // Tried again after the wait, as any unreachable CPP: no catalog read has to find the pacer first.
+      h.cpp.failure = undefined
+      const asked = seen(h, "/pacer/v1/state").length
+      yield* ahead("asked again", () => seen(h, "/pacer/v1/state").length === asked + 1)
+      yield* until("on", () => status(h).state === "on")
+      expect(
+        h.published.some((event) => (event.data as { status?: { state?: string } }).status?.state === "no-pacer"),
+      ).toBe(false)
+    }),
+  )
+
   it.effect(
     "reconnects after 1 s doubling to 30 s, never before a Retry-After, and stays on through an ended stream",
     () =>
@@ -662,20 +706,52 @@ describe("PacerConnection states", () => {
   )
 
   it.effect(
-    "waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
+    "is on once the state answers, while it waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
     () =>
       Effect.gen(function* () {
         const h = yield* harness()
         h.cpp.quiet = true
         yield* h.connect()
         yield* until("the stream asked for", () => h.cpp.streams() === 1)
-        // CPP's first heartbeat comes 25 s after the stream opened.
-        for (let second = 0; second < 25; second++) yield* TestClock.adjust("1 second")
-        yield* settle
-        h.cpp.heartbeat()
+        // On with the state's answer, before the stream sent a byte.
         yield* until("on", () => status(h).state === "on")
+        expect(h.published.filter((event) => event.type === "pacer.status").map((event) => event.data)).toMatchObject([
+          { status: { state: "on" } },
+        ])
+        // CPP's first heartbeat comes 25 s after the stream opened; on all along.
+        for (let second = 0; second < 25; second++) {
+          yield* TestClock.adjust("1 second")
+          expect(status(h).state).toBe("on")
+        }
+        yield* settle
+        // A notice before it is the stream's first bytes: followed as ever.
+        h.cpp.notice("request", { keys: [1], at: 1 })
+        yield* until("the notice heard", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+        h.cpp.heartbeat()
+        yield* settle
+        expect(status(h).state).toBe("on")
         expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
+        expect(h.published.filter((event) => event.type === "pacer.status")).toHaveLength(1)
       }),
+  )
+
+  it.effect("turns unreachable when the stream never answers after the state did, and on again after", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.quiet = true
+      h.cpp.holds.add("/pacer/v1/stream")
+      yield* h.connect()
+      yield* until("on", () => status(h).state === "on")
+      // No headers for 60 s: as gone as a silent stream.
+      for (let second = 0; second < 61 && status(h).state === "on"; second++) {
+        yield* TestClock.adjust("1 second")
+        yield* settle
+      }
+      yield* until("unreachable", () => status(h).state === "unreachable")
+      h.cpp.release()
+      h.cpp.quiet = false
+      yield* ahead("on again", () => status(h).state === "on" && h.cpp.streams() >= 1)
+    }),
   )
 
   it.effect("connects again when the stream is silent for 60 s", () =>
@@ -810,6 +886,189 @@ describe("PacerConnection notices", () => {
     }),
   )
 
+  it.effect(
+    "reads a listed chat's view again when its requests moved, once however often listed, never for an older list",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const now = h.cpp.time()
+        const ids = [yield* chat(h), yield* chat(h)]
+        const [first, second] = ids.map((id) => PacerSessionID.make(id))
+        const planned = (uuid: string, requests: number) =>
+          chatView(uuid, now, {
+            requests,
+            last_at: now + requests,
+            warming: {
+              cold: false,
+              size_tokens: 80_000,
+              threshold: 70_000,
+              compact_at: now + 30_000,
+              compact_reason: "before-cold",
+            },
+          })
+        h.cpp.views.set(first, planned(first, 5))
+        h.cpp.views.set(second, planned(second, 5))
+        for (const id of ids) yield* step(h, id)
+        yield* until("both held", () => ids.every((id) => toldChat(h, id)?.compactAt !== undefined))
+        const listed = (uuid: string, requests: number) => ({
+          id: uuid,
+          session_id: 7,
+          requests,
+          last_at: now + requests,
+          generation: 1,
+          warm: true,
+          warm_until: now + 300_000,
+          pings: chatView(uuid, now).pings,
+        })
+        // CPP compacted the first chat: a request of its own, and nothing planned after it. The list can't say so.
+        h.cpp.views.set(first, chatView(first, now, { requests: 6, last_at: now + 6 }))
+        h.cpp.listed = [listed(first, 6), listed(second, 5)]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 1 })
+        yield* until("read again", () => seen(h, viewPath(ids[0])).length === 2)
+        yield* until("told", () => toldChat(h, ids[0]) !== undefined && toldChat(h, ids[0])?.compactAt === undefined)
+        expect((yield* h.connection.chat(ids[0]))?.compactAt).toBeUndefined()
+        // The second, listed as it was read, is neither read again nor told.
+        expect((yield* h.connection.chat(ids[1]))?.compactAt).toBeDefined()
+        expect(toldChat(h, ids[1])).toBeUndefined()
+
+        // Listed again as it is: nothing more to read.
+        h.cpp.notice("session", { keys: [1], at: 2 })
+        yield* until("listed twice", () => seen(h, "/pacer/v1/sessions").length === 2)
+        yield* settle
+        expect(seen(h, viewPath(ids[0]))).toHaveLength(2)
+        expect(seen(h, viewPath(ids[1]))).toHaveLength(1)
+
+        // A list read before the view held now: nothing merged, nothing read.
+        h.cpp.listed = [{ ...listed(first, 4), warm: false }]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 3 })
+        yield* until("listed three times", () => seen(h, "/pacer/v1/sessions").length === 3)
+        yield* settle
+        expect(h.published.filter((event) => event.type === "pacer.chat.updated")).toEqual([])
+        expect(seen(h, viewPath(ids[0]))).toHaveLength(2)
+        expect((yield* h.connection.chat(ids[0]))?.warm).toBe(true)
+      }),
+  )
+
+  it.effect("reads a held chat's view again when asked, once CPP's list of the chats leaves it out", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const ids = [yield* chat(h), yield* chat(h)]
+      const [first, second] = ids.map((id) => PacerSessionID.make(id))
+      for (const uuid of [first, second]) h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      for (const id of ids) yield* step(h, id)
+      yield* until("both held", () => ids.every((id) => toldChat(h, id) !== undefined))
+
+      // CPP lists only the newest chats, with no page after: the other one may have changed as any.
+      h.cpp.listed = [{ id: first, session_id: 7, warm: true, warm_until: h.cpp.time() + 300_000 }]
+      h.cpp.notice("session", { keys: [1], at: 1 })
+      yield* until("listed", () => seen(h, "/pacer/v1/sessions").length === 1)
+      yield* settle
+      h.cpp.views.set(second, chatView(second, h.cpp.time(), { warm: false, warm_until: null }))
+      expect((yield* h.connection.chat(ids[1]))?.warm).toBe(true)
+      yield* until("read again", () => seen(h, viewPath(ids[1])).length === 2)
+      yield* until("told", () => toldChat(h, ids[1])?.warm === false)
+      // The listed one is as listed.
+      yield* h.connection.chat(ids[0])
+      yield* settle
+      expect(seen(h, viewPath(ids[0]))).toHaveLength(1)
+    }),
+  )
+
+  it.effect(
+    "checks every chat CPP has on a compact notice for many, past a full list, and only the listed ones else",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const now = h.cpp.time()
+        const id = yield* chat(h)
+        const uuid = PacerSessionID.make(id)
+        h.cpp.views.set(uuid, chatView(uuid, now))
+        yield* step(h, id)
+        yield* until("held", () => toldChat(h, id) !== undefined)
+        const plan = {
+          cold: false,
+          size_tokens: 80_000,
+          threshold: 70_000,
+          compact_at: now + 30_000,
+          compact_reason: "before-cold",
+        }
+        h.cpp.views.set(uuid, chatView(uuid, now, { warming: plan }))
+        const newer = (count: number) =>
+          Array.from({ length: count }, (_, index) => ({
+            id: `00000000-0000-5000-8000-${String(index).padStart(12, "0")}`,
+            session_id: 100 + index,
+            warm: true,
+          }))
+
+        // A list of the newest chats as long as CPP lists: more are active, the oldest left out.
+        h.cpp.listed = newer(PacerConnection.LISTED)
+        const woken = h.execution.woken.length
+        h.cpp.notice("compact", { sessions: [], many: true, at: 1 })
+        yield* until("compacted", () => h.execution.woken.slice(woken).includes(id))
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+        expect((yield* h.sessions.inbox(id)).map((item) => item.type)).toEqual(["compaction"])
+
+        // A shorter list is every active chat: one it leaves out is not active, and not read.
+        h.cpp.listed = newer(3)
+        h.cpp.notice("compact", { sessions: [], many: true, at: 2 })
+        yield* until("listed again", () => seen(h, "/pacer/v1/sessions").length === 2)
+        yield* settle
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+      }),
+  )
+
+  it.effect("drops compacts at as openforge compacts the chat, before CPP answers, and reads its view again", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const now = h.cpp.time()
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const plan = { cold: false, size_tokens: 80_000, threshold: 70_000, compact_at: now + 30_000 }
+      h.cpp.views.set(uuid, chatView(uuid, now, { warming: { ...plan, compact_reason: "before-cold" } }))
+      yield* step(h, id)
+      yield* until("held", () => toldChat(h, id)?.compactAt !== undefined)
+      const compaction = (model: typeof cppModel) =>
+        Effect.gen(function* () {
+          yield* h.bus.publish(SessionEvent.Compaction.Started, { sessionID: id, reason: "auto" })
+          yield* h.bus.publish(SessionEvent.Compaction.Ended, { sessionID: id, reason: "auto", model, text: "summary" })
+        })
+      const cleared = () => toldChat(h, id) !== undefined && toldChat(h, id)?.compactAt === undefined
+
+      // Through CPP: CPP is slow to answer, and "compacts at" goes without it.
+      h.cpp.holds.add(viewPath(id))
+      h.cpp.views.set(uuid, chatView(uuid, now))
+      h.published.length = 0
+      const reads = seen(h, viewPath(id)).length
+      yield* compaction(cppModel)
+      yield* until("cleared", cleared)
+      // The view's read is asked for, and held unanswered until now.
+      yield* until("read asked", () => seen(h, viewPath(id)).length === reads + 1 && h.cpp.inflight.now === 1)
+      h.cpp.release()
+      yield* settle
+      expect((yield* h.connection.chat(id))?.compactAt).toBeUndefined()
+
+      // Through another provider: told to CPP, then read again, with "compacts at" gone at once too.
+      h.cpp.views.set(uuid, chatView(uuid, now, { warming: { ...plan, compact_reason: "cold" } }))
+      yield* step(h, id)
+      yield* until("planned again", () => toldChat(h, id)?.compactAt !== undefined)
+      h.cpp.views.set(uuid, chatView(uuid, now))
+      h.published.length = 0
+      const before = seen(h, viewPath(id)).length
+      yield* compaction(otherModel)
+      yield* until("cleared again", cleared)
+      yield* until("told and read", () => seen(h, viewPath(id)).length === before + 1)
+      expect(seen(h, `${viewPath(id)}/events`, "POST").map((item) => item.body)).toEqual([{ type: "compacted" }])
+      yield* settle
+      expect((yield* h.connection.chat(id))?.compactAt).toBeUndefined()
+    }),
+  )
+
   it.effect("reads the meters at most every 10 s, and asks the catalog again on prices and capabilities", () =>
     Effect.gen(function* () {
       const h = yield* harness()
@@ -849,6 +1108,32 @@ describe("PacerConnection notices", () => {
 })
 
 describe("PacerConnection chats", () => {
+  it.effect("names the next and the forced account as the accounts do, never by an auth_index the meters name", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.meters = [meter(h.cpp.time())]
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      // CPP names a credential without a label of its own by its auth_index, which the meters may name; else by the
+      // alias its meters carry.
+      h.cpp.views.set(
+        uuid,
+        chatView(uuid, h.cpp.time(), {
+          next_use: { credential: "auth-a", reason: "cold_move", window_values: [] },
+          force_use: { credential: "account-b", when: "now", window_values: [] },
+        }),
+      )
+      yield* step(h, id)
+      yield* until("read", () => toldChat(h, id) !== undefined)
+      expect(yield* h.connection.chat(id)).toMatchObject({
+        account: "account-a",
+        nextUse: { account: "account-a", reason: "cold_move" },
+        forceUse: { account: "account-b", when: "now" },
+      })
+    }),
+  )
+
   it.effect("reads a chat's view once after its step, beside it, and corrects CPP's times by Date", () =>
     Effect.gen(function* () {
       const h = yield* harness()
@@ -870,16 +1155,63 @@ describe("PacerConnection chats", () => {
         sessionID: id,
         account: "account-a",
         warm: true,
-        warmUntil: warmUntil - 120_000,
-        coldAt: warmUntil - 120_000 + 3 * 240_000,
         nextUse: { account: "account-b", reason: "cold_move" },
         switches: { warming: true, compactBeforeCold: false },
       })
+      // Every answer came at the same moment, so `Date` says CPP's clock to within its second: the middle of it.
+      expect(Math.abs(held!.warmUntil! - (warmUntil - 120_000))).toBeLessThanOrEqual(500)
+      expect(held!.coldAt).toBe(held!.warmUntil! + 3 * 240_000)
       expect(seen(h, viewPath(id))).toHaveLength(1)
       const accounts = yield* h.connection.accounts()
       expect(accounts?.items[0].windows[0]).toMatchObject({ label: "5h", left: 62, stale: false })
-      expect(accounts?.items[0].windows[0].resetsAt).toBe(h.cpp.time() - 120_000 + 4_800_000)
+      const resetsAt = h.cpp.time() - 120_000 + 4_800_000
+      expect(Math.abs(accounts!.items[0].windows[0].resetsAt! - resetsAt)).toBeLessThanOrEqual(500)
     }),
+  )
+
+  it.effect(
+    "narrows CPP's clock by answers in different seconds, keeps it across a reconnect, starts over on a jump",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const offset = 120_000
+        // CPP's clock reads .900 of a second, two minutes ahead.
+        yield* TestClock.setTime(1_800_000_000_900)
+        h.cpp.offset = offset
+        yield* online(h)
+        // The state's and the stream's `Date`: CPP's clock minus this one lies in [offset - 900, offset + 100].
+        const id = yield* chat(h)
+        const uuid = PacerSessionID.make(id)
+        const warmUntil = h.cpp.time() + 300_000
+        h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { warm_until: warmUntil }))
+        // The view's at .000 of the next second: in [offset, offset + 1000]; together, [offset, offset + 100].
+        yield* TestClock.adjust("100 millis")
+        yield* step(h, id)
+        yield* until("read", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+        const shown = (yield* h.connection.chat(id))!.warmUntil!
+        expect(shown).toBeGreaterThanOrEqual(warmUntil - offset - 100)
+        expect(shown).toBeLessThanOrEqual(warmUntil - offset)
+
+        // CPP's stream ends at .900; the reconnect a second later answers at .900 too, which alone would say a second
+        // less. The times shown stay where they were.
+        yield* TestClock.adjust("900 millis")
+        h.cpp.end()
+        yield* settle
+        yield* TestClock.adjust("1 second")
+        yield* until("connected again", () => seen(h, "/pacer/v1/state").length === 2 && h.cpp.streams() === 1)
+        expect((yield* h.connection.chat(id))?.warmUntil).toBe(shown)
+        yield* until("read again after the reconnect", () => seen(h, viewPath(id)).length === 2)
+        yield* settle
+        expect((yield* h.connection.chat(id))?.warmUntil).toBe(shown)
+
+        // CPP's clock jumps a minute ahead: the next answer doesn't meet the bounds held, which start over from it.
+        h.cpp.offset = offset + 60_000
+        yield* step(h, id)
+        yield* until("read after the jump", () => seen(h, viewPath(id)).length === 3)
+        yield* until("moved", () => toldChat(h, id)?.warmUntil !== shown)
+        const jumped = (yield* h.connection.chat(id))!.warmUntil!
+        expect(Math.abs(jumped - (warmUntil - offset - 60_000))).toBeLessThanOrEqual(1_000)
+      }),
   )
 
   it.effect("costs a chat CPP doesn't know one lookup per event: no read, no store read", () =>
@@ -1068,6 +1400,37 @@ describe("PacerConnection chats", () => {
       expect(h.execution.woken.slice(woken)).toEqual([idle])
       expect((yield* h.sessions.inbox(idle)).map((item) => item.type)).toEqual(["compaction"])
       expect((yield* h.sessions.inbox(running)).map((item) => item.type)).toEqual([])
+    }),
+  )
+
+  it.effect("compacts a chat CPP asks to with its own model on CPP, never another provider's", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const own = yield* chat(h)
+      const switched = yield* chat(h)
+      const away = yield* chat(h)
+      yield* Effect.forEach([own, switched, away], (id) => step(h, id))
+      const later = { id: Model.ID.make("model-c"), providerID: Provider.ID.make("cliproxypacer") }
+      yield* h.sessions.switchModel({ sessionID: switched, model: later })
+      yield* h.sessions.switchModel({ sessionID: away, model: otherModel })
+      const woken = h.execution.woken.length
+
+      h.cpp.notice("compact", {
+        sessions: [own, switched, away].map((id) => ({ key: 1, session: PacerSessionID.make(id) })),
+        at: 1,
+      })
+      yield* until("compacted", () => h.execution.woken.slice(woken).length === 2)
+      yield* settle
+      const payloads = (id: SessionID) =>
+        Effect.map(h.sessions.inbox(id), (items) => items.map((item) => item.type === "compaction" && item.payload))
+      // The model of its last answer, whose cache is warm, then the one selected since; never the compaction agent's.
+      expect(yield* payloads(own)).toEqual([{ models: [cppModel] }])
+      expect(yield* payloads(switched)).toEqual([
+        { models: [cppModel, { ...later, variant: Model.VariantID.make("default") }] },
+      ])
+      expect(yield* payloads(away)).toEqual([])
+      expect(h.execution.woken.slice(woken).toSorted()).toEqual([own, switched].toSorted())
     }),
   )
 

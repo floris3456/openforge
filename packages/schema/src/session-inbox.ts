@@ -2,6 +2,7 @@ export * as SessionInbox from "./session-inbox.js"
 
 import { Schema } from "effect"
 import { Location } from "./location.js"
+import { Model } from "./model.js"
 import { Project } from "./project.js"
 import { Attachment, Prompt } from "./prompt.js"
 import { DateTimeUtcFromMillis, optional, RelativePath } from "./schema.js"
@@ -32,7 +33,13 @@ export const SyntheticPayload = Schema.Struct({
 }).annotate({ identifier: "Session.Inbox.SyntheticPayload" })
 
 export interface CompactionPayload extends Schema.Schema.Type<typeof CompactionPayload> {}
-export const CompactionPayload = Schema.Struct({}).annotate({ identifier: "Session.Inbox.CompactionPayload" })
+export const CompactionPayload = Schema.Struct({
+  /**
+   * The models to write the summary, first choice first: the first one the chat can use writes it, in place of the
+   * compaction agent's. Absent: the compaction agent's model, else the chat's.
+   */
+  models: Schema.Array(Model.Ref).pipe(optional),
+}).annotate({ identifier: "Session.Inbox.CompactionPayload" })
 
 export interface MovePayload extends Schema.Schema.Type<typeof MovePayload> {}
 export const MovePayload = Schema.Struct({

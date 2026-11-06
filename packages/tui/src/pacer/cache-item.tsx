@@ -5,7 +5,8 @@ import { cacheLabel, clockTime, formatRemaining } from "./format"
 
 // The toolbar's cache item (spec cliproxypacer-step-1, section 4), after the context and cost. While CPP is
 // unreachable it keeps the last text, greyed, as it read when CPP last answered, with "as of 14:02"; it counts no
-// more, so nothing ticks. Clicking it opens the footer at the Requests tab. Greyed is the theme's faint text, dimmed
+// more, so nothing ticks. It shows only while the chat's model is CPP's; one moved to another provider keeps the
+// Requests tab. Clicking it opens the footer at the Requests tab. Greyed is the theme's faint text, dimmed
 // as the toolbar dims what can't be used: a theme that sets no faint text has its muted text there, the item's own.
 
 export interface PacerCacheText {
@@ -19,7 +20,7 @@ export function usePacerCache(sessionID: Accessor<string | undefined>): Accessor
   if (!pacer) return () => undefined
   const view = createMemo(() => {
     const id = sessionID()
-    if (!pacer.active(id) || pacer.state() === "no-pacer") return undefined
+    if (!pacer.current(id) || pacer.state() === "no-pacer") return undefined
     return pacer.view(id!)
   })
   // Frozen at the first frame it is stale, so coming back changes it once, when the view read again replaces it.

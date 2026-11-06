@@ -5,8 +5,8 @@ import { useToast } from "../ui/toast"
 import { errorMessage } from "../util/error"
 
 // The shown chat's two switches on CPP (spec cliproxypacer-step-1, section 6): `<leader>k` and `<leader>j`, the keys
-// OpenCodePlus has, and their palette entries. They exist only for a chat on CPP. The answer of `chat.update` is the
-// chat's view after the change, so the toolbar shows it at once.
+// OpenCodePlus has, and their palette entries. They exist only for a chat whose model is CPP's. The answer of
+// `chat.update` is the chat's view after the change, so the toolbar shows it at once.
 
 export function PacerSwitches(props: { pacer: Pacer }) {
   const route = useRoute()
@@ -14,7 +14,7 @@ export function PacerSwitches(props: { pacer: Pacer }) {
   const shown = () => (route.data.type === "session" ? route.data.sessionID : undefined)
   const enabled = () => {
     const state = props.pacer.state()
-    return props.pacer.active(shown()) && state !== "unset" && state !== "no-pacer"
+    return props.pacer.current(shown()) && state !== "unset" && state !== "no-pacer"
   }
 
   const flip = async (key: "warming" | "compactBeforeCold") => {

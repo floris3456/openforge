@@ -17,8 +17,8 @@ const Percent = Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 100 
 
 /**
  * `unset`: no CPP is set up (no base URL or no key). `unreachable`: CPP doesn't answer, or refused the key.
- * `no-pacer`: the proxy answers but has no pacer, such as a plain CLIProxyAPI. `on`: the pacer answers and its change
- * stream is followed.
+ * `no-pacer`: the proxy answers but has no pacer, such as a plain CLIProxyAPI. `on`: the pacer answers; its change
+ * stream is followed, connected beside it.
  */
 export const State = Schema.Literals(["unset", "unreachable", "no-pacer", "on"]).annotate({ identifier: "Pacer.State" })
 export type State = typeof State.Type

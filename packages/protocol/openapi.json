@@ -24705,9 +24705,16 @@
         "additionalProperties": false
       },
       "Session.Inbox.CompactionPayload": {
-        "not": {
-          "type": "null"
-        }
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model.Ref"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "Session.Inbox.Delivery": {
         "type": "string",

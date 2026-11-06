@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util"
 import { Clock, Context, Effect, Layer, Queue, Result, Schema, Stream } from "effect"
 import { makeParser } from "effect/encoding/Sse"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import type { Model } from "@opencode/schema/model"
 import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 import { Bus } from "../bus.js"
@@ -56,9 +57,11 @@ export interface Interface {
   /**
    * The chat's view, held from the last read (its `asOf` says when). A held view is answered at once; when it is out
    * of date (after a reconnect, or CPP's `reading` or `settings` notices) and the pacer is on, it is read again in the
-   * background, and `pacer.chat.updated` follows if it changed. With none held, a chat CPP is known to have is read
-   * now; any other is answered undefined at once and looked up in the background (`pacer.chat.updated` when CPP has
-   * it). Undefined when CPP knows nothing of the chat, or nothing was read while CPP can't answer.
+   * background, and `pacer.chat.updated` follows if it changed. A held chat that CPP's list shows with requests the
+   * view hasn't seen (a ping, a compaction, another client's step) is read again at once; one openforge compacted
+   * drops its "compacts at" at once. With none held, a chat CPP is known to have is read now; any other is answered
+   * undefined at once and looked up in the background (`pacer.chat.updated` when CPP has it). Undefined when CPP
+   * knows nothing of the chat, or nothing was read while CPP can't answer.
    */
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
@@ -90,6 +93,11 @@ export const WAIT_MINUTES = 240
 export const READERS = 4
 /** Chats held at most; the oldest without pending work go first. */
 export const CHATS = 1_000
+/**
+ * The most chats CPP lists (`GET /pacer/v1/sessions`, newest first, its most): there is no page after it, so with more
+ * active chats the oldest, the nearest to cold, are left out.
+ */
+export const LISTED = 100
 /** What-changed answers held. */
 export const PROMPTS = 50
 /** CPP's UUIDs of chats with new requests this service didn't know yet, held at most. */
@@ -147,6 +155,8 @@ interface Chat {
   view: Pacer.Chat | undefined
   /** The view may be out of date. */
   stale: boolean
+  /** CPP's requests and account generation for it as last read or listed (`PacerWire.marks`). */
+  marks: string | undefined
   /** A read of the view is due. */
   read: boolean
   /** CPP knew nothing of it at the last read. */
@@ -185,10 +195,13 @@ interface Link {
   status: Pacer.Status
   /** When CPP last answered. */
   contact: number | undefined
-  /** CPP's clock minus the service's: the largest of this connection's answers, as `Date` has whole seconds. */
+  /** CPP's clock minus the service's: the middle of `bounds`. */
   offset: number
-  /** No answer of this connection gave an offset yet. */
-  fresh: boolean
+  /**
+   * What CPP's answers say of it together: each answer's bounds (`Date` has whole seconds), intersected over every
+   * answer since this CPP was set up, reconnects included, so the times shown hold still. Undefined before the first.
+   */
+  bounds: PacerHttp.Offset | undefined
   accounts: Pacer.Accounts | undefined
   /** Account aliases by `auth_index`, from the meters. */
   aliases: Map<string, string>
@@ -212,7 +225,7 @@ export const layer = Layer.effect(
       status: { state: "unset", since: yield* Clock.currentTimeMillis, refused: false },
       contact: undefined,
       offset: 0,
-      fresh: true,
+      bounds: undefined,
       accounts: undefined,
       aliases: new Map(),
       active: new Set(),
@@ -229,12 +242,16 @@ export const layer = Layer.effect(
     const context = () => Effect.map(Clock.currentTimeMillis, (now) => ({ offset: link.offset, now }))
     const alias = (account: string) => link.aliases.get(account) ?? account
 
-    const contact = (offset: number | undefined) =>
+    const contact = (offset: PacerHttp.Offset | undefined) =>
       Effect.map(Clock.currentTimeMillis, (now) => {
         link.contact = now
         if (offset === undefined) return
-        link.offset = link.fresh ? offset : Math.max(link.offset, offset)
-        link.fresh = false
+        const held = link.bounds
+        const low = held ? Math.max(held.low, offset.low) : offset.low
+        const high = held ? Math.min(held.high, offset.high) : offset.high
+        // Bounds that no longer meet: a clock jumped, CPP's or this one's. They start over from this answer.
+        link.bounds = low <= high ? { low, high } : offset
+        link.offset = Math.round((link.bounds.low + link.bounds.high) / 2)
       })
 
     const setStatus = Effect.fnUntraced(function* (next: {
@@ -335,6 +352,7 @@ export const layer = Layer.effect(
         raw: undefined,
         view: undefined,
         stale: false,
+        marks: undefined,
         read: false,
         missing: false,
         storeID: undefined,
@@ -408,6 +426,7 @@ export const layer = Layer.effect(
       chat.raw = view
       chat.on = true
       chat.stale = false
+      chat.marks = PacerWire.marks(view) ?? chat.marks
       chat.missing = false
       if (typeof view.session_id === "number") chat.storeID = view.session_id
       const duration = view.settings?.["pings.duration_minutes"]
@@ -420,7 +439,11 @@ export const layer = Layer.effect(
       if (chat.duration === WAIT_MINUTES && chat.waits.size === 0) mark(chat)
     })
 
-    /** Merges the live part of a chat CPP listed into its held view. */
+    /**
+     * Merges the live part of a chat CPP listed into its held view. What the list doesn't carry (when it compacts, the
+     * next use, a forced move) changes with a request, a ping or a compaction among them, or a move: a chat whose
+     * requests or generation moved is read again, through the chats' queue, once however often it is listed.
+     */
     const merge = Effect.fnUntraced(function* (item: PacerWire.Listed) {
       const uuid = item.id.toLowerCase()
       link.active.add(uuid)
@@ -430,6 +453,19 @@ export const layer = Layer.effect(
       chat.on = true
       if (typeof item.session_id === "number") chat.storeID = item.session_id
       if (!chat.raw) return
+      // A list read before the view held now is older than it.
+      if (
+        typeof item.requests === "number" &&
+        typeof chat.raw.requests === "number" &&
+        item.requests < chat.raw.requests
+      )
+        return
+      const marks = PacerWire.marks(item)
+      if (marks !== undefined && marks !== chat.marks) {
+        chat.marks = marks
+        chat.read = true
+        mark(chat)
+      }
       chat.raw = {
         ...chat.raw,
         warm: item.warm,
@@ -492,8 +528,12 @@ export const layer = Layer.effect(
         Effect.orElseSucceed((): Info => ({})),
       )
 
-    /** Why the chat must not be compacted now, if it must not: a step running or queued keeps it warm. */
-    const leftAlone = Effect.fnUntraced(function* (sessionID: SessionID) {
+    /**
+     * The models to compact the chat with, first choice first, or why it must not be compacted now: a step running or
+     * queued keeps it warm. Only its own model on CPP reads its warm cache (spec section 6), never a compaction model
+     * set elsewhere: the one its last answer came from, then the one selected since, if another on CPP.
+     */
+    const compactWith = Effect.fnUntraced(function* (sessionID: SessionID) {
       if ((yield* sessions.active).has(sessionID)) return "it is running"
       const inbox = yield* sessions.inbox(sessionID).pipe(Effect.orElseSucceed(() => undefined))
       if (inbox === undefined) return "it is gone"
@@ -501,19 +541,27 @@ export const layer = Layer.effect(
       // Session.compact would commit a staged revert first.
       const info = yield* sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
       if (info?.revert) return "it has a staged revert"
-      return undefined
+      if (info?.model && info.model.providerID !== provider) return "its model is no longer on CPP"
+      const [last] = yield* sessions
+        .messages({ sessionID, type: "assistant", order: "desc", limit: 1 })
+        .pipe(Effect.orElseSucceed(() => []))
+      const answered = last?.type === "assistant" && last.model.providerID === provider ? last.model : undefined
+      const models: Model.Ref[] = []
+      for (const model of [answered, info?.model])
+        if (model && !models.some((pick) => sameModel(pick, model))) models.push(model)
+      return models.length > 0 ? models : "its last answer did not come through CPP"
     })
 
     const compact = Effect.fnUntraced(function* (chat: Chat) {
       const ask = chat.compact
       chat.compact = undefined
       if (ask === "check" && chat.view?.compactAt === undefined) return
-      const why = yield* leftAlone(chat.sessionID)
-      if (why)
-        return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${why}`, {
+      const models = yield* compactWith(chat.sessionID)
+      if (typeof models === "string")
+        return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${models}`, {
           sessionID: chat.sessionID,
         })
-      yield* sessions.compact({ sessionID: chat.sessionID }).pipe(
+      yield* sessions.compact({ sessionID: chat.sessionID, models }).pipe(
         Effect.catch((error) =>
           Effect.logWarning("could not compact a chat CLIProxyPacer asked to", {
             sessionID: chat.sessionID,
@@ -632,12 +680,15 @@ export const layer = Layer.effect(
       yield* setAccounts(PacerWire.meters(meters))
     })
 
+    /** The chats CPP lists, merged; `full` when it listed as many as it lists, so that more may be active. */
     const readSessions = Effect.gen(function* () {
-      const answer = yield* get("/pacer/v1/sessions?limit=100", PacerWire.Sessions)
+      const answer = yield* get(`/pacer/v1/sessions?limit=${LISTED}`, PacerWire.Sessions)
       const items = PacerWire.listed(answer.items)
       link.active = new Set()
       for (const item of items) yield* merge(item)
-      return items
+      // A held view the list left out may have changed as any: it is read again when asked for.
+      for (const chat of chats.values()) if (chat.raw && !link.active.has(chat.uuid)) chat.stale = true
+      return { items, full: (answer.items?.length ?? 0) >= LISTED }
     })
 
     const readNew = Effect.gen(function* () {
@@ -701,10 +752,16 @@ export const layer = Layer.effect(
     const askAll = yield* trigger(
       "the chats CPP asks to compact",
       Effect.gen(function* () {
-        for (const item of yield* readSessions) {
+        const listed = yield* readSessions
+        const asked = new Set<Chat>()
+        for (const item of listed.items) {
           const sessionID = byUuid.get(item.id.toLowerCase())
           const chat = sessionID && chats.get(sessionID)
-          if (!chat) continue
+          if (chat) asked.add(chat)
+        }
+        // A full list leaves out the oldest active chats, the ones nearest to cold: every chat CPP has is checked.
+        if (listed.full) for (const chat of chats.values()) if (chat.on) asked.add(chat)
+        for (const chat of asked) {
           chat.compact = "check"
           chat.read = true
           mark(chat)
@@ -746,8 +803,9 @@ export const layer = Layer.effect(
     const reset = (endpoint: PacerEndpoint.Endpoint | undefined) => {
       link.endpoint = endpoint
       link.contact = undefined
+      // Another CPP has its own clock.
       link.offset = 0
-      link.fresh = true
+      link.bounds = undefined
       link.accounts = undefined
       link.aliases = new Map()
       link.active = new Set()
@@ -759,6 +817,7 @@ export const layer = Layer.effect(
         chat.raw = undefined
         chat.view = undefined
         chat.stale = false
+        chat.marks = undefined
         chat.read = false
         chat.missing = false
         chat.storeID = undefined
@@ -774,18 +833,19 @@ export const layer = Layer.effect(
     /** One connection: the state, then the stream until it ends. Fails when CPP can't be read. */
     const attempt = (endpoint: PacerEndpoint.Endpoint, first: boolean) =>
       Effect.gen(function* () {
-        link.fresh = true
         // The views first, then the stream: nothing is replayed after a reconnect. A proxy without the pacer answers
-        // this read 404 or 503 `unavailable` (PacerHttp.NoPacer).
+        // this read 404 (PacerHttp.NoPacer).
         yield* readState
-        // CPP sends the stream's headers at once and its first bytes with the first heartbeat, 25 s on; a proxy in front
-        // may hold the headers until those bytes, so they are waited for as long as a heartbeat.
-        const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
-        yield* contact(stream.offset)
+        // The pacer answered: it is on, while its stream connects. CPP sends the stream's headers at once and its first
+        // bytes with the first heartbeat, 25 s on; a proxy in front may hold the headers until those bytes, so they are
+        // waited for as long as a heartbeat. Nothing is lost meanwhile: CPP queues the notices on the stream asked for,
+        // and they are its first bytes. A stream that fails turns the state unreachable as any read.
         yield* setStatus({ state: "on" })
         // The first time the catalog reads itself, on the endpoint's change; after a reconnect it is read again.
         if (!first) capabilities()
         for (const chat of chats.values()) if (pending(chat)) mark(chat)
+        const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
+        yield* contact(stream.offset)
         const events: Array<{ readonly event: string; readonly data: string }> = []
         const parser = makeParser((event) => {
           if (event._tag === "Event") events.push(event)
@@ -809,6 +869,7 @@ export const layer = Layer.effect(
       let delay = RECONNECT_MS
       for (let first = true; ; first = false) {
         const begun = yield* Clock.currentTimeMillis
+        const held = yield* models.get()
         const result = yield* attempt(endpoint, first).pipe(Effect.result)
         if (Result.isFailure(result)) {
           const error = result.failure
@@ -820,7 +881,7 @@ export const layer = Layer.effect(
           }
           if (error._tag === "PacerHttp.NoPacer") {
             yield* setStatus({ state: "no-pacer", message: error.reason })
-            yield* pacerBack
+            yield* pacerBack(held)
             delay = RECONNECT_MS
             continue
           }
@@ -837,13 +898,16 @@ export const layer = Layer.effect(
       }
     })
 
-    /** Waits for a later catalog read that finds the pacer (the provider reads it again, as the model picker opens). */
-    const pacerBack = models.changes().pipe(
-      // The catalog held now said nothing new: CPP has just answered without its pacer.
-      Stream.drop(1),
-      Stream.filter((catalog) => catalog !== undefined && catalog.pacer !== null),
-      Stream.runHead,
-    )
+    /**
+     * Waits for a catalog read since `held`, the catalog as the failed try began, that finds the pacer (the provider
+     * reads it again, as the model picker opens). One that ended while the try was under way counts: it may have seen
+     * the pacer back before the try's answer came.
+     */
+    const pacerBack = (held: PacerModels.Catalog | undefined) =>
+      models.changes().pipe(
+        Stream.filter((catalog) => catalog !== held && catalog !== undefined && catalog.pacer !== null),
+        Stream.runHead,
+      )
 
     yield* endpoints.changes().pipe(
       Stream.changesWith(PacerEndpoint.same),
@@ -963,16 +1027,23 @@ export const layer = Layer.effect(
           return chat && tell(chat, { type: "reverted" })
         }
         case "session.compaction.ended": {
-          // CPP saw a compaction that went through it; one through another provider is told.
-          if (event.data.model?.providerID === provider) return
           const chat = known(sessionID)
-          return chat && tell(chat, { type: "compacted" })
+          if (!chat) return
+          // CPP's view is read again for what it plans next; one through another provider is told first, CPP saw one
+          // that went through it.
+          chat.read = true
+          if (event.data.model?.providerID === provider) mark(chat)
+          else tell(chat, { type: "compacted" })
+          // The compaction CPP planned is done: "compacts at" goes at once, not when CPP's view says so.
+          if (!chat.raw?.warming?.compact_at) return
+          chat.raw = { ...chat.raw, warming: { ...chat.raw.warming, compact_at: null, compact_reason: null } }
+          return setView(chat)
         }
       }
     }
 
     yield* bus.subscribe(followed).pipe(
-      Stream.runForEach((event) => Effect.sync(() => observe(event))),
+      Stream.runForEach((event) => Effect.suspend(() => observe(event) ?? Effect.void)),
       Effect.forkScoped({ startImmediately: true }),
     )
 
@@ -1148,4 +1219,8 @@ function truncate(text: string, bytes: number) {
   const encoded = new TextEncoder().encode(text)
   if (encoded.length <= bytes) return text
   return new TextDecoder().decode(encoded.subarray(0, bytes)).replace(/\uFFFD$/u, "")
+}
+
+function sameModel(a: Model.Ref, b: Model.Ref) {
+  return a.id === b.id && a.providerID === b.providerID && a.variant === b.variant
 }

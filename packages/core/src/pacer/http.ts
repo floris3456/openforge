@@ -36,8 +36,8 @@ export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", 
 }
 
 /**
- * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), a 503 `unavailable` (no
- * pacer store), or capabilities with `pacer: null`.
+ * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), or capabilities with
+ * `pacer: null`. CPP's 503 `unavailable` (its pacer store not open yet) is {@link Unreachable}: it passes.
  */
 export class NoPacer extends Schema.TaggedError<NoPacer>()("PacerHttp.NoPacer", {
   status: Schema.optional(Schema.Number),
@@ -69,17 +69,24 @@ export class Unexpected extends Schema.TaggedError<Unexpected>()("PacerHttp.Unex
 
 export type Error = NotSetUp | Unreachable | Refused | NoPacer | NotFound | Unexpected
 
+/**
+ * Bounds of the server's clock minus the local one, in milliseconds, from an answer's `Date` header: the server read
+ * its clock as `Date` (whole seconds, so between `Date` and a second later) at a moment between the request's sending
+ * and its answer's arrival, so the difference lies in [Date − arrival, Date + 1000 − sending].
+ */
+export interface Offset {
+  readonly low: number
+  readonly high: number
+}
+
 export interface Answer<A> {
   readonly body: A
-  /**
-   * The server's clock minus the local one, in milliseconds, from the answer's `Date` header (whole seconds, so up to
-   * a second early); subtract it from CPP's Unix-ms times. Undefined when the answer has no valid `Date`.
-   */
-  readonly offset: number | undefined
+  /** Undefined when the answer has no valid `Date`. */
+  readonly offset: Offset | undefined
 }
 
 export interface StreamAnswer {
-  readonly offset: number | undefined
+  readonly offset: Offset | undefined
   readonly headers: Readonly<Record<string, string>>
   /** The raw body. Ending or interrupting it closes the request. */
   readonly body: Stream.Stream<Uint8Array, Unreachable>
@@ -150,6 +157,7 @@ export const layer = Layer.effect(
       const url = target(endpoint, path)
       // A path that leaves the endpoint's origin would send the key elsewhere: a bug, not an answer.
       if (!url) return yield* Effect.die(new Error(`Not a path under CLIProxyPacer's root: ${path}`))
+      const sent = yield* Clock.currentTimeMillis
       const response = yield* http
         .execute(
           request(url).pipe(
@@ -162,7 +170,7 @@ export const layer = Layer.effect(
           Effect.provideService(FetchHttpClient.RequestInit, init),
           Effect.mapError(unreachable),
         )
-      return { response, offset: offset(response.headers.date, yield* Clock.currentTimeMillis) }
+      return { response, offset: offset(response.headers.date, sent, yield* Clock.currentTimeMillis) }
     })
 
     const json = <A, I>(
@@ -243,7 +251,6 @@ function refusal(response: HttpClientResponse.HttpClientResponse, text: string) 
   if (status === 401 || status === 403) return new Refused({ status, reason })
   if (status === 404 && error?.type === "not_found") return new NotFound({ reason })
   if (status === 404) return new NoPacer({ status, reason })
-  if (status === 503 && error?.type === "unavailable") return new NoPacer({ status, reason })
   if (status >= 500) return new Unreachable({ status, retryAfter: retryAfter(response.headers["retry-after"]), reason })
   return new Unexpected({ status, reason })
 }
@@ -269,9 +276,9 @@ function unreachable(error: HttpClientError.HttpClientError) {
   })
 }
 
-function offset(date: string | undefined, now: number) {
+function offset(date: string | undefined, sent: number, arrived: number): Offset | undefined {
   const server = date === undefined ? Number.NaN : Date.parse(date)
-  return Number.isFinite(server) ? server - now : undefined
+  return Number.isFinite(server) ? { low: server - arrived, high: server + 1000 - sent } : undefined
 }
 
 function retryAfter(value: string | undefined) {

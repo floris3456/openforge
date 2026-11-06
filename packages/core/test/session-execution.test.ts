@@ -1430,11 +1430,13 @@ function seedInbox(
     .values(
       items.map((item, index) => {
         const entry = typeof item === "string" ? { delivery: item, type: "user" as const } : item
+        const payload: (typeof SessionInboxTable.$inferInsert)["payload"] =
+          entry.type === "user" ? { text: "queued prompt" } : {}
         return {
           id: SessionMessage.ID.create(),
           session_id: sessionID,
           type: entry.type,
-          payload: entry.type === "user" ? { text: "queued prompt" } : {},
+          payload,
           delivery: entry.delivery,
           enqueued_seq: index + 1,
         }

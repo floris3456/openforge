@@ -44,6 +44,7 @@ async function app(input: { state: Parameters<typeof status>[0]; providerID: str
   const setup = await createAppFixture({
     width: 160,
     height: 40,
+    config: { animations: false, keybinds: { "model.list": "f8" } },
     args: { sessionID: CHAT },
     fetch: async (url, request) => {
       const pacer = await fake.handle(url, request)
@@ -106,4 +107,22 @@ test("without CPP: no cache item, no Account, no Requests tab, and no Context ei
   await setup.waitForFrame((frame) => frame.includes("Subagents"), { maxPasses: 100 })
   expect(setup.captureCharFrame()).not.toContain("Requests")
   expect(fake.calls.map((call) => call.path)).toEqual(["status"])
+})
+
+test("the model picker has CPP's models read again each time it opens, without waiting, and never without CPP", async () => {
+  for (const state of ["on", "unset"] as const) {
+    const { setup, fake } = await app({ state, providerID: state === "on" ? "cliproxypacer" : "anthropic" })
+    await using _ = setup
+    await waitForHighlightedFrame(setup, (frame) => frame.includes("Latest reply"), { maxPasses: 200 })
+    const refreshes = () => fake.calls.filter((call) => call.path === "refresh")
+    expect(refreshes()).toEqual([])
+    for (const opening of [1, 2]) {
+      setup.mockInput.pressKey("F8")
+      await setup.waitForFrame((frame) => frame.includes("Select model"), { maxPasses: 100 })
+      await Bun.sleep(50)
+      expect(refreshes().map((call) => call.method)).toEqual(state === "on" ? Array(opening).fill("POST") : [])
+      setup.mockInput.pressEscape()
+      await setup.waitForFrame((frame) => !frame.includes("Select model"), { maxPasses: 100 })
+    }
+  }
 })

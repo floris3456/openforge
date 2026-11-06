@@ -233,6 +233,7 @@ export function pacerFake(input: { delay?: number } = {}) {
     const parts = call.path.split("/")
     if (call.path === "status") return json({ data: fake.status })
     if (call.path === "accounts") return json({ data: fake.accounts })
+    if (call.path === "refresh" && call.method === "POST") return new Response(null, { status: 204 })
     if (parts[0] === "chat" && parts.length === 2 && call.method === "GET")
       return json({ data: fake.chats[parts[1]!] ?? null })
     if (parts[0] === "chat" && parts.length === 2 && call.method === "PATCH") {
@@ -376,16 +377,16 @@ export async function renderPacer(input: {
                       <DataProvider directory={directory}>
                         <LocationProvider>
                           <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
-                            <DialogProvider>
-                              <PacerProvider clock={clock}>
+                            <PacerProvider clock={clock}>
+                              <DialogProvider>
                                 <Probe />
                                 {input.content({
                                   get pacer() {
                                     return pacer
                                   },
                                 })}
-                              </PacerProvider>
-                            </DialogProvider>
+                              </DialogProvider>
+                            </PacerProvider>
                           </ThemeProvider>
                         </LocationProvider>
                       </DataProvider>

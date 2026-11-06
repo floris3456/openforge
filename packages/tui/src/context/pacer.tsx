@@ -415,6 +415,14 @@ function createPacer(input: { clock: Clock }) {
     /** A value read before CPP last came back, or while it is unreachable, is shown greyed. */
     stale: (item: { readonly epoch: number } | undefined) =>
       state() === "unreachable" || (item !== undefined && item.epoch < store.epoch),
+    /**
+     * The model picker opened: the service reads CPP's models again in the background (spec section 1), and the
+     * picker follows the model list's own events. Never waited on, and nothing is sent while CPP isn't set up.
+     */
+    refreshModels() {
+      if (state() === "unset") return
+      void client.api.experimental.pacer.refresh().catch(() => undefined)
+    },
     /** Sets the chat's switches; its answer is the view the toolbar shows at once. */
     async update(sessionID: string, change: { warming?: boolean; compactBeforeCold?: boolean }) {
       const view = await client.api.experimental.pacer.chat.update({ sessionID, ...change })

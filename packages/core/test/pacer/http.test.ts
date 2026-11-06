@@ -198,6 +198,18 @@ describe("PacerHttp", () => {
             return error(503, "busy", { "retry-after": "1" })
           case "/unavailable":
             return error(503, "unavailable")
+          case "/stopping":
+            // CPP while it stops (pair_forward.rs, cpp_down): every new request until it exits.
+            return Response.json(
+              {
+                error: {
+                  message: "CPP is down: this server is stopping (a restart or an update); retry in a moment",
+                  type: "server_error",
+                  code: "cpp_down",
+                },
+              },
+              { status: 503, headers: { "retry-after": "30" } },
+            )
           case "/401":
             return error(401, "unauthorized")
           case "/403":
@@ -229,6 +241,7 @@ describe("PacerHttp", () => {
           "/502",
           "/busy",
           "/unavailable",
+          "/stopping",
           "/401",
           "/403",
           "/not-found",
@@ -244,6 +257,7 @@ describe("PacerHttp", () => {
         { tag: "PacerHttp.Unreachable", status: 502, retryAfter: undefined },
         { tag: "PacerHttp.Unreachable", status: 503, retryAfter: 1000 },
         { tag: "PacerHttp.NoPacer", status: 503, retryAfter: undefined },
+        { tag: "PacerHttp.Unreachable", status: 503, retryAfter: 30_000 },
         { tag: "PacerHttp.Refused", status: 401, retryAfter: undefined },
         { tag: "PacerHttp.Refused", status: 403, retryAfter: undefined },
         { tag: "PacerHttp.NotFound", status: undefined, retryAfter: undefined },

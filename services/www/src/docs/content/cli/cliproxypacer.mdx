@@ -4,9 +4,13 @@ description: "What the TUI shows for a chat on CLIProxyPacer: the cache timer, t
 ---
 
 A chat on the [CLIProxyPacer provider](/providers#cliproxypacer) gets four extras in the TUI: a cache item in the
-toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and two switches. A chat counts as on
-CLIProxyPacer (CPP) when its model is one of CPP's or one of its steps went through CPP. Without CPP set up, none of the
-extras shows.
+toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and two switches. Without CPP set up,
+none of the extras shows.
+
+- The **Requests** tab shows for a chat that used CLIProxyPacer (CPP): its model is one of CPP's, or one of its steps
+  went through CPP.
+- The cache item, the **Account** section and the switches show only while the chat's model is one of CPP's: the model
+  selected for it, else the one its last reply came from. A chat moved to another provider keeps its **Requests** tab.
 
 ```text
 warm 23:41
@@ -19,16 +23,16 @@ The keys are listed on [Keybinds](/cli/keybinds#cliproxypacer).
 The toolbar under the prompt shows one cache item after the context and cost. It counts down to when the chat's prompt
 cache goes cold if nothing more is sent, including the pings CPP still plans.
 
-| It shows                                         | When                                                               |
-| ------------------------------------------------ | ------------------------------------------------------------------ |
-| `warm 23:41`                                     | the cache is warm and CPP pings it                                 |
-| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm               |
-| `cache cold`                                     | the cache went cold, shown as a warning                            |
-| `keep-alive stopped · warm 2:10`                 | CPP's pings stopped on a failure, shown as a warning               |
-| `compacts at 14:32`                              | compact before cold is on, and CPP has set the time it asks for it |
-| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning   |
-| `warm`                                           | the cache is warm and CPP gives no time                            |
-| nothing                                          | the proxy has no pacer, or CPP knows nothing of the chat yet       |
+| It shows                                         | When                                                                                                 |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `warm 23:41`                                     | the cache is warm and CPP pings it                                                                   |
+| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                 |
+| `cache cold`                                     | the cache went cold, shown as a warning                                                              |
+| `keep-alive stopped · warm 2:10`                 | CPP's pings stopped on a failure, shown as a warning                                                 |
+| `compacts at 14:32`                              | compact before cold is on, and CPP has set the time it asks for it                                   |
+| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning                                     |
+| `warm`                                           | the cache is warm and CPP gives no time                                                              |
+| nothing                                          | the proxy has no pacer, CPP knows nothing of the chat yet, or the chat's model is another provider's |
 
 - While CPP is unreachable the item keeps its last text, greyed, with the time it is from: `warm 12:05 · as of 14:02`.
   It stops counting until CPP answers again.
@@ -72,7 +76,12 @@ time      kind        model               account       read/write    verdict   
 - **read/write** are the tokens read from and written to the prompt cache.
 - **verdict** is CPP's cache verdict. A miss shows its cause and the part of the prompt that changed, as a warning; a
   failed or refused request shows as an error.
+- The columns are as wide as their values need, so a value is cut only when the line has no room left. They keep their
+  widths while the tab stays open; a longer value that arrives meanwhile is cut until you open the tab again or resize
+  the window.
 - In a narrow window the model goes first, then the account, then read/write.
+- With the newest row selected, a new request takes the selection, so the newest stays under the cursor. With any other
+  row selected, the selection stays on its request as new rows arrive at the top.
 - More rows are read as you near the end of the list.
 
 | Key                             | Does                                                                                                                                                                          |
@@ -119,8 +128,11 @@ Cache warming off for this chat
 
 - A toast says the new state, and the toolbar shows it at once.
 - Before the chat's first reply, CPP knows nothing of it yet: switch it after that reply.
-- On a proxy without the pacer, neither the keys nor the palette entries exist.
-- When CPP asks to compact, openforge compacts the chat unless a step runs, a prompt is queued, or a revert is staged.
+- On a proxy without the pacer, or for a chat whose model is another provider's, neither the keys nor the palette
+  entries exist.
+- When CPP asks to compact, openforge compacts the chat with its own model on CPP, the one whose prompt cache is warm,
+  never a compaction model set elsewhere. It leaves the chat alone while a step runs, a prompt is queued or a revert is
+  staged, and when its model is no longer on CPP.
 
 **Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
 asks CPP to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't count.

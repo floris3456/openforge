@@ -7,8 +7,10 @@ import { PacerHttp } from "./http.js"
 
 // The seam between the CLIProxyPacer provider and the service's connection to CPP. The provider's side builds the
 // catalog and owns every read of `/v1/models`, `/pacer/v1/capabilities` and `/pacer/v1/models`; the connection asks
-// it to read again when CPP's change stream says so (`capabilities`, `settings`, `price`, `resync`, a reconnect) and
-// takes "no pacer" from it. Fields may be added; none may be removed or renamed without both sides.
+// it to read again when CPP's change stream says so (`capabilities`, `price`, `resync`, a reconnect; a `settings`
+// notice reads no catalog), and so does the `pacer.refresh` route as the model picker opens. In "no pacer" the
+// connection waits for a read that finds the pacer. Fields may be added; none may be removed or renamed without both
+// sides.
 
 /** What capabilities' `pacer` block says the server does; null for a proxy without the pacer. */
 export interface Pacer {

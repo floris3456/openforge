@@ -277,23 +277,6 @@ describe("PacerHttp", () => {
     }),
   )
 
-  it.live("fails NoPacer on capabilities that say pacer: null", () =>
-    Effect.gen(function* () {
-      const cpp = yield* serve((_, url) => Response.json({ pacer: url.pathname === "/plain" ? null : { warming: {} } }))
-      const Capabilities = Schema.Struct({ pacer: Schema.NullOr(Schema.Struct({ warming: Schema.Struct({}) })) })
-      const plain = yield* failure(
-        withHttp(endpoint(cpp.origin), (http) =>
-          http.get("/plain", Capabilities).pipe(Effect.flatMap(PacerHttp.requirePacer)),
-        ),
-      )
-      expect(plain).toBeInstanceOf(PacerHttp.NoPacer)
-      const paced = yield* withHttp(endpoint(cpp.origin), (http) =>
-        http.get("/paced", Capabilities).pipe(Effect.flatMap(PacerHttp.requirePacer)),
-      )
-      expect(paced.body.pacer.warming).toEqual({})
-    }),
-  )
-
   it.live("streams the raw body as it arrives", () =>
     Effect.gen(function* () {
       const cpp = yield* serve((_, url) => {

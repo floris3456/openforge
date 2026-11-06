@@ -1268,6 +1268,37 @@ describe("PacerConnection chats", () => {
     }),
   )
 
+  it.effect("compacts a chat CPP asks to with its own model on CPP, never another provider's", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const own = yield* chat(h)
+      const switched = yield* chat(h)
+      const away = yield* chat(h)
+      yield* Effect.forEach([own, switched, away], (id) => step(h, id))
+      const later = { id: Model.ID.make("model-c"), providerID: Provider.ID.make("cliproxypacer") }
+      yield* h.sessions.switchModel({ sessionID: switched, model: later })
+      yield* h.sessions.switchModel({ sessionID: away, model: otherModel })
+      const woken = h.execution.woken.length
+
+      h.cpp.notice("compact", {
+        sessions: [own, switched, away].map((id) => ({ key: 1, session: PacerSessionID.make(id) })),
+        at: 1,
+      })
+      yield* until("compacted", () => h.execution.woken.slice(woken).length === 2)
+      yield* settle
+      const payloads = (id: SessionID) =>
+        Effect.map(h.sessions.inbox(id), (items) => items.map((item) => item.type === "compaction" && item.payload))
+      // The model of its last answer, whose cache is warm, then the one selected since; never the compaction agent's.
+      expect(yield* payloads(own)).toEqual([{ models: [cppModel] }])
+      expect(yield* payloads(switched)).toEqual([
+        { models: [cppModel, { ...later, variant: Model.VariantID.make("default") }] },
+      ])
+      expect(yield* payloads(away)).toEqual([])
+      expect(h.execution.woken.slice(woken).toSorted()).toEqual([own, switched].toSorted())
+    }),
+  )
+
   it.effect("marks the held views stale on a settings notice, and reads nothing for it", () =>
     Effect.gen(function* () {
       const h = yield* harness()

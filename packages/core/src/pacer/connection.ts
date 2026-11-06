@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util"
 import { Clock, Context, Effect, Layer, Queue, Result, Schema, Stream } from "effect"
 import { makeParser } from "effect/encoding/Sse"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import type { Model } from "@opencode/schema/model"
 import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 import { Bus } from "../bus.js"
@@ -522,8 +523,12 @@ export const layer = Layer.effect(
         Effect.orElseSucceed((): Info => ({})),
       )
 
-    /** Why the chat must not be compacted now, if it must not: a step running or queued keeps it warm. */
-    const leftAlone = Effect.fnUntraced(function* (sessionID: SessionID) {
+    /**
+     * The models to compact the chat with, first choice first, or why it must not be compacted now: a step running or
+     * queued keeps it warm. Only its own model on CPP reads its warm cache (spec section 6), never a compaction model
+     * set elsewhere: the one its last answer came from, then the one selected since, if another on CPP.
+     */
+    const compactWith = Effect.fnUntraced(function* (sessionID: SessionID) {
       if ((yield* sessions.active).has(sessionID)) return "it is running"
       const inbox = yield* sessions.inbox(sessionID).pipe(Effect.orElseSucceed(() => undefined))
       if (inbox === undefined) return "it is gone"
@@ -531,19 +536,27 @@ export const layer = Layer.effect(
       // Session.compact would commit a staged revert first.
       const info = yield* sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
       if (info?.revert) return "it has a staged revert"
-      return undefined
+      if (info?.model && info.model.providerID !== provider) return "its model is no longer on CPP"
+      const [last] = yield* sessions
+        .messages({ sessionID, type: "assistant", order: "desc", limit: 1 })
+        .pipe(Effect.orElseSucceed(() => []))
+      const answered = last?.type === "assistant" && last.model.providerID === provider ? last.model : undefined
+      const models: Model.Ref[] = []
+      for (const model of [answered, info?.model])
+        if (model && !models.some((pick) => sameModel(pick, model))) models.push(model)
+      return models.length > 0 ? models : "its last answer did not come through CPP"
     })
 
     const compact = Effect.fnUntraced(function* (chat: Chat) {
       const ask = chat.compact
       chat.compact = undefined
       if (ask === "check" && chat.view?.compactAt === undefined) return
-      const why = yield* leftAlone(chat.sessionID)
-      if (why)
-        return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${why}`, {
+      const models = yield* compactWith(chat.sessionID)
+      if (typeof models === "string")
+        return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${models}`, {
           sessionID: chat.sessionID,
         })
-      yield* sessions.compact({ sessionID: chat.sessionID }).pipe(
+      yield* sessions.compact({ sessionID: chat.sessionID, models }).pipe(
         Effect.catch((error) =>
           Effect.logWarning("could not compact a chat CLIProxyPacer asked to", {
             sessionID: chat.sessionID,
@@ -1188,4 +1201,8 @@ function truncate(text: string, bytes: number) {
   const encoded = new TextEncoder().encode(text)
   if (encoded.length <= bytes) return text
   return new TextDecoder().decode(encoded.subarray(0, bytes)).replace(/\uFFFD$/u, "")
+}
+
+function sameModel(a: Model.Ref, b: Model.Ref) {
+  return a.id === b.id && a.providerID === b.providerID && a.variant === b.variant
 }

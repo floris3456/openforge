@@ -60,8 +60,17 @@ export type Estimate = { readonly measured: number; readonly estimated: number }
 export type Trigger =
   /** `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`. */
   | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded; readonly estimate?: Estimate }
-  /** `inputID` is the `/compact` inbox item, whose message shows the outcome. */
-  | { readonly reason: "manual"; readonly context: SessionContext.Loaded; readonly inputID: SessionMessage.ID }
+  /**
+   * `inputID` is the `/compact` inbox item, whose message shows the outcome. `models`, when the item names them, write
+   * the summary as a move's do: CLIProxyPacer's `compact` notice names the chat's own model, the one whose prompt
+   * cache is warm, never the compaction agent's.
+   */
+  | {
+      readonly reason: "manual"
+      readonly context: SessionContext.Loaded
+      readonly inputID: SessionMessage.ID
+      readonly models?: ReadonlyArray<Model.Ref>
+    }
   /**
    * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
    * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
@@ -286,7 +295,8 @@ export const layer = Layer.effect(
 
     /**
      * The model that writes the summary, and the request size it aims for: the compaction agent's model, else the
-     * chat's. A move's `picks` replace the agent's: the first the chat can use, else the chat's model.
+     * chat's. Picks (a move's, or a compaction item's) replace the agent's: the first the chat can use, else the chat's
+     * model.
      */
     const selectModel = Effect.fnUntraced(function* (
       context: SessionContext.Loaded,
@@ -333,7 +343,7 @@ export const layer = Layer.effect(
         context,
         settings.buffer,
         native,
-        trigger.reason === "move" ? trigger.models : undefined,
+        trigger.reason === "move" || trigger.reason === "manual" ? trigger.models : undefined,
       )
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
       const budget =

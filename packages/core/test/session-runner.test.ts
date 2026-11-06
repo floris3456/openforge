@@ -3661,6 +3661,43 @@ describe("SessionRunnerLLM", () => {
     ])
   })
 
+  scenario("writes a compaction item's summary with the model it names, not the compaction agent's", function* (s) {
+    s.currentModel = pacedModel
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) =>
+      editor.update(Agent.ID.make("compaction"), (agent) => {
+        agent.model = { id: ID.make("replacement"), providerID: Provider.ID.make("fake") }
+      }),
+    )
+    yield* s.llm.push(TestLLM.text("Earlier answer", "text-own-history"))
+    yield* s.runPrompt("Earlier question")
+
+    // A plain `/compact` is the compaction agent's.
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.text("## Objective\n- Agent summary", "text-agent-summary"))
+    yield* s.session.compact({ sessionID })
+    yield* s.resume
+    expect(s.requests.map((request) => request.model)).toEqual([replacementModel])
+
+    // CLIProxyPacer's compact notice names the chat's own model, whose prompt cache is warm.
+    yield* s.llm.push(TestLLM.text("Later answer", "text-own-later"))
+    yield* s.runPrompt("Later question")
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.text("## Objective\n- Own summary", "text-own-summary"))
+    const own = yield* s.session.compact({
+      sessionID,
+      models: [{ id: ID.make("recovery"), providerID: Provider.ID.make("cliproxypacer") }],
+    })
+    yield* s.resume
+    expect(s.requests.map((request) => request.model)).toEqual([pacedModel])
+    expect(isSummaryRequest(s.requests[0]!)).toBe(true)
+    expect((yield* s.messages).find((message) => message.id === own.id)).toMatchObject({
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\n- Own summary",
+    })
+  })
+
   scenario("sends the step again at once on a move ask before the chat's first answer", function* (s) {
     s.currentModel = pacedModel
     yield* s.llm.push(Stream.fail(pacerMoveAsk(["claude-e2e-mini"])), TestLLM.text("Moved", "text-moved-new-chat"))

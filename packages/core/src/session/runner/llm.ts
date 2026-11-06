@@ -165,6 +165,7 @@ const layer = Layer.effect(
                     return yield* compaction.compact({
                       reason: "manual",
                       inputID: pending.id,
+                      ...(pending.payload.models ? { models: pending.payload.models } : {}),
                       context: {
                         session: selected.session,
                         agent: selected.agent,

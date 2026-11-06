@@ -100,7 +100,10 @@ export const CHATS = 1_000
 export const LISTED = 100
 /** What-changed answers held. */
 export const PROMPTS = 50
-/** Request rows held from the chats' pages, so that what changed knows which request it is compared with. */
+/**
+ * Request rows held from the chats' pages, so that what changed knows which request it is compared with, and each with
+ * the time first answered for it.
+ */
 export const ROWS = 1_000
 /** CPP's UUIDs of chats with new requests this service didn't know yet, held at most. */
 export const UNNAMED = 200
@@ -246,9 +249,11 @@ export const layer = Layer.effect(
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
-    // Request rows as CPP last answered them, by CPP's number, and CPP's number by request ID.
+    // Request rows as CPP last answered them, by CPP's number, and CPP's number by request ID; and the time on this
+    // clock first answered for each, by CPP's number.
     const heldRows = new Map<number, PacerWire.Row>()
     const heldIDs = new Map<string, number>()
+    const heldAt = new Map<number, number>()
     // A chat's first requests can reach CPP, and its notice this service, before the chat's step is published here: a
     // new chat's title and first step, or a chat continued after a restart.
     const unnamed = new Set<string>()
@@ -863,6 +868,7 @@ export const layer = Layer.effect(
       prompts.clear()
       heldRows.clear()
       heldIDs.clear()
+      heldAt.clear()
       unnamed.clear()
       // Another CPP knows nothing of what this one said.
       for (const chat of chats.values()) {
@@ -1169,9 +1175,27 @@ export const layer = Layer.effect(
       for (const [id, row] of heldRows) {
         if (heldRows.size <= ROWS) break
         heldRows.delete(id)
+        heldAt.delete(id)
         if (heldIDs.get(row.ext) === id) heldIDs.delete(row.ext)
       }
     }
+
+    /**
+     * A held row's time on this clock: the one first answered for it. The offset to CPP's clock moves as its bounds
+     * narrow, so the same CPP time can fall in either second on two reads; a time shown must never change.
+     */
+    const rowAt = (row: PacerWire.Row, context: PacerWire.Context) => {
+      const held = heldAt.get(row.id)
+      if (held !== undefined) return held
+      const at = PacerWire.local(row.at, context.offset) ?? row.at
+      if (heldRows.has(row.id)) heldAt.set(row.id, at)
+      return at
+    }
+    /** A request row in openforge's shape, at its held time. */
+    const shape = (row: PacerWire.Row, sender: PacerWire.Sender, context: PacerWire.Context): Pacer.Request => ({
+      ...PacerWire.request(row, sender, context),
+      at: rowAt(row, context),
+    })
 
     const oneRow = (request: string | number) =>
       get(
@@ -1249,7 +1273,7 @@ export const layer = Layer.effect(
           keepRows(listed)
           const sender = yield* senders(chat, listed)
           return {
-            items: listed.map((row) => PacerWire.request(row, sender(row), now)),
+            items: listed.map((row) => shape(row, sender(row), now)),
             ...(answer.next ? { cursor: answer.next } : {}),
             asOf: now.now,
           }
@@ -1284,7 +1308,12 @@ export const layer = Layer.effect(
           const sessionID = row.session_ext ? byUuid.get(row.session_ext.toLowerCase()) : undefined
           const sender = yield* senders(sessionID && chats.get(sessionID), [row])
           const now = yield* context()
-          const change = PacerWire.promptChange(prompt, PacerWire.request(row, sender(row), now), base, now)
+          const change = PacerWire.promptChange(
+            prompt,
+            shape(row, sender(row), now),
+            base && { id: base.ext, at: rowAt(base, now) },
+            now,
+          )
           // CPP may store a prompt just after its request's row: an answer without one is not kept.
           if (change.kept !== "none") remember(requestID, change)
           return change

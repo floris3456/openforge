@@ -400,13 +400,13 @@ export function request(row: Row, sender: Sender, context: Context): Pacer.Reque
 }
 
 /**
- * What changed in a request's prompt. `prompt` is undefined when CPP holds no prompt for it any more; `base` is the
- * request it was compared with.
+ * What changed in a request's prompt. `prompt` is undefined when CPP holds no prompt for it any more; `comparedWith` is
+ * the request it was compared with, its time on the service's clock.
  */
 export function promptChange(
   prompt: Prompt | undefined,
   request: Pacer.Request,
-  base: Row | undefined,
+  comparedWith: { readonly id: string; readonly at: number } | undefined,
   context: Context,
 ): Pacer.PromptChange {
   const items = each(prompt?.rows, decodePromptRow)
@@ -427,7 +427,7 @@ export function promptChange(
   const dropped = items.length > 0 && items.every((item) => item.kind === "dropped")
   return {
     request,
-    ...(base ? { comparedWith: { id: base.ext, at: local(base.at, context.offset) ?? base.at } } : {}),
+    ...(comparedWith ? { comparedWith: { id: comparedWith.id, at: comparedWith.at } } : {}),
     kept: prompt === undefined || dropped ? "none" : prompt.kept === false ? "part" : "all",
     items: changed,
     removed: prompt?.removed ?? [],

@@ -24,6 +24,13 @@ const Pings = Schema.Struct({
   stopped: maybe(Schema.String),
 })
 
+/** A chat's requests at CPP, and the generation of its account (a move starts a new one). */
+const Marks = Schema.Struct({
+  requests: maybe(Schema.Number),
+  last_at: maybe(Schema.Number),
+  generation: maybe(Schema.Number),
+})
+
 /** `GET|PATCH /pacer/v1/sessions/{id}`: one chat's state. */
 export const View = Schema.Struct({
   id: Schema.String,
@@ -48,10 +55,14 @@ export const View = Schema.Struct({
   next_use: maybe(Schema.Struct({ credential: Schema.String, reason: maybe(Schema.String) })),
   force_use: maybe(Schema.Struct({ credential: Schema.String, when: maybe(Schema.String) })),
   label: maybe(Schema.Unknown),
+  ...Marks.fields,
 })
 export type View = typeof View.Type
 
-/** One chat of `GET /pacer/v1/sessions`: the live part of a view. */
+/**
+ * One chat of `GET /pacer/v1/sessions`: the live part of a view, without `warming`, `next_use`, `force_use` or the
+ * switches.
+ */
 const Listed = Schema.Struct({
   id: Schema.String,
   session_id: maybe(Schema.Number),
@@ -60,8 +71,18 @@ const Listed = Schema.Struct({
   warm: maybe(Schema.Boolean),
   warm_until: maybe(Schema.Number),
   pings: maybe(Pings),
+  ...Marks.fields,
 })
 export type Listed = typeof Listed.Type
+
+/**
+ * What moves a chat's view where the session list can't show it: its requests (pings and compactions too) and its
+ * account generation. Undefined when CPP sends none of them.
+ */
+export function marks(item: typeof Marks.Type) {
+  if (item.requests == null && item.last_at == null && item.generation == null) return undefined
+  return `${item.requests ?? ""}/${item.last_at ?? ""}/${item.generation ?? ""}`
+}
 export const Sessions = Schema.Struct({ items: Items })
 
 const Window = Schema.Struct({

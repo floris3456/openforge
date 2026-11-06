@@ -847,6 +847,119 @@ describe("PacerConnection notices", () => {
     }),
   )
 
+  it.effect(
+    "reads a listed chat's view again when its requests moved, once however often listed, never for an older list",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const now = h.cpp.time()
+        const ids = [yield* chat(h), yield* chat(h)]
+        const [first, second] = ids.map((id) => PacerSessionID.make(id))
+        const planned = (uuid: string, requests: number) =>
+          chatView(uuid, now, {
+            requests,
+            last_at: now + requests,
+            warming: {
+              cold: false,
+              size_tokens: 80_000,
+              threshold: 70_000,
+              compact_at: now + 30_000,
+              compact_reason: "before-cold",
+            },
+          })
+        h.cpp.views.set(first, planned(first, 5))
+        h.cpp.views.set(second, planned(second, 5))
+        for (const id of ids) yield* step(h, id)
+        yield* until("both held", () => ids.every((id) => toldChat(h, id)?.compactAt !== undefined))
+        const listed = (uuid: string, requests: number) => ({
+          id: uuid,
+          session_id: 7,
+          requests,
+          last_at: now + requests,
+          generation: 1,
+          warm: true,
+          warm_until: now + 300_000,
+          pings: chatView(uuid, now).pings,
+        })
+        // CPP compacted the first chat: a request of its own, and nothing planned after it. The list can't say so.
+        h.cpp.views.set(first, chatView(first, now, { requests: 6, last_at: now + 6 }))
+        h.cpp.listed = [listed(first, 6), listed(second, 5)]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 1 })
+        yield* until("read again", () => seen(h, viewPath(ids[0])).length === 2)
+        yield* until("told", () => toldChat(h, ids[0]) !== undefined && toldChat(h, ids[0])?.compactAt === undefined)
+        expect((yield* h.connection.chat(ids[0]))?.compactAt).toBeUndefined()
+        // The second, listed as it was read, is neither read again nor told.
+        expect((yield* h.connection.chat(ids[1]))?.compactAt).toBeDefined()
+        expect(toldChat(h, ids[1])).toBeUndefined()
+
+        // Listed again as it is: nothing more to read.
+        h.cpp.notice("session", { keys: [1], at: 2 })
+        yield* until("listed twice", () => seen(h, "/pacer/v1/sessions").length === 2)
+        yield* settle
+        expect(seen(h, viewPath(ids[0]))).toHaveLength(2)
+        expect(seen(h, viewPath(ids[1]))).toHaveLength(1)
+
+        // A list read before the view held now: nothing merged, nothing read.
+        h.cpp.listed = [{ ...listed(first, 4), warm: false }]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 3 })
+        yield* until("listed three times", () => seen(h, "/pacer/v1/sessions").length === 3)
+        yield* settle
+        expect(h.published.filter((event) => event.type === "pacer.chat.updated")).toEqual([])
+        expect(seen(h, viewPath(ids[0]))).toHaveLength(2)
+        expect((yield* h.connection.chat(ids[0]))?.warm).toBe(true)
+      }),
+  )
+
+  it.effect("drops compacts at as openforge compacts the chat, before CPP answers, and reads its view again", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const now = h.cpp.time()
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const plan = { cold: false, size_tokens: 80_000, threshold: 70_000, compact_at: now + 30_000 }
+      h.cpp.views.set(uuid, chatView(uuid, now, { warming: { ...plan, compact_reason: "before-cold" } }))
+      yield* step(h, id)
+      yield* until("held", () => toldChat(h, id)?.compactAt !== undefined)
+      const compaction = (model: typeof cppModel) =>
+        Effect.gen(function* () {
+          yield* h.bus.publish(SessionEvent.Compaction.Started, { sessionID: id, reason: "auto" })
+          yield* h.bus.publish(SessionEvent.Compaction.Ended, { sessionID: id, reason: "auto", model, text: "summary" })
+        })
+      const cleared = () => toldChat(h, id) !== undefined && toldChat(h, id)?.compactAt === undefined
+
+      // Through CPP: CPP is slow to answer, and "compacts at" goes without it.
+      h.cpp.holds.add(viewPath(id))
+      h.cpp.views.set(uuid, chatView(uuid, now))
+      h.published.length = 0
+      const reads = seen(h, viewPath(id)).length
+      yield* compaction(cppModel)
+      yield* until("cleared", cleared)
+      // The view's read is asked for, and held unanswered until now.
+      yield* until("read asked", () => seen(h, viewPath(id)).length === reads + 1 && h.cpp.inflight.now === 1)
+      h.cpp.release()
+      yield* settle
+      expect((yield* h.connection.chat(id))?.compactAt).toBeUndefined()
+
+      // Through another provider: told to CPP, then read again, with "compacts at" gone at once too.
+      h.cpp.views.set(uuid, chatView(uuid, now, { warming: { ...plan, compact_reason: "cold" } }))
+      yield* step(h, id)
+      yield* until("planned again", () => toldChat(h, id)?.compactAt !== undefined)
+      h.cpp.views.set(uuid, chatView(uuid, now))
+      h.published.length = 0
+      const before = seen(h, viewPath(id)).length
+      yield* compaction(otherModel)
+      yield* until("cleared again", cleared)
+      yield* until("told and read", () => seen(h, viewPath(id)).length === before + 1)
+      expect(seen(h, `${viewPath(id)}/events`, "POST").map((item) => item.body)).toEqual([{ type: "compacted" }])
+      yield* settle
+      expect((yield* h.connection.chat(id))?.compactAt).toBeUndefined()
+    }),
+  )
+
   it.effect("reads the meters at most every 10 s, and asks the catalog again on prices and capabilities", () =>
     Effect.gen(function* () {
       const h = yield* harness()

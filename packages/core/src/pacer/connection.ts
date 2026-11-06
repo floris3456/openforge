@@ -56,9 +56,11 @@ export interface Interface {
   /**
    * The chat's view, held from the last read (its `asOf` says when). A held view is answered at once; when it is out
    * of date (after a reconnect, or CPP's `reading` or `settings` notices) and the pacer is on, it is read again in the
-   * background, and `pacer.chat.updated` follows if it changed. With none held, a chat CPP is known to have is read
-   * now; any other is answered undefined at once and looked up in the background (`pacer.chat.updated` when CPP has
-   * it). Undefined when CPP knows nothing of the chat, or nothing was read while CPP can't answer.
+   * background, and `pacer.chat.updated` follows if it changed. A held chat that CPP's list shows with requests the
+   * view hasn't seen (a ping, a compaction, another client's step) is read again at once; one openforge compacted
+   * drops its "compacts at" at once. With none held, a chat CPP is known to have is read now; any other is answered
+   * undefined at once and looked up in the background (`pacer.chat.updated` when CPP has it). Undefined when CPP
+   * knows nothing of the chat, or nothing was read while CPP can't answer.
    */
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
@@ -147,6 +149,8 @@ interface Chat {
   view: Pacer.Chat | undefined
   /** The view may be out of date. */
   stale: boolean
+  /** CPP's requests and account generation for it as last read or listed (`PacerWire.marks`). */
+  marks: string | undefined
   /** A read of the view is due. */
   read: boolean
   /** CPP knew nothing of it at the last read. */
@@ -342,6 +346,7 @@ export const layer = Layer.effect(
         raw: undefined,
         view: undefined,
         stale: false,
+        marks: undefined,
         read: false,
         missing: false,
         storeID: undefined,
@@ -415,6 +420,7 @@ export const layer = Layer.effect(
       chat.raw = view
       chat.on = true
       chat.stale = false
+      chat.marks = PacerWire.marks(view) ?? chat.marks
       chat.missing = false
       if (typeof view.session_id === "number") chat.storeID = view.session_id
       const duration = view.settings?.["pings.duration_minutes"]
@@ -427,7 +433,11 @@ export const layer = Layer.effect(
       if (chat.duration === WAIT_MINUTES && chat.waits.size === 0) mark(chat)
     })
 
-    /** Merges the live part of a chat CPP listed into its held view. */
+    /**
+     * Merges the live part of a chat CPP listed into its held view. What the list doesn't carry (when it compacts, the
+     * next use, a forced move) changes with a request, a ping or a compaction among them, or a move: a chat whose
+     * requests or generation moved is read again, through the chats' queue, once however often it is listed.
+     */
     const merge = Effect.fnUntraced(function* (item: PacerWire.Listed) {
       const uuid = item.id.toLowerCase()
       link.active.add(uuid)
@@ -437,6 +447,19 @@ export const layer = Layer.effect(
       chat.on = true
       if (typeof item.session_id === "number") chat.storeID = item.session_id
       if (!chat.raw) return
+      // A list read before the view held now is older than it.
+      if (
+        typeof item.requests === "number" &&
+        typeof chat.raw.requests === "number" &&
+        item.requests < chat.raw.requests
+      )
+        return
+      const marks = PacerWire.marks(item)
+      if (marks !== undefined && marks !== chat.marks) {
+        chat.marks = marks
+        chat.read = true
+        mark(chat)
+      }
       chat.raw = {
         ...chat.raw,
         warm: item.warm,
@@ -767,6 +790,7 @@ export const layer = Layer.effect(
         chat.raw = undefined
         chat.view = undefined
         chat.stale = false
+        chat.marks = undefined
         chat.read = false
         chat.missing = false
         chat.storeID = undefined
@@ -972,16 +996,23 @@ export const layer = Layer.effect(
           return chat && tell(chat, { type: "reverted" })
         }
         case "session.compaction.ended": {
-          // CPP saw a compaction that went through it; one through another provider is told.
-          if (event.data.model?.providerID === provider) return
           const chat = known(sessionID)
-          return chat && tell(chat, { type: "compacted" })
+          if (!chat) return
+          // CPP's view is read again for what it plans next; one through another provider is told first, CPP saw one
+          // that went through it.
+          chat.read = true
+          if (event.data.model?.providerID === provider) mark(chat)
+          else tell(chat, { type: "compacted" })
+          // The compaction CPP planned is done: "compacts at" goes at once, not when CPP's view says so.
+          if (!chat.raw?.warming?.compact_at) return
+          chat.raw = { ...chat.raw, warming: { ...chat.raw.warming, compact_at: null, compact_reason: null } }
+          return setView(chat)
         }
       }
     }
 
     yield* bus.subscribe(followed).pipe(
-      Stream.runForEach((event) => Effect.sync(() => observe(event))),
+      Stream.runForEach((event) => Effect.suspend(() => observe(event) ?? Effect.void)),
       Effect.forkScoped({ startImmediately: true }),
     )
 

@@ -259,7 +259,8 @@ describe("PacerHttp", () => {
         { tag: "PacerHttp.Unreachable", status: 500, retryAfter: undefined },
         { tag: "PacerHttp.Unreachable", status: 502, retryAfter: undefined },
         { tag: "PacerHttp.Unreachable", status: 503, retryAfter: 1000 },
-        { tag: "PacerHttp.NoPacer", status: 503, retryAfter: undefined },
+        // CPP's pacer store is not open yet: it passes.
+        { tag: "PacerHttp.Unreachable", status: 503, retryAfter: undefined },
         { tag: "PacerHttp.Unreachable", status: 503, retryAfter: 30_000 },
         { tag: "PacerHttp.Refused", status: 401, retryAfter: undefined },
         { tag: "PacerHttp.Refused", status: 403, retryAfter: undefined },

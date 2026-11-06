@@ -101,7 +101,14 @@ const fakeCpp = (now: () => number) =>
             body: text ? JSON.parse(text) : undefined,
             at: now(),
           })
+          // Decided as the request arrives, answered after any hold: a slow answer says what was so when asked.
           const failure = cpp.failure
+          const view = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
+          const counted = failure === undefined && view !== undefined && request.method === "GET"
+          if (counted) cpp.inflight.most = Math.max(cpp.inflight.most, ++cpp.inflight.now)
+          if ([...cpp.holds].some((prefix) => path.startsWith(prefix)))
+            await new Promise<void>((resolve) => waiting.push(resolve))
+          if (counted) cpp.inflight.now--
           if (failure === "plain") return new Response("404 page not found", { status: 404 })
           if (failure)
             return answer(
@@ -109,12 +116,6 @@ const fakeCpp = (now: () => number) =>
               failure.status,
               failure.retryAfter ? { "retry-after": String(failure.retryAfter) } : {},
             )
-          const view = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
-          const counted = view !== undefined && request.method === "GET"
-          if (counted) cpp.inflight.most = Math.max(cpp.inflight.most, ++cpp.inflight.now)
-          if ([...cpp.holds].some((prefix) => path.startsWith(prefix)))
-            await new Promise<void>((resolve) => waiting.push(resolve))
-          if (counted) cpp.inflight.now--
           return route(request.method, path, url.searchParams, text ? JSON.parse(text) : undefined)
         },
       })
@@ -597,6 +598,44 @@ describe("PacerConnection states", () => {
       h.cpp.failure = undefined
       yield* SubscriptionRef.set(h.catalog, catalog(yield* Clock.currentTimeMillis))
       yield* until("on", () => status(h).state === "on")
+    }),
+  )
+
+  it.effect("leaves no pacer for a catalog read that found the pacer while the failing try was under way", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.failure = "plain"
+      h.cpp.holds.add("/pacer/v1/state")
+      yield* h.connect()
+      yield* until("asked", () => seen(h, "/pacer/v1/state").length === 1)
+      // The pacer is back, and a catalog read finds it, before the try's plain 404 comes.
+      h.cpp.failure = undefined
+      yield* SubscriptionRef.set(h.catalog, catalog(yield* Clock.currentTimeMillis))
+      h.cpp.release()
+      yield* until("on", () => status(h).state === "on" && h.cpp.streams() === 1)
+      expect(seen(h, "/pacer/v1/state")).toHaveLength(2)
+      expect(h.published.filter((event) => event.type === "pacer.status").map((event) => event.data)).toMatchObject([
+        { status: { state: "no-pacer" } },
+        { status: { state: "on" } },
+      ])
+    }),
+  )
+
+  it.effect("is unreachable while CPP's pacer store is not open (503 unavailable), and on once it is", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.failure = { status: 503, type: "unavailable" }
+      yield* h.connect()
+      yield* until("unreachable", () => status(h).state === "unreachable")
+      expect(status(h)).toMatchObject({ state: "unreachable", refused: false })
+      // Tried again after the wait, as any unreachable CPP: no catalog read has to find the pacer first.
+      h.cpp.failure = undefined
+      const asked = seen(h, "/pacer/v1/state").length
+      yield* ahead("asked again", () => seen(h, "/pacer/v1/state").length === asked + 1)
+      yield* until("on", () => status(h).state === "on")
+      expect(
+        h.published.some((event) => (event.data as { status?: { state?: string } }).status?.state === "no-pacer"),
+      ).toBe(false)
     }),
   )
 

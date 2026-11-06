@@ -820,7 +820,7 @@ export const layer = Layer.effect(
     const attempt = (endpoint: PacerEndpoint.Endpoint, first: boolean) =>
       Effect.gen(function* () {
         // The views first, then the stream: nothing is replayed after a reconnect. A proxy without the pacer answers
-        // this read 404 or 503 `unavailable` (PacerHttp.NoPacer).
+        // this read 404 (PacerHttp.NoPacer).
         yield* readState
         // The pacer answered: it is on, while its stream connects. CPP sends the stream's headers at once and its first
         // bytes with the first heartbeat, 25 s on; a proxy in front may hold the headers until those bytes, so they are
@@ -855,6 +855,7 @@ export const layer = Layer.effect(
       let delay = RECONNECT_MS
       for (let first = true; ; first = false) {
         const begun = yield* Clock.currentTimeMillis
+        const held = yield* models.get()
         const result = yield* attempt(endpoint, first).pipe(Effect.result)
         if (Result.isFailure(result)) {
           const error = result.failure
@@ -866,7 +867,7 @@ export const layer = Layer.effect(
           }
           if (error._tag === "PacerHttp.NoPacer") {
             yield* setStatus({ state: "no-pacer", message: error.reason })
-            yield* pacerBack
+            yield* pacerBack(held)
             delay = RECONNECT_MS
             continue
           }
@@ -883,13 +884,16 @@ export const layer = Layer.effect(
       }
     })
 
-    /** Waits for a later catalog read that finds the pacer (the provider reads it again, as the model picker opens). */
-    const pacerBack = models.changes().pipe(
-      // The catalog held now said nothing new: CPP has just answered without its pacer.
-      Stream.drop(1),
-      Stream.filter((catalog) => catalog !== undefined && catalog.pacer !== null),
-      Stream.runHead,
-    )
+    /**
+     * Waits for a catalog read since `held`, the catalog as the failed try began, that finds the pacer (the provider
+     * reads it again, as the model picker opens). One that ended while the try was under way counts: it may have seen
+     * the pacer back before the try's answer came.
+     */
+    const pacerBack = (held: PacerModels.Catalog | undefined) =>
+      models.changes().pipe(
+        Stream.filter((catalog) => catalog !== held && catalog !== undefined && catalog.pacer !== null),
+        Stream.runHead,
+      )
 
     yield* endpoints.changes().pipe(
       Stream.changesWith(PacerEndpoint.same),

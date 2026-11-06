@@ -36,8 +36,8 @@ export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", 
 }
 
 /**
- * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), a 503 `unavailable` (no
- * pacer store), or capabilities with `pacer: null`.
+ * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), or capabilities with
+ * `pacer: null`. CPP's 503 `unavailable` (its pacer store not open yet) is {@link Unreachable}: it passes.
  */
 export class NoPacer extends Schema.TaggedError<NoPacer>()("PacerHttp.NoPacer", {
   status: Schema.optional(Schema.Number),
@@ -251,7 +251,6 @@ function refusal(response: HttpClientResponse.HttpClientResponse, text: string) 
   if (status === 401 || status === 403) return new Refused({ status, reason })
   if (status === 404 && error?.type === "not_found") return new NotFound({ reason })
   if (status === 404) return new NoPacer({ status, reason })
-  if (status === 503 && error?.type === "unavailable") return new NoPacer({ status, reason })
   if (status >= 500) return new Unreachable({ status, retryAfter: retryAfter(response.headers["retry-after"]), reason })
   return new Unexpected({ status, reason })
 }

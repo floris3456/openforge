@@ -89,6 +89,8 @@ export interface Input {
   readonly webSocket?: "session"
   /** Prompt size, measured by the provider or estimated. The default output limit leaves room for it. */
   readonly inputTokens?: { readonly measured: number; readonly estimated: number }
+  /** Whether the chat compacts automatically, which a step tells a proxy that asks for compactions. */
+  readonly autoCompaction?: boolean
 }
 
 /** The default output limit: the catalog limit, fitted to the room the prompt leaves in the context window. */
@@ -310,6 +312,7 @@ export const layer = Layer.effect(
               kind,
               sessionID: session.id,
               parentID: session.parentID,
+              auto: input.autoCompaction === true,
             }),
           },
         },

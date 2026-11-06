@@ -5170,6 +5170,19 @@ describe("SessionRunnerLLM", () => {
     })
   })
 
+  scenario("announces only before-cold to CLIProxyPacer while automatic compaction is off", function* (s) {
+    s.currentModel = LanguageModel.make({ id: "fake-model", provider: "cliproxypacer", route: OpenAIChat.route })
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ auto: false }))
+    yield* s.runPrompt("Run without automatic compaction")
+    yield* compaction.transform((editor) => editor.configure({ auto: true }))
+    yield* s.runPrompt("Run with automatic compaction")
+
+    const [off, on] = s.requests.map((request) => request.http?.headers)
+    expect(off).toMatchObject({ "X-Pacer-Session": PacerSessionID.make(sessionID), "X-Pacer-Compact": "before-cold" })
+    expect(on).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
+  })
+
   scenario("uses parent cache affinity for child model requests", function* (s) {
     const parentID = Session.ID.make("ses_runner_parent")
 

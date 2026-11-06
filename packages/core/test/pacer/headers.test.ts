@@ -11,23 +11,32 @@ const parent = PacerSessionID.make(parentID)
 
 describe("PacerHeaders", () => {
   test("marks a step with the chat and the compaction asks it acts on, and no kind", () => {
-    expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind: "primary", sessionID })).toEqual({
+    expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind: "primary", sessionID, auto: true })).toEqual({
       "X-Pacer-Session": chat,
       "X-Pacer-Compact": "auto, before-cold",
     })
   })
 
+  test("leaves auto out of a step's asks while the chat does not compact automatically", () => {
+    expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind: "primary", sessionID, auto: false })).toEqual({
+      "X-Pacer-Session": chat,
+      "X-Pacer-Compact": "before-cold",
+    })
+  })
+
   test("marks titles and one-off generations as title, summaries as compaction", () => {
-    const kind = (kind: PacerHeaders.Input["kind"]) =>
-      PacerHeaders.make({ providerID: PacerEndpoint.id, kind, sessionID })
-    expect(kind("title")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "title" })
-    expect(kind("generate")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "title" })
-    expect(kind("compaction")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "compaction" })
+    for (const auto of [true, false]) {
+      const kind = (kind: PacerHeaders.Input["kind"]) =>
+        PacerHeaders.make({ providerID: PacerEndpoint.id, kind, sessionID, auto })
+      expect(kind("title")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "title" })
+      expect(kind("generate")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "title" })
+      expect(kind("compaction")).toEqual({ "X-Pacer-Session": chat, "X-Pacer-Kind": "compaction" })
+    }
   })
 
   test("names a subagent's parent on each of its requests", () => {
     for (const kind of ["primary", "title", "generate", "compaction"] as const)
-      expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind, sessionID, parentID })).toMatchObject({
+      expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind, sessionID, parentID, auto: true })).toMatchObject({
         "X-Pacer-Session": chat,
         "X-Pacer-Parent-Session": parent,
       })
@@ -35,6 +44,6 @@ describe("PacerHeaders", () => {
 
   test("adds nothing for another provider", () => {
     for (const providerID of ["anthropic", "openai", "cliproxyapi", "CLIProxyPacer"])
-      expect(PacerHeaders.make({ providerID, kind: "primary", sessionID, parentID })).toEqual({})
+      expect(PacerHeaders.make({ providerID, kind: "primary", sessionID, parentID, auto: true })).toEqual({})
   })
 })

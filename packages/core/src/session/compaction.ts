@@ -81,6 +81,8 @@ export type Outcome =
 
 export interface Interface extends State.Transformable<Editor> {
   readonly compact: (trigger: Trigger) => Effect.Effect<Outcome>
+  /** Whether automatic compaction is on; a step tells a proxy that asks for compactions which asks it acts on. */
+  readonly auto: () => boolean
   /**
    * Starts a background summary when the context nears the threshold. Never waits for it. Loads `context` only when
    * background summaries are on. `estimate`, when given, is `estimatePrompt` of the loaded context.
@@ -947,6 +949,7 @@ export const layer = Layer.effect(
     return Service.of({
       transform: state.transform,
       reload: state.reload,
+      auto: () => state.get().auto,
       // A manual compaction settles through its `/compact` inbox item, which the runner owns.
       compact: (trigger) =>
         compact(trigger).pipe(

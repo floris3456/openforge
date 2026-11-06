@@ -177,10 +177,13 @@ function supports(model: PacerModels.Model): readonly Variant.Support[] | undefi
 
 const zero = Money.USDPerMillionTokens.zero
 
-/** CPP's price; a model it has none for costs nothing, as an unpriced catalog model does. */
+/**
+ * CPP's price. A model it has none for gets no rows, openforge's unknown price (`Model.Info.default`'s, and what the
+ * subscription providers give their models): pickers show no price, and a step costs 0 unless its answer says what it
+ * cost. An all-zero row would read as free, and a model on CPP runs on an account.
+ */
 function cost(price: PacerModels.Price | undefined): Model.Info["cost"] {
-  if (price?.rates.input === undefined || price.rates.output === undefined)
-    return [{ input: zero, output: zero, cache: { read: zero, write: zero } }]
+  if (price?.rates.input === undefined || price.rates.output === undefined) return []
   const base = row(price.rates, undefined)
   // A tier sets only the rates that change; CPP lays it over the base rates.
   return [

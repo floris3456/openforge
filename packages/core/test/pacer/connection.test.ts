@@ -662,20 +662,52 @@ describe("PacerConnection states", () => {
   )
 
   it.effect(
-    "waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
+    "is on once the state answers, while it waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
     () =>
       Effect.gen(function* () {
         const h = yield* harness()
         h.cpp.quiet = true
         yield* h.connect()
         yield* until("the stream asked for", () => h.cpp.streams() === 1)
-        // CPP's first heartbeat comes 25 s after the stream opened.
-        for (let second = 0; second < 25; second++) yield* TestClock.adjust("1 second")
-        yield* settle
-        h.cpp.heartbeat()
+        // On with the state's answer, before the stream sent a byte.
         yield* until("on", () => status(h).state === "on")
+        expect(h.published.filter((event) => event.type === "pacer.status").map((event) => event.data)).toMatchObject([
+          { status: { state: "on" } },
+        ])
+        // CPP's first heartbeat comes 25 s after the stream opened; on all along.
+        for (let second = 0; second < 25; second++) {
+          yield* TestClock.adjust("1 second")
+          expect(status(h).state).toBe("on")
+        }
+        yield* settle
+        // A notice before it is the stream's first bytes: followed as ever.
+        h.cpp.notice("request", { keys: [1], at: 1 })
+        yield* until("the notice heard", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+        h.cpp.heartbeat()
+        yield* settle
+        expect(status(h).state).toBe("on")
         expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
+        expect(h.published.filter((event) => event.type === "pacer.status")).toHaveLength(1)
       }),
+  )
+
+  it.effect("turns unreachable when the stream never answers after the state did, and on again after", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.quiet = true
+      h.cpp.holds.add("/pacer/v1/stream")
+      yield* h.connect()
+      yield* until("on", () => status(h).state === "on")
+      // No headers for 60 s: as gone as a silent stream.
+      for (let second = 0; second < 61 && status(h).state === "on"; second++) {
+        yield* TestClock.adjust("1 second")
+        yield* settle
+      }
+      yield* until("unreachable", () => status(h).state === "unreachable")
+      h.cpp.release()
+      h.cpp.quiet = false
+      yield* ahead("on again", () => status(h).state === "on" && h.cpp.streams() >= 1)
+    }),
   )
 
   it.effect("connects again when the stream is silent for 60 s", () =>

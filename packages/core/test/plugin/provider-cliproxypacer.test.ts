@@ -14,6 +14,7 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { Plugin } from "@opencode/core/plugin"
+import type { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { CLIProxyPacerPlugin, isClaude } from "@opencode/core/plugin/provider/cliproxypacer"
 import { Provider } from "@opencode/core/provider"
@@ -444,12 +445,17 @@ const failing = (cause: unknown) =>
 /**
  * The decisions upstream's retry policy makes, as a step consults it, on `failures` one after another, and when each
  * was made, from the first. With `wait` the test clock moves by each wait decided, as the step waits it, and the
- * decisions end at the first that does not retry. `from` is the progress a restarted step continues from.
+ * decisions end at the first that does not retry. `from` is the progress a restarted step continues from, and `hook`
+ * a plugin's `session.retry` hook.
  */
 const decided = Effect.fn(function* (
   model: Model.Ref,
   failures: ReadonlyArray<AIError>,
-  options: { readonly wait?: boolean; readonly from?: SessionRunnerRetry.Progress } = {},
+  options: {
+    readonly wait?: boolean
+    readonly from?: SessionRunnerRetry.Progress
+    readonly hook?: (event: PluginHooks.Domains["session"]["retry"]) => Effect.Effect<void>
+  } = {},
 ) {
   const decide = yield* SessionRunnerRetry.policy(Session.ID.make("ses_cpp_answers"), options.from)
   const begun = yield* Clock.currentTimeMillis
@@ -461,7 +467,7 @@ const decided = Effect.fn(function* (
       error: toSessionError(failure),
       agent: Agent.defaultID,
       model,
-      hook: () => Effect.void,
+      hook: options.hook ?? (() => Effect.void),
       retry: SessionRunnerRetry.isRetryable(failure),
     })
     decisions.push(decision)
@@ -693,6 +699,22 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
           ),
         ).toEqual([true, true, true, false])
       }),
+  )
+
+  it.effect("a 502 upstream would not retry is no outage, even when a plugin retries it: upstream's 10 retries", () =>
+    Effect.gen(function* () {
+      const { model, failure } = yield* failed(
+        "claude-test-1",
+        answering(answer(502, cppDownMessages, { "x-should-retry": "false" })),
+      )
+      expect(SessionRunnerRetry.isRetryable(failure)).toBe(false)
+      const retried = (event: PluginHooks.Domains["session"]["retry"]) =>
+        Effect.sync(() => {
+          event.decision = { retry: true, delay: 10_000 }
+        })
+      const { decisions } = yield* decided(model, Array(20).fill(failure), { wait: true, hook: retried })
+      expect(decisions).toEqual(retries(10, 10_000))
+    }),
   )
 
   it.effect("another provider's 502 and 503 with CPP's answers: upstream's 10 retries, each after the 30 s", () =>

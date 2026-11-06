@@ -2,9 +2,9 @@ import type { OpenCodeClient } from "@opencode/client"
 import type { Attention } from "@opencode/schema/attention"
 import type { LogTags } from "./context/log"
 
-// openforge: a TUI tells its service of every notification it shows (docs/specs/notifications-over-ssh.md), so the
-// players that follow the service (`openforge notify`) play and show it on the machine you sit at. The answer says
-// which of them are connected: the TUI then leaves its sound, or also its own notification, to them.
+// openforge: a TUI tells its service of every notification it shows, so the players that follow the service
+// (`openforge notify`) play and show it on the machine you sit at. The answer says which of them are connected: the
+// TUI then leaves its sound, or also its own notification, to them.
 
 /** Tells the service of one occurrence; answers which players it leaves the sound and the notification to. */
 export type Report = (occurrence: Attention.Occurrence) => Promise<Attention.Players>

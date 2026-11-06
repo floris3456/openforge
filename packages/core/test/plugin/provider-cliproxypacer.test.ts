@@ -19,6 +19,7 @@ import { Provider } from "@opencode/core/provider"
 import { Session } from "@opencode/core/session"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { toSessionError } from "@opencode/core/session/to-session-error"
+import { SessionUsage } from "@opencode/core/session/usage"
 import { Document, Info } from "@opencode/schema/config"
 import { Money } from "@opencode/schema/money"
 import { testEffect } from "../lib/effect"
@@ -263,8 +264,32 @@ describe("CLIProxyPacerPlugin", () => {
       // Nothing known: openforge's defaults, no limits, no price.
       expect(required(plain).limit).toEqual({ context: 0, output: 0 })
       expect(required(plain).capabilities).toEqual(Model.Capabilities.default())
-      expect(required(plain).cost).toEqual([rates(0, 0, 0, 0)])
+      expect(required(plain).cost).toEqual([])
       expect(required(plain).variants.map((variant) => String(variant.id))).toEqual(["low", "medium", "high"])
+    }),
+  )
+
+  it.effect("leaves a model unpriced, not free, unless CPP gives both its input and its output rate", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(
+        yield* fakeCPP(configKey, {
+          at: 1,
+          pacer: null,
+          models: [
+            { id: "none-1", ownedBy: "provc" },
+            { id: "input-1", ownedBy: "provc", price: { rates: { input: 2 }, context: [] } },
+            { id: "output-1", ownedBy: "provc", price: { rates: { output: 8 }, context: [] } },
+            { id: "both-1", ownedBy: "provc", price: { rates: { input: 2, output: 8 }, context: [] } },
+          ],
+        }),
+      )
+      // No rows is openforge's unknown price; one all-zero row would be a free model.
+      expect((yield* listed).map((model) => [String(model.id), model.cost])).toEqual([
+        ["none-1", []],
+        ["input-1", []],
+        ["output-1", []],
+        ["both-1", [rates(2, 8, 0, 0)]],
+      ])
     }),
   )
 
@@ -549,6 +574,108 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
       )
       expect(responses.decisions).toEqual([{ retry: false }])
       expect(responses.error.message).toContain(message)
+    }),
+  )
+})
+
+describe("CLIProxyPacer's unpriced models", () => {
+  it.effect("answer a turn, whose step records its tokens at a cost of 0, on Messages and on Responses", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(yield* fakeCPP(configKey, catalog))
+      const models = yield* listed
+      for (const [id, reply, tokens] of [
+        [
+          "provb/claude-test-2",
+          sse(
+            [
+              "message_start",
+              {
+                type: "message_start",
+                message: {
+                  id: "msg_1",
+                  type: "message",
+                  role: "assistant",
+                  model: "provb/claude-test-2",
+                  content: [],
+                  usage: { input_tokens: 12, cache_read_input_tokens: 100, cache_creation_input_tokens: 20 },
+                },
+              },
+            ],
+            ...messagesStart.slice(1),
+            [
+              "content_block_delta",
+              { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } },
+            ],
+            ["content_block_stop", { type: "content_block_stop", index: 0 }],
+            [
+              "message_delta",
+              { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } },
+            ],
+            ["message_stop", { type: "message_stop" }],
+          ),
+          { input: 12, output: 5, reasoning: 0, cache: { read: 100, write: 20 } },
+        ],
+        [
+          "plain-1",
+          sse(
+            responsesStart[0],
+            [
+              "response.output_item.added",
+              { type: "response.output_item.added", item: { type: "message", id: "msg_1" } },
+            ],
+            responsesStart[1],
+            [
+              "response.output_text.delta",
+              { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "lo" },
+            ],
+            [
+              "response.output_item.done",
+              {
+                type: "response.output_item.done",
+                item: {
+                  type: "message",
+                  id: "msg_1",
+                  role: "assistant",
+                  status: "completed",
+                  content: [{ type: "output_text", text: "Hello", annotations: [] }],
+                },
+              },
+            ],
+            [
+              "response.completed",
+              {
+                type: "response.completed",
+                response: {
+                  id: "resp_1",
+                  object: "response",
+                  status: "completed",
+                  output: [],
+                  usage: {
+                    input_tokens: 132,
+                    input_tokens_details: { cached_tokens: 100 },
+                    output_tokens: 5,
+                    output_tokens_details: { reasoning_tokens: 2 },
+                  },
+                },
+              },
+            ],
+          ),
+          { input: 32, output: 3, reasoning: 2, cache: { read: 100, write: 0 } },
+        ],
+      ] as const) {
+        const info = required(models.find((model) => String(model.id) === id))
+        expect(info.cost).toEqual([])
+        const http = HttpClient.make((request) => Effect.sync(() => HttpClientResponse.fromWeb(request, reply())))
+        const response = yield* LLMClient.generate(
+          ai.request({ model: yield* ModelResolver.fromCatalogModel(info), prompt: "Hello" }),
+        ).pipe(
+          Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.fresh)),
+          Effect.provideService(HttpClient.HttpClient, http),
+        )
+        expect(response.text).toBe("Hello")
+        // A step records its answer's usage with the model's cost (step.ts), which the runner takes from the catalog.
+        expect(SessionUsage.record(response.usage, info.cost)).toEqual({ tokens, cost: Money.USD.zero })
+      }
     }),
   )
 })

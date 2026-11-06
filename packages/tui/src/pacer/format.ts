@@ -13,14 +13,22 @@ import { stringWidth } from "../util/string-width"
 // The words and numbers CLIProxyPacer's screens print (spec cliproxypacer-step-1, sections 4, 5 and 7), as pure
 // functions of openforge's own shapes and the time, so every row of the spec is one unit test.
 
-/** 1:05:09, 23:41, 0:07: what is left of a countdown, rounded up to the second. */
-export function formatRemaining(ms: number) {
+/**
+ * 1:05:09, 23:41, 0:07: what is left of a countdown, rounded up to the second. With `hours`, always hours, minutes and
+ * seconds (0:59:59), as a countdown that started at an hour or more keeps down to 0:00:00.
+ */
+export function formatRemaining(ms: number, hours = false) {
   const seconds = Math.max(0, Math.ceil(ms / 1000))
-  const hours = Math.floor(seconds / 3600)
+  const whole = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const rest = String(seconds % 60).padStart(2, "0")
-  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${rest}`
+  if (hours || whole > 0) return `${whole}:${String(minutes).padStart(2, "0")}:${rest}`
   return `${minutes}:${rest}`
+}
+
+/** Whether what is left, rounded up to the second as it shows, is an hour or more. */
+export function remainingHours(ms: number) {
+  return Math.ceil(ms / 1000) >= 3600
 }
 
 /** When a window resets: 1:20 (hours and minutes) within a day, else 3d 4h. */

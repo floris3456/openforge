@@ -1,7 +1,7 @@
 import { createMemo, Show, type Accessor } from "solid-js"
 import { usePacer } from "../context/pacer"
 import { useTheme } from "../context/theme"
-import { cacheLabel, clockTime, formatRemaining } from "./format"
+import { cacheLabel, clockTime, formatRemaining, remainingHours } from "./format"
 
 // The toolbar's cache item (spec cliproxypacer-step-1, section 4), after the context and cost. While CPP is
 // unreachable it keeps the last text, greyed, as it read when CPP last answered, with "as of 14:02"; it counts no
@@ -35,14 +35,18 @@ export function usePacerCache(sessionID: Accessor<string | undefined>): Accessor
     return current && cacheLabel(current.value, at())
   })
   pacer.countdown(() => label()?.until !== undefined && asOf() === undefined)
-  // A countdown keeps the widest width it had for the same deadline, so 10:00 → 9:59 changes only its digits.
-  const digits = createMemo<{ key: string; width: number; text: string } | undefined>((previous) => {
+  // A countdown keeps its form and the widest width it had for the same deadline, so each tick changes only its digits:
+  // one that started at an hour or more keeps hours down to 0:00:00 (1:00:00 → 0:59:59), one that started under an
+  // hour keeps minutes and seconds, padded (10:00 → " 9:59").
+  const digits = createMemo<{ key: string; hours: boolean; width: number; text: string } | undefined>((previous) => {
     const current = label()
     if (current?.until === undefined) return undefined
-    const text = formatRemaining(current.until - at())
     const key = `${current.text}${current.until}`
-    const width = previous?.key === key ? Math.max(previous.width, text.length) : text.length
-    return { key, width, text: text.padStart(width) }
+    const same = previous?.key === key
+    const hours = same ? previous.hours : remainingHours(current.until - at())
+    const text = formatRemaining(current.until - at(), hours)
+    const width = same ? Math.max(previous.width, text.length) : text.length
+    return { key, hours, width, text: text.padStart(width) }
   })
   return createMemo((): PacerCacheText | undefined => {
     const current = label()

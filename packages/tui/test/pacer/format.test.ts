@@ -6,6 +6,7 @@ import {
   cacheText,
   forceUseLine,
   formatRemaining,
+  remainingHours,
   formatReset,
   nextUseLine,
   promptChangeLines,
@@ -84,6 +85,13 @@ describe("the toolbar's cache item (section 4)", () => {
     expect(formatRemaining(10 * 60_000 - 1)).toBe("10:00")
     expect(formatRemaining(10 * 60_000 - 1000)).toBe("9:59")
     expect(formatRemaining(-5)).toBe("0:00")
+    // One that started at an hour or more keeps its hours down to the end; an hour shows as one, rounded up.
+    expect(formatRemaining(3_600_000, true)).toBe("1:00:00")
+    expect(formatRemaining(3_600_000 - 1000, true)).toBe("0:59:59")
+    expect(formatRemaining(7_000, true)).toBe("0:00:07")
+    expect(formatRemaining(0, true)).toBe("0:00:00")
+    expect(remainingHours(3_600_000 - 999)).toBe(true)
+    expect(remainingHours(3_600_000 - 1000)).toBe(false)
   })
 })
 

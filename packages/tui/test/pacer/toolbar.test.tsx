@@ -147,8 +147,9 @@ describe("the countdown changes only its digits", () => {
     using recorder = recordFrames(setup.app)
     for (let second = 0; second < 4; second++) {
       setup.clock.advance(1000)
-      await setup.app.waitForFrame(() => recorder.frames.length > second)
+      await until(() => recorder.frames.length > second, 5_000, `frame ${second}`)
     }
+    expect(recorder.missed).toBe(0)
     const footers = recorder.frames.map((frame) => frame.text.split("\n")[0]!)
     expect(footers.map((text) => text.match(/warm +\d+:\d\d/)?.[0])).toEqual([
       "warm 10:01",
@@ -170,6 +171,8 @@ describe("the countdown changes only its digits", () => {
     const mark = recorder.mark()
     setup.clock.advance(1000)
     await setup.app.waitForFrame((frame) => frame.includes("warm  8:59"))
+    await until(() => mark().length > 0, 5_000, "the frame of 8:59")
+    expect(recorder.missed).toBe(0)
     expect(mark().map((frame) => frame.text.split("\n")[0]!.match(/warm +\d+:\d\d/)?.[0])).toEqual(["warm  8:59"])
   })
 
@@ -193,7 +196,8 @@ test("an event for another chat costs a comparison and changes nothing", async (
   setup.emit({ type: "pacer.requests.updated", data: { sessionID: OTHER } })
   await Bun.sleep(40)
   expect(setup.fake.calls.length).toBe(calls)
-  expect(recorder.frames.filter((frame) => frame.text !== before)).toEqual([])
+  expect(recorder.missed).toBe(0)
+  expect(recorder.frames.filter((frame) => frame.text.trimEnd() !== before.trimEnd())).toEqual([])
   // The chat's own update shows at once.
   setup.emit({ type: "pacer.chat.updated", data: { chat: chat({ warm: false }) } })
   await setup.frame((frame) => frame.includes("cache cold"))

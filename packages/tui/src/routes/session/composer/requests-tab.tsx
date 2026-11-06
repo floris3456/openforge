@@ -129,10 +129,6 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     const first = items()[0]
     if (first && view.selected[which()] === undefined) setView("selected", which(), first.id)
   })
-  createEffect(() => {
-    const request = active() ? selected() : undefined
-    if (request) untrack(() => props.pacer.cursor(request.id))
-  })
 
   const moveTo = (index: number) => {
     const list = items()
@@ -144,6 +140,8 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
       setView("selected", which(), list[next]!.id)
       setView("top", which(), top === 0 ? undefined : list[top]!.id)
     })
+    // What changed is read ahead for the row the cursor reaches; opening the tab reads nothing.
+    props.pacer.cursor(list[next]!.id)
     if (next >= list.length - MORE_AHEAD) props.pacer.more(props.sessionID, which())
   }
 
@@ -243,12 +241,14 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
           // The other filter's first page is held too, so this draws at once; a row in both stays selected.
           const current = selected()
           const list = props.pacer.page(props.sessionID, next)?.items ?? []
+          const keep = list.find((request) => request.id === current?.id) ?? list[0]
           batch(() => {
             updateFilter((draft) => (draft.misses = next === "misses"))
             setView("pending", undefined)
             setView("top", next, undefined)
-            setView("selected", next, list.find((request) => request.id === current?.id)?.id ?? list[0]?.id)
+            setView("selected", next, keep?.id)
           })
+          if (keep) props.pacer.cursor(keep.id)
         },
       },
     ],

@@ -303,7 +303,17 @@ export function step(
 export async function renderPacer(input: {
   fake: PacerFake
   content: (scope: { pacer: Pacer }) => JSX.Element
-  sessions?: Record<string, { providerID: string; parentID?: string; messages?: SessionMessageInfo[]; cost?: number }>
+  sessions?: Record<
+    string,
+    {
+      providerID: string
+      parentID?: string
+      messages?: SessionMessageInfo[]
+      /** Messages before `messages`, on the next page of the history. */
+      older?: SessionMessageInfo[]
+      cost?: number
+    }
+  >
   route?: string
   width?: number
   height?: number
@@ -323,7 +333,15 @@ export async function renderPacer(input: {
     const known = sessionID === undefined ? undefined : sessions[sessionID]
     if (sessionID && known) return json({ data: sessionInfo(sessionID, known.providerID, known.parentID, known.cost) })
     const messagesOf = url.pathname.match(/^\/api\/session\/([^/]+)\/message$/)?.[1]
-    if (messagesOf) return json({ data: [...(sessions[messagesOf]?.messages ?? [])].reverse(), cursor: {} })
+    if (messagesOf) {
+      const known = sessions[messagesOf]
+      if (url.searchParams.get("cursor") === "older")
+        return json({ data: [...(known?.older ?? [])].reverse(), cursor: {} })
+      return json({
+        data: [...(known?.messages ?? [])].reverse(),
+        cursor: known?.older?.length ? { next: "older" } : {},
+      })
+    }
     if (url.pathname === "/api/session" && url.searchParams.has("parentID")) return json({ data: [], cursor: {} })
   }, events)
   let pacer!: Pacer

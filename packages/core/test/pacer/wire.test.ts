@@ -28,7 +28,7 @@ describe("PacerWire", () => {
         interval_ms: 240_000,
         stopped: null,
       },
-      effective: { pings_enabled: false, compact_before_cold: true },
+      effective: { pings_enabled: true, compact_before_cold: true },
       warming: { compact_at: 9_800_000, compact_reason: "before-cold" },
       next_use: { credential: "account-b", reason: "forced_move", window_values: [] },
       force_use: { credential: "account-b", when: "soon" },
@@ -50,7 +50,7 @@ describe("PacerWire", () => {
       compactReason: "before-cold",
       nextUse: { account: "alias of account-b", reason: "forced_move" },
       forceUse: { account: "alias of account-b", when: "soon" },
-      switches: { warming: false, compactBeforeCold: true },
+      switches: { warming: true, compactBeforeCold: true },
       asOf: 1,
     })
   })
@@ -69,6 +69,25 @@ describe("PacerWire", () => {
       alias: (account) => account,
     })
     expect(cold.coldAt).toBeUndefined()
+  })
+
+  test("counts no pings with warming off, though CPP's answer to the write still lists them planned", () => {
+    // CPP's answer to {"pings.enabled": false} on the owner's CPP (run/evidence/v0.0.7/live-owner-4): the switch off,
+    // the pings still active with 8 left, about a second before its list says they stopped.
+    const answered = (enabled: boolean) =>
+      PacerWire.chat(
+        decodeView({
+          id: "uuid-a",
+          warm: true,
+          warm_until: 500,
+          pings: { active: true, pings_left: 8, interval_ms: 285_000 },
+          effective: { pings_enabled: enabled },
+        }),
+        sessionID,
+        { offset: 0, now: 0, alias: (account) => account },
+      )
+    expect(answered(false)).toMatchObject({ coldAt: 500, switches: { warming: false } })
+    expect(answered(true)).toMatchObject({ coldAt: 500 + 8 * 285_000, switches: { warming: true } })
   })
 
   test("keeps the windows that apply, named with their scope, and stale after an hour or without a reading", () => {

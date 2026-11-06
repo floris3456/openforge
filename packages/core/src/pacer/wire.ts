@@ -292,12 +292,17 @@ export function chat(
   const compactAt = local(view.warming?.compact_at, context.offset)
   const reason = view.warming?.compact_reason
   const when = view.force_use?.when
+  const warming = view.effective?.pings_enabled === true
+  const state = live(view, context)
   return {
     sessionID,
     ...(view.model ? { model: view.model } : {}),
     ...(view.provider ? { provider: view.provider } : {}),
     ...(view.account ? { account: context.alias(view.account), accountID: view.account } : {}),
-    ...live(view, context),
+    ...state,
+    // With warming off no ping goes out. CPP's answer to the write that turns it off can still list the pings planned,
+    // until its list says otherwise about a second on (run/evidence/v0.0.7/live-owner-4): they don't move the countdown.
+    ...(!warming && state.coldAt !== undefined ? { coldAt: state.warmUntil } : {}),
     ...(compactAt !== undefined && (reason === "before-cold" || reason === "cold")
       ? { compactAt, compactReason: reason }
       : {}),
@@ -308,7 +313,7 @@ export function chat(
       ? { forceUse: { account: context.alias(view.force_use.credential), when } }
       : {}),
     switches: {
-      warming: view.effective?.pings_enabled === true,
+      warming,
       compactBeforeCold: view.effective?.compact_before_cold === true,
     },
     asOf: context.now,

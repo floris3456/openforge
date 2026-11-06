@@ -248,9 +248,9 @@ An invalid or unreadable override falls back to the built-in sound for that even
 
 The TUI shows a system notification as a terminal escape sequence. Inside tmux, turn on `set -g allow-passthrough on` so
 it reaches the terminal, and `set -s focus-events on` so the TUI knows whether its window is focused. While it doesn't
-know, a notification shows even when you look at the chat. Set `attention.protocol` when tmux or ssh hides which
-terminal you use, to a sequence your terminal's documentation lists: OSC 99 is kitty's protocol, OSC 9 is iTerm2's,
-and OSC 777 comes from urxvt.
+know, a notification shows even when you look at the chat. Inside tmux, `auto` cannot see which terminal is behind
+it and may send no notification at all: set `attention.protocol` to a sequence your terminal's documentation lists.
+OSC 99 is kitty's protocol, OSC 9 is iTerm2's, and OSC 777 comes from urxvt.
 
 For a terminal that shows no notifications (Terminal.app), or for openforge on another machine, run
 [`openforge notify`](/cli/commands#notify) on the machine you sit at: it plays the sounds there and with `--desktop`

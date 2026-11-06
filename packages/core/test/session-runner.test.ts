@@ -19,7 +19,7 @@ import {
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { AnthropicMessages, OpenAIResponses } from "@opencode/ai/protocols"
 import { TestLLM, compileRequest } from "@opencode/ai/testing"
-import { RequestExecutor } from "@opencode/ai/route"
+import { RequestExecutor, classifyProviderFailure } from "@opencode/ai/route"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Database } from "@opencode/core/database/database"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -222,6 +222,8 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     currentModel: model,
     compaction,
     modelResolveHook: resolvesModel,
+    /** Model IDs a session cannot use: resolving one fails as unavailable. */
+    unavailableModels: new Set<string>(),
     systemBaseline: "Initial context",
     systemRemoved: false,
     systemUnavailable: false,
@@ -334,6 +336,16 @@ const layer = Layer.unwrap(
     const models = Layer.mock(SessionRunnerModel.Service)({
       resolve: (session) =>
         state.modelResolveHook.pipe(
+          Effect.andThen(
+            session.model && state.unavailableModels.has(session.model.id)
+              ? Effect.fail(
+                  new SessionRunnerModel.ModelUnavailableError({
+                    providerID: session.model.providerID,
+                    modelID: session.model.id,
+                  }),
+                )
+              : Effect.void,
+          ),
           Effect.map(() => {
             const selected = session.model?.id === "replacement" ? replacementModel : state.currentModel
             return SessionRunnerModel.resolved(selected, {
@@ -698,6 +710,29 @@ const rateLimited = (retryAfterMs?: number) =>
   new AIError({
     reason: new RateLimitError({ message: "Rate limited", retryAfterMs }),
   })
+
+/** CPP's ask to compact before it moves the chat, as the route's executor turns its 409 into a failure. */
+const pacerMoveAsk = (models: readonly string[] = []) => {
+  const body = JSON.stringify({
+    error: {
+      type: "pacer_compact_required",
+      reason: "move",
+      message: "The pacer moves this chat from a (1) to b (2): compact it first, then continue.",
+      models,
+    },
+  })
+  return new AIError({
+    reason: classifyProviderFailure({
+      message: `HTTP 409: ${body}`,
+      status: 409,
+      rawBody: body,
+      http: new HttpContext({ url: "https://cpp.test/v1/chat/completions", status: 409, headers: {} }),
+    }),
+  })
+}
+const pacedModel = LanguageModel.make({ id: "recovery", provider: "cliproxypacer", route: OpenAIChat.route })
+const summaryPrompts = [SessionCompaction.buildPrompt(false), SessionCompaction.buildPrompt(true)]
+const isSummaryRequest = (request: LLMRequest) => summaryPrompts.includes(userTexts(request).at(-1) ?? "")
 
 const setupOverflowRecovery = Effect.fnUntraced(function* (s: Scenario) {
   yield* s.llm.push(TestLLM.text("Earlier answer", "text-earlier"))
@@ -3603,6 +3638,67 @@ describe("SessionRunnerLLM", () => {
     ])
     yield* replaySessionProjection(sessionID)
     expect(yield* s.context).toMatchObject([{ type: "compaction" }, { type: "assistant", finish: "stop" }])
+  })
+
+  scenario("compacts on CLIProxyPacer's move ask with the first of its models the chat can use", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    s.unavailableModels.add("gone")
+    yield* s.llm.push(
+      Stream.fail(pacerMoveAsk(["gone", "replacement"])),
+      TestLLM.text("## Objective\n- Moved summary", "text-move-summary"),
+      TestLLM.text("Moved", "text-moved"),
+    )
+    yield* s.runPrompt("Continue")
+
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false])
+    // The summary is the answer's pick, written here: neither the chat's model nor a native compaction.
+    expect(s.requests[1]?.model).toBe(replacementModel)
+    expect(s.requests[2]?.model).toBe(pacedModel)
+    expect(s.requests[2]?.http?.headers).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Moved summary\n</summary>")
+    expect(yield* s.context).toMatchObject([
+      { type: "compaction", summary: "## Objective\n- Moved summary" },
+      { type: "assistant", finish: "stop" },
+    ])
+  })
+
+  scenario("sends the step again after a move ask it could not compact for", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ auto: false }))
+    yield* s.llm.push(Stream.fail(pacerMoveAsk()), TestLLM.text("Moved without a summary", "text-moved"))
+    yield* s.runPrompt("Continue")
+
+    // CPP asks once per move, so the step sent again moves the chat without the summary.
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+  })
+
+  scenario("shows CLIProxyPacer's refusal after three move asks in one step, without a retry", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    let summaries = 0
+    yield* s.llm.serve((request) =>
+      isSummaryRequest(request)
+        ? TestLLM.text(`## Objective\n- Summary ${++summaries}`, `text-summary-${summaries}`)
+        : Stream.fail(pacerMoveAsk()),
+    )
+    yield* s.admit("Continue")
+    expect((yield* s.resume.pipe(Effect.flip)).message).toContain("compact it first, then continue")
+
+    const steps = s.requests.filter((request) => !isSummaryRequest(request))
+    expect(steps).toHaveLength(4)
+    expect(steps.every((request) => request.model === pacedModel)).toBe(true)
+    expect((yield* s.context).at(-1)).toMatchObject({
+      type: "assistant",
+      finish: "error",
+      error: expect.objectContaining({ message: expect.stringContaining("compact it first, then continue") }),
+    })
+    expect(yield* recordedEventTypes(sessionID)).not.toContain(Bus.versionedType(SessionEvent.RetryScheduled.type, 1))
   })
 
   scenario("refreshes preparation after overflow compaction without promoting new input", function* (s) {

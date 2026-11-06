@@ -62,6 +62,16 @@ export type Trigger =
   | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded; readonly estimate?: Estimate }
   /** `inputID` is the `/compact` inbox item, whose message shows the outcome. */
   | { readonly reason: "manual"; readonly context: SessionContext.Loaded; readonly inputID: SessionMessage.ID }
+  /**
+   * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
+   * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
+   * own model. Always a summary written here, never a provider's native compaction.
+   */
+  | {
+      readonly reason: "move"
+      readonly context: SessionContext.Loaded
+      readonly models: ReadonlyArray<Model.Ref>
+    }
 
 export type Outcome =
   /** Only `auto` skips: the context fits, or automatic compaction is off. */
@@ -268,19 +278,26 @@ export const layer = Layer.effect(
       }),
     })
 
-    /** The model that writes the summary, and the request size it aims for. */
+    const resolveModel = (context: SessionContext.Loaded, model: Model.Ref) =>
+      models.resolve({ ...context.session, model }, catalog.available).pipe(Effect.orElseSucceed(() => undefined))
+
+    /**
+     * The model that writes the summary, and the request size it aims for: the compaction agent's model, else the
+     * chat's. A move's `picks` replace the agent's: the first the chat can use, else the chat's model.
+     */
     const selectModel = Effect.fnUntraced(function* (
       context: SessionContext.Loaded,
       buffer: Settings["buffer"],
       native: boolean,
+      picks?: ReadonlyArray<Model.Ref>,
     ) {
-      const agent = native ? undefined : yield* agents.get(Agent.ID.make("compaction"))
-      const model =
-        (agent?.model &&
-          (yield* models
-            .resolve({ ...context.session, model: agent.model }, catalog.available)
-            .pipe(Effect.orElseSucceed(() => undefined)))) ??
-        context.model
+      let picked: SessionRunnerModel.Resolved | undefined
+      for (const pick of picks ?? []) {
+        picked = yield* resolveModel(context, pick)
+        if (picked) break
+      }
+      const agent = native || picks ? undefined : yield* agents.get(Agent.ID.make("compaction"))
+      const model = picked ?? (agent?.model && (yield* resolveModel(context, agent.model))) ?? context.model
       const ceiling = calculateCeiling(model.limit, buffer)
       // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
       const cap = Number.isFinite(ceiling)
@@ -302,8 +319,13 @@ export const layer = Layer.effect(
         return { status: "skipped" }
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
-      const native = context.model.compaction?.type === "native"
-      const model = yield* selectModel(context, settings.buffer, native)
+      const native = trigger.reason !== "move" && context.model.compaction?.type === "native"
+      const model = yield* selectModel(
+        context,
+        settings.buffer,
+        native,
+        trigger.reason === "move" ? trigger.models : undefined,
+      )
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
       const budget =
         trigger.reason === "overflow"

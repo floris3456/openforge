@@ -952,6 +952,76 @@ describe("PacerConnection notices", () => {
       }),
   )
 
+  it.effect("reads a held chat's view again when asked, once CPP's list of the chats leaves it out", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const ids = [yield* chat(h), yield* chat(h)]
+      const [first, second] = ids.map((id) => PacerSessionID.make(id))
+      for (const uuid of [first, second]) h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      for (const id of ids) yield* step(h, id)
+      yield* until("both held", () => ids.every((id) => toldChat(h, id) !== undefined))
+
+      // CPP lists only the newest chats, with no page after: the other one may have changed as any.
+      h.cpp.listed = [{ id: first, session_id: 7, warm: true, warm_until: h.cpp.time() + 300_000 }]
+      h.cpp.notice("session", { keys: [1], at: 1 })
+      yield* until("listed", () => seen(h, "/pacer/v1/sessions").length === 1)
+      yield* settle
+      h.cpp.views.set(second, chatView(second, h.cpp.time(), { warm: false, warm_until: null }))
+      expect((yield* h.connection.chat(ids[1]))?.warm).toBe(true)
+      yield* until("read again", () => seen(h, viewPath(ids[1])).length === 2)
+      yield* until("told", () => toldChat(h, ids[1])?.warm === false)
+      // The listed one is as listed.
+      yield* h.connection.chat(ids[0])
+      yield* settle
+      expect(seen(h, viewPath(ids[0]))).toHaveLength(1)
+    }),
+  )
+
+  it.effect(
+    "checks every chat CPP has on a compact notice for many, past a full list, and only the listed ones else",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const now = h.cpp.time()
+        const id = yield* chat(h)
+        const uuid = PacerSessionID.make(id)
+        h.cpp.views.set(uuid, chatView(uuid, now))
+        yield* step(h, id)
+        yield* until("held", () => toldChat(h, id) !== undefined)
+        const plan = {
+          cold: false,
+          size_tokens: 80_000,
+          threshold: 70_000,
+          compact_at: now + 30_000,
+          compact_reason: "before-cold",
+        }
+        h.cpp.views.set(uuid, chatView(uuid, now, { warming: plan }))
+        const newer = (count: number) =>
+          Array.from({ length: count }, (_, index) => ({
+            id: `00000000-0000-5000-8000-${String(index).padStart(12, "0")}`,
+            session_id: 100 + index,
+            warm: true,
+          }))
+
+        // A list of the newest chats as long as CPP lists: more are active, the oldest left out.
+        h.cpp.listed = newer(PacerConnection.LISTED)
+        const woken = h.execution.woken.length
+        h.cpp.notice("compact", { sessions: [], many: true, at: 1 })
+        yield* until("compacted", () => h.execution.woken.slice(woken).includes(id))
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+        expect((yield* h.sessions.inbox(id)).map((item) => item.type)).toEqual(["compaction"])
+
+        // A shorter list is every active chat: one it leaves out is not active, and not read.
+        h.cpp.listed = newer(3)
+        h.cpp.notice("compact", { sessions: [], many: true, at: 2 })
+        yield* until("listed again", () => seen(h, "/pacer/v1/sessions").length === 2)
+        yield* settle
+        expect(seen(h, viewPath(id))).toHaveLength(2)
+      }),
+  )
+
   it.effect("drops compacts at as openforge compacts the chat, before CPP answers, and reads its view again", () =>
     Effect.gen(function* () {
       const h = yield* harness()

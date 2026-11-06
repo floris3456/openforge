@@ -93,6 +93,11 @@ export const WAIT_MINUTES = 240
 export const READERS = 4
 /** Chats held at most; the oldest without pending work go first. */
 export const CHATS = 1_000
+/**
+ * The most chats CPP lists (`GET /pacer/v1/sessions`, newest first, its most): there is no page after it, so with more
+ * active chats the oldest, the nearest to cold, are left out.
+ */
+export const LISTED = 100
 /** What-changed answers held. */
 export const PROMPTS = 50
 /** CPP's UUIDs of chats with new requests this service didn't know yet, held at most. */
@@ -675,12 +680,15 @@ export const layer = Layer.effect(
       yield* setAccounts(PacerWire.meters(meters))
     })
 
+    /** The chats CPP lists, merged; `full` when it listed as many as it lists, so that more may be active. */
     const readSessions = Effect.gen(function* () {
-      const answer = yield* get("/pacer/v1/sessions?limit=100", PacerWire.Sessions)
+      const answer = yield* get(`/pacer/v1/sessions?limit=${LISTED}`, PacerWire.Sessions)
       const items = PacerWire.listed(answer.items)
       link.active = new Set()
       for (const item of items) yield* merge(item)
-      return items
+      // A held view the list left out may have changed as any: it is read again when asked for.
+      for (const chat of chats.values()) if (chat.raw && !link.active.has(chat.uuid)) chat.stale = true
+      return { items, full: answer.items.length >= LISTED }
     })
 
     const readNew = Effect.gen(function* () {
@@ -744,10 +752,16 @@ export const layer = Layer.effect(
     const askAll = yield* trigger(
       "the chats CPP asks to compact",
       Effect.gen(function* () {
-        for (const item of yield* readSessions) {
+        const listed = yield* readSessions
+        const asked = new Set<Chat>()
+        for (const item of listed.items) {
           const sessionID = byUuid.get(item.id.toLowerCase())
           const chat = sessionID && chats.get(sessionID)
-          if (!chat) continue
+          if (chat) asked.add(chat)
+        }
+        // A full list leaves out the oldest active chats, the ones nearest to cold: every chat CPP has is checked.
+        if (listed.full) for (const chat of chats.values()) if (chat.on) asked.add(chat)
+        for (const chat of asked) {
           chat.compact = "check"
           chat.read = true
           mark(chat)

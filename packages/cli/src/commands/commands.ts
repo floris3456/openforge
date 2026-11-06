@@ -2,6 +2,7 @@ import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
 import { Product } from "@opencode/schema/product"
 import { Spec } from "../framework/spec"
+import { SessionIDFlag } from "./session-id"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
   flag: Flag.Boolean("print-logs").pipe(
@@ -62,6 +63,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     session: Flag.String("session").pipe(
       Flag.withAlias("s"),
       Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+      SessionIDFlag.check,
       Flag.optional,
     ),
     prompt: Flag.String("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
@@ -371,6 +373,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         session: Flag.String("session").pipe(
           Flag.withAlias("s"),
           Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+          SessionIDFlag.check,
           Flag.optional,
         ),
         fork: Flag.Boolean("fork").pipe(
@@ -411,6 +414,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         session: Flag.String("session").pipe(
           Flag.withAlias("s"),
           Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+          SessionIDFlag.check,
           Flag.optional,
         ),
         fork: Flag.Boolean("fork").pipe(

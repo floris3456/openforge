@@ -975,6 +975,7 @@ export type PacerChat = {
   model?: string
   provider?: string
   account?: string
+  accountID?: string
   warm: boolean
   warmUntil?: number
   coldAt?: number
@@ -2360,7 +2361,7 @@ export type PacerStatus2 = {
   data: { status: PacerStatus }
 }
 
-export type PacerAccount = { alias: string; provider: string; plan?: string; windows: Array<PacerWindow> }
+export type PacerAccount = { id?: string; alias: string; provider: string; plan?: string; windows: Array<PacerWindow> }
 
 export type PacerChatUpdated = {
   id: EventID

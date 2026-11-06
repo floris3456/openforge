@@ -82,6 +82,11 @@ export const Window = Schema.Struct({
 /** An account CPP spreads chats over. */
 export interface Account extends Schema.Schema.Type<typeof Account> {}
 export const Account = Schema.Struct({
+  /**
+   * CPP's opaque ID of the credential (its `auth_index`). Two logins of one address share an alias, each with its own
+   * readings: a chat's account is found by this ID (`Chat.accountID`).
+   */
+  id: Schema.String.pipe(optional),
   /** CPP's alias of the account, the same in all of its answers to the key; never an e-mail address. */
   alias: Schema.String,
   /** CPP's provider of the account, such as `claude`, `codex` or `antigravity`. */
@@ -161,6 +166,8 @@ export const Chat = Schema.Struct({
   provider: Schema.String.pipe(optional),
   /** The alias of the account serving the chat, or of the one that served it last. */
   account: Schema.String.pipe(optional),
+  /** That account's `Account.id`: the alias may name two logins of one address. */
+  accountID: Schema.String.pipe(optional),
   /** Its prompt cache is warm now. */
   warm: Schema.Boolean,
   /** When the cache goes cold unless something is sent: moves forward at every ping. */

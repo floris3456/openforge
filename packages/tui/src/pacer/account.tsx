@@ -19,9 +19,15 @@ function AccountSection(props: { pacer: Pacer; sessionID: string }) {
   const active = () => props.pacer.current(props.sessionID)
   const noPacer = () => props.pacer.state() === "no-pacer"
   const view = () => (active() && !noPacer() ? props.pacer.view(props.sessionID) : undefined)
+  // By the credential's ID: CPP names two logins of one address alike, each with its own readings, and the first of
+  // them by alias may be one read hours ago. By alias only from a service that sends no ID.
   const account = createMemo(() => {
-    const alias = view()?.value.account
-    return alias === undefined ? undefined : props.pacer.accounts()?.value.items.find((item) => item.alias === alias)
+    const chat = view()?.value
+    if (chat?.account === undefined) return undefined
+    const items = props.pacer.accounts()?.value.items ?? []
+    if (chat.accountID !== undefined && items.some((item) => item.id !== undefined))
+      return items.find((item) => item.id === chat.accountID)
+    return items.find((item) => item.alias === chat.account)
   })
   // Frozen at the first frame it is stale, as the toolbar's item is.
   const asOf = createMemo<number | undefined>((previous) => {

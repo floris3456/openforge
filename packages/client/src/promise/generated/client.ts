@@ -273,6 +273,12 @@ import type {
   ExperimentalServicePauseInput,
   ExperimentalServicePauseOutput,
   ExperimentalServiceResumeOutput,
+  ExperimentalAttentionOccurrenceInput,
+  ExperimentalAttentionOccurrenceOutput,
+  ExperimentalAttentionFollowInput,
+  ExperimentalAttentionFollowOutput,
+  ExperimentalAttentionTestInput,
+  ExperimentalAttentionTestOutput,
   ExperimentalPacerStatusOutput,
   ExperimentalPacerAccountsOutput,
   ExperimentalPacerChatGetInput,
@@ -1727,6 +1733,55 @@ export function make(options: ClientOptions) {
             {
               method: "POST",
               path: `/api/experimental/service/resume`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
+      attention: {
+        occurrence: (input: ExperimentalAttentionOccurrenceInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalAttentionOccurrenceOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/attention/occurrence`,
+              body: {
+                kind: input["kind"],
+                sessionID: input["sessionID"],
+                title: input["title"],
+                message: input["message"],
+                notify: input["notify"],
+                sound: input["sound"],
+                focused: input["focused"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        follow: (
+          input?: ExperimentalAttentionFollowInput,
+          requestOptions?: RequestOptions,
+        ): AsyncIterable<ExperimentalAttentionFollowOutput> =>
+          sse<ExperimentalAttentionFollowOutput>(
+            {
+              method: "GET",
+              path: `/api/experimental/attention/follow`,
+              query: { desktop: input?.["desktop"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ),
+        test: (input: ExperimentalAttentionTestInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalAttentionTestOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/attention/test`,
+              body: { kind: input["kind"] },
               successStatus: 200,
               declaredStatuses: [400, 401],
               empty: false,

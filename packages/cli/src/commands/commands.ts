@@ -1,7 +1,9 @@
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
+import { Attention } from "@opencode/schema/attention"
 import { Product } from "@opencode/schema/product"
 import { Spec } from "../framework/spec"
+import { SessionIDFlag } from "./session-id"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
   flag: Flag.Boolean("print-logs").pipe(
@@ -62,6 +64,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
     session: Flag.String("session").pipe(
       Flag.withAlias("s"),
       Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+      SessionIDFlag.check,
       Flag.optional,
     ),
     prompt: Flag.String("prompt").pipe(Flag.withDescription("Prompt to use"), Flag.optional),
@@ -371,6 +374,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         session: Flag.String("session").pipe(
           Flag.withAlias("s"),
           Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+          SessionIDFlag.check,
           Flag.optional,
         ),
         fork: Flag.Boolean("fork").pipe(
@@ -411,6 +415,7 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
         session: Flag.String("session").pipe(
           Flag.withAlias("s"),
           Flag.withDescription("Session ID to continue, or to create if it does not exist"),
+          SessionIDFlag.check,
           Flag.optional,
         ),
         fork: Flag.Boolean("fork").pipe(
@@ -528,6 +533,47 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           },
         }),
       ],
+    }),
+    Spec.make("notify", {
+      description: `Play the notification sounds of ${Product.name}'s chats on this machine, also from another machine over ssh`,
+      params: {
+        target: Argument.String("ssh-target").pipe(
+          Argument.withDescription(
+            "The machine the service runs on, as ssh takes it (user@host or a Host from ~/.ssh/config); without it, the service on this machine",
+          ),
+          Argument.optional,
+        ),
+        via: Flag.String("via").pipe(
+          Flag.withDescription(
+            `Reach the other machine with this command instead of ssh: it runs its arguments there, as "docker exec -i <container>" does`,
+          ),
+          Flag.optional,
+        ),
+        desktop: Flag.Boolean("desktop").pipe(
+          Flag.withDescription(
+            "Also show each notification on this desktop (notify-send on Linux, osascript on macOS)",
+          ),
+          Flag.withDefault(false),
+        ),
+        test: Flag.Literals("test", Attention.testKinds).pipe(
+          Flag.withOptionalValue("done"),
+          Flag.withDescription("Once connected, ask the service for a test; --test=<event> picks the event"),
+          Flag.optional,
+        ),
+        volume: Flag.Finite("volume").pipe(
+          Flag.withSchema(Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 1 }))),
+          Flag.withDescription("Sound volume from 0 to 1 (default 0.4)"),
+          Flag.withDefault(0.4),
+        ),
+        verbose: Flag.Boolean("verbose").pipe(
+          Flag.withDescription("Print every notification and what was done with it"),
+          Flag.withDefault(false),
+        ),
+        // The other end of `notify <ssh-target>` and `notify --via`, started there: occurrences go to stdout as lines.
+        relay: Flag.Boolean("relay").pipe(Flag.withDefault(false), Flag.withHidden),
+        // Hands each sound to this command instead of playing it: a recording stand-in where there is no sound device.
+        soundCommand: Flag.String("sound-command").pipe(Flag.optional, Flag.withHidden),
+      },
     }),
     Spec.make("reload", {
       description: "Reload configuration",

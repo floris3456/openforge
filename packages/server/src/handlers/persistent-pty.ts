@@ -19,6 +19,7 @@ import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
+import { makeAttention } from "./attention"
 import { makeMediaGet } from "./media"
 import { makePacer } from "./pacer"
 import { type Outbound, runPtySocket } from "./pty-socket"
@@ -34,6 +35,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
     const service = yield* makeService
+    const attention = yield* makeAttention
     const pacer = yield* makePacer
 
     return handlers
@@ -54,6 +56,9 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("service.status", () => service.status)
       .handle("service.pause", (ctx) => service.pause(ctx.payload.timeout))
       .handle("service.resume", () => service.resume)
+      .handle("attention.occurrence", (ctx) => attention.occurrence(ctx.payload))
+      .handle("attention.test", (ctx) => attention.test(ctx.payload.kind))
+      .handleRaw("attention.follow", (ctx) => attention.follow(ctx.query.desktop === true))
       .handle("pacer.status", () => pacer.status)
       .handle("pacer.accounts", () => pacer.accounts)
       .handle("pacer.chat.get", (ctx) => pacer.chat(ctx.params.sessionID))

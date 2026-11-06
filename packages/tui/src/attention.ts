@@ -10,6 +10,7 @@ import type {
 import { Config } from "./config"
 import { Schema } from "effect"
 import { Product } from "@opencode/schema/product"
+import { SessionID } from "@opencode/schema/session-id"
 import stripAnsi from "strip-ansi"
 import * as TuiAudio from "./audio"
 import {
@@ -19,6 +20,7 @@ import {
   errorSoundPath,
   subagentDoneSoundPath,
 } from "#attention-sounds"
+import { noPlayers, type Report } from "./attention-report"
 
 type FocusState = "unknown" | "focused" | "blurred"
 
@@ -36,7 +38,7 @@ type AttentionHost = Attention & {
 const DEFAULT_TITLE = Product.name
 const TITLE_LIMIT = 80
 const MESSAGE_LIMIT = 240
-const BUILTIN_SOUNDS: Record<AttentionSoundName, string> = {
+export const BUILTIN_SOUNDS: Record<AttentionSoundName, string> = {
   default: defaultSoundPath,
   question: questionSoundPath,
   permission: permissionSoundPath,
@@ -78,7 +80,8 @@ function soundVolume(input: AttentionNotifyOptions, config: Pick<Config.Resolved
 
 function focusSkip(when: AttentionWhen, focus: FocusState) {
   if (when === "always") return
-  if (focus === "unknown") return "focus_unknown"
+  // openforge: unknown focus (tmux without focus-events) counts as not focused, so a notification shows.
+  if (focus === "unknown") return when === "focused" ? "focus_unknown" : undefined
   if (when === "blurred" && focus === "focused") return "focused"
   if (when === "focused" && focus === "blurred") return "blurred"
 }
@@ -87,6 +90,8 @@ export function createTuiAttention(input: {
   renderer: AttentionRenderer
   config: Pick<Config.Resolved, "attention">
   audio?: Pick<typeof TuiAudio, "loadSoundFile" | "play">
+  /** openforge: tells the service of each occurrence; its players then take the sound or the notification. */
+  report?: Report
 }): AttentionHost {
   let focus: FocusState = "unknown"
   let disposed = false
@@ -139,19 +144,7 @@ export function createTuiAttention(input: {
         const notificationSkip = focusSkip(requestedNotification?.when ?? "blurred", focus)
         const notificationRequested = input.config.attention.notifications && request.notification !== false
         const shouldNotify = notificationRequested && !notificationSkip
-        const notification = shouldNotify
-          ? (() => {
-              try {
-                return input.renderer.triggerNotification(
-                  message,
-                  normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT),
-                )
-              } catch (error) {
-                console.debug("failed to trigger attention notification", { error })
-                return false
-              }
-            })()
-          : false
+        const title = normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT)
         const volume = soundVolume(request, input.config)
         const requestedSound = typeof request.sound === "object" ? request.sound : undefined
         const soundSkip = volume === undefined ? undefined : focusSkip(requestedSound?.when ?? "always", focus)
@@ -159,15 +152,39 @@ export function createTuiAttention(input: {
           requestedSound?.name && Schema.is(Config.AttentionSoundName)(requestedSound.name)
             ? requestedSound.name
             : "default"
-        const sound = volume === undefined || soundSkip ? false : await playSound(soundName, volume)
+        const playable = volume !== undefined && !soundSkip
+        // openforge: the service's players (`openforge notify`) play the sound, and with --desktop show the
+        // notification, on the machine you sit at; this TUI then doesn't, so nothing comes twice.
+        const players = await (input.report?.({
+          kind: soundName,
+          sessionID: Schema.is(SessionID)(request.sessionID) ? request.sessionID : undefined,
+          title,
+          message,
+          notify: shouldNotify,
+          sound: playable ? { name: soundName, file: input.config.attention.sounds[soundName] } : undefined,
+          focused: focus === "focused",
+        }) ?? noPlayers)
+        const notification =
+          shouldNotify && !players.desktop
+            ? (() => {
+                try {
+                  return input.renderer.triggerNotification(message, title)
+                } catch (error) {
+                  console.debug("failed to trigger attention notification", { error })
+                  return false
+                }
+              })()
+            : false
+        const sound = playable && !players.sound ? await playSound(soundName, volume) : false
+        const forwarded = (shouldNotify && players.desktop) || (playable && players.sound)
 
-        if (!notification && !sound) {
+        if (!notification && !sound && !forwarded) {
           if (notificationRequested && notificationSkip) return skipped(notificationSkip)
           if (soundSkip) return skipped(soundSkip)
         }
 
         return {
-          ok: notification || sound,
+          ok: notification || sound || forwarded,
           notification,
           sound,
         }

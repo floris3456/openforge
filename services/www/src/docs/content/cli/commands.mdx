@@ -498,6 +498,59 @@ View all subcommands and flags.
 $ openforge service --help
 ```
 
+## notify
+
+Plays the notification sounds of openforge's chats on the machine you sit at, and with `--desktop` shows their
+notifications there. Use it when openforge runs on another machine over ssh, or inside tmux in a terminal that shows no
+notifications. It follows the background service on this machine:
+
+```bash
+$ openforge notify
+```
+
+It never starts a service. While none runs, it says so and waits for one to start.
+
+Follow openforge on another machine over ssh, and show its notifications here. openforge must be installed there too,
+on `PATH` or in `~/.local/bin`. No port is forwarded, and the service's password stays on that machine.
+
+```bash
+$ openforge notify me@devbox --desktop
+```
+
+Reach the other machine with a command of your own instead of ssh: one that runs its arguments there, as
+`docker exec -i` does. The command is split at spaces; one that needs quoting goes in a script of its own.
+
+```bash
+$ openforge notify --via "docker exec -i devbox" --desktop
+```
+
+Once connected, ask the service for a test notification. `--test=<event>` picks `done`, `subagent_done`, `question`,
+`permission` or `error`; `--test` alone is `done`. Test notifications are titled "openforge test".
+
+```bash
+$ openforge notify --test=question
+```
+
+Set the volume from `0` to `1` (default `0.4`), and print every notification and what was done with it.
+
+```bash
+$ openforge notify --volume 0.2 --verbose
+```
+
+- While a player is connected, the service's TUIs play no sound of their own. While one with `--desktop` is connected,
+  they show no notification of their own either.
+- Two TUIs on the same chat make one sound: the same notification within 300 ms plays once.
+- No desktop notification shows for a chat whose TUI window is focused.
+- Desktop notifications go through `notify-send` on Linux and `osascript` on macOS.
+- When the connection is lost, it is made again after 1 s, then twice as long each time, up to 30 s. Press Ctrl+C to
+  stop; the other machine's side stops when ssh closes.
+
+View all flags.
+
+```bash
+$ openforge notify --help
+```
+
 ## reload
 
 Reloads configuration without restarting the server. Running sessions continue with fresh services at the next step boundary.

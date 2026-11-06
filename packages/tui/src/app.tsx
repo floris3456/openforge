@@ -272,6 +272,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         consoleOptions: {
           keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
         },
+        // openforge: a terminal OpenTUI can't recognise through tmux or ssh gets its notification sequence set.
+        ...(config.attention.protocol !== "auto" && {
+          environment: { OPENTUI_NOTIFICATION_PROTOCOL: config.attention.protocol },
+        }),
       } satisfies CliRendererConfig
       const renderer = yield* Effect.gen(function* () {
         if (handoff) {

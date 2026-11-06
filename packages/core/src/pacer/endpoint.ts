@@ -30,6 +30,8 @@ export interface Endpoint {
   /** `root + "/v1"`, for the OpenAI routes. */
   readonly baseURL: string
   readonly key: string
+  /** Where the key came from: the integration's credential store, or config's `apiKey`. */
+  readonly keyFrom: "credential" | "config"
 }
 
 export interface Interface {
@@ -51,10 +53,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pa
 export function resolve(settings: Provider.Settings | undefined, credential: Credential.Value | undefined) {
   const login = credential?.type === "key" ? credential : undefined
   const url = text(settings?.baseURL) ?? text(login?.metadata?.baseURL)
-  const key = text(login?.key) ?? text(settings?.apiKey)
+  const stored = text(login?.key)
+  const key = stored ?? text(settings?.apiKey)
   if (url === undefined || key === undefined) return undefined
   const location = normalize(url)
-  return location && ({ ...location, key } satisfies Endpoint)
+  return location && ({ ...location, key, keyFrom: stored ? "credential" : "config" } satisfies Endpoint)
 }
 
 /** Accepts `https://host`, `https://host/`, `https://host/v1`, `https://host/v1/`, with or without a path prefix. */
@@ -67,9 +70,15 @@ export function normalize(baseURL: string) {
   return { origin: url.origin, root, baseURL: `${root}/v1` }
 }
 
-/** Whether two endpoints are the same address with the same key. */
+/** Whether two endpoints are the same address with the same key from the same place. */
 export function same(a: Endpoint | undefined, b: Endpoint | undefined) {
-  return a?.root === b?.root && a?.origin === b?.origin && a?.baseURL === b?.baseURL && a?.key === b?.key
+  return (
+    a?.root === b?.root &&
+    a?.origin === b?.origin &&
+    a?.baseURL === b?.baseURL &&
+    a?.key === b?.key &&
+    a?.keyFrom === b?.keyFrom
+  )
 }
 
 function text(value: unknown) {

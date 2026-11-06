@@ -53,7 +53,11 @@ describe("PacerEndpoint.resolve", () => {
   const cpp = { origin: "https://cpp.test", root: "https://cpp.test", baseURL: "https://cpp.test/v1" }
 
   test("takes the credential's key and the base URL its login form stored", () => {
-    expect(PacerEndpoint.resolve(undefined, key("k-login", "https://cpp.test/v1"))).toEqual({ ...cpp, key: "k-login" })
+    expect(PacerEndpoint.resolve(undefined, key("k-login", "https://cpp.test/v1"))).toEqual({
+      ...cpp,
+      key: "k-login",
+      keyFrom: "credential",
+    })
   })
 
   test("takes the config's base URL over the login's, and the credential's key over the config's", () => {
@@ -62,16 +66,31 @@ describe("PacerEndpoint.resolve", () => {
     expect(PacerEndpoint.resolve({ baseURL: "https://cpp.test/", apiKey: "k-config" }, login)).toEqual({
       ...cpp,
       key: "k-login",
+      keyFrom: "credential",
     })
-    expect(PacerEndpoint.resolve({ baseURL: "https://cpp.test/v1/" }, login)).toEqual({ ...cpp, key: "k-login" })
+    expect(PacerEndpoint.resolve({ baseURL: "https://cpp.test/v1/" }, login)).toEqual({
+      ...cpp,
+      key: "k-login",
+      keyFrom: "credential",
+    })
     expect(PacerEndpoint.resolve({ apiKey: "k-config" }, key("k-login", "https://cpp.test"))).toEqual({
       ...cpp,
       key: "k-login",
+      keyFrom: "credential",
     })
     expect(PacerEndpoint.resolve({ baseURL: "https://cpp.test", apiKey: "k-config" }, undefined)).toEqual({
       ...cpp,
       key: "k-config",
+      keyFrom: "config",
     })
+  })
+
+  test("says where the key came from; the same key moved into the store is a change", () => {
+    const config = PacerEndpoint.resolve({ baseURL: "https://cpp.test", apiKey: "k" }, undefined)
+    const stored = PacerEndpoint.resolve({ baseURL: "https://cpp.test" }, key("k"))
+    expect([config?.keyFrom, stored?.keyFrom]).toEqual(["config", "credential"])
+    expect(PacerEndpoint.same(config, stored)).toBe(false)
+    expect(PacerEndpoint.same(stored, PacerEndpoint.resolve({ baseURL: "https://cpp.test/v1/" }, key("k")))).toBe(true)
   })
 
   test("is not set up without both a base URL and a key", () => {
@@ -219,13 +238,17 @@ describe("PacerEndpoint.Service", () => {
               root: "https://config.test/proxy",
               baseURL: "https://config.test/proxy/v1",
             }
-            expect(yield* endpoints.get()).toEqual({ ...configured, key: "k-file" })
+            expect(yield* endpoints.get()).toEqual({ ...configured, key: "k-file", keyFrom: "config" })
             yield* credentials.create({ integrationID: PacerEndpoint.id, value: key("k-login", "https://login.test") })
-            expect(yield* until((endpoint) => endpoint?.key === "k-login")).toEqual({ ...configured, key: "k-login" })
+            expect(yield* until((endpoint) => endpoint?.key === "k-login")).toEqual({
+              ...configured,
+              key: "k-login",
+              keyFrom: "credential",
+            })
             const bus = yield* Bus.Service
             // A location's config change re-reads, but changes nothing here.
             yield* bus.publish(Event.Updated, {}, { location: { directory: AbsolutePath.make(path.sep) } })
-            expect(yield* endpoints.get()).toEqual({ ...configured, key: "k-login" })
+            expect(yield* endpoints.get()).toEqual({ ...configured, key: "k-login", keyFrom: "credential" })
           }),
       ),
     ),
@@ -243,6 +266,7 @@ describe("PacerEndpoint.Service", () => {
             root: "https://v1.test",
             baseURL: "https://v1.test/v1",
             key: "k-login",
+            keyFrom: "credential",
           })
         }),
     ),

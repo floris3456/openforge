@@ -349,6 +349,10 @@ export type ContinuityState = "running" | "pausing" | "paused"
 
 export type ContinuityRunner = { version: string; reachable: boolean; reason?: string }
 
+export type AttentionPlayers = { sound: boolean; desktop: boolean }
+
+export type AttentionKind = "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
 export type VcsBranch = { current?: string; default?: string }
@@ -949,6 +953,8 @@ export type ArtifactInfo = {
   url: string
   time: ArtifactTime
 }
+
+export type AttentionSound = { name: AttentionKind; file?: string }
 
 export type VcsInfo = { provider?: string; branch: VcsBranch }
 
@@ -2262,6 +2268,16 @@ export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery |
 
 export type ArtifactContent = { info: ArtifactInfo; files: { [x: string]: string } }
 
+export type AttentionOccurrence = {
+  kind: AttentionKind
+  sessionID?: SessionID
+  title: string
+  message: string
+  notify: boolean
+  sound?: AttentionSound
+  focused: boolean
+}
+
 export type SessionInboxMove = {
   id: SessionMessageID
   sessionID: SessionID
@@ -2686,6 +2702,10 @@ export type ScheduleInfo = {
   lastOutput?: string
   time: { created: number; updated: number }
 }
+
+export type AttentionFollowEvent =
+  | { type: "following"; version: string }
+  | { type: "occurrence"; occurrence: AttentionOccurrence; test?: true }
 
 export type AgentInfo = {
   id: AgentID
@@ -4734,6 +4754,33 @@ export type ExperimentalServicePauseInput = { readonly timeout?: number | undefi
 export type ExperimentalServicePauseOutput = { data: ContinuityPauseResult }["data"]
 
 export type ExperimentalServiceResumeOutput = { data: ContinuityStatus }["data"]
+
+export type ExperimentalAttentionOccurrenceInput = {
+  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+  readonly sessionID?: string | undefined
+  readonly title: string
+  readonly message: string
+  readonly notify: boolean
+  readonly sound?:
+    | {
+        readonly name: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+        readonly file?: string
+      }
+    | undefined
+  readonly focused: boolean
+}
+
+export type ExperimentalAttentionOccurrenceOutput = { data: AttentionPlayers }["data"]
+
+export type ExperimentalAttentionFollowInput = { readonly desktop?: boolean | undefined }
+
+export type ExperimentalAttentionFollowOutput = AttentionFollowEvent
+
+export type ExperimentalAttentionTestInput = {
+  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error"
+}
+
+export type ExperimentalAttentionTestOutput = { data: AttentionPlayers }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

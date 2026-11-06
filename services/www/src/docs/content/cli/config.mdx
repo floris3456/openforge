@@ -214,35 +214,47 @@ the TUI exits and do not change `cli.json`.
 
 ## Alerts
 
-Enable system notifications and attention sounds independently:
+System notifications and attention sounds are on by default. Turn them off independently:
 
 ```json title="cli.json"
 {
   "attention": {
     "notifications": true,
-    "sound": true,
+    "sound": false,
     "volume": 0.4,
     "sound_pack": "opencode.default",
     "sounds": {
       "permission": "/home/me/sounds/permission.wav"
-    }
+    },
+    "protocol": "auto"
   }
 }
 ```
 
 <div class="docs-table-scroll" role="region" aria-label="Alert settings" tabIndex={0}>
 
-| Setting                  | Values                 | Description                                                                                              |
-| ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `attention.notifications` | boolean               | Shows system notifications, normally when the terminal is not focused.                                  |
-| `attention.sound`        | boolean                | Plays attention sounds.                                                                                  |
-| `attention.volume`       | number from `0` to `1` | Sets sound volume.                                                                                       |
-| `attention.sound_pack`   | string                 | Selects the active sound pack ID.                                                                        |
-| `attention.sounds`       | object                 | Overrides sound files for `default`, `question`, `permission`, `error`, `done`, or `subagent_done`.    |
+| Setting                   | Values                               | Description                                                                                         |
+| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `attention.notifications` | boolean                              | Shows system notifications when the terminal is not focused. On by default.                         |
+| `attention.sound`         | boolean                              | Plays attention sounds. On by default.                                                              |
+| `attention.volume`        | number from `0` to `1`               | Sets sound volume.                                                                                  |
+| `attention.sound_pack`    | string                               | Selects the active sound pack ID.                                                                   |
+| `attention.sounds`        | object                               | Overrides sound files for `default`, `question`, `permission`, `error`, `done`, or `subagent_done`. |
+| `attention.protocol`      | `auto`, `osc99`, `osc777`, or `osc9` | The terminal sequence for system notifications. `auto` recognises the terminal. Applies at start.   |
 
 </div>
 
 An invalid or unreadable override falls back to the built-in sound for that event.
+
+The TUI shows a system notification as a terminal escape sequence. Inside tmux, turn on `set -g allow-passthrough on` so
+it reaches the terminal, and `set -s focus-events on` so the TUI knows whether its window is focused. While it doesn't
+know, a notification shows even when you look at the chat. Inside tmux, `auto` cannot see which terminal is behind
+it and may send no notification at all: set `attention.protocol` to a sequence your terminal's documentation lists.
+OSC 99 is kitty's protocol, OSC 9 is iTerm2's, and OSC 777 comes from urxvt.
+
+For a terminal that shows no notifications (Terminal.app), or for openforge on another machine, run
+[`openforge notify`](/cli/commands#notify) on the machine you sit at: it plays the sounds there and with `--desktop`
+shows the notifications, and the TUIs then leave them to it.
 
 After an update, the TUI shows the new release's highlights once on the home screen. Run `/highlights` to see them
 again, or turn the dialog off:

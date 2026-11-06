@@ -15,6 +15,7 @@ function notify(
     message,
     notification: isSubagent ? false : { when: "blurred" },
     sound: { name: sound, when: "always" },
+    sessionID,
   })
 }
 

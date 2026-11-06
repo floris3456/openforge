@@ -25,6 +25,9 @@ export const AttentionSoundName = Schema.Literals([
   "subagent_done",
 ])
 export type AttentionSoundName = Schema.Schema.Type<typeof AttentionSoundName>
+// openforge: the terminal's notification escape sequence; OpenTUI detects it (`auto`), or it is set.
+export const AttentionProtocol = Schema.Literals(["auto", "osc99", "osc777", "osc9"])
+export type AttentionProtocol = Schema.Schema.Type<typeof AttentionProtocol>
 export type AttentionSoundPaths = Partial<Record<AttentionSoundName, string>>
 
 export const MiniWorkSpinner = Schema.Literals([
@@ -107,6 +110,10 @@ export const Info = Schema.Struct({
       sound_pack: Schema.optional(Schema.String).annotate({ description: "Active attention sound pack ID" }),
       sounds: Schema.optional(Schema.Record(AttentionSoundName, Schema.optionalKey(Schema.String))).annotate({
         description: "Sound file overrides by attention event",
+      }),
+      protocol: Schema.optional(AttentionProtocol).annotate({
+        description:
+          "Notification escape sequence: 'auto' detects it; osc99, osc777 or osc9 for a terminal that is not recognised through tmux or ssh. Read when the TUI starts",
       }),
     }),
   ).annotate({ description: "System notification and sound settings" }),
@@ -264,6 +271,7 @@ export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader"
     volume: number
     sound_pack: string
     sounds: AttentionSoundPaths
+    protocol: AttentionProtocol
   }
   keybinds: TuiKeybind.BindingLookupView
   leader: { timeout: number }
@@ -305,11 +313,13 @@ export function resolve(
   return {
     ...input,
     attention: {
-      notifications: input.attention?.notifications ?? false,
-      sound: input.attention?.sound ?? false,
+      // openforge: notifications and sounds are on by default.
+      notifications: input.attention?.notifications ?? true,
+      sound: input.attention?.sound ?? true,
       volume: input.attention?.volume ?? 0.4,
       sound_pack: input.attention?.sound_pack ?? "opencode.default",
       sounds: input.attention?.sounds ?? {},
+      protocol: input.attention?.protocol ?? "auto",
     },
     keybinds: createBindingLookup(TuiKeybind.toBindingConfig(TuiKeybind.parse(keybinds)), {
       bindingDefaults: TuiKeybind.bindingDefaults(),

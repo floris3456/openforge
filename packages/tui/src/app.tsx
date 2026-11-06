@@ -113,6 +113,7 @@ import { StorageProvider, useStorage } from "./context/storage"
 import { SessionTerminalsProvider } from "./context/session-terminals"
 import { ClientMcp } from "./context/client-mcp"
 import { PanelProvider, usePanel } from "./context/panel"
+import { PacerProvider } from "./context/pacer"
 import { SessionFrame } from "./component/session-frame"
 import { createTuiClipboard } from "./clipboard"
 
@@ -437,30 +438,32 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                           <ClientMcp />
                                                           <LocalProvider>
                                                             <PromptStashProvider>
-                                                              <DialogProvider>
-                                                                <FrecencyProvider>
-                                                                  <PromptHistoryProvider>
-                                                                    <PromptRefProvider>
-                                                                      <EditorContextProvider>
-                                                                        <AttentionProvider>
-                                                                          <UpdateNotificationProvider
-                                                                            updater={input.updater}
-                                                                          >
-                                                                            <PanelProvider>
-                                                                              <PluginProvider
-                                                                                packages={input.packages}
-                                                                                directories={pluginDirectories}
-                                                                              >
-                                                                                <App />
-                                                                              </PluginProvider>
-                                                                            </PanelProvider>
-                                                                          </UpdateNotificationProvider>
-                                                                        </AttentionProvider>
-                                                                      </EditorContextProvider>
-                                                                    </PromptRefProvider>
-                                                                  </PromptHistoryProvider>
-                                                                </FrecencyProvider>
-                                                              </DialogProvider>
+                                                              <PacerProvider>
+                                                                <DialogProvider>
+                                                                  <FrecencyProvider>
+                                                                    <PromptHistoryProvider>
+                                                                      <PromptRefProvider>
+                                                                        <EditorContextProvider>
+                                                                          <AttentionProvider>
+                                                                            <UpdateNotificationProvider
+                                                                              updater={input.updater}
+                                                                            >
+                                                                              <PanelProvider>
+                                                                                <PluginProvider
+                                                                                  packages={input.packages}
+                                                                                  directories={pluginDirectories}
+                                                                                >
+                                                                                  <App />
+                                                                                </PluginProvider>
+                                                                              </PanelProvider>
+                                                                            </UpdateNotificationProvider>
+                                                                          </AttentionProvider>
+                                                                        </EditorContextProvider>
+                                                                      </PromptRefProvider>
+                                                                    </PromptHistoryProvider>
+                                                                  </FrecencyProvider>
+                                                                </DialogProvider>
+                                                              </PacerProvider>
                                                             </PromptStashProvider>
                                                           </LocalProvider>
                                                         </ThemeProvider>

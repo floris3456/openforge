@@ -128,6 +128,17 @@ costs, count against rate limits, and fail like other model requests.
 For example, the defaults allow up to seven warming attempts during one
 uninterrupted 30-minute window: at minutes 4, 8, 12, 16, 20, 24, and 28.
 
+## CLIProxyPacer
+
+A chat whose step goes through [CLIProxyPacer](/providers#cliproxypacer) is
+never warmed this way, even with `warming` on: CLIProxyPacer pings its chats
+itself. Switch its pings per chat with `<leader>k` in the TUI
+([CLIProxyPacer](/cli/cliproxypacer#switches)).
+
+```text
+00:00  step through CLIProxyPacer; no warming request follows
+```
+
 ## Disabling
 
 Set `warming` to `false` to disable it explicitly. Omitting the field also

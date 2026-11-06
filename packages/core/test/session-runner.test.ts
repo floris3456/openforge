@@ -19,7 +19,7 @@ import {
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { AnthropicMessages, OpenAIResponses } from "@opencode/ai/protocols"
 import { TestLLM, compileRequest } from "@opencode/ai/testing"
-import { RequestExecutor } from "@opencode/ai/route"
+import { RequestExecutor, classifyProviderFailure } from "@opencode/ai/route"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Database } from "@opencode/core/database/database"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -77,6 +77,7 @@ import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { Location } from "@opencode/core/location"
 import { Provider } from "@opencode/core/provider"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, desc, eq, sql } from "drizzle-orm"
@@ -221,6 +222,8 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     currentModel: model,
     compaction,
     modelResolveHook: resolvesModel,
+    /** Model IDs a session cannot use: resolving one fails as unavailable. */
+    unavailableModels: new Set<string>(),
     systemBaseline: "Initial context",
     systemRemoved: false,
     systemUnavailable: false,
@@ -333,6 +336,16 @@ const layer = Layer.unwrap(
     const models = Layer.mock(SessionRunnerModel.Service)({
       resolve: (session) =>
         state.modelResolveHook.pipe(
+          Effect.andThen(
+            session.model && state.unavailableModels.has(session.model.id)
+              ? Effect.fail(
+                  new SessionRunnerModel.ModelUnavailableError({
+                    providerID: session.model.providerID,
+                    modelID: session.model.id,
+                  }),
+                )
+              : Effect.void,
+          ),
           Effect.map(() => {
             const selected = session.model?.id === "replacement" ? replacementModel : state.currentModel
             return SessionRunnerModel.resolved(selected, {
@@ -697,6 +710,29 @@ const rateLimited = (retryAfterMs?: number) =>
   new AIError({
     reason: new RateLimitError({ message: "Rate limited", retryAfterMs }),
   })
+
+/** CPP's ask to compact before it moves the chat, as the route's executor turns its 409 into a failure. */
+const pacerMoveAsk = (models: readonly string[] = []) => {
+  const body = JSON.stringify({
+    error: {
+      type: "pacer_compact_required",
+      reason: "move",
+      message: "The pacer moves this chat from a (1) to b (2): compact it first, then continue.",
+      models,
+    },
+  })
+  return new AIError({
+    reason: classifyProviderFailure({
+      message: `HTTP 409: ${body}`,
+      status: 409,
+      rawBody: body,
+      http: new HttpContext({ url: "https://cpp.test/v1/chat/completions", status: 409, headers: {} }),
+    }),
+  })
+}
+const pacedModel = LanguageModel.make({ id: "recovery", provider: "cliproxypacer", route: OpenAIChat.route })
+const summaryPrompts = [SessionCompaction.buildPrompt(false), SessionCompaction.buildPrompt(true)]
+const isSummaryRequest = (request: LLMRequest) => summaryPrompts.includes(userTexts(request).at(-1) ?? "")
 
 const setupOverflowRecovery = Effect.fnUntraced(function* (s: Scenario) {
   yield* s.llm.push(TestLLM.text("Earlier answer", "text-earlier"))
@@ -3601,6 +3637,173 @@ describe("SessionRunnerLLM", () => {
     expect(yield* s.context).toMatchObject([{ type: "compaction" }, { type: "assistant", finish: "stop" }])
   })
 
+  scenario("compacts on CLIProxyPacer's move ask with the first of its models the chat can use", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    s.unavailableModels.add("gone")
+    yield* s.llm.push(
+      Stream.fail(pacerMoveAsk(["gone", "replacement"])),
+      TestLLM.text("## Objective\n- Moved summary", "text-move-summary"),
+      TestLLM.text("Moved", "text-moved"),
+    )
+    yield* s.runPrompt("Continue")
+
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false])
+    // The summary is the answer's pick, written here: neither the chat's model nor a native compaction.
+    expect(s.requests[1]?.model).toBe(replacementModel)
+    expect(s.requests[2]?.model).toBe(pacedModel)
+    expect(s.requests[2]?.http?.headers).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Moved summary\n</summary>")
+    expect(yield* s.context).toMatchObject([
+      { type: "compaction", summary: "## Objective\n- Moved summary" },
+      { type: "assistant", finish: "stop" },
+    ])
+  })
+
+  scenario("writes a compaction item's summary with the model it names, not the compaction agent's", function* (s) {
+    s.currentModel = pacedModel
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) =>
+      editor.update(Agent.ID.make("compaction"), (agent) => {
+        agent.model = { id: ID.make("replacement"), providerID: Provider.ID.make("fake") }
+      }),
+    )
+    yield* s.llm.push(TestLLM.text("Earlier answer", "text-own-history"))
+    yield* s.runPrompt("Earlier question")
+
+    // A plain `/compact` is the compaction agent's.
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.text("## Objective\n- Agent summary", "text-agent-summary"))
+    yield* s.session.compact({ sessionID })
+    yield* s.resume
+    expect(s.requests.map((request) => request.model)).toEqual([replacementModel])
+
+    // CLIProxyPacer's compact notice names the chat's own model, whose prompt cache is warm.
+    yield* s.llm.push(TestLLM.text("Later answer", "text-own-later"))
+    yield* s.runPrompt("Later question")
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.text("## Objective\n- Own summary", "text-own-summary"))
+    const own = yield* s.session.compact({
+      sessionID,
+      models: [{ id: ID.make("recovery"), providerID: Provider.ID.make("cliproxypacer") }],
+    })
+    yield* s.resume
+    expect(s.requests.map((request) => request.model)).toEqual([pacedModel])
+    expect(isSummaryRequest(s.requests[0]!)).toBe(true)
+    expect((yield* s.messages).find((message) => message.id === own.id)).toMatchObject({
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\n- Own summary",
+    })
+  })
+
+  // A summary held from the background is written by the compaction agent's model when one is set; a compaction whose
+  // item names the models to write it takes that summary only when the model it names wrote it.
+  for (const ask of ["compact notice", "move ask"] as const)
+    for (const agentModel of [true, false])
+      scenario(
+        agentModel
+          ? `on CLIProxyPacer's ${ask}, writes the summary with the model it names, not the compaction agent's held one`
+          : `on CLIProxyPacer's ${ask}, takes the summary held from the background when the model it names wrote it`,
+        function* (s) {
+          s.currentModel = pacedModel
+          const compaction = yield* SessionCompaction.Service
+          yield* compaction.transform((editor) => editor.configure({ precompute: true }))
+          if (agentModel) {
+            const agents = yield* Agent.Service
+            yield* agents.transform((editor) =>
+              editor.update(Agent.ID.make("compaction"), (agent) => {
+                agent.model = { id: ID.make("replacement"), providerID: Provider.ID.make("fake") }
+              }),
+            )
+          }
+          // 160k of the 170k ceiling is past the 85 % at which everything before the answer is summarized in the
+          // background and held, and short of compacting.
+          yield* s.llm.push(
+            TestLLM.textWithUsage("Earlier answer", "text-earlier", 160_000),
+            TestLLM.text("## Objective\n- Held summary", "text-held-summary"),
+          )
+          yield* s.runPrompt("Earlier question")
+          yield* s.llm.wait(2)
+          expect(isSummaryRequest(s.requests[1]!)).toBe(true)
+          expect(s.requests[1]?.model).toBe(agentModel ? replacementModel : pacedModel)
+          s.requests.length = 0
+
+          const named = agentModel ? [TestLLM.text("## Objective\n- Named summary", "text-named-summary")] : []
+          if (ask === "compact notice") {
+            yield* s.llm.push(...named)
+            yield* s.session.compact({
+              sessionID,
+              models: [{ id: ID.make("recovery"), providerID: Provider.ID.make("cliproxypacer") }],
+            })
+            yield* s.resume
+          } else {
+            yield* s.llm.push(Stream.fail(pacerMoveAsk(["recovery"])), ...named, TestLLM.text("Moved", "text-moved"))
+            yield* s.runPrompt("Continue")
+          }
+          expect(s.requests.filter(isSummaryRequest).map((request) => request.model)).toEqual(
+            agentModel ? [pacedModel] : [],
+          )
+          expect((yield* s.context)[0]).toMatchObject({
+            type: "compaction",
+            summary: agentModel ? "## Objective\n- Named summary" : "## Objective\n- Held summary",
+          })
+        },
+      )
+
+  scenario("sends the step again at once on a move ask before the chat's first answer", function* (s) {
+    s.currentModel = pacedModel
+    yield* s.llm.push(Stream.fail(pacerMoveAsk(["claude-e2e-mini"])), TestLLM.text("Moved", "text-moved-new-chat"))
+    yield* s.runPrompt("A new chat")
+
+    // Nothing to summarize but the prompt: no summary request, and the step goes again.
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+    expect(s.requests.every((request) => request.model === pacedModel)).toBe(true)
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    expect(yield* recordedEventTypes(sessionID)).not.toContain(
+      Bus.versionedType(SessionEvent.Compaction.Started.type, 1),
+    )
+  })
+
+  scenario("sends the step again after a move ask it could not compact for", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ auto: false }))
+    yield* s.llm.push(Stream.fail(pacerMoveAsk()), TestLLM.text("Moved without a summary", "text-moved"))
+    yield* s.runPrompt("Continue")
+
+    // CPP asks once per move, so the step sent again moves the chat without the summary.
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+  })
+
+  scenario("shows CLIProxyPacer's refusal after three move asks in one step, without a retry", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    let summaries = 0
+    yield* s.llm.serve((request) =>
+      isSummaryRequest(request)
+        ? TestLLM.text(`## Objective\n- Summary ${++summaries}`, `text-summary-${summaries}`)
+        : Stream.fail(pacerMoveAsk()),
+    )
+    yield* s.admit("Continue")
+    expect((yield* s.resume.pipe(Effect.flip)).message).toContain("compact it first, then continue")
+
+    const steps = s.requests.filter((request) => !isSummaryRequest(request))
+    expect(steps).toHaveLength(4)
+    expect(steps.every((request) => request.model === pacedModel)).toBe(true)
+    expect((yield* s.context).at(-1)).toMatchObject({
+      type: "assistant",
+      finish: "error",
+      error: expect.objectContaining({ message: expect.stringContaining("compact it first, then continue") }),
+    })
+    expect(yield* recordedEventTypes(sessionID)).not.toContain(Bus.versionedType(SessionEvent.RetryScheduled.type, 1))
+  })
+
   scenario("refreshes preparation after overflow compaction without promoting new input", function* (s) {
     yield* setupOverflowRecovery(s)
 
@@ -5042,6 +5245,48 @@ describe("SessionRunnerLLM", () => {
       "x-opencode-session": sessionID,
       "x-opencode-client": "opencode",
     })
+  })
+
+  scenario("adds CLIProxyPacer's headers to its steps, a subagent's with its parent", function* (s) {
+    const parentID = Session.ID.make("ses_runner_parent")
+    // The runner's ref takes its provider from the resolved model, so the chat's model is CPP's.
+    s.currentModel = LanguageModel.make({ id: "fake-model", provider: "cliproxypacer", route: OpenAIChat.route })
+    yield* s.runPrompt("Run paced request")
+    yield* s.db
+      .update(SessionTable)
+      .set({ parent_id: parentID })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.runPrompt("Run paced child request")
+
+    const [step, child] = s.requests.map((request) => request.http?.headers)
+    expect(step).toMatchObject({
+      "x-opencode-session-id": sessionID,
+      "X-Pacer-Session": PacerSessionID.make(sessionID),
+      "X-Pacer-Compact": "auto, before-cold",
+    })
+    expect(step).not.toHaveProperty("X-Pacer-Kind")
+    expect(step).not.toHaveProperty("X-Pacer-Parent-Session")
+    expect(child).toMatchObject({
+      "x-opencode-parent-session-id": parentID,
+      "X-Pacer-Session": PacerSessionID.make(sessionID),
+      "X-Pacer-Parent-Session": PacerSessionID.make(parentID),
+      "X-Pacer-Compact": "auto, before-cold",
+    })
+  })
+
+  scenario("announces only before-cold to CLIProxyPacer while automatic compaction is off", function* (s) {
+    s.currentModel = LanguageModel.make({ id: "fake-model", provider: "cliproxypacer", route: OpenAIChat.route })
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ auto: false }))
+    yield* s.runPrompt("Run without automatic compaction")
+    yield* compaction.transform((editor) => editor.configure({ auto: true }))
+    yield* s.runPrompt("Run with automatic compaction")
+
+    const [off, on] = s.requests.map((request) => request.http?.headers)
+    expect(off).toMatchObject({ "X-Pacer-Session": PacerSessionID.make(sessionID), "X-Pacer-Compact": "before-cold" })
+    expect(on).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
   })
 
   scenario("uses parent cache affinity for child model requests", function* (s) {

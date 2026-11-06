@@ -1,0 +1,68 @@
+import { describe, expect, test } from "bun:test"
+import { AIError, HttpContext, isRetryable } from "@opencode/ai/effect"
+import { classifyProviderFailure } from "@opencode/ai/route"
+import { PacerAnswers } from "@opencode/core/pacer/answers"
+import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { Model } from "@opencode/schema/model"
+import { Provider } from "@opencode/schema/provider"
+
+const chat = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make(PacerEndpoint.id) })
+
+/** An HTTP answer as the route's executor turns it into a failure. */
+const answer = (status: number, body: unknown) => {
+  const rawBody = typeof body === "string" ? body : JSON.stringify(body)
+  return new AIError({
+    reason: classifyProviderFailure({
+      message: `HTTP ${status}: ${rawBody}`,
+      status,
+      rawBody,
+      http: new HttpContext({ url: "https://cpp.test/v1/messages", status, headers: {} }),
+    }),
+  })
+}
+
+// The body CPP writes for a forced move (pacer_routing.rs, Route::Compact), with made-up account names.
+const move = (models: unknown = ["haiku-test", "provb/claude-test-2"]) =>
+  answer(409, {
+    error: {
+      type: "pacer_compact_required",
+      reason: "move",
+      message: "The pacer moves this chat from a (1) to b (2): compact it first, then continue.",
+      models,
+    },
+  })
+
+const ids = (ask: PacerAnswers.MoveAsk | undefined) =>
+  ask?.models.map((model) => [String(model.providerID), String(model.id)])
+
+describe("PacerAnswers.moveAsk", () => {
+  test("reads CPP's ask to compact before a move, with its models on the chat's provider, first first", () => {
+    const failure = move()
+    // Upstream reads a 409 as a provider failure worth retrying, which would resend without compacting.
+    expect(failure.reason._tag).toBe("ProviderInternal")
+    expect(isRetryable(failure)).toBe(true)
+    expect(ids(PacerAnswers.moveAsk(chat, failure))).toEqual([
+      ["cliproxypacer", "haiku-test"],
+      ["cliproxypacer", "provb/claude-test-2"],
+    ])
+  })
+
+  test("takes any reason as a move, and an answer without models as one for the chat's model", () => {
+    const cold = answer(409, { error: { type: "pacer_compact_required", reason: "cold", writer: "client" } })
+    expect(ids(PacerAnswers.moveAsk(chat, cold))).toEqual([])
+    const unknown = answer(409, { error: { type: "pacer_compact_required", reason: "later", models: ["m-1"] } })
+    expect(ids(PacerAnswers.moveAsk(chat, unknown))).toEqual([["cliproxypacer", "m-1"]])
+  })
+
+  test("ignores other answers and other providers", () => {
+    const other = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make("anthropic") })
+    expect(PacerAnswers.moveAsk(other, move())).toBeUndefined()
+    expect(PacerAnswers.moveAsk(chat, answer(409, { error: { type: "conflict", message: "busy" } }))).toBeUndefined()
+    expect(PacerAnswers.moveAsk(chat, answer(409, "pacer_compact_required"))).toBeUndefined()
+    expect(PacerAnswers.moveAsk(chat, move("not a list"))).toBeUndefined()
+    const wrongStatus = answer(400, { error: { type: "pacer_compact_required", reason: "move", models: [] } })
+    expect(PacerAnswers.moveAsk(chat, wrongStatus)).toBeUndefined()
+    expect(PacerAnswers.moveAsk(chat, new Error("409 pacer_compact_required"))).toBeUndefined()
+    expect(PacerAnswers.moveAsk(chat, undefined)).toBeUndefined()
+  })
+})

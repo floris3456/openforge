@@ -66,7 +66,6 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     paneResize.onMouseUp(event)
   }
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
-  const [sessionWidth, setSessionWidth] = createSignal<number>()
   const [activePane, setActivePane] = createSignal<"session" | "right">("session")
   const [restoreTerminalFocus, setRestoreTerminalFocus] = createSignal(false)
   let focusTerminal: (() => void) | undefined
@@ -115,6 +114,19 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     if (selectedTerminal()) return "terminal"
     if (sidebarVisible()) return "sidebar"
   })
+  // The right pane takes its width in the row; its resize handle and a narrow window's sidebar lie over the session.
+  const rightPaneShown = () =>
+    rightPane() === "terminal" || rightPane() === "panel" || (rightPane() === "sidebar" && wide())
+  const rightPaneWidth = () =>
+    fullscreen() ? availableWidth() : rightPane() === "sidebar" ? SESSION_SIDEBAR_WIDTH : paneResize.size()
+  // The session pane's width as the row lays it out, known before a frame at a new size is drawn. Read from the pane's
+  // onSizeChange, it came a frame late: OpenTUI calls that while it draws the frame, and text and <Show> branches that
+  // change with it are drawn only in the next one, so the first frame after a resize had the old width's layout.
+  const sessionWidth = createMemo(() =>
+    fullscreen()
+      ? Math.max(0, panels.width() - paneResize.size())
+      : Math.max(0, availableWidth() - (rightPaneShown() ? rightPaneWidth() : 0)),
+  )
   const toggleSidebar = () => {
     batch(() => {
       const visible = rightPane() === "sidebar"
@@ -278,11 +290,8 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
         minHeight={0}
         position={fullscreen() ? "absolute" : "relative"}
         visible={!fullscreen()}
-        width={fullscreen() ? Math.max(0, panels.width() - paneResize.size()) : undefined}
+        width={fullscreen() ? sessionWidth() : undefined}
         height="100%"
-        onSizeChange={function () {
-          setSessionWidth(this.width)
-        }}
       >
         <InteractivityProvider enabled={activePane() === "session" && !fullscreen()}>
           <Session
@@ -322,13 +331,11 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
           />
         </Show>
       </box>
-      <Show when={rightPane() === "terminal" || rightPane() === "panel" || (rightPane() === "sidebar" && wide())}>
+      <Show when={rightPaneShown()}>
         <box
           ref={(value: BoxRenderable) => (rightNode = value)}
           flexShrink={0}
-          width={
-            fullscreen() ? availableWidth() : rightPane() === "sidebar" ? SESSION_SIDEBAR_WIDTH : paneResize.size()
-          }
+          width={rightPaneWidth()}
           minWidth={0}
           minHeight={0}
         >

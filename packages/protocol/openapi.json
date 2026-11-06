@@ -10689,6 +10689,10 @@
                     "form.cancelled",
                     "websearch.updated",
                     "artifact.updated",
+                    "pacer.status",
+                    "pacer.accounts.updated",
+                    "pacer.chat.updated",
+                    "pacer.requests.updated",
                     "session.status",
                     "session.idle",
                     "tui.prompt.append",
@@ -10802,6 +10806,10 @@
                           "form.cancelled",
                           "websearch.updated",
                           "artifact.updated",
+                          "pacer.status",
+                          "pacer.accounts.updated",
+                          "pacer.chat.updated",
+                          "pacer.requests.updated",
                           "session.status",
                           "session.idle",
                           "tui.prompt.append",
@@ -14428,6 +14436,478 @@
           },
           "required": true
         }
+      }
+    },
+    "/api/experimental/pacer/status": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.status",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Status"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The state of the service's connection to CLIProxyPacer (not set up, unreachable, no pacer, or on), and when CPP last answered. Experimental: may change without compatibility guarantees.",
+        "summary": "Get CLIProxyPacer status"
+      }
+    },
+    "/api/experimental/pacer/accounts": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.accounts",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Pacer.Accounts"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CPP. Experimental: may change without compatibility guarantees.",
+        "summary": "List CLIProxyPacer accounts"
+      }
+    },
+    "/api/experimental/pacer/chat/{sessionID}": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.chat.get",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Pacer.Chat"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "How CPP sees the chat: its account, cache, pings, next use, forced move and switches. Answers the view held from the last read at once, and never waits on CPP. When that view may be out of date (after a step of the chat, a reconnect, CPP's notices) or none is held, and the pacer is on, one read starts in the background and `pacer.chat.updated` follows if the view changed. Null while none is held, and when CPP knows nothing of the chat. Experimental: may change without compatibility guarantees.",
+        "summary": "Get a chat on CLIProxyPacer"
+      },
+      "patch": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.chat.update",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Chat"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Set the chat's cache warming or compact-before-cold switch on CPP, and return its view after the change. Unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
+        "summary": "Switch a chat's warming",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pacer.ChatUpdate"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/pacer/chat/{sessionID}/requests": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.chat.requests",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Pacer.Filter"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`misses` lists only cache misses (`miss` and `partial`); `all`, the default, every request."
+            },
+            "required": false
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "description": "The previous page's `cursor`, for the next, older page."
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Rows per page; 50 when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Requests"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "One page of the requests CPP recorded for the chat and its subagents, newest first. Read from CPP; unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
+        "summary": "List a chat's CLIProxyPacer requests"
+      }
+    },
+    "/api/experimental/pacer/refresh": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.refresh",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Start reading CPP's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up. Experimental: may change without compatibility guarantees.",
+        "summary": "Read CLIProxyPacer's models again"
+      }
+    },
+    "/api/experimental/pacer/prompt/{requestID}": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.prompt",
+        "parameters": [
+          {
+            "name": "requestID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Pacer.PromptChange"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "What changed in the prompt of one request (by its CPP request ID) against the request CPP compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request. Experimental: may change without compatibility guarantees.",
+        "summary": "Get what changed in a request's prompt"
       }
     },
     "/api/shell": {
@@ -21744,6 +22224,468 @@
       "Money.USDPerMillionTokens": {
         "type": "number"
       },
+      "Pacer.Account": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.Window"
+            }
+          }
+        },
+        "required": ["alias", "provider", "windows"],
+        "additionalProperties": false
+      },
+      "Pacer.Accounts": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.Account"
+            }
+          },
+          "asOf": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["items", "asOf"],
+        "additionalProperties": false
+      },
+      "Pacer.Chat": {
+        "type": "object",
+        "properties": {
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "warm": {
+            "type": "boolean"
+          },
+          "warmUntil": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "coldAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "pings": {
+            "$ref": "#/components/schemas/Pacer.Pings"
+          },
+          "compactAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "compactReason": {
+            "type": "string",
+            "enum": ["before-cold", "cold"]
+          },
+          "nextUse": {
+            "$ref": "#/components/schemas/Pacer.NextUse"
+          },
+          "forceUse": {
+            "$ref": "#/components/schemas/Pacer.ForceUse"
+          },
+          "switches": {
+            "$ref": "#/components/schemas/Pacer.Switches"
+          },
+          "asOf": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["sessionID", "warm", "pings", "switches", "asOf"],
+        "additionalProperties": false
+      },
+      "Pacer.ChatUpdate": {
+        "type": "object",
+        "properties": {
+          "warming": {
+            "type": "boolean"
+          },
+          "compactBeforeCold": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Pacer.Filter": {
+        "type": "string",
+        "enum": ["all", "misses"]
+      },
+      "Pacer.ForceUse": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string",
+            "enum": ["now", "soon"]
+          }
+        },
+        "required": ["account", "when"],
+        "additionalProperties": false
+      },
+      "Pacer.Kind": {
+        "type": "string",
+        "enum": ["step", "ping", "title", "compaction", "other", "probe", "search"]
+      },
+      "Pacer.NextUse": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": ["account", "reason"],
+        "additionalProperties": false
+      },
+      "Pacer.Pings": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "nextAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "left": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "intervalMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "stopped": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["active", "left", "sent", "failed"],
+        "additionalProperties": false
+      },
+      "Pacer.PromptChange": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/Pacer.Request"
+          },
+          "comparedWith": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "at": {
+                "type": "number",
+                "description": "Milliseconds since the Unix epoch, on the service's clock"
+              }
+            },
+            "required": ["id", "at"],
+            "additionalProperties": false
+          },
+          "kept": {
+            "type": "string",
+            "enum": ["all", "part", "none"]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.PromptItem"
+            }
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unchanged": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "asOf": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["request", "kept", "items", "removed", "unchanged", "asOf"],
+        "additionalProperties": false
+      },
+      "Pacer.PromptItem": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "chars": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "change": {
+            "type": "string",
+            "enum": ["changed", "new", "marker"]
+          },
+          "error": {
+            "type": "boolean"
+          }
+        },
+        "required": ["path", "kind", "summary", "chars", "change", "error"],
+        "additionalProperties": false
+      },
+      "Pacer.Request": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "subagent": {
+            "type": "boolean"
+          },
+          "agent": {
+            "$ref": "#/components/schemas/Agent.ID"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Pacer.Kind"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "failed": {
+            "type": "boolean"
+          },
+          "refusal": {
+            "type": "string"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/Pacer.Tokens"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "verdict": {
+            "type": "string"
+          },
+          "miss": {
+            "type": "boolean"
+          },
+          "cause": {
+            "type": "string"
+          },
+          "changedPart": {
+            "type": "string"
+          },
+          "rewritten": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "missCost": {
+            "$ref": "#/components/schemas/Money.USD"
+          }
+        },
+        "required": ["id", "at", "subagent", "kind", "model", "provider", "status", "failed", "tokens", "miss"],
+        "additionalProperties": false
+      },
+      "Pacer.Requests": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.Request"
+            }
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "asOf": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["items", "asOf"],
+        "additionalProperties": false
+      },
+      "Pacer.State": {
+        "type": "string",
+        "enum": ["unset", "unreachable", "no-pacer", "on"]
+      },
+      "Pacer.Status": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/Pacer.State"
+          },
+          "since": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "asOf": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "message": {
+            "type": "string"
+          },
+          "refused": {
+            "type": "boolean"
+          }
+        },
+        "required": ["state", "since", "refused"],
+        "additionalProperties": false
+      },
+      "Pacer.Switches": {
+        "type": "object",
+        "properties": {
+          "warming": {
+            "type": "boolean"
+          },
+          "compactBeforeCold": {
+            "type": "boolean"
+          }
+        },
+        "required": ["warming", "compactBeforeCold"],
+        "additionalProperties": false
+      },
+      "Pacer.Tokens": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "output": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reasoning": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cacheRead": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cacheWrite": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["input", "output", "reasoning", "cacheRead", "cacheWrite"],
+        "additionalProperties": false
+      },
+      "Pacer.Window": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "left": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "resetsAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "readAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "state": {
+            "$ref": "#/components/schemas/Pacer.WindowState"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "staleAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["label", "scope", "seconds", "state", "stale"],
+        "additionalProperties": false
+      },
+      "Pacer.WindowState": {
+        "type": "string",
+        "enum": ["current", "estimated", "partial", "unknown", "dormant", "awaiting-confirmation"]
+      },
       "PairingCode": {
         "type": "object",
         "properties": {
@@ -23763,9 +24705,16 @@
         "additionalProperties": false
       },
       "Session.Inbox.CompactionPayload": {
-        "not": {
-          "type": "null"
-        }
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model.Ref"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "Session.Inbox.Delivery": {
         "type": "string",

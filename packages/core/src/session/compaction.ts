@@ -60,8 +60,30 @@ export type Estimate = { readonly measured: number; readonly estimated: number }
 export type Trigger =
   /** `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`. */
   | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded; readonly estimate?: Estimate }
-  /** `inputID` is the `/compact` inbox item, whose message shows the outcome. */
-  | { readonly reason: "manual"; readonly context: SessionContext.Loaded; readonly inputID: SessionMessage.ID }
+  /**
+   * `inputID` is the `/compact` inbox item, whose message shows the outcome. `models`, when the item names them, write
+   * the summary as a move's do: CLIProxyPacer's `compact` notice names the chat's own model, the one whose prompt
+   * cache is warm, never the compaction agent's. A summary held from the background is taken then only when the model
+   * picked wrote it.
+   */
+  | {
+      readonly reason: "manual"
+      readonly context: SessionContext.Loaded
+      readonly inputID: SessionMessage.ID
+      readonly models?: ReadonlyArray<Model.Ref>
+    }
+  /**
+   * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
+   * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
+   * own model. Always a summary written here, never a provider's native compaction, and a summary held from the
+   * background only when the model picked wrote it. Skipped before the chat's first finished step, when there is
+   * nothing to summarize but the prompt.
+   */
+  | {
+      readonly reason: "move"
+      readonly context: SessionContext.Loaded
+      readonly models: ReadonlyArray<Model.Ref>
+    }
 
 export type Outcome =
   /** Only `auto` skips: the context fits, or automatic compaction is off. */
@@ -71,6 +93,8 @@ export type Outcome =
 
 export interface Interface extends State.Transformable<Editor> {
   readonly compact: (trigger: Trigger) => Effect.Effect<Outcome>
+  /** Whether automatic compaction is on; a step tells a proxy that asks for compactions which asks it acts on. */
+  readonly auto: () => boolean
   /**
    * Starts a background summary when the context nears the threshold. Never waits for it. Loads `context` only when
    * background summaries are on. `estimate`, when given, is `estimatePrompt` of the loaded context.
@@ -114,6 +138,8 @@ type Precomputed = {
   readonly firstID: SessionMessage.ID | undefined
   readonly keepID: SessionMessage.ID
   readonly model: SessionContext.Loaded["model"]["ref"]
+  /** The model writing it: the compaction agent's when one is set, else the chat's. */
+  readonly writer: SessionContext.Loaded["model"]["ref"]
   readonly initial: string
   /** The longest tail since `keepID` that compaction still accepts beside this summary. */
   readonly tailLimit: number
@@ -268,19 +294,27 @@ export const layer = Layer.effect(
       }),
     })
 
-    /** The model that writes the summary, and the request size it aims for. */
+    const resolveModel = (context: SessionContext.Loaded, model: Model.Ref) =>
+      models.resolve({ ...context.session, model }, catalog.available).pipe(Effect.orElseSucceed(() => undefined))
+
+    /**
+     * The model that writes the summary, and the request size it aims for: the compaction agent's model, else the
+     * chat's. Picks (a move's, or a compaction item's) replace the agent's: the first the chat can use, else the chat's
+     * model.
+     */
     const selectModel = Effect.fnUntraced(function* (
       context: SessionContext.Loaded,
       buffer: Settings["buffer"],
       native: boolean,
+      picks?: ReadonlyArray<Model.Ref>,
     ) {
-      const agent = native ? undefined : yield* agents.get(Agent.ID.make("compaction"))
-      const model =
-        (agent?.model &&
-          (yield* models
-            .resolve({ ...context.session, model: agent.model }, catalog.available)
-            .pipe(Effect.orElseSucceed(() => undefined)))) ??
-        context.model
+      let picked: SessionRunnerModel.Resolved | undefined
+      for (const pick of picks ?? []) {
+        picked = yield* resolveModel(context, pick)
+        if (picked) break
+      }
+      const agent = native || picks ? undefined : yield* agents.get(Agent.ID.make("compaction"))
+      const model = picked ?? (agent?.model && (yield* resolveModel(context, agent.model))) ?? context.model
       const ceiling = calculateCeiling(model.limit, buffer)
       // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
       const cap = Number.isFinite(ceiling)
@@ -295,6 +329,12 @@ export const layer = Layer.effect(
 
       // Only the user compacts when automatic compaction is off, overflow included.
       if (trigger.reason !== "manual" && !settings.auto) return { status: "skipped" }
+      // A summary of the prompt alone would be a wasted request.
+      if (
+        trigger.reason === "move" &&
+        !context.messages.some((message) => message.type === "assistant" && message.time.completed !== undefined)
+      )
+        return { status: "skipped" }
       if (
         trigger.reason === "auto" &&
         !due(context, calculateCeiling(context.model.limit, settings.buffer), trigger.estimate)
@@ -302,8 +342,9 @@ export const layer = Layer.effect(
         return { status: "skipped" }
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
-      const native = context.model.compaction?.type === "native"
-      const model = yield* selectModel(context, settings.buffer, native)
+      const native = trigger.reason !== "move" && context.model.compaction?.type === "native"
+      const picks = trigger.reason === "move" || trigger.reason === "manual" ? trigger.models : undefined
+      const model = yield* selectModel(context, settings.buffer, native, picks)
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
       const budget =
         trigger.reason === "overflow"
@@ -315,7 +356,11 @@ export const layer = Layer.effect(
       // opens here, before any wait, so a background summary still being written shows as a running compaction.
       if (trigger.reason !== "manual")
         yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: context.session.id, reason: "auto" })
-      const swapped = held ? yield* usePrecomputed(selected, held, budget, settings) : undefined
+      // A compaction whose item names the models to write it (CLIProxyPacer's compact notice, a move) takes a summary
+      // held from the background only when the model it picked wrote it, not the compaction agent's.
+      const usable = held && (picks === undefined || sameRef(held.writer, model.context.model.ref)) ? held : undefined
+      if (held && !usable) yield* Fiber.interrupt(held.fiber)
+      const swapped = usable ? yield* usePrecomputed(selected, usable, budget, settings) : undefined
       const compaction = swapped
         ? Effect.succeed(swapped)
         : native
@@ -381,6 +426,7 @@ export const layer = Layer.effect(
         firstID: context.messages[0]?.id,
         keepID: anchor.id,
         model: context.model.ref,
+        writer: model.context.model.ref,
         initial: Instructions.join(context.initial),
         tailLimit: tailLimit(settings.keep, model.cap),
         failures,
@@ -925,6 +971,7 @@ export const layer = Layer.effect(
     return Service.of({
       transform: state.transform,
       reload: state.reload,
+      auto: () => state.get().auto,
       // A manual compaction settles through its `/compact` inbox item, which the runner owns.
       compact: (trigger) =>
         compact(trigger).pipe(
@@ -1243,4 +1290,8 @@ const estimateMedia = (mime: string) => {
   if (type.startsWith("image/")) return IMAGE_TOKEN_ESTIMATE
   if (type === "application/pdf") return PDF_TOKEN_ESTIMATE
   return 0
+}
+
+function sameRef(a: SessionContext.Loaded["model"]["ref"], b: SessionContext.Loaded["model"]["ref"]) {
+  return a.id === b.id && a.providerID === b.providerID && a.variant === b.variant
 }

@@ -39,6 +39,7 @@ import type { OpenCodeEvent } from "@opencode/protocol/groups/event"
 import type { Pty } from "@opencode/schema/pty"
 import type { Schedule } from "@opencode/schema/schedule"
 import type { Artifact } from "@opencode/schema/artifact"
+import type { Pacer } from "@opencode/schema/pacer"
 import type { Reference } from "@opencode/schema/reference"
 import type { Worktree } from "@opencode/schema/worktree"
 import type { Vcs } from "@opencode/schema/vcs"
@@ -2134,6 +2135,10 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "pacer.status"
+        | "pacer.accounts.updated"
+        | "pacer.chat.updated"
+        | "pacer.requests.updated"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -2599,6 +2604,48 @@ export type ExperimentalAttentionTestOperation<E = never> = (
   input: ExperimentalAttentionTestInput,
 ) => Effect.Effect<ExperimentalAttentionTestOutput, E>
 
+export type ExperimentalPacerStatusOutput = Pacer.Status
+export type ExperimentalPacerStatusOperation<E = never> = () => Effect.Effect<ExperimentalPacerStatusOutput, E>
+
+export type ExperimentalPacerAccountsOutput = Pacer.Accounts | null
+export type ExperimentalPacerAccountsOperation<E = never> = () => Effect.Effect<ExperimentalPacerAccountsOutput, E>
+
+export type ExperimentalPacerChatGetInput = { readonly sessionID: Session.ID }
+export type ExperimentalPacerChatGetOutput = Pacer.Chat | null
+export type ExperimentalPacerChatGetOperation<E = never> = (
+  input: ExperimentalPacerChatGetInput,
+) => Effect.Effect<ExperimentalPacerChatGetOutput, E>
+
+export type ExperimentalPacerChatUpdateInput = {
+  readonly sessionID: Session.ID
+  readonly warming?: boolean | undefined
+  readonly compactBeforeCold?: boolean | undefined
+}
+export type ExperimentalPacerChatUpdateOutput = Pacer.Chat
+export type ExperimentalPacerChatUpdateOperation<E = never> = (
+  input: ExperimentalPacerChatUpdateInput,
+) => Effect.Effect<ExperimentalPacerChatUpdateOutput, E>
+
+export type ExperimentalPacerChatRequestsInput = {
+  readonly sessionID: Session.ID
+  readonly filter?: Pacer.Filter | undefined
+  readonly cursor?: string | undefined
+  readonly limit?: number | undefined
+}
+export type ExperimentalPacerChatRequestsOutput = Pacer.Requests
+export type ExperimentalPacerChatRequestsOperation<E = never> = (
+  input: ExperimentalPacerChatRequestsInput,
+) => Effect.Effect<ExperimentalPacerChatRequestsOutput, E>
+
+export type ExperimentalPacerRefreshOutput = void
+export type ExperimentalPacerRefreshOperation<E = never> = () => Effect.Effect<ExperimentalPacerRefreshOutput, E>
+
+export type ExperimentalPacerPromptInput = { readonly requestID: string }
+export type ExperimentalPacerPromptOutput = Pacer.PromptChange | null
+export type ExperimentalPacerPromptOperation<E = never> = (
+  input: ExperimentalPacerPromptInput,
+) => Effect.Effect<ExperimentalPacerPromptOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2637,6 +2684,17 @@ export interface ExperimentalApi<E = never> {
     readonly occurrence: ExperimentalAttentionOccurrenceOperation<E>
     readonly follow: ExperimentalAttentionFollowOperation<E>
     readonly test: ExperimentalAttentionTestOperation<E>
+  }
+  readonly pacer: {
+    readonly status: ExperimentalPacerStatusOperation<E>
+    readonly accounts: ExperimentalPacerAccountsOperation<E>
+    readonly chat: {
+      readonly get: ExperimentalPacerChatGetOperation<E>
+      readonly update: ExperimentalPacerChatUpdateOperation<E>
+      readonly requests: ExperimentalPacerChatRequestsOperation<E>
+    }
+    readonly refresh: ExperimentalPacerRefreshOperation<E>
+    readonly prompt: ExperimentalPacerPromptOperation<E>
   }
 }
 

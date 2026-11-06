@@ -1391,8 +1391,8 @@ describe("SessionProjector", () => {
       const id = SessionMessage.ID.make("msg_media_user")
       const files = [attachment("shot.png"), attachment("copy.png")]
       const refs = [
-        { mime: "image/png", source: { type: "inline" }, name: "shot.png", uri },
-        { mime: "image/png", source: { type: "inline" }, name: "copy.png", uri },
+        { mime: "image/png", source: { type: "inline" as const }, name: "shot.png", uri },
+        { mime: "image/png", source: { type: "inline" as const }, name: "copy.png", uri },
       ]
 
       yield* inbox.admit({ id, sessionID, item: { type: "user", payload: { text: "look", files }, delivery: "steer" } })

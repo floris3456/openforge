@@ -95,8 +95,6 @@ export type SessionInboxDelivery = "steer" | "queue"
 
 export type SessionInboxSyntheticPayload = { text: string; description?: string; metadata?: { [x: string]: JsonValue } }
 
-export type SessionInboxCompactionPayload = {}
-
 export type ShellID = string
 
 export type SessionMessageNative = { [x: string]: JsonValue }
@@ -308,6 +306,26 @@ export type FormWhen1 = { key: string; op: "eq" | "neq"; value: string | number 
 
 export type FormValue1 = string | number | boolean | Array<string>
 
+export type PacerState = "unset" | "unreachable" | "no-pacer" | "on"
+
+export type PacerWindowState = "current" | "estimated" | "partial" | "unknown" | "dormant" | "awaiting-confirmation"
+
+export type PacerPings = {
+  active: boolean
+  nextAt?: number
+  left: number
+  sent: number
+  intervalMs?: number
+  stopped?: string
+  failed: boolean
+}
+
+export type PacerNextUse = { account: string; reason: string }
+
+export type PacerForceUse = { account: string; when: "now" | "soon" }
+
+export type PacerSwitches = { warming: boolean; compactBeforeCold: boolean }
+
 export type SessionStatus =
   | { type: "idle" }
   | {
@@ -352,6 +370,19 @@ export type ContinuityRunner = { version: string; reachable: boolean; reason?: s
 export type AttentionPlayers = { sound: boolean; desktop: boolean }
 
 export type AttentionKind = "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+
+export type PacerKind = "step" | "ping" | "title" | "compaction" | "other" | "probe" | "search"
+
+export type PacerTokens = { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }
+
+export type PacerPromptItem = {
+  path: string
+  kind: string
+  summary: string
+  chars: number
+  change: "changed" | "new" | "marker"
+  error: boolean
+}
 
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
@@ -519,15 +550,6 @@ export type SessionInboxSynthetic = {
   time: { created: number }
   type: "synthetic"
   payload: SessionInboxSyntheticPayload
-  delivery: SessionInboxDelivery
-}
-
-export type SessionInboxCompaction = {
-  id: SessionMessageID
-  sessionID: SessionID
-  time: { created: number }
-  type: "compaction"
-  payload: SessionInboxCompactionPayload
   delivery: SessionInboxDelivery
 }
 
@@ -934,6 +956,37 @@ export type FormMultiselectField1 = {
 
 export type FormAnswer1 = { [x: string]: FormValue1 }
 
+export type PacerStatus = { state: PacerState; since: number; asOf?: number; message?: string; refused: boolean }
+
+export type PacerWindow = {
+  label: string
+  scope: string
+  seconds: number
+  left?: number
+  resetsAt?: number
+  readAt?: number
+  state: PacerWindowState
+  stale: boolean
+  staleAt?: number
+}
+
+export type PacerChat = {
+  sessionID: SessionID
+  model?: string
+  provider?: string
+  account?: string
+  warm: boolean
+  warmUntil?: number
+  coldAt?: number
+  pings: PacerPings
+  compactAt?: number
+  compactReason?: "before-cold" | "cold"
+  nextUse?: PacerNextUse
+  forceUse?: PacerForceUse
+  switches: PacerSwitches
+  asOf: number
+}
+
 export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
 
 export type ScheduleWhenEvery = { type: "every"; every: ScheduleDuration; tz?: string }
@@ -955,6 +1008,29 @@ export type ArtifactInfo = {
 }
 
 export type AttentionSound = { name: AttentionKind; file?: string }
+
+export type PacerRequest = {
+  id: string
+  at: number
+  sessionID?: SessionID
+  subagent: boolean
+  agent?: AgentID
+  kind: PacerKind
+  model: string
+  provider: string
+  account?: string
+  status: number
+  failed: boolean
+  refusal?: string
+  tokens: PacerTokens
+  cost?: MoneyUSD
+  verdict?: string
+  miss: boolean
+  cause?: string
+  changedPart?: string
+  rewritten?: number
+  missCost?: MoneyUSD
+}
 
 export type VcsInfo = { provider?: string; branch: VcsBranch }
 
@@ -1003,6 +1079,8 @@ export type V2EventServerConnected = {
 export type ReferenceSource = ReferenceLocalSource | ReferenceGitSource
 
 export type WorktreeList = Array<WorktreeDirectory>
+
+export type SessionInboxCompactionPayload = { models?: Array<ModelRef> }
 
 export type SessionMessageModelSelected = {
   id: SessionMessageID
@@ -1979,6 +2057,15 @@ export type ArtifactUpdated = {
   data: {}
 }
 
+export type PacerRequestsUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.requests.updated"
+  location?: LocationRef
+  data: { sessionID?: SessionID }
+}
+
 export type SessionStatusUpdated = {
   id: EventID
   created: number
@@ -2264,6 +2351,26 @@ export type FormReplied = {
   data: { id: FormID; sessionID: string; answer: FormAnswer1 }
 }
 
+export type PacerStatus2 = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.status"
+  location?: LocationRef
+  data: { status: PacerStatus }
+}
+
+export type PacerAccount = { alias: string; provider: string; plan?: string; windows: Array<PacerWindow> }
+
+export type PacerChatUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.chat.updated"
+  location?: LocationRef
+  data: { chat: PacerChat }
+}
+
 export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery | ScheduleWhenCron
 
 export type ArtifactContent = { info: ArtifactInfo; files: { [x: string]: string } }
@@ -2276,6 +2383,18 @@ export type AttentionOccurrence = {
   notify: boolean
   sound?: AttentionSound
   focused: boolean
+}
+
+export type PacerRequests = { items: Array<PacerRequest>; cursor?: string; asOf: number }
+
+export type PacerPromptChange = {
+  request: PacerRequest
+  comparedWith?: { id: string; at: number }
+  kept: "all" | "part" | "none"
+  items: Array<PacerPromptItem>
+  removed: Array<string>
+  unchanged: number
+  asOf: number
 }
 
 export type SessionInboxMove = {
@@ -2293,6 +2412,15 @@ export type ReferenceInfo = {
   description?: string
   hidden?: boolean
   source: ReferenceSource
+}
+
+export type SessionInboxCompaction = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "compaction"
+  payload: SessionInboxCompactionPayload
+  delivery: SessionInboxDelivery
 }
 
 export type SessionMessageCompaction =
@@ -2683,6 +2811,8 @@ export type CredentialEntry = {
 
 export type FormFields1 = [FormField1, ...Array<FormField1>]
 
+export type PacerAccounts = { items: Array<PacerAccount>; asOf: number }
+
 export type ScheduleInfo = {
   id: ScheduleID
   sessionID?: SessionID
@@ -2783,6 +2913,15 @@ export type SessionMessageAssistantContentEncoded =
 export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
 
 export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields1 }
+
+export type PacerAccountsUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.accounts.updated"
+  location?: LocationRef
+  data: { accounts: PacerAccounts }
+}
 
 export type SessionMessageInfo =
   | SessionMessageAgentSelected
@@ -2973,6 +3112,10 @@ export type V2Event =
   | FormCancelled
   | WebsearchUpdated
   | ArtifactUpdated
+  | PacerStatus2
+  | PacerAccountsUpdated
+  | PacerChatUpdated
+  | PacerRequestsUpdated
   | SessionStatusUpdated
   | SessionIdle
   | TuiPromptAppend
@@ -4468,6 +4611,10 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "pacer.status"
+        | "pacer.accounts.updated"
+        | "pacer.chat.updated"
+        | "pacer.requests.updated"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -4781,6 +4928,37 @@ export type ExperimentalAttentionTestInput = {
 }
 
 export type ExperimentalAttentionTestOutput = { data: AttentionPlayers }["data"]
+
+export type ExperimentalPacerStatusOutput = { data: PacerStatus }["data"]
+
+export type ExperimentalPacerAccountsOutput = { data: PacerAccounts | null }["data"]
+
+export type ExperimentalPacerChatGetInput = { readonly sessionID: string }
+
+export type ExperimentalPacerChatGetOutput = { data: PacerChat | null }["data"]
+
+export type ExperimentalPacerChatUpdateInput = {
+  readonly sessionID: string
+  readonly warming?: boolean | undefined
+  readonly compactBeforeCold?: boolean | undefined
+}
+
+export type ExperimentalPacerChatUpdateOutput = { data: PacerChat }["data"]
+
+export type ExperimentalPacerChatRequestsInput = {
+  readonly sessionID: string
+  readonly filter?: ("all" | "misses") | undefined
+  readonly cursor?: string | undefined
+  readonly limit?: number | undefined
+}
+
+export type ExperimentalPacerChatRequestsOutput = { data: PacerRequests }["data"]
+
+export type ExperimentalPacerRefreshOutput = void
+
+export type ExperimentalPacerPromptInput = { readonly requestID: string }
+
+export type ExperimentalPacerPromptOutput = { data: PacerPromptChange | null }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

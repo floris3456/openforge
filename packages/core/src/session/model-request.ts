@@ -28,6 +28,7 @@ import { Cause, Context, Effect, Layer, Result, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
+import { PacerHeaders } from "../pacer/headers.js"
 import { Instructions } from "../instructions/index.js"
 import { Permission } from "../permission.js"
 import { PluginHooks } from "../plugin/hooks.js"
@@ -88,6 +89,8 @@ export interface Input {
   readonly webSocket?: "session"
   /** Prompt size, measured by the provider or estimated. The default output limit leaves room for it. */
   readonly inputTokens?: { readonly measured: number; readonly estimated: number }
+  /** Whether the chat compacts automatically, which a step tells a proxy that asks for compactions. */
+  readonly autoCompaction?: boolean
 }
 
 /** The default output limit: the catalog limit, fitted to the room the prompt leaves in the context window. */
@@ -304,6 +307,13 @@ export const layer = Layer.effect(
             "x-opencode-project": session.projectID,
             "x-opencode-session": affinity,
             "x-opencode-client": app.name,
+            ...PacerHeaders.make({
+              providerID: model.ref.providerID,
+              kind,
+              sessionID: session.id,
+              parentID: session.parentID,
+              auto: input.autoCompaction === true,
+            }),
           },
         },
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.

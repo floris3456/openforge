@@ -1,6 +1,7 @@
 import type { ModelInfo } from "@opencode/client"
 import { createMemo, createSignal, onMount, Show } from "solid-js"
 import { useLocal } from "../context/local"
+import { usePacer } from "../context/pacer"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
 import { DialogIntegration } from "./dialog-integration"
@@ -21,6 +22,8 @@ export function DialogModel(props: { providerID?: string }) {
   const dialog = useDialog()
   const newDesigns = useNewDesigns()
   const connected = useConnected()
+  const pacer = usePacer()
+  onMount(() => pacer?.refreshModels())
 
   function select(providerID: string, modelID: string) {
     local.model.set({ providerID, modelID }, { recent: true })

@@ -279,6 +279,17 @@ import type {
   ExperimentalAttentionFollowOutput,
   ExperimentalAttentionTestInput,
   ExperimentalAttentionTestOutput,
+  ExperimentalPacerStatusOutput,
+  ExperimentalPacerAccountsOutput,
+  ExperimentalPacerChatGetInput,
+  ExperimentalPacerChatGetOutput,
+  ExperimentalPacerChatUpdateInput,
+  ExperimentalPacerChatUpdateOutput,
+  ExperimentalPacerChatRequestsInput,
+  ExperimentalPacerChatRequestsOutput,
+  ExperimentalPacerRefreshOutput,
+  ExperimentalPacerPromptInput,
+  ExperimentalPacerPromptOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1774,6 +1785,89 @@ export function make(options: ClientOptions) {
               body: { kind: input["kind"] },
               successStatus: 200,
               declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
+      pacer: {
+        status: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerStatusOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/pacer/status`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        accounts: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerAccountsOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/pacer/accounts`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        chat: {
+          get: (input: ExperimentalPacerChatGetInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerChatGetOutput }>(
+              {
+                method: "GET",
+                path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}`,
+                successStatus: 200,
+                declaredStatuses: [400, 401],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+          update: (input: ExperimentalPacerChatUpdateInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerChatUpdateOutput }>(
+              {
+                method: "PATCH",
+                path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}`,
+                body: { warming: input["warming"], compactBeforeCold: input["compactBeforeCold"] },
+                successStatus: 200,
+                declaredStatuses: [400, 401, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+          requests: (input: ExperimentalPacerChatRequestsInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerChatRequestsOutput }>(
+              {
+                method: "GET",
+                path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}/requests`,
+                query: { filter: input["filter"], cursor: input["cursor"], limit: input["limit"] },
+                successStatus: 200,
+                declaredStatuses: [400, 401, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+        },
+        refresh: (requestOptions?: RequestOptions) =>
+          request<ExperimentalPacerRefreshOutput>(
+            {
+              method: "POST",
+              path: `/api/experimental/pacer/refresh`,
+              successStatus: 204,
+              declaredStatuses: [400, 401],
+              empty: true,
+            },
+            requestOptions,
+          ),
+        prompt: (input: ExperimentalPacerPromptInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerPromptOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/pacer/prompt/${encodeURIComponent(input.requestID)}`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 503],
               empty: false,
             },
             requestOptions,

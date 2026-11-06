@@ -17,6 +17,7 @@ import { CodeModeTool } from "../../codemode/tool.js"
 import { SessionContinuity } from "../../continuity.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
+import { PacerAnswers } from "../../pacer/answers.js"
 import { Tool } from "../../tool.js"
 import { ToolOutput } from "../../tool-output.js"
 import { QuestionTool } from "../../tool/plugin/question.js"
@@ -40,6 +41,8 @@ export type Outcome = Data.TaggedEnum<{
   }
   RecoverFull: {}
   Compacted: {}
+  /** The provider asked to compact before it moves the chat; the runner did, and sends the step again. */
+  Moved: {}
   OutputLimit: { readonly needsContinuation: boolean }
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
@@ -59,6 +62,11 @@ interface Input {
   readonly recoverContinuation: boolean
   /** The runner owns compaction policy; the attempt invokes it only before durable output. */
   readonly recoverOverflow: Effect.Effect<boolean>
+  /**
+   * Answers CLIProxyPacer's ask to compact before a move, only before durable output. Absent, or false once the runner
+   * stops answering: the refusal then shows, without a retry.
+   */
+  readonly recoverMove?: (ask: PacerAnswers.MoveAsk) => Effect.Effect<boolean>
   /** The logical step, recorded with the step's checkpoint so a restart continues the turn's count. */
   readonly step: number
   /** Finishes a step whose reply streamed before a restart, instead of calling the model. */
@@ -262,6 +270,15 @@ export const make = Effect.gen(function* () {
           return Outcome.Compacted()
         }
 
+        const move = publisher.record().outputStarted ? undefined : PacerAnswers.moveAsk(input.model.ref, streamFailure)
+        if (move && input.recoverMove && (yield* restore(input.recoverMove(move)))) {
+          yield* Effect.logInfo("CLIProxyPacer asked to compact before it moves the chat; compacted", {
+            sessionID: input.sessionID,
+            model: input.model.ref,
+          })
+          return Outcome.Moved()
+        }
+
         if (overflowFailure) yield* publisher.publish(overflowFailure)
         const recorded = publisher.record()
         const unknownFinish =
@@ -288,8 +305,10 @@ export const make = Effect.gen(function* () {
                 input.retry(
                   llmFailure,
                   llmError,
-                  SessionRunnerRetry.isRetryable(llmFailure) ||
-                    (recorded.outputStarted && isInterruptedStream(llmFailure)),
+                  // A move ask the runner no longer answers would come back the same, so it shows instead.
+                  move === undefined &&
+                    (SessionRunnerRetry.isRetryable(llmFailure) ||
+                      (recorded.outputStarted && isInterruptedStream(llmFailure))),
                 ),
               )
             : undefined

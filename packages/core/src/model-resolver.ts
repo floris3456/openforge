@@ -15,6 +15,7 @@ import { Auth, mergeHttpOptions } from "@opencode/ai/route"
 import { Context, Effect, Layer, Schema, Struct } from "effect"
 import { AISDK } from "./aisdk.js"
 import { Credential } from "./credential.js"
+import { PacerEndpoint } from "./pacer/endpoint.js"
 import { Integration } from "./integration.js"
 import { Capabilities, ID, Info, Model, Ref, VariantID } from "./model.js"
 import type { RuntimeInfo } from "./model.js"
@@ -380,9 +381,14 @@ function unresolvedProviderVariables(model: RuntimeInfo, baseURL: string) {
   })
 }
 
+const pacer = Provider.ID.make(PacerEndpoint.id)
+
 const nativeCredentialSettings = (model: RuntimeInfo, specifier: string, credential: Credential.Value | undefined) => {
   if (!credential) return {}
-  if (credential.type === "key") return { apiKey: credential.key }
+  // CLIProxyPacer's key goes as a bearer token on Messages too: fetch drops Authorization on a redirect to another
+  // origin, but keeps x-api-key.
+  if (credential.type === "key")
+    return model.providerID === pacer ? tokenSettings(specifier, credential.key) : { apiKey: credential.key }
   if (credential.type === "oauth") return tokenSettings(specifier, credential.access)
   // The Bedrock plugin projects the saved profile into settings; SigV4 keeps an ambient bearer token from taking over.
   if (specifier.startsWith("@opencode/ai/providers/amazon-bedrock")) return { auth: "sigv4" }

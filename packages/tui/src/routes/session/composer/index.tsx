@@ -1,13 +1,17 @@
-import { createEffect, createMemo, For, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, For, onCleanup, Show, useContext } from "solid-js"
 import { createStore } from "solid-js/store"
 import { TextAttributes } from "@opentui/core"
+import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../../../context/theme"
 import { SplitBorder } from "../../../ui/border"
 import { Keymap } from "../../../context/keymap"
 import { SubagentsTab } from "./subagents-tab"
 import { ShellTab } from "./shell-tab"
 import { TerminalsTab } from "./terminals-tab"
+import { RequestsTab } from "./requests-tab"
 import { ComposerContext, type ComposerTab } from "./context"
+import { ActiveTab, COMPOSER_FRAME, composerBar } from "./bar"
+import { context as sessionContext } from "../render-context"
 
 export type ComposerProps = {
   sessionID: string
@@ -26,9 +30,18 @@ export function Composer(props: ComposerProps) {
     active: "",
   })
 
-  const tabList = createMemo(() => Object.values(store.tabs))
+  const tabList = createMemo(() => Object.values(store.tabs).sort((a, b) => (a.order ?? 0) - (b.order ?? 0)))
   const activeTab = createMemo(() => tabList().find((t) => t.id === store.active))
   const footerHints = createMemo(() => activeTab()?.hints?.() ?? [])
+  const session = useContext(sessionContext)
+  const dimensions = useTerminalDimensions()
+  const bar = createMemo(() =>
+    composerBar({
+      width: (session?.width ?? dimensions().width - 4) - COMPOSER_FRAME,
+      labels: tabList().map((t) => t.label),
+      hints: footerHints(),
+    }),
+  )
 
   // Set active tab when opened
   createEffect(() => {
@@ -97,11 +110,9 @@ export function Composer(props: ComposerProps) {
           <box gap={1}>
             <box flexDirection="row" justifyContent="space-between" paddingLeft={1}>
               <Show
-                when={tabList().length > 1}
+                when={tabList().length > 1 && bar().all}
                 fallback={
-                  <text fg={theme.text.base} attributes={TextAttributes.BOLD}>
-                    {tabList()[0]?.label ?? ""}
-                  </text>
+                  <ActiveTab label={activeTab()?.label ?? tabList()[0]?.label ?? ""} more={tabList().length > 1} />
                 }
               >
                 <box flexDirection="row" gap={2}>
@@ -129,8 +140,9 @@ export function Composer(props: ComposerProps) {
             <Show when={props.terminals}>
               <TerminalsTab sessionID={props.sessionID} visibleTerminalID={props.visibleTerminalID} />
             </Show>
+            <RequestsTab sessionID={props.sessionID} />
             <box flexDirection="row" gap={2} paddingLeft={1} flexShrink={0}>
-              <For each={footerHints()}>
+              <For each={bar().hints}>
                 {(hint) => (
                   <text>
                     <span style={{ fg: theme.text.base }}>
@@ -140,7 +152,7 @@ export function Composer(props: ComposerProps) {
                   </text>
                 )}
               </For>
-              <Show when={tabList().length > 1}>
+              <Show when={bar().tabs}>
                 <text>
                   <span style={{ fg: theme.text.base }}>
                     <b>tabs</b>{" "}

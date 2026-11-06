@@ -353,6 +353,20 @@ Select a running command in the **Shell** tab and press **Enter**, or click it, 
 Use **↑/↓**, **Page Up/Down**, or **Home** to scroll, **End** to follow new output, and **Esc** to return without stopping the command.
 The viewer shows recent output and stays open after exit; output redirected to a file is not included.
 
+## CLIProxyPacer
+
+| ID                                 | Default                  | Description                               |
+| ---------------------------------- | ------------------------ | ----------------------------------------- |
+| `composer.request.up`              | `up`                     | Previous request                          |
+| `composer.request.down`            | `down`                   | Next request                              |
+| `composer.request.select`          | `return`                 | Go to where the request ended             |
+| `composer.request.detail`          | `ctrl+return,alt+return` | Show what changed in the request's prompt |
+| `pacer.warming.toggle`             | `<leader>k`              | Switch cache warming for this chat        |
+| `pacer.compact_before_cold.toggle` | `<leader>j`              | Switch compact before cold for this chat  |
+
+The request keys work in the composer's **Requests** tab, which a chat that used CLIProxyPacer has. The two switches, and their entries in the command palette, exist only while the chat's model is served through CLIProxyPacer.
+In the **Requests** tab, **Ctrl+A** shows only cache misses, **Page Up/Down** move a page, and **Esc** returns from what changed to the list.
+
 ## Dialogs and autocomplete
 
 | ID                             | Default       | Description                         |

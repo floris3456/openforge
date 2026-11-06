@@ -3,6 +3,7 @@ import { AzurePlugin } from "./provider/azure.js"
 import { CerebrasPlugin } from "./provider/cerebras.js"
 import { ChatGPTPlugin } from "./provider/chatgpt.js"
 import { ClaudeAgentPlugin } from "./provider/claude-agent/index.js"
+import { CLIProxyPacerPlugin } from "./provider/cliproxypacer.js"
 import { CloudflareAIGatewayPlugin } from "./provider/cloudflare-ai-gateway.js"
 import { CloudflareWorkersAIPlugin } from "./provider/cloudflare-workers-ai.js"
 import { DatabricksPlugin } from "./provider/databricks.js"
@@ -35,6 +36,7 @@ export const ProviderPlugins: PluginInternal.InternalPlugin[] = [
   AzurePlugin,
   CerebrasPlugin,
   ChatGPTPlugin,
+  CLIProxyPacerPlugin,
   CloudflareAIGatewayPlugin,
   CloudflareWorkersAIPlugin,
   DatabricksPlugin,

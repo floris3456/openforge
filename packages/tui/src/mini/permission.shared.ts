@@ -54,6 +54,7 @@ export function permissionInfo(request: MiniPermissionRequest, directory?: strin
       metadata: request.metadata,
       input: state?.status === "streaming" ? undefined : state?.input,
       toolMetadata: state?.status === "streaming" ? undefined : state?.metadata,
+      tool: request.tool?.name,
     },
     (value) => toolPath(value, { home: true, directory }),
   )

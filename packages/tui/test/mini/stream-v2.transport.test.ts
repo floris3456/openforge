@@ -2939,6 +2939,74 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
+  // CLIProxyPacer's web tools (spec cliproxypacer-step-2, section 4): CPP names the service only in its answer.
+  test("writes CPP's search line once the call ends, with the service CPP's answer names", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({ sdk: client, sessionID: "ses_1", thinking: false, footer: ui.api })
+    const call = { sessionID: "ses_1", assistantMessageID: "msg_web", id: "call_web" }
+    events.push({
+      id: "evt_web_input",
+      created: 1,
+      type: "session.tool.input.started",
+      durable: durable("ses_1"),
+      data: { ...call, name: "web_research" },
+    })
+    events.push({
+      id: "evt_web_called",
+      created: 2,
+      type: "session.tool.called",
+      durable: durable("ses_1", 1),
+      data: { ...call, input: { question: "Who ships Rust 1.95?" }, executed: true },
+    })
+    await Bun.sleep(0)
+    expect(ui.commits.filter((item) => item.part?.id === "call_web")).toEqual([])
+
+    events.push({
+      id: "evt_web_success",
+      created: 3,
+      type: "session.tool.success",
+      durable: durable("ses_1", 2, 2),
+      data: { ...call, content: [{ type: "text", text: "CPP's text" }], metadata: { provider: "Exa" }, executed: true },
+    })
+    await Bun.sleep(0)
+    const commits = ui.commits.filter((item) => item.part?.id === "call_web")
+    expect(commits.map((item) => item.phase)).toEqual(["start", "final"])
+    expect(entryBody(commits[0]!)).toEqual({ type: "text", content: '◈ Web Research via Exa "Who ships Rust 1.95?"' })
+    expect(entryBody(commits[1]!)).toEqual({ type: "none" })
+    await transport.close()
+  })
+
+  test("writes CPP's extract line as soon as the call runs, as webfetch's", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({ sdk: client, sessionID: "ses_1", thinking: false, footer: ui.api })
+    const call = { sessionID: "ses_1", assistantMessageID: "msg_web", id: "call_web" }
+    events.push({
+      id: "evt_web_input",
+      created: 1,
+      type: "session.tool.input.started",
+      durable: durable("ses_1"),
+      data: { ...call, name: "web_extract" },
+    })
+    events.push({
+      id: "evt_web_called",
+      created: 2,
+      type: "session.tool.called",
+      durable: durable("ses_1", 1),
+      data: { ...call, input: { urls: ["https://a.example/", "https://b.example/"] }, executed: true },
+    })
+    await Bun.sleep(0)
+    const commits = ui.commits.filter((item) => item.part?.id === "call_web")
+    expect(commits.map((item) => item.phase)).toEqual(["start"])
+    expect(entryBody(commits[0]!)).toEqual({ type: "text", content: "% Web Extract https://a.example/ (+1 more)" })
+    await transport.close()
+  })
+
   test("falls back to the default model when selecting a variant on a fresh session", async () => {
     const events = feed()
     events.push(connected())

@@ -122,14 +122,14 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
 
   const source = createMemo(() => {
     const tool = props.request.source
-    if (!tool) return { input: undefined, metadata: undefined }
+    if (!tool) return { input: undefined, metadata: undefined, name: undefined }
     const message = data.session.message.get(props.request.sessionID, tool.messageID)
-    if (message?.type !== "assistant") return { input: undefined, metadata: undefined }
+    if (message?.type !== "assistant") return { input: undefined, metadata: undefined, name: undefined }
     const part = message.content.find((part) => part.type === "tool" && part.id === tool.id)
     if (part?.type === "tool" && part.state.status !== "streaming") {
-      return { input: part.state.input, metadata: part.state.metadata }
+      return { input: part.state.input, metadata: part.state.metadata, name: part.name }
     }
-    return { input: undefined, metadata: undefined }
+    return { input: undefined, metadata: undefined, name: undefined }
   })
 
   const theme = useTheme()
@@ -163,6 +163,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               metadata: props.request.metadata,
               input: source().input,
               toolMetadata: source().metadata,
+              tool: source().name,
             },
             pathFormatter.format,
           )

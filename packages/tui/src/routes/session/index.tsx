@@ -77,6 +77,7 @@ import { UsageLimitNotice, useLimitNotice, useUsageAlerts } from "../../componen
 import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
 import { usePacerSession } from "../../pacer/jump"
+import { webTool, webToolProvider, webToolSubject } from "../../pacer/web-tools"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -2614,6 +2615,7 @@ function ToolPart(props: { part: SessionMessageAssistantTool; images?: boolean }
       <Match when={display() === "websearch"}>
         <WebSearch {...toolprops} />
       </Match>
+      <Match when={webTool(display())}>{(tool) => <WebTool {...toolprops} web={tool()} />}</Match>
       <Match when={display() === "write"}>
         <Write {...toolprops} />
       </Match>
@@ -3271,6 +3273,35 @@ function WebSearch(props: ToolProps) {
         )}
       </Show>{" "}
       "{stringValue(props.input.query)}"
+    </InlineTool>
+  )
+}
+
+/** CLIProxyPacer's web tools, as the two above (spec cliproxypacer-step-2, section 4). */
+function WebTool(props: ToolProps & { web: NonNullable<ReturnType<typeof webTool>> }) {
+  const ctx = use()
+  const provider = createMemo(() => webToolProvider(props.tool, props.metadata))
+  const subject = createMemo(() => webToolSubject(props.tool, props.input))
+  return (
+    <InlineTool icon={props.web.icon} pending={props.web.pending} complete={subject()} part={props.part}>
+      {props.web.label}
+      <Show when={provider()}>
+        {(value) => (
+          <>
+            {" "}
+            via{" "}
+            <RetryProvider
+              value={{
+                id: `${ctx.sessionID}:${props.part.time.created}:${props.part.id}`,
+                provider: value(),
+                running: props.part.state.status === "running",
+              }}
+              enabled={ctx.config.animations ?? true}
+            />
+          </>
+        )}
+      </Show>
+      <Show when={subject()}> {subject()}</Show>
     </InlineTool>
   )
 }

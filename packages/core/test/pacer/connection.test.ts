@@ -810,45 +810,41 @@ describe("PacerConnection notices", () => {
     }),
   )
 
-  it.effect(
-    "reads the meters at most every 10 s, and asks the catalog again on settings, prices and capabilities",
-    () =>
-      Effect.gen(function* () {
-        const h = yield* harness()
-        h.cpp.meters = [meter(h.cpp.time())]
-        yield* online(h)
-        h.cpp.meters = [meter(h.cpp.time(), { label: "account-c" })]
-        h.cpp.notice("reading", { at: 1 })
-        const updates = () => h.published.filter((event) => event.type === "pacer.accounts.updated").length
-        // Held (after the state's at connect): the 10 s rest starts now.
-        yield* until("read", () => updates() === 2)
+  it.effect("reads the meters at most every 10 s, and asks the catalog again on prices and capabilities", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      h.cpp.meters = [meter(h.cpp.time())]
+      yield* online(h)
+      h.cpp.meters = [meter(h.cpp.time(), { label: "account-c" })]
+      h.cpp.notice("reading", { at: 1 })
+      const updates = () => h.published.filter((event) => event.type === "pacer.accounts.updated").length
+      // Held (after the state's at connect): the 10 s rest starts now.
+      yield* until("read", () => updates() === 2)
+      yield* settle
+      expect(seen(h, "/pacer/v1/meters")).toHaveLength(1)
+      for (let notice = 0; notice < 5; notice++) {
+        h.cpp.notice("reading", { at: 2 })
+        yield* TestClock.adjust("1 second")
         yield* settle
-        expect(seen(h, "/pacer/v1/meters")).toHaveLength(1)
-        for (let notice = 0; notice < 5; notice++) {
-          h.cpp.notice("reading", { at: 2 })
-          yield* TestClock.adjust("1 second")
-          yield* settle
-        }
-        expect(seen(h, "/pacer/v1/meters")).toHaveLength(1)
-        yield* TestClock.adjust("5 seconds")
-        yield* until("read once more", () => seen(h, "/pacer/v1/meters").length === 2)
-        yield* TestClock.adjust("20 seconds")
-        yield* settle
-        expect(seen(h, "/pacer/v1/meters")).toHaveLength(2)
-        expect(h.published.filter((event) => event.type === "pacer.accounts.updated")).toHaveLength(2)
+      }
+      expect(seen(h, "/pacer/v1/meters")).toHaveLength(1)
+      yield* TestClock.adjust("5 seconds")
+      yield* until("read once more", () => seen(h, "/pacer/v1/meters").length === 2)
+      yield* TestClock.adjust("20 seconds")
+      yield* settle
+      expect(seen(h, "/pacer/v1/meters")).toHaveLength(2)
+      expect(h.published.filter((event) => event.type === "pacer.accounts.updated")).toHaveLength(2)
 
-        const before = h.refreshes.count
-        h.cpp.notice("settings", { at: 3 })
-        yield* until("settings", () => h.refreshes.count === before + 1)
-        h.cpp.notice("capabilities", { at: 4 })
-        yield* until("capabilities", () => h.refreshes.count === before + 2)
-        h.cpp.notice("price", { at: 5 })
-        yield* until("price", () => h.refreshes.count === before + 3)
+      const before = h.refreshes.count
+      h.cpp.notice("capabilities", { at: 4 })
+      yield* until("capabilities", () => h.refreshes.count === before + 1)
+      h.cpp.notice("price", { at: 5 })
+      yield* until("price", () => h.refreshes.count === before + 2)
 
-        h.cpp.notice("resync", { at: 6 })
-        yield* until("everything", () => seen(h, "/pacer/v1/state").length === 2 && h.refreshes.count === before + 4)
-        yield* until("the requests too", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
-      }),
+      h.cpp.notice("resync", { at: 6 })
+      yield* until("everything", () => seen(h, "/pacer/v1/state").length === 2 && h.refreshes.count === before + 3)
+      yield* until("the requests too", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+    }),
   )
 })
 
@@ -1072,6 +1068,30 @@ describe("PacerConnection chats", () => {
       expect(h.execution.woken.slice(woken)).toEqual([idle])
       expect((yield* h.sessions.inbox(idle)).map((item) => item.type)).toEqual(["compaction"])
       expect((yield* h.sessions.inbox(running)).map((item) => item.type)).toEqual([])
+    }),
+  )
+
+  it.effect("marks the held views stale on a settings notice, and reads nothing for it", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      yield* step(h, id)
+      yield* until("held", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      const refreshes = h.refreshes.count
+      const asked = h.cpp.seen.length
+      h.cpp.notice("settings", { at: 1 })
+      // A notice behind it, handled after it: the catalog is read for this one only.
+      h.cpp.notice("capabilities", { at: 2 })
+      yield* until("capabilities", () => h.refreshes.count === refreshes + 1)
+      yield* settle
+      expect(h.refreshes.count).toBe(refreshes + 1)
+      expect(h.cpp.seen).toHaveLength(asked)
+      // Asked for, the held view is answered at once and read again beside it.
+      expect((yield* h.connection.chat(id))?.sessionID).toBe(id)
+      yield* until("read again", () => seen(h, viewPath(id)).length === 2)
     }),
   )
 

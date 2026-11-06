@@ -688,7 +688,6 @@ export const layer = Layer.effect(
     const listing = yield* trigger("the chats", Effect.asVoid(readSessions))
     const meters = yield* trigger("the meters", readMeters, METERS_MS)
     const capabilities = yield* trigger("the capabilities", models.refresh())
-    const settings = yield* trigger("the settings", models.refresh().pipe(Effect.andThen(Effect.sync(staleViews))))
     const everything = yield* trigger(
       "everything",
       Effect.all([readState, models.refresh()], { concurrency: "unbounded", discard: true }).pipe(
@@ -720,7 +719,9 @@ export const layer = Layer.effect(
       if (event === "request") return requests()
       if (event === "session") return listing()
       if (event === "reading") return meters()
-      if (event === "settings") return settings()
+      // Settings change what CPP answers for the chats (and CPP sends one for a chat's own writes too); capabilities and
+      // prices have notices of their own. A stale view costs nothing until a chat is asked for.
+      if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
       if (event === "resync") return everything()
       if (event !== "compact") return

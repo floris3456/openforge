@@ -31,18 +31,28 @@ export interface Decision {
   readonly delay: number
 }
 
-export const policy = (sessionID: SessionSchema.ID, from?: ModelRetry.Progress) =>
+/** Where a step's retries stand: ModelRetry's count, and when the run of CLIProxyPacer outages it is in began. */
+export interface Progress extends ModelRetry.Progress {
+  readonly outageSince?: number
+}
+
+export const policy = (sessionID: SessionSchema.ID, from?: Progress) =>
   Effect.gen(function* () {
     const retry = yield* ModelRetry.resume(from)
-    // On the CLIProxyPacer provider: whether the last failure was a 502.
+    // On the CLIProxyPacer provider: whether the last failure was a 502, and when the run of outages began.
     let badGateway = false
+    let outageSince = from?.outageSince
     const decide = (input: Input) =>
       Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
         const gateway = PacerAnswers.badGateway(input.model, input.cause)
+        outageSince = input.retry && PacerAnswers.outage(input.model, input.cause) ? (outageSince ?? now) : undefined
         const next = yield* retry.decide({
           ...input,
           // CPP's 502 says Retry-After: 30, yet the next request usually reaches the other instance at once.
           skipRetryAfter: gateway && !badGateway,
+          // A chat waits out a CPP restart: 30 minutes from the run's first failure, as OpenCodePlus's outage.ts.
+          pastSchedule: outageSince !== undefined && now - outageSince < PacerAnswers.OUTAGE_RETRY_FOR,
         })
         badGateway = gateway
         if (!next) return { retry: false as const }
@@ -62,7 +72,7 @@ export const policy = (sessionID: SessionSchema.ID, from?: ModelRetry.Progress) 
             : next.delay
         return { retry: true as const, attempt: next.attempt, delay: normalized }
       })
-    return Object.assign(decide, { progress: retry.progress })
+    return Object.assign(decide, { progress: (): Progress => ({ ...retry.progress(), outageSince }) })
   })
 
 /**
@@ -113,6 +123,7 @@ export const make = (
                 mode: input.mode ?? "retry",
                 attempt: input.decision.attempt,
                 timeouts: progress.timeouts,
+                outageSince: progress.outageSince,
                 at,
                 error: input.error,
               }),

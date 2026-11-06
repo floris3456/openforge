@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AIError, HttpContext, isRetryable } from "@opencode/ai/effect"
+import { AIError, HttpContext, isRetryable, TransportError } from "@opencode/ai/effect"
 import { classifyProviderFailure } from "@opencode/ai/route"
 import { PacerAnswers } from "@opencode/core/pacer/answers"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -69,6 +69,8 @@ describe("PacerAnswers.moveAsk", () => {
 
 const other = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make("anthropic") })
 const cppDown = "CPP is down: the active instance could not be reached from here"
+const transport = (fields: { readonly operation: "request" | "read"; readonly code?: string }) =>
+  new AIError({ reason: new TransportError({ message: "transport", transport: "http", ...fields }) })
 
 describe("PacerAnswers.badGateway", () => {
   test("is any 502 on the CLIProxyPacer provider", () => {
@@ -81,5 +83,45 @@ describe("PacerAnswers.badGateway", () => {
     expect(PacerAnswers.badGateway(chat, answer(502, "error code: 502"))).toBe(true)
     expect(PacerAnswers.badGateway(chat, answer(503, { error: { message: cppDown, code: "cpp_down" } }))).toBe(false)
     expect(PacerAnswers.badGateway(other, answer(502, "error code: 502"))).toBe(false)
+  })
+})
+
+describe("PacerAnswers.outage", () => {
+  test("is a refused or lost connection, a 502 or 504, or CPP's \"CPP is down\" 503, on each route's shape", () => {
+    expect(PacerAnswers.outage(chat, transport({ operation: "request", code: "ECONNREFUSED" }))).toBe(true)
+    expect(PacerAnswers.outage(chat, transport({ operation: "request" }))).toBe(true)
+    expect(PacerAnswers.outage(chat, answer(502, "error code: 502"))).toBe(true)
+    expect(PacerAnswers.outage(chat, answer(504, "error code: 504"))).toBe(true)
+    // pair_forward.rs's cpp_down on /v1/messages, /v1beta and the OpenAI routes.
+    expect(
+      PacerAnswers.outage(chat, answer(503, { type: "error", error: { type: "overloaded_error", message: cppDown } })),
+    ).toBe(true)
+    expect(
+      PacerAnswers.outage(chat, answer(503, { error: { code: 503, message: cppDown, status: "UNAVAILABLE" } })),
+    ).toBe(true)
+    expect(
+      PacerAnswers.outage(chat, answer(503, { error: { message: cppDown, type: "server_error", code: "cpp_down" } })),
+    ).toBe(true)
+  })
+
+  test("is not a timeout, a cut stream, CPP's other 503s, a 429, or another provider's failure", () => {
+    expect(PacerAnswers.outage(chat, transport({ operation: "request", code: "Timeout" }))).toBe(false)
+    expect(PacerAnswers.outage(chat, transport({ operation: "read", code: "ECONNRESET" }))).toBe(false)
+    expect(
+      PacerAnswers.outage(
+        chat,
+        answer(503, { error: { type: "pacer_transient_wait", message: "retry to keep its warm cache" } }),
+      ),
+    ).toBe(false)
+    const unavailable = "auth_unavailable: no auth available (providers=claude, model=claude-test-1)"
+    expect(
+      PacerAnswers.outage(chat, answer(503, { type: "error", error: { type: "api_error", message: unavailable } })),
+    ).toBe(false)
+    expect(PacerAnswers.outage(chat, answer(503, { error: { message: `upstream: ${cppDown}` } }))).toBe(false)
+    expect(PacerAnswers.outage(chat, answer(429, { error: { code: "model_cooldown", message: "cooling down" } }))).toBe(
+      false,
+    )
+    expect(PacerAnswers.outage(other, answer(502, "error code: 502"))).toBe(false)
+    expect(PacerAnswers.outage(other, transport({ operation: "request", code: "ECONNREFUSED" }))).toBe(false)
   })
 })

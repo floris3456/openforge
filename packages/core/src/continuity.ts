@@ -46,6 +46,8 @@ const Retry = Schema.Struct({
   mode: Schema.Literals(["retry", "continue"]),
   attempt: Schema.Number,
   timeouts: Schema.Number,
+  /** When the run of CLIProxyPacer outages this retry is in began, so a restart keeps its 30 minutes. */
+  outageSince: Schema.optional(Schema.Number),
   at: Schema.Number,
   error: SessionError.Error,
 })

@@ -8,6 +8,8 @@ interface Input {
   readonly retry: boolean
   /** The answer's retry-after does not raise this decision's wait. */
   readonly skipRetryAfter?: boolean
+  /** Once the schedule's retries are used up, this decision still retries, after the schedule's last gap. */
+  readonly pastSchedule?: boolean
 }
 
 /** Bound provider-requested delays so a hostile or buggy retry-after cannot stall a call for hours. */
@@ -29,6 +31,8 @@ const schedule = Schedule.max([
   Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("10 seconds")]),
   Schedule.recurs(10),
 ]).pipe(Schedule.jittered)
+// The schedule's last gap, with its jitter, for a caller that keeps retrying once the 10 are used up.
+const pastSchedule = Schedule.spaced("10 seconds").pipe(Schedule.jittered)
 
 // A timed-out attempt already waited minutes before failing, so the general allowance would let a
 // dead provider hold a call for most of an hour. Cap those attempts well below it.
@@ -44,6 +48,7 @@ export interface Progress {
 export const resume = (from?: Progress) =>
   Effect.gen(function* () {
     const step = yield* Schedule.toStep(schedule)
+    const past = yield* Schedule.toStep(pastSchedule)
     let attempt = 1
     let timeouts = 0
     if (from !== undefined) {
@@ -56,7 +61,13 @@ export const resume = (from?: Progress) =>
     const decide = (input: Input) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
-        const next = yield* step(now, undefined).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
+        const next = yield* step(now, undefined).pipe(
+          Pull.catchDone(() =>
+            input.pastSchedule
+              ? past(now, undefined).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
+              : Effect.succeed(undefined),
+          ),
+        )
         if (!next) return undefined
         const minimum = input.skipRetryAfter ? undefined : retryAfter(input)
         const duration = minimum === undefined ? next[1] : Duration.max(next[1], Duration.millis(minimum))

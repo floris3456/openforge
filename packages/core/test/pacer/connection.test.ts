@@ -868,6 +868,42 @@ describe("PacerConnection notices", () => {
       }),
   )
 
+  it.effect("tells every chat, without a sessionID, when CPP has more new requests than one read takes", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const named = yield* chat(h)
+      const missed = yield* chat(h)
+      yield* step(h, named)
+      yield* step(h, missed)
+      yield* until("both chats held", () => h.lookups.count >= 2)
+      const told = () =>
+        h.published.filter((event) => event.type === "pacer.requests.updated").map((event) => event.data)
+
+      // Fewer than one read takes: the chat is named, and only it.
+      h.cpp.rows = [row(1, { session_ext: PacerSessionID.make(named) })]
+      h.published.length = 0
+      h.cpp.notice("request", { keys: [1], at: 1 })
+      yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+      yield* settle
+      expect(told()).toStrictEqual([{ sessionID: named }])
+
+      // 501 new ones, one more than a read takes: the other chat's, the oldest, is past the page read.
+      h.cpp.rows = [
+        ...h.cpp.rows,
+        row(2, { session_ext: PacerSessionID.make(missed) }),
+        ...Array.from({ length: 499 }, (_, index) => row(3 + index, { session_ext: `another-client-${index}` })),
+        row(502, { session_ext: PacerSessionID.make(named) }),
+      ]
+      h.published.length = 0
+      h.cpp.notice("request", { keys: [1], at: 2 })
+      yield* until("read again", () => seen(h, "/pacer/v1/monitor/requests").length === 2)
+      yield* settle
+      expect(seen(h, "/pacer/v1/monitor/requests")[1].query.toString()).toBe("after=1&limit=500&from=0")
+      expect(told()).toStrictEqual([{ sessionID: named }, {}])
+    }),
+  )
+
   it.effect("merges a session notice's list into the held views", () =>
     Effect.gen(function* () {
       const h = yield* harness()

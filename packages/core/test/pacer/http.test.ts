@@ -145,7 +145,7 @@ describe("PacerHttp", () => {
     }),
   )
 
-  it.live("takes the server's clock offset from the Date header", () =>
+  it.live("bounds the server's clock offset by the Date header and the request's time", () =>
     Effect.gen(function* () {
       const ahead = 3_600_000
       const cpp = yield* serve((_, url) =>
@@ -154,10 +154,13 @@ describe("PacerHttp", () => {
           { headers: { date: url.pathname === "/bad" ? "not a date" : new Date(Date.now() + ahead).toUTCString() } },
         ),
       )
+      const sent = Date.now()
       const answer = yield* withHttp(endpoint(cpp.origin), (http) => http.get("/good", Ok))
-      // Date has whole seconds, so the server's clock reads up to a second early.
-      expect(answer.offset).toBeGreaterThan(ahead - 2_000)
-      expect(answer.offset).toBeLessThanOrEqual(ahead)
+      const took = Date.now() - sent
+      // Date has whole seconds: the bounds hold the true offset, a second and the request's time apart.
+      expect(answer.offset!.low).toBeLessThanOrEqual(ahead)
+      expect(answer.offset!.high).toBeGreaterThanOrEqual(ahead)
+      expect(answer.offset!.high - answer.offset!.low).toBeLessThanOrEqual(1_000 + took)
       const bad = yield* withHttp(endpoint(cpp.origin), (http) => http.get("/bad", Ok))
       expect(bad.offset).toBeUndefined()
     }),
@@ -309,7 +312,8 @@ describe("PacerHttp", () => {
         http.stream("/pacer/v1/stream", { headers: { accept: "text/event-stream" } }),
       )
       expect(answer.headers["content-type"]).toBe("text/event-stream")
-      expect(answer.offset).toBeGreaterThan(58_000)
+      expect(answer.offset!.low).toBeLessThanOrEqual(60_000)
+      expect(answer.offset!.high).toBeGreaterThanOrEqual(60_000)
       const text = yield* answer.body.pipe(Stream.decodeText(), Stream.mkString)
       expect(text).toBe("event: resync\ndata: {}\n\n: heartbeat\n\n")
       const refused = yield* failure(withHttp(endpoint(cpp.origin), (http) => http.stream("/refused")))

@@ -185,10 +185,13 @@ interface Link {
   status: Pacer.Status
   /** When CPP last answered. */
   contact: number | undefined
-  /** CPP's clock minus the service's: the largest of this connection's answers, as `Date` has whole seconds. */
+  /** CPP's clock minus the service's: the middle of `bounds`. */
   offset: number
-  /** No answer of this connection gave an offset yet. */
-  fresh: boolean
+  /**
+   * What CPP's answers say of it together: each answer's bounds (`Date` has whole seconds), intersected over every
+   * answer since this CPP was set up, reconnects included, so the times shown hold still. Undefined before the first.
+   */
+  bounds: PacerHttp.Offset | undefined
   accounts: Pacer.Accounts | undefined
   /** Account aliases by `auth_index`, from the meters. */
   aliases: Map<string, string>
@@ -212,7 +215,7 @@ export const layer = Layer.effect(
       status: { state: "unset", since: yield* Clock.currentTimeMillis, refused: false },
       contact: undefined,
       offset: 0,
-      fresh: true,
+      bounds: undefined,
       accounts: undefined,
       aliases: new Map(),
       active: new Set(),
@@ -229,12 +232,16 @@ export const layer = Layer.effect(
     const context = () => Effect.map(Clock.currentTimeMillis, (now) => ({ offset: link.offset, now }))
     const alias = (account: string) => link.aliases.get(account) ?? account
 
-    const contact = (offset: number | undefined) =>
+    const contact = (offset: PacerHttp.Offset | undefined) =>
       Effect.map(Clock.currentTimeMillis, (now) => {
         link.contact = now
         if (offset === undefined) return
-        link.offset = link.fresh ? offset : Math.max(link.offset, offset)
-        link.fresh = false
+        const held = link.bounds
+        const low = held ? Math.max(held.low, offset.low) : offset.low
+        const high = held ? Math.min(held.high, offset.high) : offset.high
+        // Bounds that no longer meet: a clock jumped, CPP's or this one's. They start over from this answer.
+        link.bounds = low <= high ? { low, high } : offset
+        link.offset = Math.round((link.bounds.low + link.bounds.high) / 2)
       })
 
     const setStatus = Effect.fnUntraced(function* (next: {
@@ -746,8 +753,9 @@ export const layer = Layer.effect(
     const reset = (endpoint: PacerEndpoint.Endpoint | undefined) => {
       link.endpoint = endpoint
       link.contact = undefined
+      // Another CPP has its own clock.
       link.offset = 0
-      link.fresh = true
+      link.bounds = undefined
       link.accounts = undefined
       link.aliases = new Map()
       link.active = new Set()
@@ -774,7 +782,6 @@ export const layer = Layer.effect(
     /** One connection: the state, then the stream until it ends. Fails when CPP can't be read. */
     const attempt = (endpoint: PacerEndpoint.Endpoint, first: boolean) =>
       Effect.gen(function* () {
-        link.fresh = true
         // The views first, then the stream: nothing is replayed after a reconnect. A proxy without the pacer answers
         // this read 404 or 503 `unavailable` (PacerHttp.NoPacer).
         yield* readState

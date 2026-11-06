@@ -495,6 +495,11 @@ const status = (h: Harness) => Effect.runSync(h.connection.status())
 const seen = (h: Harness, path: string, method = "GET") =>
   h.cpp.seen.filter((item) => item.method === method && item.path === path)
 const viewPath = (sessionID: SessionID) => `/pacer/v1/sessions/${PacerSessionID.make(sessionID)}`
+/** The chat as the last `pacer.chat.updated` told it. */
+const toldChat = (h: Harness, sessionID: SessionID) =>
+  h.published
+    .flatMap((event) => (event.type === "pacer.chat.updated" ? [(event.data as { chat: Pacer.Chat }).chat] : []))
+    .findLast((item) => item.sessionID === sessionID)
 
 /** Sends CPP's heartbeat and waits until the connection heard it. */
 const heartbeat = Effect.fnUntraced(function* (h: Harness) {
@@ -902,16 +907,63 @@ describe("PacerConnection chats", () => {
         sessionID: id,
         account: "account-a",
         warm: true,
-        warmUntil: warmUntil - 120_000,
-        coldAt: warmUntil - 120_000 + 3 * 240_000,
         nextUse: { account: "account-b", reason: "cold_move" },
         switches: { warming: true, compactBeforeCold: false },
       })
+      // Every answer came at the same moment, so `Date` says CPP's clock to within its second: the middle of it.
+      expect(Math.abs(held!.warmUntil! - (warmUntil - 120_000))).toBeLessThanOrEqual(500)
+      expect(held!.coldAt).toBe(held!.warmUntil! + 3 * 240_000)
       expect(seen(h, viewPath(id))).toHaveLength(1)
       const accounts = yield* h.connection.accounts()
       expect(accounts?.items[0].windows[0]).toMatchObject({ label: "5h", left: 62, stale: false })
-      expect(accounts?.items[0].windows[0].resetsAt).toBe(h.cpp.time() - 120_000 + 4_800_000)
+      const resetsAt = h.cpp.time() - 120_000 + 4_800_000
+      expect(Math.abs(accounts!.items[0].windows[0].resetsAt! - resetsAt)).toBeLessThanOrEqual(500)
     }),
+  )
+
+  it.effect(
+    "narrows CPP's clock by answers in different seconds, keeps it across a reconnect, starts over on a jump",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const offset = 120_000
+        // CPP's clock reads .900 of a second, two minutes ahead.
+        yield* TestClock.setTime(1_800_000_000_900)
+        h.cpp.offset = offset
+        yield* online(h)
+        // The state's and the stream's `Date`: CPP's clock minus this one lies in [offset - 900, offset + 100].
+        const id = yield* chat(h)
+        const uuid = PacerSessionID.make(id)
+        const warmUntil = h.cpp.time() + 300_000
+        h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { warm_until: warmUntil }))
+        // The view's at .000 of the next second: in [offset, offset + 1000]; together, [offset, offset + 100].
+        yield* TestClock.adjust("100 millis")
+        yield* step(h, id)
+        yield* until("read", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+        const shown = (yield* h.connection.chat(id))!.warmUntil!
+        expect(shown).toBeGreaterThanOrEqual(warmUntil - offset - 100)
+        expect(shown).toBeLessThanOrEqual(warmUntil - offset)
+
+        // CPP's stream ends at .900; the reconnect a second later answers at .900 too, which alone would say a second
+        // less. The times shown stay where they were.
+        yield* TestClock.adjust("900 millis")
+        h.cpp.end()
+        yield* settle
+        yield* TestClock.adjust("1 second")
+        yield* until("connected again", () => seen(h, "/pacer/v1/state").length === 2 && h.cpp.streams() === 1)
+        expect((yield* h.connection.chat(id))?.warmUntil).toBe(shown)
+        yield* until("read again after the reconnect", () => seen(h, viewPath(id)).length === 2)
+        yield* settle
+        expect((yield* h.connection.chat(id))?.warmUntil).toBe(shown)
+
+        // CPP's clock jumps a minute ahead: the next answer doesn't meet the bounds held, which start over from it.
+        h.cpp.offset = offset + 60_000
+        yield* step(h, id)
+        yield* until("read after the jump", () => seen(h, viewPath(id)).length === 3)
+        yield* until("moved", () => toldChat(h, id)?.warmUntil !== shown)
+        const jumped = (yield* h.connection.chat(id))!.warmUntil!
+        expect(Math.abs(jumped - (warmUntil - offset - 60_000))).toBeLessThanOrEqual(1_000)
+      }),
   )
 
   it.effect("costs a chat CPP doesn't know one lookup per event: no read, no store read", () =>

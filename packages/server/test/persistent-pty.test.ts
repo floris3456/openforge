@@ -625,9 +625,14 @@ smoke(
         (yield* request(migratedBase, "POST", "/api/experimental/persistent-pty/handoff")).handoff,
       )
       expect(handoff.directory).toBe(directory)
+      const registration = Schema.decodeUnknownSync(Schema.Struct({ pid: Schema.Number }))(
+        yield* Effect.promise(() => Bun.file(path.join(directory, "service.json")).json()),
+      )
       yield* Scope.close(migratedScope, Exit.void)
-      // Simulate macOS purging the registration while the daemon waits for its successor.
-      yield* Effect.promise(() => fs.rm(path.join(directory, "service.json")))
+      // Simulate macOS purging the registration while the daemon waits for its successor. The file is kept
+      // aside: it holds the daemon's only credential, so the test can stop the daemon afterwards.
+      const purged = path.join(fixture.root, "purged-service.json")
+      yield* Effect.promise(() => fs.rename(path.join(directory, "service.json"), purged))
 
       const fresh = yield* ServerProcess.start<never, never>({ ...options, pty: { root: fixture.directory, handoff } })
       const freshBase = HttpServer.formatAddress(fresh.address)
@@ -642,6 +647,14 @@ smoke(
         })).data,
       )
       expect(yield* waitForText(freshBase, second.id, "after-restart")).toContain("after-restart")
+
+      // Nothing can reach the old daemon without its registration, so it keeps waiting until its handoff
+      // expires. Stop it through the registration the test kept.
+      expect(process.kill(registration.pid, 0)).toBeTrue()
+      yield* Effect.promise(() => fs.rename(purged, path.join(directory, "service.json")))
+      yield* stopDaemon(fixture.directory, path.basename(directory))
+      yield* waitForExit(registration.pid)
+      yield* waitForExit(first.pid)
     }),
   30_000,
 )
@@ -681,6 +694,21 @@ function waitForExit(pid: number) {
       await Bun.sleep(20)
     }
     throw new Error(`Process ${pid} survived its server scope`)
+  })
+}
+
+// `opencode-pty stop` sends the registration's credential with a shutdown, which stops a daemon even while it
+// waits for a successor, and returns once the daemon has removed its registration.
+function stopDaemon(root: string, name: string) {
+  return Effect.promise(async () => {
+    if (binary === undefined) throw new Error("opencode-pty is not available on this platform")
+    const child = Bun.spawn([binary, "stop", "--runtime-dir", root, "--name", name], { stdout: "pipe", stderr: "pipe" })
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    if (code !== 0) throw new Error(`opencode-pty stop failed (${code}): ${stderr || stdout}`)
   })
 }
 

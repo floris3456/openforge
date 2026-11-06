@@ -391,6 +391,7 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
                         const current = connection()
 
                         if (!current) return
+
                         if (current.type === "config") return language.t("dialog.provider.connection.config")
 
                         return current.type === "credential" ? current.label : `$${current.name}`

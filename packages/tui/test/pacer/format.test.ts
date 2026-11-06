@@ -6,10 +6,12 @@ import {
   cacheText,
   forceUseLine,
   formatRemaining,
+  remainingHours,
   formatReset,
   nextUseLine,
   promptChangeLines,
-  requestColumns,
+  requestHeader,
+  requestLayout,
   requestRow,
   requestTone,
   windowLine,
@@ -84,6 +86,13 @@ describe("the toolbar's cache item (section 4)", () => {
     expect(formatRemaining(10 * 60_000 - 1)).toBe("10:00")
     expect(formatRemaining(10 * 60_000 - 1000)).toBe("9:59")
     expect(formatRemaining(-5)).toBe("0:00")
+    // One that started at an hour or more keeps its hours down to the end; an hour shows as one, rounded up.
+    expect(formatRemaining(3_600_000, true)).toBe("1:00:00")
+    expect(formatRemaining(3_600_000 - 1000, true)).toBe("0:59:59")
+    expect(formatRemaining(7_000, true)).toBe("0:00:07")
+    expect(formatRemaining(0, true)).toBe("0:00:00")
+    expect(remainingHours(3_600_000 - 999)).toBe(true)
+    expect(remainingHours(3_600_000 - 1000)).toBe(false)
   })
 })
 
@@ -139,8 +148,17 @@ describe("the sidebar's Account section (section 5)", () => {
 
 describe("a row of the Requests tab (section 7)", () => {
   const at = new Date(2026, 10, 6, 14, 2, 13).getTime()
-  const row = (extra: Partial<PacerRequest>, width = 110) => requestRow(request(0, { at, ...extra }), width)
+  /** The row in the columns sized to it alone. */
+  const row = (extra: Partial<PacerRequest>, width = 110) => {
+    const one = request(0, { at, ...extra })
+    return requestRow(one, requestLayout(width, [one]))
+  }
   const cells = (text: string) => text.split(/\s{2,}/).filter(Boolean)
+  /** The header and the rows, in the columns sized to them. */
+  const table = (requests: PacerRequest[], width: number) => {
+    const layout = requestLayout(width, requests)
+    return [requestHeader(layout), ...requests.map((item) => requestRow(item, layout))]
+  }
 
   test("time, kind, model, account, cache read and write, verdict and cost, in one line of the width", () => {
     const text = row({})
@@ -157,7 +175,7 @@ describe("a row of the Requests tab (section 7)", () => {
   })
 
   test("a miss shows as a warning, with its cause and the part that changed", () => {
-    const text = requestRow(miss(0, { at }), 110)
+    const text = requestRow(miss(0, { at }), requestLayout(110, [miss(0, { at })]))
     expect(cells(text)).toEqual([
       "14:02:13",
       "step",
@@ -192,16 +210,113 @@ describe("a row of the Requests tab (section 7)", () => {
     expect(requestTone(request(0, { failed: true }))).toBe("error")
   })
 
-  test("a narrow window drops the model, then the account, then the cache, and keeps the verdict and the cost", () => {
-    expect(requestColumns(110)).toEqual({ cache: true, account: true, model: 18, verdict: 31 })
-    expect(requestColumns(90)).toEqual({ cache: true, account: true, model: 0, verdict: 31 })
-    expect(requestColumns(80)).toEqual({ cache: true, account: false, model: 0, verdict: 35 })
-    expect(requestColumns(60)).toEqual({ cache: false, account: false, model: 0, verdict: 29 })
-    expect(cells(row({}, 90))).toEqual(["14:02:13", "step", "max-2", "120.3K/1.2K", "hit", "$0.0123"])
-    expect(cells(row({}, 80))).toEqual(["14:02:13", "step", "120.3K/1.2K", "hit", "$0.0123"])
-    const narrow = requestRow(miss(0, { at }), 61)
-    expect(narrow).toHaveLength(61)
-    expect(cells(narrow)).toEqual(["14:02:13", "step", "miss · prefix changed · system", "$0.0123"])
+  // Found live: at 160 columns the model and the account were cut while some 30 cells of the line stayed blank, and at
+  // 80 the cache read and write were dropped while some 35 were.
+  const live = [
+    request(0, { at, model: "claude-sonnet-4-5", account: "claude-apikey", verdict: "hit" }),
+    request(1, { at, model: "claude-sonnet-4-5", account: "claude-apikey", kind: "title", verdict: "cold" }),
+    miss(2, { at, model: "claude-sonnet-4-5", account: "claude-apikey", cause: "provider", changedPart: undefined }),
+    request(3, { at, model: "claude-sonnet-4-5", account: "claude-apikey", kind: "ping" }),
+  ]
+
+  test("with blank room nothing is cut, every column shown: the tab at 160 and 120 columns", () => {
+    for (const width of [150, 110]) {
+      const lines = table(live, width)
+      for (const line of lines) expect(line).toHaveLength(width)
+      expect(lines.join("\n")).not.toContain("…")
+      expect(cells(lines[0]!)).toEqual(["time", "kind", "model", "account", "read/write", "verdict", "cost"])
+      expect(cells(lines[3]!)).toEqual([
+        "14:02:13",
+        "step",
+        "claude-sonnet-4-5",
+        "claude-apikey",
+        "0/98.1K",
+        "miss · provider",
+        "$0.0123",
+      ])
+    }
+  })
+
+  test("a narrow window drops the model, then the account, then the cache, only when they don't fit, and cuts last", () => {
+    // The tab at 80 columns: no model, the rest whole.
+    const at80 = table(live, 70)
+    expect(at80.join("\n")).not.toContain("…")
+    expect(cells(at80[0]!)).toEqual(["time", "kind", "account", "read/write", "verdict", "cost"])
+    expect(cells(at80[3]!)).toEqual(["14:02:13", "step", "claude-apikey", "0/98.1K", "miss · provider", "$0.0123"])
+    // At 60: no account either.
+    const at60 = table(live, 50)
+    expect(cells(at60[0]!)).toEqual(["time", "kind", "verdict", "cost"])
+    expect(cells(at60[3]!)).toEqual(["14:02:13", "step", "miss · provider", "$0.0123"])
+    // In that order: at 53 the account would fit where the read and write no longer do, and still goes first.
+    expect(cells(table(live, 53)[0]!)).toEqual(["time", "kind", "verdict", "cost"])
+    for (const line of at80) expect(line).toHaveLength(70)
+    for (const line of at60) expect(line).toHaveLength(50)
+
+    // A long verdict keeps room for its cause before a column is added, and what doesn't fit is cut, not dropped.
+    const rows = [request(0, { at }), miss(1, { at })]
+    expect(requestLayout(110, rows)).toEqual({
+      width: 110,
+      kind: 10,
+      model: 18,
+      account: 12,
+      cache: 12,
+      verdict: 31,
+      cost: 7,
+    })
+    expect(cells(table(rows, 90)[2]!)).toEqual([
+      "14:02:13",
+      "step",
+      "claude-opus…",
+      "max-2",
+      "0/98.1K",
+      "miss · prefix changed · syst…",
+      "$0.0123",
+    ])
+    expect(cells(table(rows, 80)[2]!)).toEqual([
+      "14:02:13",
+      "step",
+      "max-2",
+      "0/98.1K",
+      "miss · prefix changed · system",
+      "$0.0123",
+    ])
+    expect(cells(table(rows, 70)[2]!)).toEqual([
+      "14:02:13",
+      "step",
+      "0/98.1K",
+      "miss · prefix changed · system",
+      "$0.0123",
+    ])
+    expect(cells(table(rows, 60)[2]!)).toEqual(["14:02:13", "step", "miss · prefix changed · system", "$0.0123"])
+    const narrow = table(rows, 50)[2]!
+    expect(narrow).toHaveLength(50)
+    expect(cells(narrow)).toEqual(["14:02:13", "step", "miss · prefix changed · …", "$0.0123"])
+  })
+
+  test("room to spare widens the columns to their usual widths first, so a longer value arriving later fits", () => {
+    const rows = [
+      request(0, { at, model: "m", account: "a", tokens: { ...request(0).tokens, cacheRead: 0, cacheWrite: 0 } }),
+    ]
+    expect(requestLayout(150, rows)).toEqual({
+      width: 150,
+      kind: 10,
+      model: 18,
+      account: 12,
+      cache: 12,
+      verdict: 71,
+      cost: 7,
+    })
+    const layout = requestLayout(150, rows)
+    const later = request(1, { at, kind: "compaction", model: "claude-opus-4-5", account: "max-2", verdict: "miss" })
+    expect(cells(requestRow(later, layout))).toEqual([
+      "14:02:13",
+      "compaction",
+      "claude-opus-4-5",
+      "max-2",
+      "120.3K/1.2K",
+      "miss",
+      "$0.0123",
+    ])
   })
 })
 

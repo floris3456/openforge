@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Clock, Context, Effect, Layer, Stream, SubscriptionRef } from "effect"
+import { Clock, Context, Effect, Fiber, Layer, Stream, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/schema/agent"
@@ -1736,6 +1736,48 @@ describe("PacerConnection reads", () => {
       expect(h.cpp.seen).toHaveLength(again)
       yield* h.connection.prompt("req-3")
       expect(h.cpp.seen.length).toBeGreaterThan(again)
+    }),
+  )
+
+  it.effect("what changed of a listed request reads the request it is compared with beside it, in one round trip", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const parent = yield* chat(h)
+      const uuid = PacerSessionID.make(parent)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+      const miss = { session_ext: uuid, cache_verdict: "miss", cache_cause: "system changed" }
+      h.cpp.rows = [
+        row(1, { session_ext: uuid }),
+        // Another chat's request, so on none of this chat's pages.
+        row(2, { session_id: 9 }),
+        row(3, { ...miss, cache_base: 1 }),
+        row(5, { ...miss, cache_base: 2 }),
+      ]
+      h.cpp.prompts.set("req-3", { kept: true, previous: 1, rows: [] })
+      h.cpp.prompts.set("req-5", { kept: true, previous: 2, rows: [] })
+      yield* h.connection.requests(parent, { filter: "all" })
+      const reads = (from: number) =>
+        h.cpp.seen
+          .slice(from)
+          .map((item) => item.query.get("request") ?? item.path)
+          .toSorted()
+
+      // Its listed row names the request it is compared with: that one is read while its prompt and row are.
+      const first = h.cpp.seen.length
+      h.cpp.holds.add("/pacer/v1/prompts/")
+      h.cpp.holds.add("/pacer/v1/monitor/requests")
+      const fiber = yield* h.connection.prompt("req-5").pipe(Effect.forkScoped({ startImmediately: true }))
+      yield* until("three reads out at once", () => h.cpp.seen.length === first + 3)
+      expect(reads(first)).toEqual(["/pacer/v1/prompts/req-5", "2", "req-5"])
+      h.cpp.release()
+      expect(yield* Fiber.join(fiber)).toMatchObject({ request: { id: "req-5" }, comparedWith: { id: "req-2" } })
+      expect(h.cpp.seen).toHaveLength(first + 3)
+
+      // The one it is compared with was listed too: not read at all.
+      const second = h.cpp.seen.length
+      expect(yield* h.connection.prompt("req-3")).toMatchObject({ comparedWith: { id: "req-1" } })
+      expect(reads(second)).toEqual(["/pacer/v1/prompts/req-3", "req-3"])
     }),
   )
 })

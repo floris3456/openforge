@@ -81,9 +81,11 @@ async function requestsTab(
     prompts?: Record<string, ReturnType<typeof promptChange>>
     width?: number
     height?: number
+    /** CPP is far from the start, the first pages too. */
+    far?: boolean
   } = {},
 ) {
-  const fake = pacerFake()
+  const fake = pacerFake({ delay: input.far ? FAR : 0 })
   Object.assign(fake.prompts, input.prompts)
   fake.status = status(input.state ?? "on")
   fake.chats[CHAT] = chat()
@@ -258,6 +260,54 @@ describe("the list", () => {
     for (const frame of recorder.frames) expect(selected(frame)).toBe(time(2))
   })
 
+  test("the columns hold while rows arrive; one with a longer value is cut until the tab opens again or the window resizes", async () => {
+    await using setup = await requestsTab({ delay: 20, width: 100 })
+    await clickCacheItem(setup)
+    const before = await setup.frame((frame) => rowsOf(frame).length > 0)
+    const header = (frame: string) => frame.split("\n").find((line) => /time +kind/.test(line))
+    const line = (frame: string, at: string) => frame.split("\n").find((text) => text.includes(at))
+    const longer = { model: "claude-sonnet-4-5-20250929", account: "claude-apikey-2" }
+    {
+      using recorder = recordFrames(setup.app)
+      setup.fake.requests[CHAT] = [request(-1, longer), ...setup.fake.requests[CHAT]!]
+      setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+      await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
+      await setup.settle()
+      expect(recorder.missed).toBe(0)
+      // On every frame the header and the rows held before stay where they were, cell for cell.
+      for (const frame of recorder.frames) {
+        expect(header(frame.text)).toBe(header(before)!)
+        for (const at of range(0, 5)) expect(line(frame.text, at)).toBe(line(before, at)!)
+      }
+    }
+    const cut = line(setup.app.captureCharFrame(), time(-1))!
+    expect(cut).toContain("claude-sonnet-…")
+    expect(cut).not.toContain(longer.account)
+    // Opened again, the columns fit it.
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame((frame) => rowsOf(frame).length === 0)
+    await clickCacheItem(setup)
+    const again = await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(line(again, time(-1))).toContain(longer.model)
+    expect(line(again, time(-1))).toContain(longer.account)
+    expect(header(again)).not.toBe(header(before))
+    // A narrower window sizes them again, to its width.
+    setup.app.resize(80, 30)
+    const narrow = await setup.frame((frame) => rowsOf(frame).length > 0 && !frame.includes(longer.model))
+    expect(header(narrow)).toMatch(/time +kind +account +read\/write +verdict +cost/)
+    expect(line(narrow, time(-1))).toContain(longer.account)
+  })
+
+  test("opened with no rows yet, the columns are sized to the first rows that arrive", async () => {
+    await using setup = await requestsTab({ requests: [], delay: 20, width: 100 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => frame.includes("No requests yet"))
+    setup.fake.requests[CHAT] = [request(0, { model: "claude-sonnet-4-5-20250929", account: "claude-apikey-2" })]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    const frame = await setup.frame((frame) => rowsOf(frame).length === 1)
+    expect(frame).toContain("claude-sonnet-4-5-20250929  claude-apikey-2")
+  })
+
   test("watched from the newest row, new requests come in under the cursor on the top line, past the six rows", async () => {
     // Found live: a cursor left on the newest row was pushed down by each new request until the view followed it
     // off the top, and the newest requests stopped showing.
@@ -304,6 +354,25 @@ describe("the list", () => {
     await setup.settle()
     await setup.frame(() => selectedTime(setup) === time(-8))
   })
+
+  test("back from what changed on the newest row, new requests come in under the cursor again", async () => {
+    // Found live (round 5): after Ctrl+Enter and Esc on the newest row, the next request pushed the cursor down, as
+    // what changed holds the row it was opened on.
+    await using setup = await requestsTab({ delay: 20 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    using recorder = recordFrames(setup.app)
+    setup.fake.requests[CHAT] = [request(-1), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
+    await setup.settle()
+    finished(recorder, [list(range(0, 6)), list(range(-1, 5))])
+    for (const frame of recorder.frames) expect(selected(frame)).toBe(rowsOf(frame.text)[0])
+  })
 })
 
 describe("what changed", () => {
@@ -344,19 +413,88 @@ describe("what changed", () => {
   })
 
   test("Ctrl+Enter on a row not held keeps the list until it is, then shows it in one frame", async () => {
+    // Row 2, a hit, isn't read ahead before the cursor reaches it.
     await using setup = await requestsTab({
       requests,
-      prompts: { req_0: promptChange(request(0), { comparedWith: undefined }) },
+      prompts: { req_2: promptChange(request(2), { comparedWith: undefined }) },
     })
     await clickCacheItem(setup)
     await setup.frame((frame) => rowsOf(frame).length > 0)
     using recorder = recordFrames(setup.app)
+    setup.app.mockInput.pressArrow("down")
+    setup.app.mockInput.pressArrow("down")
     const start = performance.now()
     setup.app.mockInput.pressEnter({ ctrl: true })
     await setup.frame((frame) => frame.includes("compared with no earlier request"))
     const drawn = recorder.frames.find((frame) => frame.text.includes("compared with no earlier request"))!
     expect(drawn.at - start).toBeGreaterThanOrEqual(FAR - 5)
     finished(recorder, [list(range(0, 4)), (frame) => frame.includes("compared with no earlier request")])
+    expect(setup.fake.calls.filter((call) => call.path === "prompt/req_2")).toHaveLength(1)
+  })
+
+  test("opening the tab and Ctrl+Enter at once draws what changed for the newest row within 100 ms, CPP at 300 ms from the start", async () => {
+    // Found live: the first Ctrl+Enter on the newest row, a hit, waited for its read: only misses were read ahead,
+    // and the tab opens on the newest row.
+    const many = [request(0), ...Array.from({ length: 9 }, (_, index) => miss(index + 1))]
+    await using setup = await requestsTab({ requests: many, far: true, prompts: { req_0: promptChange(request(0)) } })
+    // Read with the first pages, at once: not behind the misses read ahead, three at a time.
+    await until(() => setup.pacer.held("req_0") !== undefined, FAR + 200, "the newest row read ahead")
+    using recorder = recordFrames(setup.app)
+    const start = performance.now()
+    await clickCacheItem(setup)
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const detail = await setup.frame((frame) => frame.includes("compared with req_prev"))
+    const drawn = recorder.frames.find((frame) => frame.text.includes("compared with req_prev"))!
+    console.log(
+      `What changed: on screen ${(drawn.at - start).toFixed(1)} ms after the click and Ctrl+Enter (CPP at ${FAR} ms)`,
+    )
+    expect(drawn.at - start).toBeLessThan(100)
+    expect(setup.fake.since(start)).toEqual([])
+    expect(detail).toContain("hit")
+    expect(detail).toContain("45 unchanged")
+    finished(recorder, [closed, list(range(0, 6)), (frame) => frame.includes("compared with req_prev")])
+  })
+
+  test("read ahead before CPP stored its prompt, the newest row isn't held as not kept: Ctrl+Enter reads it again", async () => {
+    // CPP may store a prompt just after its request's row, and the newest row is read ahead as soon as it is listed.
+    await using setup = await requestsTab({
+      requests,
+      delay: 0,
+      prompts: { req_0: promptChange(request(0), { kept: "none", items: [] }) },
+    })
+    const reads = () => setup.fake.calls.filter((call) => call.path === "prompt/req_0")
+    await until(() => reads().some((call) => call.done !== undefined), 5_000, "the newest row read ahead")
+    await setup.settle()
+    expect(setup.pacer.held("req_0")).toBeUndefined()
+    setup.fake.prompts.req_0 = promptChange(request(0))
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    // The cursor coming back to it doesn't read it again: only asking does.
+    setup.app.mockInput.pressArrow("down")
+    setup.app.mockInput.pressArrow("up")
+    await setup.settle()
+    expect(reads()).toHaveLength(1)
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const frame = await setup.frame((frame) => frame.includes("compared with req_prev"))
+    expect(frame).toContain("45 unchanged")
+    expect(frame).not.toContain("prompt no longer kept")
+    expect(reads()).toHaveLength(2)
+  })
+
+  test("Ctrl+Enter while the newest row is read ahead waits for that read, and shows its answer whatever it is", async () => {
+    await using setup = await requestsTab({
+      requests,
+      far: true,
+      prompts: { req_0: promptChange(request(0), { kept: "none", items: [] }) },
+    })
+    const reads = () => setup.fake.calls.filter((call) => call.path === "prompt/req_0")
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(reads().map((call) => call.done)).toEqual([undefined])
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const frame = await setup.frame((frame) => frame.includes("prompt no longer kept"))
+    expect(frame).toContain("compared with req_prev")
+    expect(reads()).toHaveLength(1)
   })
 
   test("prompt no longer kept", async () => {

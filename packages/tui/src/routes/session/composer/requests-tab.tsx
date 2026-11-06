@@ -8,7 +8,15 @@ import { usePacer, type Pacer, type PacerFilter } from "../../../context/pacer"
 import { useRoute } from "../../../context/route"
 import { useStorage } from "../../../context/storage"
 import { useTheme } from "../../../context/theme"
-import { clockTime, promptChangeLines, requestHeader, requestRow, requestTone } from "../../../pacer/format"
+import {
+  clockTime,
+  promptChangeLines,
+  requestHeader,
+  requestLayout,
+  requestRow,
+  requestTone,
+  type RequestLayout,
+} from "../../../pacer/format"
 import { useToast } from "../../../ui/toast"
 import { errorMessage } from "../../../util/error"
 import { context as sessionContext } from "../render-context"
@@ -16,10 +24,11 @@ import { useComposerTab } from "./context"
 
 // The Requests tab (spec cliproxypacer-step-1, section 7): the shown chat's requests at CPP with its subagents',
 // newest first, after Terminals, for chats on CPP. It draws what the store holds and reads nothing when it opens:
-// the store read the first page of both filters when the chat was shown. Rows keep one line. A cursor on the newest
-// row stays on the newest, so requests arriving while the tab is watched come in under it; on any other row it is
-// anchored by the request's ID, so a new request at the top never moves it to another one. Only the rows on screen
-// are mounted, so 500 rows scroll as 6 do. Ctrl+Enter or Alt+Enter shows what changed in place of the list.
+// the store read the first page of both filters when the chat was shown, and what changed for their newest rows, where
+// the tab opens. Rows keep one line. A cursor on the newest row stays on the newest, so requests arriving while the
+// tab is watched come in under it; on any other row it is anchored by the request's ID, so a new request at the top
+// never moves it to another one. Only the rows on screen are mounted, so 500 rows scroll as 6 do. Ctrl+Enter or
+// Alt+Enter shows what changed in place of the list.
 
 /** Rows on screen; the list mounts no more than these. */
 const LIST_ROWS = 6
@@ -66,6 +75,20 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     return previous ?? props.pacer.status()?.asOf ?? page()?.asOf
   })
   const width = createMemo(() => Math.max(20, (session?.width ?? dimensions().width - 4) - 6))
+  // The columns are sized when the tab opens, to the rows held then for both filters, and stay while it is open at the
+  // same width: rows arriving never move a column. A longer value arriving meanwhile, past the room the columns were
+  // given, is cut until the tab opens again or the window is resized.
+  const sized = createMemo<{ rows: number; layout: RequestLayout } | undefined>((previous) => {
+    if (!active()) return undefined
+    const current = width()
+    if (previous && previous.rows > 0 && previous.layout.width === current) return previous
+    const rows = [
+      ...(props.pacer.page(props.sessionID, "all")?.items ?? []),
+      ...(props.pacer.page(props.sessionID, "misses")?.items ?? []),
+    ]
+    return { rows: rows.length, layout: requestLayout(current, rows) }
+  })
+  const layout = () => sized()?.layout ?? requestLayout(width(), [])
 
   createEffect(() => {
     if (!visible()) return
@@ -139,7 +162,8 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
       setView("selected", which(), next === 0 ? undefined : list[next]!.id)
       setView("top", which(), top === 0 ? undefined : list[top]!.id)
     })
-    // What changed is read ahead for the row the cursor reaches; opening the tab reads nothing.
+    // What changed is read ahead for the row the cursor reaches; the newest row's, where the tab opens, was read with
+    // the first page, so opening the tab reads nothing.
     props.pacer.cursor(list[next]!.id)
     if (next >= list.length - MORE_AHEAD) props.pacer.more(props.sessionID, which())
   }
@@ -154,7 +178,13 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
 
   const toggleDetail = () => {
     if (view.detail !== undefined) {
-      setView({ detail: undefined, detailTop: 0 })
+      // Back on the row it was opened on; if that is still the newest, the cursor is on the newest again and follows
+      // new requests.
+      const newest = items()[0]?.id === view.selected[which()]
+      batch(() => {
+        setView({ detail: undefined, detailTop: 0 })
+        if (newest) setView("selected", which(), undefined)
+      })
       return
     }
     const request = selected()
@@ -330,7 +360,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
                 </Match>
                 <Match when={true}>
                   <text fg={theme.text.muted} attributes={TextAttributes.DIM} wrapMode="none">
-                    {requestHeader(width())}
+                    {requestHeader(layout())}
                   </text>
                 </Match>
               </Switch>
@@ -347,7 +377,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
                 {(request) => (
                   <RequestRow
                     request={request}
-                    width={width()}
+                    layout={layout()}
                     selected={request.id === selected()?.id}
                     stale={asOf() !== undefined}
                     onSelect={() => moveTo(items().indexOf(request))}
@@ -364,13 +394,13 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
 
 function RequestRow(props: {
   request: PacerRequest
-  width: number
+  layout: RequestLayout
   selected: boolean
   stale: boolean
   onSelect: () => void
 }) {
   const theme = useTheme()
-  const text = createMemo(() => requestRow(props.request, props.width))
+  const text = createMemo(() => requestRow(props.request, props.layout))
   const fg = () => {
     if (props.selected) return theme.text.action.primary.focused
     if (props.stale) return theme.text.faint

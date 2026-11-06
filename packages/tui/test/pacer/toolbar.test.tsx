@@ -278,6 +278,40 @@ describe("the countdown changes only its digits", () => {
     expect(mark().map((frame) => frame.text.split("\n")[0]!.match(/warm +\d+:\d\d/)?.[0])).toEqual(["warm  8:59"])
   })
 
+  test("over the hour: one that started above it keeps hours, 1:00:00 → 0:59:59, on every frame drawn", async () => {
+    // Codex's countdown starts near two hours: it keeps h:mm:ss down to the end, so a tick never turns a colon into a
+    // space (the frame checker's rule since workspace 73b2899).
+    await using setup = await toolbar({ view: chat({ coldAt: NOW + 3_600_000 + 2_000 }) })
+    await setup.app.waitForFrame((frame) => frame.includes("warm 1:00:02"))
+    using recorder = recordFrames(setup.app)
+    for (let second = 0; second < 4; second++) {
+      setup.clock.advance(1000)
+      await until(() => recorder.frames.length > second, 5_000, `frame ${second}`)
+    }
+    expect(recorder.missed).toBe(0)
+    const footers = recorder.frames.map((frame) => frame.text.split("\n")[0]!)
+    expect(footers.map((text) => text.match(/warm +[\d:]+/)?.[0])).toEqual([
+      "warm 1:00:01",
+      "warm 1:00:00",
+      "warm 0:59:59",
+      "warm 0:59:58",
+    ])
+    const first = footers[0]!
+    for (const text of footers) {
+      expect(text).toHaveLength(first.length)
+      // Only digits change: every colon stays where it was.
+      expect([...text].every((char, index) => char === first[index] || /^\d\d$/.test(char + first[index]))).toBe(true)
+    }
+    // Down to the last second in the same form.
+    setup.clock.advance(3_596_000)
+    await setup.frame((frame) => frame.includes("warm 0:00:02"))
+    setup.clock.advance(1000)
+    await setup.frame((frame) => frame.includes("warm 0:00:01"))
+    // A countdown that starts under an hour keeps minutes and seconds.
+    setup.emit({ type: "pacer.chat.updated", data: { chat: chat({ coldAt: NOW + 3_600_000 + 2_000 + 59 * 60_000 }) } })
+    await setup.frame((frame) => /warm 59:\d\d  /.test(frame))
+  })
+
   test("the cache goes cold when the countdown ends, and the clock stops", async () => {
     await using setup = await toolbar({ view: chat({ coldAt: NOW + 2_000 }) })
     await setup.app.waitForFrame((frame) => frame.includes("warm 0:02"))

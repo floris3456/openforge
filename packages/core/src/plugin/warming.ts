@@ -5,6 +5,7 @@ import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { Session } from "@opencode/schema/session"
 import { Clock, Duration, Effect, Scope, Stream } from "effect"
 import { Config } from "../config.js"
+import { PacerEndpoint } from "../pacer/endpoint.js"
 
 const defaults = {
   prompt: "This is a keep-alive request. Do not perform any work or use tools. Reply with exactly: OK",
@@ -88,6 +89,11 @@ export const Plugin = define({
       Effect.gen(function* () {
         const session = yield* ctx.session.get({ sessionID: event.sessionID }).pipe(Effect.orDie)
         if (session.parentID) return
+        // CLIProxyPacer pings its chats itself; a keep-alive through it would arrive as one of the chat's titles.
+        if (String(event.model.providerID) === PacerEndpoint.id) {
+          sessions.delete(event.sessionID)
+          return
+        }
 
         const active = sessions.get(event.sessionID)
         const settings = yield* loadSettings()

@@ -130,7 +130,7 @@ test("the detail row shows a priced CLIProxyPacer model's price, and no price fo
 })
 
 test("the detail row leaves out a context window that is unknown", async () => {
-  await using fixture = await picker({ newDesigns: true, connections: stored })
+  await using fixture = await picker({ newDesigns: true, connected: true })
   const setup = fixture.setup
   await setup.waitForFrame((frame) => frame.includes("Search models"))
   await setup.mockInput.typeText("Unknown Window")

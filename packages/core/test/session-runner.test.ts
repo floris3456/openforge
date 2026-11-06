@@ -3661,6 +3661,21 @@ describe("SessionRunnerLLM", () => {
     ])
   })
 
+  scenario("sends the step again at once on a move ask before the chat's first answer", function* (s) {
+    s.currentModel = pacedModel
+    yield* s.llm.push(Stream.fail(pacerMoveAsk(["claude-e2e-mini"])), TestLLM.text("Moved", "text-moved-new-chat"))
+    yield* s.runPrompt("A new chat")
+
+    // Nothing to summarize but the prompt: no summary request, and the step goes again.
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+    expect(s.requests.every((request) => request.model === pacedModel)).toBe(true)
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    expect(yield* recordedEventTypes(sessionID)).not.toContain(
+      Bus.versionedType(SessionEvent.Compaction.Started.type, 1),
+    )
+  })
+
   scenario("sends the step again after a move ask it could not compact for", function* (s) {
     yield* setupOverflowRecovery(s)
     s.currentModel = pacedModel

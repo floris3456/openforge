@@ -65,7 +65,8 @@ export type Trigger =
   /**
    * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
    * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
-   * own model. Always a summary written here, never a provider's native compaction.
+   * own model. Always a summary written here, never a provider's native compaction. Skipped before the chat's first
+   * finished step, when there is nothing to summarize but the prompt.
    */
   | {
       readonly reason: "move"
@@ -314,6 +315,12 @@ export const layer = Layer.effect(
 
       // Only the user compacts when automatic compaction is off, overflow included.
       if (trigger.reason !== "manual" && !settings.auto) return { status: "skipped" }
+      // A summary of the prompt alone would be a wasted request.
+      if (
+        trigger.reason === "move" &&
+        !context.messages.some((message) => message.type === "assistant" && message.time.completed !== undefined)
+      )
+        return { status: "skipped" }
       if (
         trigger.reason === "auto" &&
         !due(context, calculateCeiling(context.model.limit, settings.buffer), trigger.estimate)

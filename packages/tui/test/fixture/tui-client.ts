@@ -209,6 +209,9 @@ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof 
     if (url.pathname === "/api/experimental/migration/v1") return json({ status: "completed" })
     if (url.pathname === "/api/experimental/service/status")
       return json({ data: { state: "running", startedPaused: false, waiting: [], rested: [], active: [] } })
+    // The TUI reads CLIProxyPacer's status once at start; no fixture sets CPP up.
+    if (url.pathname === "/api/experimental/pacer/status")
+      return json({ data: { state: "unset", since: 0, refused: false } })
     // The prompt footer reads the routed session's goal from the goal plugin's RPC; no fixture sets one.
     if (url.pathname === "/api/rpc/opencode.goal/get") return json({ output: null })
     throw new Error(`unexpected request: ${url.pathname}`)

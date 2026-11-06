@@ -6,6 +6,7 @@ import { TextAttributes } from "@opentui/core"
 import { useInteractivity } from "../../context/interactivity"
 import { stringWidth } from "../../util/string-width"
 import { createGoal, GoalStatus } from "./goal"
+import { PacerCacheItem, usePacerCache } from "../../pacer/cache-item"
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -50,16 +51,18 @@ export function PromptFooter(props: {
     ].filter((item): item is string => Boolean(item))
   })
   const live = createMemo(() => Boolean(subagents() || shells()))
+  const cache = usePacerCache(() => props.sessionID)
   const goal = createGoal(props.context, () => props.sessionID)
   // Prompt hints read as disabled while the session does not own input, e.g. while a side panel is focused.
   const interactive = useInteractivity()
   const shortcut = (id: string) => props.context.keymap.shortcuts(id)[0]
   const layout = createMemo(() => {
     const command = shortcut("command.palette.show")
-    if (status().length === 0) return { usage: false, shortcuts: dimensions().width >= 44 }
+    if (status().length === 0 && !cache()) return { usage: false, cache: false, shortcuts: dimensions().width >= 44 }
     return promptFooterLayout({
       width: Math.max(0, dimensions().width - 8),
       usage: status(),
+      cache: cache()?.text,
       shortcuts: command ? [`${command} commands`] : [],
     })
   })
@@ -68,8 +71,12 @@ export function PromptFooter(props: {
     <Switch>
       <Match when={props.mode === "normal"}>
         <Switch>
-          <Match when={goal() || live() || status().length > 0}>
-            <box flexDirection="row" flexShrink={props.showDetails && layout().usage ? 0 : 1} minWidth={0}>
+          <Match when={goal() || live() || status().length > 0 || cache()}>
+            <box
+              flexDirection="row"
+              flexShrink={props.showDetails && (layout().usage || layout().cache) ? 0 : 1}
+              minWidth={0}
+            >
               <Show when={live()}>
                 <box
                   flexShrink={0}
@@ -103,6 +110,15 @@ export function PromptFooter(props: {
                   <Show when={live() || goal()}> · </Show>
                   {status().join(" · ")}
                 </text>
+              </Show>
+              <Show when={props.showDetails && layout().cache && cache()}>
+                {(item) => (
+                  <PacerCacheItem
+                    sessionID={props.sessionID}
+                    item={item()}
+                    separated={Boolean(live() || goal() || (layout().usage && status().length > 0))}
+                  />
+                )}
               </Show>
             </box>
           </Match>
@@ -153,14 +169,17 @@ export default Plugin.define({
   },
 })
 
-function promptFooterLayout(input: { width: number; usage: string[]; shortcuts: string[] }) {
+function promptFooterLayout(input: { width: number; usage: string[]; cache?: string; shortcuts: string[] }) {
   const usage = input.usage.join(" · ")
   const shortcuts = input.shortcuts.join(" · ")
   const available = Math.max(0, input.width - Math.min(28, Math.floor(input.width / 2)))
-  if (usage && shortcuts && stringWidth(`${usage} · ${shortcuts}`) <= available) {
-    return { usage: true, shortcuts: true }
+  // In a narrow window the shortcuts go first, then the usage; CLIProxyPacer's cache item goes last.
+  const cache = input.cache ?? ""
+  const fits = (...parts: string[]) => stringWidth(parts.filter(Boolean).join(" · ")) <= available
+  if (usage && shortcuts && fits(usage, cache, shortcuts)) {
+    return { usage: true, cache: Boolean(cache), shortcuts: true }
   }
-  if (usage && stringWidth(usage) <= available) return { usage: true, shortcuts: false }
-  if (!usage && shortcuts && stringWidth(shortcuts) <= available) return { usage: false, shortcuts: true }
-  return { usage: false, shortcuts: false }
+  if (usage && fits(usage, cache)) return { usage: true, cache: Boolean(cache), shortcuts: false }
+  if (!usage && shortcuts && fits(cache, shortcuts)) return { usage: false, cache: Boolean(cache), shortcuts: true }
+  return { usage: false, cache: Boolean(cache) && fits(cache), shortcuts: false }
 }

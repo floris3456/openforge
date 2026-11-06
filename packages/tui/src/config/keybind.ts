@@ -257,6 +257,12 @@ export const Definitions = {
   "composer.terminal.up": keybind("up,k", "Previous terminal"),
   "composer.terminal.down": keybind("down,j", "Next terminal"),
   "composer.terminal.select": keybind("return", "Select terminal"),
+  "composer.request.up": keybind("up", "Previous request"),
+  "composer.request.down": keybind("down", "Next request"),
+  "composer.request.select": keybind("return", "Go to where the request ended"),
+  "composer.request.detail": keybind("ctrl+return,alt+return", "Show what changed in the request's prompt"),
+  "pacer.warming.toggle": keybind("<leader>k", "Switch cache warming for this chat"),
+  "pacer.compact_before_cold.toggle": keybind("<leader>j", "Switch compact before cold for this chat"),
 
   "dialog.select.prev": keybind("up,ctrl+p", "Move to previous dialog item"),
   "dialog.select.next": keybind("down,ctrl+n", "Move to next dialog item"),

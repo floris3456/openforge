@@ -9,6 +9,8 @@ export interface ComposerTab {
   id: string
   label: string
   hints?: () => ComposerHint[]
+  /** Tabs show by order, then as they registered: one registered later still shows after one of a lower order. */
+  order?: number
 }
 
 export const ComposerContext = createContext<{

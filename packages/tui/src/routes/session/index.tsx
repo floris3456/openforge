@@ -76,6 +76,7 @@ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { UsageLimitNotice, useLimitNotice, useUsageAlerts } from "../../component/usage"
 import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
+import { usePacerSession } from "../../pacer/jump"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -872,14 +873,28 @@ export function Session(props: {
       dialog.clear()
     })
 
-  const jumpToMessage = (messageID: string) =>
+  const jumpToMessage = (messageID: string, end = false) =>
     ensureAllRows(() => {
       const child = anchors.forMessage(messageID)
       if (!child) return
       const y = scroll.scrollTop + child.node.y - scroll.viewport.y
       const message = data.session.message.get(route.sessionID, messageID)
-      alignMessage(messageID, Math.max(0, y - (message?.type === "assistant" ? 1 : 0)))
+      // `end`: a message taller than the view shows its last part's end, where its step ended.
+      const last = end
+        ? anchors
+            .list()
+            .findLast((anchor) => anchor.target.type === "part" && anchor.target.ref.messageID === messageID)
+        : undefined
+      const bottom = last ? scroll.scrollTop + last.node.y + last.node.height - scroll.viewport.y : 0
+      alignMessage(messageID, Math.max(0, y - (message?.type === "assistant" ? 1 : 0), bottom - scroll.viewport.height))
     })
+  usePacerSession({
+    sessionID: route.sessionID,
+    ready: () => synced() && rowsSynced(),
+    open: () => setComposer({ open: true, tab: "requests" }),
+    jump: (messageID) => jumpToMessage(messageID, true),
+    bottom: toBottom,
+  })
 
   function toBottom() {
     clearMessageNavigation()

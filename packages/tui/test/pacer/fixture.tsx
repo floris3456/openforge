@@ -319,12 +319,13 @@ export async function renderPacer(input: {
   width?: number
   height?: number
   keybinds?: Partial<TuiKeybind.Keybinds>
-  clock?: ManualClock
+  /** `"default"`: the store's own clock, as the app has it. */
+  clock?: ManualClock | "default"
 }) {
   const state = await tmpdir()
   const events = createEventStream()
-  const clock = input.clock ?? new ManualClock()
-  if (!input.clock) clock.setTime(NOW)
+  const clock = input.clock === "default" ? undefined : (input.clock ?? new ManualClock())
+  if (!input.clock) clock!.setTime(NOW)
   const sessions = input.sessions ?? { [CHAT]: { providerID: "cliproxypacer" } }
   const ready = Promise.withResolvers<void>()
   const calls = createFetch(async (url, request) => {
@@ -407,7 +408,8 @@ export async function renderPacer(input: {
   return {
     app,
     events,
-    clock,
+    /** Undefined with the store's own clock. */
+    clock: clock as ManualClock,
     get pacer() {
       return pacer
     },

@@ -463,8 +463,18 @@ export type Pacer = ReturnType<typeof createPacer>
 
 const PacerContext = createContext<Pacer>()
 
+/**
+ * OpenTUI's system clock on the wall clock's time. CPP's times are Unix ms, while `SystemClock.now()` counts from the
+ * start of the process (`performance.now()`), which made every countdown read as some 500,000 hours.
+ */
+export class WallClock extends SystemClock {
+  override now() {
+    return Date.now()
+  }
+}
+
 export function PacerProvider(props: ParentProps<{ clock?: Clock }>) {
-  const pacer = createPacer({ clock: props.clock ?? new SystemClock() })
+  const pacer = createPacer({ clock: props.clock ?? new WallClock() })
   return (
     <PacerContext.Provider value={pacer}>
       <PacerSwitches pacer={pacer} />

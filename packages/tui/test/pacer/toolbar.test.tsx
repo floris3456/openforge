@@ -35,6 +35,22 @@ async function toolbar(input: {
 const line = (setup: { app: { captureCharFrame: () => string } }) => setup.app.captureCharFrame().split("\n")[0]!
 
 describe("the cache item", () => {
+  test("counts down on the wall clock with the store's own clock, as in the app", async () => {
+    // CPP's times are Unix ms; OpenTUI's SystemClock counts from the start of the process.
+    const fake = pacerFake()
+    fake.status = status("on")
+    fake.chats[CHAT] = chat({ coldAt: Date.now() + 23 * 60_000 + 41_000 })
+    await using setup = await renderPacer({
+      fake,
+      width: 100,
+      height: 3,
+      clock: "default",
+      content: () => <Toolbar sessionID={CHAT} />,
+    })
+    await setup.app.waitForFrame((frame) => /warm \d/.test(frame))
+    expect(line(setup)).toMatch(/warm 23:4[12] /)
+  })
+
   test("pings run: warm 23:41", async () => {
     await using setup = await toolbar({})
     await setup.app.waitForFrame((frame) => frame.includes("warm 23:41"))

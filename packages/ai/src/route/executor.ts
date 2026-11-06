@@ -7,7 +7,7 @@ import {
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/http"
-import { HttpContext, HttpRateLimitDetails, AIError, TransportError } from "../schema/index.js"
+import { HttpContext, HttpRateLimitDetails, AIError, InvalidRequestError, TransportError } from "../schema/index.js"
 import { classifyProviderFailure, providerErrorMessage } from "../provider-error.js"
 import { headerDetails, responseHttp, Service, type HttpMiddleware, type Interface } from "./executor-service.js"
 
@@ -160,6 +160,14 @@ const rootCause = (error: unknown): unknown =>
 
 const CONNECTION_LOST = "Connection lost while reading the response"
 
+// Fetch strips spaces, tabs, CRs and LFs around a header value, then refuses one that still holds a NUL, a CR or
+// an LF, or a character above U+00FF, before it sends anything (Bun: "Header '<name>' has invalid value"). The
+// same request fails the same way on every attempt.
+const invalidHeader = (request: HttpClientRequest.HttpClientRequest) =>
+  Object.keys(request.headers).find((name) =>
+    /[\0\r\n]|[^\0-\xff]/.test((request.headers[name] ?? "").replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "")),
+  )
+
 const httpError = (input: {
   readonly error: unknown
   readonly request: HttpClientRequest.HttpClientRequest
@@ -189,6 +197,14 @@ const httpError = (input: {
 
   if (Cause.isTimeoutError(input.error) || Cause.isTimeoutError(source))
     return transportError({ message: message ?? "HTTP transport timed out", code: code ?? "Timeout" })
+  const header = input.operation === "request" ? invalidHeader(request) : undefined
+  if (header !== undefined)
+    return new AIError({
+      reason: new InvalidRequestError({
+        message: `Request not sent: header '${header}' has a line break, a NUL or a character above U+00FF in its value`,
+        cause: source,
+      }),
+    })
   if (!HttpClientError.isHttpClientError(input.error))
     return transportError({ message: message ?? "HTTP transport failed", code })
   // Effect reports every response body read failure as a DecodeError, but the raw byte stream decodes

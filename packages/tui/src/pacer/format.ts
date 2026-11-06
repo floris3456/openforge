@@ -41,17 +41,16 @@ export function clockSeconds(ms: number) {
   return `${clockTime(ms)}:${String(new Date(ms).getSeconds()).padStart(2, "0")}`
 }
 
-const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
-const cents = new Intl.NumberFormat("en-US", {
+const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
-  minimumFractionDigits: 4,
+  minimumFractionDigits: 2,
   maximumFractionDigits: 4,
 })
 
-/** $0.41, or $0.0012 below a cent, which most cached steps cost. */
+/** $0.41, $0.0123: most cached steps cost less than a cent. */
 export function formatCost(cost: number) {
-  return cost > 0 && cost < 0.01 ? cents.format(cost) : usd.format(cost)
+  return usd.format(cost)
 }
 
 /**
@@ -92,7 +91,10 @@ export function windowStale(window: PacerWindow, now: number) {
   return window.stale || (window.staleAt !== undefined && window.staleAt <= now)
 }
 
-/** `5h  62% left · resets 1:20`, marked when CPP calls it estimated or stale (section 5). */
+/**
+ * `5h  62% left · resets 1:20`, marked when CPP calls it estimated or stale (section 5): `resets ~3d 4h` when the
+ * reset is CPP's estimate, `· stale` when the reading can't be trusted. Short enough for the sidebar's 37 columns.
+ */
 export function windowLine(window: PacerWindow, now: number) {
   const left = window.left === undefined ? undefined : `${Math.round(window.left)}% left`
   const state = (() => {
@@ -103,10 +105,11 @@ export function windowLine(window: PacerWindow, now: number) {
   })()
   const reset =
     window.resetsAt !== undefined && window.state !== "dormant" && window.state !== "awaiting-confirmation"
-      ? `resets ${formatReset(window.resetsAt - now)}`
+      ? `resets ${window.state === "estimated" ? "~" : ""}${formatReset(window.resetsAt - now)}`
       : undefined
-  const marks = [window.state === "estimated" ? "estimated" : undefined, windowStale(window, now) ? "stale" : undefined]
-  const parts = [left, state, reset, ...marks].filter((part): part is string => part !== undefined)
+  const parts = [left, state, reset, windowStale(window, now) ? "stale" : undefined].filter(
+    (part): part is string => part !== undefined,
+  )
   return `${window.label}  ${parts.length ? parts.join(" · ") : "unknown"}`
 }
 
@@ -150,20 +153,25 @@ export function requestTone(request: PacerRequest): "base" | "warning" | "error"
   return "base"
 }
 
-// Column widths. Two spaces between columns; the model and the verdict share what is left, the verdict first.
+// Column widths, two spaces apart. The verdict takes what is left; a narrow window drops the model first, then the
+// account, then the cache read and write, so the verdict keeps room for a miss's cause.
 const TIME = 8
 const KIND = 10
 const ACCOUNT = 12
-const CACHE = 13
-const COST = 8
+const CACHE = 12
+const COST = 7
 const GAP = 2
+const VERDICT = 28
+const MODEL = 18
 
-/** The columns a row of `width` cells has room for; the model and the account go first in a narrow window. */
+/** The columns a row of `width` cells has room for, and the widths of the model and the verdict. */
 export function requestColumns(width: number) {
-  const fixed = (columns: number[]) => columns.reduce((sum, column) => sum + column + GAP, 0)
-  const model = width - fixed([TIME, KIND, ACCOUNT, CACHE, COST]) >= 34
-  const account = width - fixed([TIME, KIND, CACHE, COST]) >= 24
-  return { model, account }
+  const base = width - (TIME + KIND + COST + 3 * GAP)
+  const cache = base - (CACHE + GAP) >= VERDICT
+  const account = cache && base - (CACHE + ACCOUNT + 2 * GAP) >= VERDICT
+  const rest = base - (cache ? CACHE + GAP : 0) - (account ? ACCOUNT + GAP : 0)
+  const model = account && rest - GAP - VERDICT >= 12 ? Math.min(MODEL, rest - GAP - VERDICT) : 0
+  return { cache, account, model, verdict: Math.max(0, rest - (model ? model + GAP : 0)) }
 }
 
 /** The header over the rows, in the same columns. */
@@ -197,21 +205,14 @@ function requestLine(
   cells: { time: string; kind: string; model: string; account: string; cache: string; verdict: string; cost: string },
 ) {
   const columns = requestColumns(width)
-  const flexible = Math.max(
-    0,
-    width -
-      [TIME, KIND, CACHE, COST, ...(columns.account ? [ACCOUNT] : [])].reduce((sum, column) => sum + column + GAP, 0),
-  )
-  const modelWidth = columns.model ? Math.min(24, Math.max(8, Math.floor(flexible / 2))) : 0
-  const verdictWidth = Math.max(0, flexible - (columns.model ? modelWidth + GAP : 0))
   const fit = (text: string, size: number) => pad(Locale.truncateWidth(text, size), size)
   const line = [
     fit(cells.time, TIME),
     fit(cells.kind, KIND),
-    ...(columns.model ? [fit(cells.model, modelWidth)] : []),
+    ...(columns.model ? [fit(cells.model, columns.model)] : []),
     ...(columns.account ? [fit(cells.account, ACCOUNT)] : []),
-    fit(cells.cache, CACHE),
-    fit(cells.verdict, verdictWidth),
+    ...(columns.cache ? [fit(cells.cache, CACHE)] : []),
+    fit(cells.verdict, columns.verdict),
     padStart(Locale.truncateWidth(cells.cost, COST), COST),
   ].join(" ".repeat(GAP))
   return fit(line, width)

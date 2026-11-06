@@ -109,21 +109,22 @@ function createPacer(input: { clock: Clock }) {
   const touch = () => setNow(second(clock.now()))
   let tickers = 0
   let timer: TimerHandle | undefined
+  // Scheduled before the second is published: a countdown that ends on it stops the clock it was ticked by.
   const tick = () => {
-    touch()
     timer = clock.setTimeout(tick, 1000 - (clock.now() % 1000))
+    touch()
   }
   const countdown = (active: Accessor<boolean>) =>
     createEffect(() => {
       if (!active()) return
-      tickers++
-      if (tickers === 1) tick()
       onCleanup(() => {
         tickers--
         if (tickers > 0 || timer === undefined) return
         clock.clearTimeout(timer)
         timer = undefined
       })
+      tickers++
+      if (tickers === 1) tick()
     })
 
   const applyStatus = (next: PacerStatus) => {

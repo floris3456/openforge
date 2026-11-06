@@ -61,6 +61,9 @@ interface Cpp {
   meters: Json[]
   rows: Json[]
   readonly prompts: Map<string, Json>
+  /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
+   * them until the first bytes. */
+  quiet: boolean
   /** Path prefixes whose answers wait until `release`. */
   readonly holds: Set<string>
   readonly release: () => void
@@ -124,7 +127,7 @@ const fakeCpp = (now: () => number) =>
                 opened.controller = controller
                 controllers.add(controller)
                 // Bun's server sends a streamed answer's headers with its first bytes; CPP's sends them at once.
-                controller.enqueue(encoder.encode(":open\n\n"))
+                if (!cpp.quiet) controller.enqueue(encoder.encode(":open\n\n"))
               },
               // The client went away.
               cancel: () => void (opened.controller && controllers.delete(opened.controller)),
@@ -204,6 +207,7 @@ const fakeCpp = (now: () => number) =>
         seen: [],
         offset: 0,
         failure: undefined,
+        quiet: false,
         views: new Map(),
         listed: [],
         meters: [],
@@ -654,6 +658,23 @@ describe("PacerConnection states", () => {
         // CPP is back: on again.
         h.cpp.failure = undefined
         yield* ahead("on again", () => status(h).state === "on")
+      }),
+  )
+
+  it.effect(
+    "waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        h.cpp.quiet = true
+        yield* h.connect()
+        yield* until("the stream asked for", () => h.cpp.streams() === 1)
+        // CPP's first heartbeat comes 25 s after the stream opened.
+        for (let second = 0; second < 25; second++) yield* TestClock.adjust("1 second")
+        yield* settle
+        h.cpp.heartbeat()
+        yield* until("on", () => status(h).state === "on")
+        expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
       }),
   )
 

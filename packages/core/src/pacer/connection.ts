@@ -736,7 +736,9 @@ export const layer = Layer.effect(
         // The views first, then the stream: nothing is replayed after a reconnect. A proxy without the pacer answers
         // this read 404 or 503 `unavailable` (PacerHttp.NoPacer).
         yield* readState
-        const stream = yield* http.stream("/pacer/v1/stream", { endpoint })
+        // CPP sends the stream's headers at once and its first bytes with the first heartbeat, 25 s on; a proxy in front
+        // may hold the headers until those bytes, so they are waited for as long as a heartbeat.
+        const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
         yield* contact(stream.offset)
         yield* setStatus({ state: "on" })
         // The first time the catalog reads itself, on the endpoint's change; after a reconnect it is read again.

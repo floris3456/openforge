@@ -26,6 +26,8 @@ const isMcp = (integration: { readonly metadata?: { readonly source?: unknown } 
 
 // `integration.connect` decides which integrations are listed and can be connected. Credential creation shares it.
 export const requireConnectable = Effect.fnUntraced(function* (integrationID: Integration.ID) {
+  // A location's integrations come from its plugins: before they are active, a new location has none.
+  yield* Plugin.awaitActivation
   const integrations = yield* Integration.Service
   if (isMcp(yield* integrations.get(integrationID))) return
   const denied = ManagedPolicy.match(yield* statements(), "integration.connect", integrationID)
@@ -75,6 +77,7 @@ export const IntegrationHandler = HttpApiBuilder.group(Api, "server.integration"
       .handle(
         "integration.get",
         Effect.fn(function* (ctx) {
+          yield* Plugin.awaitActivation
           const service = yield* Integration.Service
           const integration = yield* service.get(ctx.params.integrationID)
           if (!integration)

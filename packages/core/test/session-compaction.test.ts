@@ -38,6 +38,7 @@ import { App } from "@opencode/core/app"
 import { Agent } from "@opencode/core/agent"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Money } from "@opencode/schema/money"
 import { Skill } from "@opencode/schema/skill"
@@ -751,6 +752,42 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
       { type: Bus.versionedType(SessionEvent.UsageRecorded.type, 1) },
       { type: Bus.versionedType(SessionEvent.Compaction.Ended.type, 1) },
     ])
+  }),
+)
+
+it.effect("marks a CLIProxyPacer summary as its chat's compaction, with openforge's own summary", () =>
+  Effect.gen(function* () {
+    requests = []
+    const sessionID = Session.ID.make("ses_paced_compaction")
+    const parentID = Session.ID.make("ses_paced_compaction_parent")
+    const session = yield* insertSession(sessionID, { parent_id: parentID })
+    const paced = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "summary-model", provider: "cliproxypacer", route: OpenAIChat.route }),
+      { capabilities: { tools: true, input: ["text"], output: ["text"] }, cost, limit: resolved.limit },
+    )
+    const messages = [
+      SessionMessage.User.make({
+        id: SessionMessage.ID.create(),
+        type: "user",
+        text: "Summarize this paced chat.",
+        time: { created: DateTime.makeUnsafe(0) },
+      }),
+    ]
+    const compaction = yield* SessionCompaction.Service
+    const inputID = SessionMessage.ID.create()
+    yield* (yield* Bus.Service).publish(SessionEvent.Compaction.Started, { sessionID, reason: "manual", inputID })
+    expect(
+      yield* compaction.compact({ reason: "manual", context: { ...loaded(session, messages), model: paced }, inputID }),
+    ).toEqual({ status: "completed" })
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.http?.headers).toMatchObject({
+      "x-opencode-session-id": sessionID,
+      "X-Pacer-Session": PacerSessionID.make(sessionID),
+      "X-Pacer-Parent-Session": PacerSessionID.make(parentID),
+      "X-Pacer-Kind": "compaction",
+    })
+    expect(requests[0]?.http?.headers).not.toHaveProperty("X-Pacer-Compact")
   }),
 )
 

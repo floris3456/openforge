@@ -28,6 +28,7 @@ import { Cause, Context, Effect, Layer, Result, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
+import { PacerHeaders } from "../pacer/headers.js"
 import { Instructions } from "../instructions/index.js"
 import { Permission } from "../permission.js"
 import { PluginHooks } from "../plugin/hooks.js"
@@ -304,6 +305,12 @@ export const layer = Layer.effect(
             "x-opencode-project": session.projectID,
             "x-opencode-session": affinity,
             "x-opencode-client": app.name,
+            ...PacerHeaders.make({
+              providerID: model.ref.providerID,
+              kind,
+              sessionID: session.id,
+              parentID: session.parentID,
+            }),
           },
         },
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.

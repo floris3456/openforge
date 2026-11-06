@@ -77,6 +77,7 @@ import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { Location } from "@opencode/core/location"
 import { Provider } from "@opencode/core/provider"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, desc, eq, sql } from "drizzle-orm"
@@ -1615,7 +1616,10 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       yield* s.admit("Echo before moving")
-      yield* s.llm.push(TestLLM.toolCall("call-move", "echo", { text: "moving" }), TestLLM.text("Done", "text-after-move"))
+      yield* s.llm.push(
+        TestLLM.toolCall("call-move", "echo", { text: "moving" }),
+        TestLLM.text("Done", "text-after-move"),
+      )
       const tools = yield* s.blockTools()
       const run = yield* s.resume.pipe(Effect.forkChild)
       yield* tools.started
@@ -5044,6 +5048,35 @@ describe("SessionRunnerLLM", () => {
     })
   })
 
+  scenario("adds CLIProxyPacer's headers to its steps, a subagent's with its parent", function* (s) {
+    const parentID = Session.ID.make("ses_runner_parent")
+    // The runner's ref takes its provider from the resolved model, so the chat's model is CPP's.
+    s.currentModel = LanguageModel.make({ id: "fake-model", provider: "cliproxypacer", route: OpenAIChat.route })
+    yield* s.runPrompt("Run paced request")
+    yield* s.db
+      .update(SessionTable)
+      .set({ parent_id: parentID })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+    yield* s.runPrompt("Run paced child request")
+
+    const [step, child] = s.requests.map((request) => request.http?.headers)
+    expect(step).toMatchObject({
+      "x-opencode-session-id": sessionID,
+      "X-Pacer-Session": PacerSessionID.make(sessionID),
+      "X-Pacer-Compact": "auto, before-cold",
+    })
+    expect(step).not.toHaveProperty("X-Pacer-Kind")
+    expect(step).not.toHaveProperty("X-Pacer-Parent-Session")
+    expect(child).toMatchObject({
+      "x-opencode-parent-session-id": parentID,
+      "X-Pacer-Session": PacerSessionID.make(sessionID),
+      "X-Pacer-Parent-Session": PacerSessionID.make(parentID),
+      "X-Pacer-Compact": "auto, before-cold",
+    })
+  })
+
   scenario("uses parent cache affinity for child model requests", function* (s) {
     const parentID = Session.ID.make("ses_runner_parent")
 
@@ -5957,7 +5990,10 @@ describe("SessionRunnerLLM", () => {
     // the window instead of rejecting it.
     s.currentModel = recoveryModel
     yield* s.llm.push(
-      TestLLM.complete({ reason: { normalized: "length" }, usage: { inputTokens: 199_994, nonCachedInputTokens: 199_994, outputTokens: 0 } }),
+      TestLLM.complete({
+        reason: { normalized: "length" },
+        usage: { inputTokens: 199_994, nonCachedInputTokens: 199_994, outputTokens: 0 },
+      }),
       TestLLM.text("## Objective\n- summary", "summary"),
       TestLLM.text("Done", "done"),
     )

@@ -8,6 +8,7 @@ import { Clock, Duration, Effect } from "effect"
 import { Bus } from "../../bus.js"
 import type { SessionContinuity } from "../../continuity.js"
 import { ModelRetry } from "../../model-retry.js"
+import { PacerAnswers } from "../../pacer/answers.js"
 import type { PluginHooks } from "../../plugin/hooks.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
@@ -33,9 +34,17 @@ export interface Decision {
 export const policy = (sessionID: SessionSchema.ID, from?: ModelRetry.Progress) =>
   Effect.gen(function* () {
     const retry = yield* ModelRetry.resume(from)
+    // On the CLIProxyPacer provider: whether the last failure was a 502.
+    let badGateway = false
     const decide = (input: Input) =>
       Effect.gen(function* () {
-        const next = yield* retry.decide(input)
+        const gateway = PacerAnswers.badGateway(input.model, input.cause)
+        const next = yield* retry.decide({
+          ...input,
+          // CPP's 502 says Retry-After: 30, yet the next request usually reaches the other instance at once.
+          skipRetryAfter: gateway && !badGateway,
+        })
+        badGateway = gateway
         if (!next) return { retry: false as const }
         const event: PluginHooks.Domains["session"]["retry"] = {
           sessionID,

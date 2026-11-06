@@ -6,6 +6,8 @@ import { Clock, Duration, Effect, Pull, Schedule } from "effect"
 interface Input {
   readonly cause: AIError
   readonly retry: boolean
+  /** The answer's retry-after does not raise this decision's wait. */
+  readonly skipRetryAfter?: boolean
 }
 
 /** Bound provider-requested delays so a hostile or buggy retry-after cannot stall a call for hours. */
@@ -56,7 +58,7 @@ export const resume = (from?: Progress) =>
         const now = yield* Clock.currentTimeMillis
         const next = yield* step(now, undefined).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
         if (!next) return undefined
-        const minimum = retryAfter(input)
+        const minimum = input.skipRetryAfter ? undefined : retryAfter(input)
         const duration = minimum === undefined ? next[1] : Duration.max(next[1], Duration.millis(minimum))
         attempt++
         if (input.cause.reason._tag === "Transport" && input.cause.reason.code === "Timeout") timeouts++

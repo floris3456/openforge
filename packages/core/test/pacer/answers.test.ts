@@ -66,3 +66,20 @@ describe("PacerAnswers.moveAsk", () => {
     expect(PacerAnswers.moveAsk(chat, undefined)).toBeUndefined()
   })
 })
+
+const other = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make("anthropic") })
+const cppDown = "CPP is down: the active instance could not be reached from here"
+
+describe("PacerAnswers.badGateway", () => {
+  test("is any 502 on the CLIProxyPacer provider", () => {
+    expect(
+      PacerAnswers.badGateway(
+        chat,
+        answer(502, { type: "error", error: { type: "overloaded_error", message: cppDown } }),
+      ),
+    ).toBe(true)
+    expect(PacerAnswers.badGateway(chat, answer(502, "error code: 502"))).toBe(true)
+    expect(PacerAnswers.badGateway(chat, answer(503, { error: { message: cppDown, code: "cpp_down" } }))).toBe(false)
+    expect(PacerAnswers.badGateway(other, answer(502, "error code: 502"))).toBe(false)
+  })
+})

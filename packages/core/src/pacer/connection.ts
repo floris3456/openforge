@@ -928,10 +928,16 @@ export const layer = Layer.effect(
 
     const follow = Effect.fnUntraced(function* (endpoint: PacerEndpoint.Endpoint) {
       let delay = RECONNECT_MS
+      // The tries in a row that failed with a 502: the first waits no Retry-After (PacerAnswers.badGateway says why).
+      let badGateways = 0
       for (let first = true; ; first = false) {
         const begun = yield* Clock.currentTimeMillis
         const held = yield* models.get()
         const result = yield* attempt(endpoint, first).pipe(Effect.result)
+        badGateways =
+          Result.isFailure(result) && result.failure._tag === "PacerHttp.Unreachable" && result.failure.status === 502
+            ? badGateways + 1
+            : 0
         if (Result.isFailure(result)) {
           const error = result.failure
           if (error._tag === "PacerHttp.NotSetUp") return yield* Effect.never
@@ -947,7 +953,9 @@ export const layer = Layer.effect(
             continue
           }
           yield* setStatus({ state: "unreachable", message: error.message })
-          yield* Effect.sleep(Math.max(delay, error._tag === "PacerHttp.Unreachable" ? (error.retryAfter ?? 0) : 0))
+          yield* Effect.sleep(
+            Math.max(delay, error._tag === "PacerHttp.Unreachable" && badGateways !== 1 ? (error.retryAfter ?? 0) : 0),
+          )
         }
         if (Result.isSuccess(result)) {
           // A stream that lasted is a working connection: its end starts the waits from a second again.

@@ -718,6 +718,40 @@ describe("PacerConnection states", () => {
   )
 
   it.effect(
+    "reads the state again after its wait when CPP answers 502 with Retry-After 30, and waits the 30 s for a second 502 in a row",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        // pair_forward.rs's 502 of a failed forward: a standby's, with Retry-After: 30.
+        const forward = { status: 502, type: "upstream", retryAfter: 30 }
+        h.cpp.failure = forward
+        yield* h.connect()
+        yield* until("unreachable", () => status(h).state === "unreachable")
+        const reads = () => seen(h, "/pacer/v1/state")
+        /** Waits for the next read, then sets CPP's answer to the read after it. */
+        const then = Effect.fnUntraced(function* (failure: Cpp["failure"]) {
+          const count = reads().length
+          yield* ahead(`read ${count + 1}`, () => reads().length === count + 1)
+          h.cpp.failure = failure
+        })
+        // Two 502s, a 503, two 502s again, then CPP answers.
+        yield* then({ status: 503 })
+        yield* then(forward)
+        yield* then(forward)
+        yield* then(undefined)
+        yield* ahead("on", () => status(h).state === "on")
+        const times = reads().map((item) => item.at)
+        const gaps = times.slice(1).map((at, index) => at - times[index])
+        expect(gaps).toHaveLength(5)
+        // The waits double from 1 s; a first 502 waits only that, a second in a row its 30 s.
+        ;[1_000, 30_000, 4_000, 8_000, 30_000].forEach((least, index) => {
+          expect(gaps[index]).toBeGreaterThanOrEqual(least)
+          expect(gaps[index]).toBeLessThan(least + 300)
+        })
+      }),
+  )
+
+  it.effect(
     "is on once the state answers, while it waits for the stream's headers as long as for a heartbeat, as a proxy may hold them until CPP's first bytes",
     () =>
       Effect.gen(function* () {

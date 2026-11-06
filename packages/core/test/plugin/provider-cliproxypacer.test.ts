@@ -367,6 +367,13 @@ const sse =
       headers: { "content-type": "text/event-stream" },
     })
 const cppDown = "CPP is down: the active cannot be reached"
+const cppDownMessages = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: cppDown } })
+const transientWait = JSON.stringify({
+  error: {
+    type: "pacer_transient_wait",
+    message: "Pacer: this chat's account failed briefly; retry to keep its warm cache",
+  },
+})
 const streamCut = "this server stopped serving this stream (a restart, an update or a switch over); retry the request"
 const messagesStart = [
   [
@@ -390,16 +397,11 @@ const responsesStart = [
   ],
 ] as const
 
-/**
- * Sends a request of the CPP model through its route to an HTTP client that answers `reply`, and returns how the
- * stream failed, then the decisions upstream's retry policy makes on that failure, as a step consults it, over
- * `attempts` attempts in a row.
- */
-const answered = Effect.fn(function* (id: string, reply: () => Response, attempts = 1) {
+/** Sends a request of the CPP model through its route to `http`, and returns the model's ref and how the stream failed. */
+const failed = Effect.fn(function* (id: string, http: HttpClient.HttpClient) {
   yield* addPlugin(yield* fakeCPP(configKey, catalog))
   const info = required((yield* listed).find((model) => String(model.id) === id))
   const model = yield* ModelResolver.fromCatalogModel(info)
-  const http = HttpClient.make((request) => Effect.sync(() => HttpClientResponse.fromWeb(request, reply())))
   const failure = yield* LLMClient.stream(ai.request({ model, prompt: "Hello" })).pipe(
     Stream.runDrain,
     Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.fresh)),
@@ -407,19 +409,38 @@ const answered = Effect.fn(function* (id: string, reply: () => Response, attempt
     Effect.flip,
   )
   if (!(failure instanceof AIError)) return yield* Effect.die(failure)
+  return { model: Model.Ref.make({ id: info.id, providerID }), failure }
+})
+
+const answering = (reply: () => Response) =>
+  HttpClient.make((request) => Effect.sync(() => HttpClientResponse.fromWeb(request, reply())))
+
+/** The decisions upstream's retry policy makes, as a step consults it, on `failures` one after another. */
+const decided = Effect.fn(function* (model: Model.Ref, failures: ReadonlyArray<AIError>) {
   const decide = yield* SessionRunnerRetry.policy(Session.ID.make("ses_cpp_answers"))
   const decisions = []
-  for (let attempt = 0; attempt < attempts; attempt++)
+  for (const failure of failures)
     decisions.push(
       yield* decide({
         cause: failure,
         error: toSessionError(failure),
         agent: Agent.defaultID,
-        model: Model.Ref.make({ id: info.id, providerID }),
+        model,
         hook: () => Effect.void,
         retry: SessionRunnerRetry.isRetryable(failure),
       }),
     )
+  return { decisions }
+})
+
+/**
+ * Sends a request of the CPP model through its route to an HTTP client that answers `reply`, and returns how the
+ * stream failed, then the decisions upstream's retry policy makes on that failure, as a step consults it, over
+ * `attempts` attempts in a row.
+ */
+const answered = Effect.fn(function* (id: string, reply: () => Response, attempts = 1) {
+  const { model, failure } = yield* failed(id, answering(reply))
+  const { decisions } = yield* decided(model, Array(attempts).fill(failure))
   return { failure, error: toSessionError(failure), decisions }
 })
 
@@ -508,16 +529,38 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
     }),
   )
 
-  it.effect("502 of a pair's failed forward: CPP sends Retry-After 30 with it, which the retry waits", () =>
+  it.effect(
+    "502 of a pair's failed forward: tried again after the schedule's own gap, not its Retry-After of 30 s; a second 502 in a row waits it",
+    () =>
+      Effect.gen(function* () {
+        // pair_forward.rs's bad_gateway is cpp_down's answer with the status changed, so it keeps Retry-After: 30. The
+        // standby then stops its connector, and Cloudflare sends the next request to the other instance at once.
+        const { decisions } = yield* answered("claude-test-1", answer(502, cppDownMessages, { "retry-after": "30" }), 3)
+        expect(decisions).toMatchObject([
+          { retry: true, attempt: 2 },
+          { retry: true, attempt: 3, delay: 30_000 },
+          { retry: true, attempt: 4, delay: 30_000 },
+        ])
+        // The schedule's first gap: 2 s with up to 20% jitter.
+        expect(delays(decisions)[0]).toBeGreaterThanOrEqual(1.6)
+        expect(delays(decisions)[0]).toBeLessThanOrEqual(2.4)
+      }),
+  )
+
+  it.effect("a failure other than a 502 ends a run of them: the next 502 is tried again after the schedule's gap", () =>
     Effect.gen(function* () {
-      // pair_forward.rs's bad_gateway is cpp_down's answer with the status changed, so it keeps Retry-After: 30.
-      const { decisions } = yield* answered(
-        "claude-test-1",
-        answer(502, JSON.stringify({ type: "error", error: { type: "overloaded_error", message: cppDown } }), {
-          "retry-after": "30",
-        }),
+      const forward = yield* failed("claude-test-1", answering(answer(502, cppDownMessages, { "retry-after": "30" })))
+      const transient = yield* failed("claude-test-1", answering(answer(503, transientWait, { "retry-after": "2" })))
+      const waited = delays(
+        (yield* decided(forward.model, [forward.failure, transient.failure, forward.failure, forward.failure]))
+          .decisions,
       )
-      expect(decisions).toEqual([{ retry: true, attempt: 2, delay: 30_000 }])
+      // The schedule's gaps, 2, 4 and 8 s with up to 20% jitter; only the second 502 in a row waits its 30 s.
+      for (const [index, base] of [2, 4, 8].entries()) {
+        expect(waited[index]).toBeGreaterThanOrEqual(base * 0.8)
+        expect(waited[index]).toBeLessThanOrEqual(base * 1.2)
+      }
+      expect(waited[3]).toBe(30)
     }),
   )
 

@@ -256,6 +256,53 @@ describe("the list", () => {
     // The selection holds its request on every frame.
     for (const frame of recorder.frames) expect(selected(frame)).toBe(time(2))
   })
+
+  test("watched from the newest row, new requests come in under the cursor on the top line, past the six rows", async () => {
+    // Found live: a cursor left on the newest row was pushed down by each new request until the view followed it
+    // off the top, and the newest requests stopped showing.
+    await using setup = await requestsTab({ delay: 20 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    {
+      // Spans are read from the recorded frames only: reading them while the renderer draws one fails.
+      using recorder = recordFrames(setup.app)
+      for (const index of [-1, -2, -3, -4, -5, -6, -7]) {
+        setup.fake.requests[CHAT] = [request(index), ...setup.fake.requests[CHAT]!]
+        setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+        await setup.frame((frame) => rowsOf(frame)[0] === time(index))
+      }
+      await setup.settle()
+      // On every frame the six rows are the newest and the selection is the top one.
+      finished(
+        recorder,
+        [-1, -2, -3, -4, -5, -6, -7].map((index) => list(range(index, index + 6))),
+      )
+      for (const frame of recorder.frames) expect(selected(frame)).toBe(rowsOf(frame.text)[0])
+    }
+    expect(rowsOf(setup.app.captureCharFrame())).toEqual(range(-7, -1))
+    await setup.frame(() => selectedTime(setup) === time(-7))
+    // Moved off the newest row, the selection holds its request.
+    setup.app.mockInput.pressArrow("down")
+    await setup.frame(() => selectedTime(setup) === time(-6))
+    setup.fake.requests[CHAT] = [request(-8), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-8))
+    await setup.settle()
+    await setup.frame(() => selectedTime(setup) === time(-6))
+    // Back on the newest row, what changed and Esc come back to that row, not to one that came meanwhile.
+    setup.app.mockInput.pressArrow("up")
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame(() => selectedTime(setup) === time(-8))
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    setup.fake.requests[CHAT] = [request(-9), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await until(() => setup.pacer.page(CHAT, "all")!.items[0]!.id === "req_-9", 5_000)
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-9))
+    await setup.settle()
+    await setup.frame(() => selectedTime(setup) === time(-8))
+  })
 })
 
 describe("what changed", () => {
@@ -517,11 +564,20 @@ function selected(frame: RecordedFrame) {
     .match(KIND)?.[1]
 }
 
-/** The time of the row drawn selected (bold) now. */
+/**
+ * The time of the row drawn selected (bold) now; undefined while the renderer writes a frame, when its spans can't be
+ * read (OpenTUI's `OutputBusy`), so wait on it with `setup.frame`.
+ */
 function selectedTime(setup: Setup) {
-  return setup.app
-    .captureSpans()
-    .lines.find((line) => line.spans.some((span) => KIND.test(span.text) && span.attributes & 1))
+  let spans: ReturnType<Setup["app"]["captureSpans"]>
+  try {
+    spans = setup.app.captureSpans()
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("OutputBusy")) return undefined
+    throw error
+  }
+  return spans.lines
+    .find((line) => line.spans.some((span) => KIND.test(span.text) && span.attributes & 1))
     ?.spans.map((span) => span.text)
     .join("")
     .match(KIND)?.[1]

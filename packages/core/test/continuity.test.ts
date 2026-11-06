@@ -13,6 +13,7 @@ import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { SessionContinuity } from "@opencode/core/continuity"
+import { SessionRestTable } from "@opencode/core/continuity/sql"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
@@ -186,18 +187,20 @@ const plugins = makeLocationNode({
   ],
 })
 
-const fixedModel = SessionRunnerModel.node.replace(
-  Layer.succeed(SessionRunnerModel.Service, {
-    resolve: () =>
-      Effect.succeed(
-        SessionRunnerModel.resolved(LanguageModel.make({ id: "model", provider: "test", route: OpenAIChat.route }), {
-          capabilities: { tools: true, input: ["text"], output: ["text"] },
-          cost: [],
-          limit: { context: 200_000, output: 32_000 },
-        }),
-      ),
-  }),
-)
+/** The one model every step calls, of `provider`. */
+const fixedModel = (provider = "test") =>
+  SessionRunnerModel.node.replace(
+    Layer.succeed(SessionRunnerModel.Service, {
+      resolve: () =>
+        Effect.succeed(
+          SessionRunnerModel.resolved(LanguageModel.make({ id: "model", provider, route: OpenAIChat.route }), {
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+            cost: [],
+            limit: { context: 200_000, output: 32_000 },
+          }),
+        ),
+    }),
+  )
 
 const nodes = LayerNode.group([
   Database.node,
@@ -216,12 +219,13 @@ const it = testEffect(Layer.mergeAll(AppNodeBuilder.build(Database.node), TestLL
 
 /**
  * Starts a service generation over the shared database; `stop` is the SIGTERM. `wrap` stands between the services and
- * continuity, to hold one of its steps.
+ * continuity, to hold one of its steps; `provider` is the provider of the model the steps call.
  */
 const start = (
   options: {
     readonly paused?: boolean
     readonly wrap?: (continuity: SessionContinuity.Interface) => SessionContinuity.Interface
+    readonly provider?: string
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -248,7 +252,7 @@ const start = (
         ),
         PluginSupervisor.node.replace(plugins),
         offlineModels,
-        fixedModel,
+        fixedModel(options.provider),
       ]),
       scope,
     )
@@ -428,6 +432,79 @@ describe("SessionContinuity", () => {
       yield* succeeded(second.events, session.id)
       expect(yield* counts(llm)).toEqual({ parent: 3, child: 0 })
       expect(yield* transcript(second.sessions, session.id)).not.toContain(RESTART_NOTICE)
+    }),
+  )
+
+  it.effect("a retry rest an earlier release stored, without an outage's start, decodes; one with it keeps it", () =>
+    Effect.gen(function* () {
+      reset()
+      const db = (yield* Database.Service).db
+      const generation = yield* start()
+      const session = yield* createSession(generation)
+      const rest = {
+        kind: "retry",
+        step: 1,
+        assistantMessageID: SessionMessage.ID.create(),
+        mode: "retry",
+        attempt: 3,
+        timeouts: 0,
+        at: 5_000,
+        error: { type: "provider.transport", message: "Provider unavailable" },
+      } as const
+      yield* db
+        .insert(SessionRestTable)
+        .values({ session_id: session.id, call_id: "", data: rest })
+        .run()
+        .pipe(Effect.orDie)
+      expect((yield* generation.continuity.restored(session.id)).rest).toEqual(rest)
+      yield* generation.continuity.save(session.id, { ...rest, outageSince: 1_000 })
+      expect((yield* generation.continuity.restored(session.id)).rest).toEqual({ ...rest, outageSince: 1_000 })
+    }),
+  )
+
+  it.effect("a step in a CPP outage keeps its 30 minutes across a stop, counted from its first failure", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      const requested = yield* TestClock.testClockWith((clock) => {
+        const times: number[] = []
+        return llm
+          .serve(() => {
+            times.push(clock.currentTimeMillisUnsafe())
+            return TestLLM.failAfter(transportError())
+          })
+          .pipe(Effect.as(times))
+      })
+
+      const first = yield* start({ provider: "cliproxypacer" })
+      const session = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: session.id, text: "work" })
+      yield* first.events.waitFor(SessionEvent.RetryScheduled)
+      // The step's rest says when the run of outages began: at its first failure.
+      expect((yield* first.continuity.restored(session.id)).rest).toMatchObject({
+        kind: "retry",
+        attempt: 2,
+        outageSince: requested[0],
+      })
+      yield* pausedAndStopped(first)
+
+      // Down for 20 minutes; the next process tries again at each deadline until the step stops retrying.
+      yield* TestClock.adjust("20 minutes")
+      const second = yield* start({ provider: "cliproxypacer" })
+      for (let attempt = 2; ; ) {
+        const next = yield* Effect.raceFirst(
+          second.events.waitFor(SessionEvent.RetryScheduled, (event) => event.data.attempt > attempt),
+          second.events.waitFor(SessionEvent.Execution.Failed, (event) => event.data.sessionID === session.id),
+        )
+        if (next.type === SessionEvent.Execution.Failed.type) break
+        attempt = next.data.attempt
+        yield* TestClock.setTime(next.data.at)
+      }
+      // The last try came at 30 minutes from the first failure or within a gap after; the one before, before them.
+      const since = (index: number) => (requested.at(index) ?? Number.NaN) - requested[0]
+      expect(since(-2)).toBeLessThan(30 * 60_000)
+      expect(since(-1)).toBeGreaterThanOrEqual(30 * 60_000)
+      expect(since(-1) - since(-2)).toBeLessThanOrEqual(12_000)
     }),
   )
 

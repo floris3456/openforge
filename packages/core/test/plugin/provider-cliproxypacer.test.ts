@@ -1,8 +1,9 @@
 import { describe, expect } from "bun:test"
 import { AIError, ai } from "@opencode/ai/effect"
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
-import { Effect, Layer, Schedule, Schema, Stream, SubscriptionRef } from "effect"
-import { Headers, HttpClient, HttpClientResponse } from "effect/http"
+import { Cause, Clock, Effect, Layer, Schedule, Schema, Stream, SubscriptionRef } from "effect"
+import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/http"
+import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
 import { ConfigProviderPlugin } from "@opencode/core/config/plugin/provider"
@@ -13,6 +14,7 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { Plugin } from "@opencode/core/plugin"
+import type { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { CLIProxyPacerPlugin, isClaude } from "@opencode/core/plugin/provider/cliproxypacer"
 import { Provider } from "@opencode/core/provider"
@@ -367,6 +369,30 @@ const sse =
       headers: { "content-type": "text/event-stream" },
     })
 const cppDown = "CPP is down: the active cannot be reached"
+const cppDownMessages = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: cppDown } })
+const cppDownResponses = JSON.stringify({ error: { message: cppDown, type: "server_error", code: "cpp_down" } })
+const transientWait = JSON.stringify({
+  error: {
+    type: "pacer_transient_wait",
+    message: "Pacer: this chat's account failed briefly; retry to keep its warm cache",
+  },
+})
+const modelCooldown = answer(
+  429,
+  JSON.stringify({
+    error: {
+      code: "model_cooldown",
+      message: "All credentials for model claude-test-1 are cooling down via provider claude",
+      model: "claude-test-1",
+      provider: "claude",
+      reset_seconds: 60,
+      reset_time: "1m0s",
+    },
+  }),
+  { "retry-after": "60" },
+)
+// dispatch.rs's `unavailable_text`, which errors.rs wraps as each route's error.
+const authUnavailable = "auth_unavailable: no auth available (providers=claude, model=claude-test-1)"
 const streamCut = "this server stopped serving this stream (a restart, an update or a switch over); retry the request"
 const messagesStart = [
   [
@@ -390,16 +416,11 @@ const responsesStart = [
   ],
 ] as const
 
-/**
- * Sends a request of the CPP model through its route to an HTTP client that answers `reply`, and returns how the
- * stream failed, then the decisions upstream's retry policy makes on that failure, as a step consults it, over
- * `attempts` attempts in a row.
- */
-const answered = Effect.fn(function* (id: string, reply: () => Response, attempts = 1) {
+/** Sends a request of the CPP model through its route to `http`, and returns the model's ref and how the stream failed. */
+const failed = Effect.fn(function* (id: string, http: HttpClient.HttpClient) {
   yield* addPlugin(yield* fakeCPP(configKey, catalog))
   const info = required((yield* listed).find((model) => String(model.id) === id))
   const model = yield* ModelResolver.fromCatalogModel(info)
-  const http = HttpClient.make((request) => Effect.sync(() => HttpClientResponse.fromWeb(request, reply())))
   const failure = yield* LLMClient.stream(ai.request({ model, prompt: "Hello" })).pipe(
     Stream.runDrain,
     Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.fresh)),
@@ -407,21 +428,75 @@ const answered = Effect.fn(function* (id: string, reply: () => Response, attempt
     Effect.flip,
   )
   if (!(failure instanceof AIError)) return yield* Effect.die(failure)
-  const decide = yield* SessionRunnerRetry.policy(Session.ID.make("ses_cpp_answers"))
+  return { model: Model.Ref.make({ id: info.id, providerID }), failure }
+})
+
+const answering = (reply: () => Response) =>
+  HttpClient.make((request) => Effect.sync(() => HttpClientResponse.fromWeb(request, reply())))
+
+/** An HTTP client whose every request fails as fetch's does when the cause is `cause`. */
+const failing = (cause: unknown) =>
+  HttpClient.make((request) =>
+    Effect.fail(
+      new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({ request, cause }) }),
+    ),
+  )
+
+/**
+ * The decisions upstream's retry policy makes, as a step consults it, on `failures` one after another, and when each
+ * was made, from the first. With `wait` the test clock moves by each wait decided, as the step waits it, and the
+ * decisions end at the first that does not retry. `from` is the progress a restarted step continues from, and `hook`
+ * a plugin's `session.retry` hook.
+ */
+const decided = Effect.fn(function* (
+  model: Model.Ref,
+  failures: ReadonlyArray<AIError>,
+  options: {
+    readonly wait?: boolean
+    readonly from?: SessionRunnerRetry.Progress
+    readonly hook?: (event: PluginHooks.Domains["session"]["retry"]) => Effect.Effect<void>
+  } = {},
+) {
+  const decide = yield* SessionRunnerRetry.policy(Session.ID.make("ses_cpp_answers"), options.from)
+  const begun = yield* Clock.currentTimeMillis
   const decisions = []
-  for (let attempt = 0; attempt < attempts; attempt++)
-    decisions.push(
-      yield* decide({
-        cause: failure,
-        error: toSessionError(failure),
-        agent: Agent.defaultID,
-        model: Model.Ref.make({ id: info.id, providerID }),
-        hook: () => Effect.void,
-        retry: SessionRunnerRetry.isRetryable(failure),
-      }),
-    )
+  const times = []
+  for (const failure of failures) {
+    const decision = yield* decide({
+      cause: failure,
+      error: toSessionError(failure),
+      agent: Agent.defaultID,
+      model,
+      hook: options.hook ?? (() => Effect.void),
+      retry: SessionRunnerRetry.isRetryable(failure),
+    })
+    decisions.push(decision)
+    times.push((yield* Clock.currentTimeMillis) - begun)
+    if (!options.wait) continue
+    if (!decision.retry) break
+    yield* TestClock.adjust(decision.delay)
+  }
+  return { decisions, times, progress: decide.progress() }
+})
+
+/**
+ * Sends a request of the CPP model through its route to an HTTP client that answers `reply`, and returns how the
+ * stream failed, then the decisions upstream's retry policy makes on that failure, as a step consults it, over
+ * `attempts` attempts in a row.
+ */
+const answered = Effect.fn(function* (id: string, reply: () => Response, attempts = 1) {
+  const { model, failure } = yield* failed(id, answering(reply))
+  const { decisions } = yield* decided(model, Array(attempts).fill(failure))
   return { failure, error: toSessionError(failure), decisions }
 })
+
+/** `count` retries in a row, from the second attempt on, each waiting `delay` ms, then none. */
+const retries = (count: number, delay: number, from = 2) => [
+  ...Array.from({ length: count }, (_, index) => ({ retry: true as const, attempt: from + index, delay })),
+  { retry: false as const },
+]
+
+const MINUTES_30 = 30 * 60_000
 
 /** The delays a retry would wait, in seconds; undefined where the policy does not retry. */
 const delays = (decisions: ReadonlyArray<{ readonly retry: boolean; readonly delay?: number }>) =>
@@ -508,17 +583,190 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
     }),
   )
 
-  it.effect("502 of a pair's failed forward: CPP sends Retry-After 30 with it, which the retry waits", () =>
+  it.effect(
+    "502 of a pair's failed forward: tried again after the schedule's own gap, not its Retry-After of 30 s; a second 502 in a row waits it",
+    () =>
+      Effect.gen(function* () {
+        // pair_forward.rs's bad_gateway is cpp_down's answer with the status changed, so it keeps Retry-After: 30. The
+        // standby then stops its connector, and Cloudflare sends the next request to the other instance at once.
+        const { decisions } = yield* answered("claude-test-1", answer(502, cppDownMessages, { "retry-after": "30" }), 3)
+        expect(decisions).toMatchObject([
+          { retry: true, attempt: 2 },
+          { retry: true, attempt: 3, delay: 30_000 },
+          { retry: true, attempt: 4, delay: 30_000 },
+        ])
+        // The schedule's first gap: 2 s with up to 20% jitter.
+        expect(delays(decisions)[0]).toBeGreaterThanOrEqual(1.6)
+        expect(delays(decisions)[0]).toBeLessThanOrEqual(2.4)
+      }),
+  )
+
+  it.effect("a failure other than a 502 ends a run of them: the next 502 is tried again after the schedule's gap", () =>
     Effect.gen(function* () {
-      // pair_forward.rs's bad_gateway is cpp_down's answer with the status changed, so it keeps Retry-After: 30.
-      const { decisions } = yield* answered(
-        "claude-test-1",
-        answer(502, JSON.stringify({ type: "error", error: { type: "overloaded_error", message: cppDown } }), {
-          "retry-after": "30",
-        }),
+      const forward = yield* failed("claude-test-1", answering(answer(502, cppDownMessages, { "retry-after": "30" })))
+      const transient = yield* failed("claude-test-1", answering(answer(503, transientWait, { "retry-after": "2" })))
+      const waited = delays(
+        (yield* decided(forward.model, [forward.failure, transient.failure, forward.failure, forward.failure]))
+          .decisions,
       )
-      expect(decisions).toEqual([{ retry: true, attempt: 2, delay: 30_000 }])
+      // The schedule's gaps, 2, 4 and 8 s with up to 20% jitter; only the second 502 in a row waits its 30 s.
+      for (const [index, base] of [2, 4, 8].entries()) {
+        expect(waited[index]).toBeGreaterThanOrEqual(base * 0.8)
+        expect(waited[index]).toBeLessThanOrEqual(base * 1.2)
+      }
+      expect(waited[3]).toBe(30)
     }),
+  )
+
+  it.effect(
+    "503 CPP is down: keeps retrying past upstream's 10 retries, each after its Retry-After of 30 s, until 30 minutes from the first, on Messages and on Responses",
+    () =>
+      Effect.gen(function* () {
+        for (const [id, body] of [
+          ["claude-test-1", cppDownMessages],
+          ["gpt-test-1", cppDownResponses],
+        ] as const) {
+          const { model, failure } = yield* failed(id, answering(answer(503, body, { "retry-after": "30" })))
+          const { decisions, times } = yield* decided(model, Array(100).fill(failure), { wait: true })
+          // Tried at 0, 30 s, …, 29 min 30 s from the first failure; at 30 minutes, no more.
+          expect(decisions).toEqual(retries(60, 30_000))
+          expect(times.at(-1)).toBe(MINUTES_30)
+        }
+      }),
+  )
+
+  it.effect(
+    "a refused connection: keeps retrying past upstream's 10 retries, every 10 s with up to 20% jitter, until 30 minutes from the first",
+    () =>
+      Effect.gen(function* () {
+        const { model, failure } = yield* failed(
+          "claude-test-1",
+          failing(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), { code: "ECONNREFUSED" })),
+        )
+        expect(failure.reason).toMatchObject({ _tag: "Transport", operation: "request", code: "ECONNREFUSED" })
+        const { decisions, times } = yield* decided(model, Array(400).fill(failure), { wait: true })
+        expect(decisions.at(-1)).toEqual({ retry: false })
+        expect(times.at(-2)).toBeLessThan(MINUTES_30)
+        expect(times.at(-1)).toBeGreaterThanOrEqual(MINUTES_30)
+        // Every decision before it retried; past upstream's 10, after 8 to 12 s.
+        expect(decisions.slice(0, -1).every((decision) => decision.retry)).toBe(true)
+        expect(decisions.length).toBeGreaterThan(100)
+        for (const waited of delays(decisions.slice(10, -1))) {
+          expect(waited).toBeGreaterThanOrEqual(8)
+          expect(waited).toBeLessThanOrEqual(12)
+        }
+      }),
+  )
+
+  it.effect(
+    "429 model_cooldown, 503 pacer_transient_wait and 503 auth_unavailable are no outage: upstream's 10 retries; a timeout its 3",
+    () =>
+      Effect.gen(function* () {
+        const cooldown = yield* failed("claude-test-1", answering(modelCooldown))
+        const transient = yield* failed("claude-test-1", answering(answer(503, transientWait, { "retry-after": "2" })))
+        const unavailable = [
+          yield* failed(
+            "claude-test-1",
+            answering(
+              answer(503, JSON.stringify({ type: "error", error: { type: "api_error", message: authUnavailable } })),
+            ),
+          ),
+          yield* failed(
+            "gpt-test-1",
+            answering(
+              answer(
+                503,
+                JSON.stringify({
+                  error: { message: authUnavailable, type: "server_error", code: "internal_server_error" },
+                }),
+              ),
+            ),
+          ),
+        ]
+        expect((yield* decided(cooldown.model, Array(20).fill(cooldown.failure), { wait: true })).decisions).toEqual(
+          retries(10, 60_000),
+        )
+        for (const { model, failure } of [transient, ...unavailable]) {
+          const { decisions } = yield* decided(model, Array(20).fill(failure), { wait: true })
+          expect(decisions).toHaveLength(11)
+          expect(decisions.at(-1)).toEqual({ retry: false })
+        }
+        const timeout = yield* failed("claude-test-1", failing(new Cause.TimeoutError("timed out")))
+        expect(timeout.failure.reason).toMatchObject({ _tag: "Transport", code: "Timeout" })
+        expect(
+          (yield* decided(timeout.model, Array(20).fill(timeout.failure), { wait: true })).decisions.map(
+            (decision) => decision.retry,
+          ),
+        ).toEqual([true, true, true, false])
+      }),
+  )
+
+  it.effect("a 502 upstream would not retry is no outage, even when a plugin retries it: upstream's 10 retries", () =>
+    Effect.gen(function* () {
+      const { model, failure } = yield* failed(
+        "claude-test-1",
+        answering(answer(502, cppDownMessages, { "x-should-retry": "false" })),
+      )
+      expect(SessionRunnerRetry.isRetryable(failure)).toBe(false)
+      const retried = (event: PluginHooks.Domains["session"]["retry"]) =>
+        Effect.sync(() => {
+          event.decision = { retry: true, delay: 10_000 }
+        })
+      const { decisions } = yield* decided(model, Array(20).fill(failure), { wait: true, hook: retried })
+      expect(decisions).toEqual(retries(10, 10_000))
+    }),
+  )
+
+  it.effect("another provider's 502 and 503 with CPP's answers: upstream's 10 retries, each after the 30 s", () =>
+    Effect.gen(function* () {
+      for (const [status, body] of [
+        [502, cppDownMessages],
+        [503, cppDownMessages],
+      ] as const) {
+        const { model, failure } = yield* failed(
+          "claude-test-1",
+          answering(answer(status, body, { "retry-after": "30" })),
+        )
+        const other = Model.Ref.make({ id: model.id, providerID: Provider.ID.make("other") })
+        expect((yield* decided(other, Array(20).fill(failure), { wait: true })).decisions).toEqual(retries(10, 30_000))
+      }
+    }),
+  )
+
+  it.effect("a failure that is no outage ends a run of them: the 30 minutes count from the next outage", () =>
+    Effect.gen(function* () {
+      const down = yield* failed("gpt-test-1", answering(answer(503, cppDownResponses, { "retry-after": "30" })))
+      const cooldown = yield* failed("gpt-test-1", answering(modelCooldown))
+      const { decisions, times } = yield* decided(
+        down.model,
+        [...Array(5).fill(down.failure), cooldown.failure, ...Array(100).fill(down.failure)],
+        { wait: true },
+      )
+      // Down at 0 to 120 s, the cooldown at 150 s waits 60 s, and the next run of outages begins at 210 s.
+      expect(times.slice(0, 7)).toEqual([0, 30_000, 60_000, 90_000, 120_000, 150_000, 210_000])
+      expect(decisions.at(-1)).toEqual({ retry: false })
+      expect(times.at(-1)).toBe(210_000 + MINUTES_30)
+    }),
+  )
+
+  it.effect(
+    "a restarted step keeps its run of outages: it stops 30 minutes from the first failure, not from the restart",
+    () =>
+      Effect.gen(function* () {
+        const { model, failure } = yield* failed(
+          "gpt-test-1",
+          answering(answer(503, cppDownResponses, { "retry-after": "30" })),
+        )
+        const begun = yield* Clock.currentTimeMillis
+        const before = yield* decided(model, Array(20).fill(failure), { wait: true })
+        // What the step's rest stores: 20 failures, 30 s apart, of a run that began with the first.
+        expect(before.progress).toEqual({ attempt: 21, timeouts: 0, outageSince: begun })
+        // The service is down for 15 minutes; the step's policy is rebuilt from its rest, 25 minutes into the run.
+        yield* TestClock.adjust("15 minutes")
+        const after = yield* decided(model, Array(100).fill(failure), { wait: true, from: before.progress })
+        expect(after.decisions).toEqual(retries(10, 30_000, 22))
+        expect((yield* Clock.currentTimeMillis) - begun).toBe(MINUTES_30)
+      }),
   )
 
   it.effect("a stream without its end event fails, then the retry tries again, on Messages and on Responses", () =>

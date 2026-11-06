@@ -29,6 +29,8 @@ import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
 import { PacerHeaders } from "../pacer/headers.js"
+import { PacerOffer } from "../pacer/offer.js"
+import { PacerTools } from "../pacer/tools.js"
 import { Instructions } from "../instructions/index.js"
 import { Permission } from "../permission.js"
 import { PluginHooks } from "../plugin/hooks.js"
@@ -245,6 +247,7 @@ export const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
+    const pacerTools = yield* PacerTools.Service
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
@@ -255,12 +258,24 @@ export const layer = Layer.effect(
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
       }
+      // CPP's web tools as the chat's list defines them, before any hook, so plugins' hooks see and may change them.
+      const definitions = PacerOffer.wanted(tools.definitions)
+        ? PacerOffer.apply(
+            tools.definitions,
+            yield* pacerTools.list({
+              sessionID: session.id,
+              parentID: session.parentID,
+              model: model.ref.id,
+              step: kind === "primary",
+            }),
+          )
+        : tools.definitions
       // Remember which tool each definition object came from. Hooks rename a tool by moving
       // its definition to a new key, so after the hook we find the tool by object identity.
       // Definitions are shared across steps and sessions, and hooks may edit schemas in place,
       // so each hook gets a deep copy.
       const given = new Map(
-        tools.definitions.map(
+        definitions.map(
           (t) => [{ description: t.description, input: JSON.parse(JSON.stringify(t.inputSchema)) }, t] as const,
         ),
       )
@@ -283,7 +298,7 @@ export const layer = Layer.effect(
       )
       // Match by identity first, then by key. Entries matching neither were invented by a
       // hook and are dropped. `t.name` stays the real name so execution can map renames back.
-      const byName = new Map(tools.definitions.map((t) => [t.name, t]))
+      const byName = new Map(definitions.map((t) => [t.name, t]))
       const hooked = new Map(
         Object.entries(shaped.tools ?? {}).flatMap(([name, d]) => {
           const t = given.get(d) ?? byName.get(name)
@@ -406,7 +421,9 @@ export const layer = Layer.effect(
       // The proxy's request ID is read on native HTTP routes only, which CLIProxyPacer's models use: any HTTP
       // middleware on the AI SDK route copies the request body, and a WebSocket step gets no HTTP answer.
       const proxy =
-        request.model.route.protocol === "ai-sdk" || webSocket ? undefined : SessionProxyRequest.capture(httpHooks)
+        request.model.route.protocol === "ai-sdk" || webSocket
+          ? undefined
+          : SessionProxyRequest.capture(httpHooks, (version) => pacerTools.seen(session.id, version))
       const http = proxy?.http ?? httpHooks
 
       return {
@@ -454,5 +471,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, PacerTools.node],
 })

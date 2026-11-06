@@ -16,10 +16,11 @@ export function requestID(trace: string | undefined) {
 
 /**
  * HTTP middleware that keeps the request ID of the latest answer, around `inner` when there is one, so the answer
- * seen is the provider's own and not one a hook rewrote. It reads one header and leaves the request and its body as
- * they are.
+ * seen is the provider's own and not one a hook rewrote. It reads two headers and leaves the request and its body as
+ * they are: the request ID, and the chat's tool list version (`X-Pacer-Tools`, undefined when absent), which goes to
+ * `tools`.
  */
-export function capture(inner: HttpMiddleware | undefined) {
+export function capture(inner: HttpMiddleware | undefined, tools?: (version: string | undefined) => void) {
   const seen: { id?: string } = {}
   const http: HttpMiddleware = (request, handler) => {
     const read: typeof handler = (sent) =>
@@ -27,6 +28,7 @@ export function capture(inner: HttpMiddleware | undefined) {
         Effect.tap((response) =>
           Effect.sync(() => {
             seen.id = requestID(response.headers["x-cpa-trace-id"])
+            tools?.(response.headers["x-pacer-tools"])
           }),
         ),
       )

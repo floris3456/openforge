@@ -827,6 +827,67 @@ describe("WebSocket channel execution", () => {
     }),
   )
 
+  it.live("fails to open a socket whose header value WebSocket refuses to send as invalid, with no retry", () =>
+    Effect.gen(function* () {
+      const valid = "ses_e5180050ffferB1nij3MJqNzhP"
+      const received: Array<string | null> = []
+      const server = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            fetch: (incoming, server) => {
+              received.push(incoming.headers.get("x-opencode-session-id"))
+              return server.upgrade(incoming) ? undefined : new Response("not a WebSocket", { status: 400 })
+            },
+            websocket: { message() {} },
+          }),
+        ),
+        (server) => Effect.promise(() => server.stop(true)),
+      )
+      const url = `ws://127.0.0.1:${server.port}/responses`
+      const open = (value: string) =>
+        WebSocketTransport.open({ url, headers: Headers.fromInput({ "x-opencode-session-id": value }) })
+
+      // A session ID captured twice, one line under the other; an added header line; a NUL; a character above U+00FF.
+      for (const value of [`${valid}\n${valid}`, `${valid}\r\nx-other: 1`, "ses_a\0b", "ses_\u{1f600}"]) {
+        const error = yield* open(value).pipe(Effect.flip)
+        expectAIError(error)
+        expect(error.reason).toMatchObject({ _tag: "InvalidRequest" })
+        expect(error.message).toBe(
+          "Request not sent: header 'x-opencode-session-id' has a line break, a NUL or a character above U+00FF in its value",
+        )
+        expect(error.reason.cause).toBeInstanceOf(TypeError)
+        expect(isRetryable(error)).toBeFalse()
+      }
+      expect(received).toEqual([])
+
+      const connection = yield* open(valid)
+      yield* connection.close
+      expect(received).toEqual([valid])
+
+      // WebSocket strips a line break at the end and sends the rest, so a socket with one that fails to open
+      // otherwise is still a transport failure a retry may get past.
+      const blocked = yield* open(`${valid}\n`).pipe(
+        Effect.provideService(Socket.WebSocketConstructor, () => {
+          throw new TypeError("blocked by the test")
+        }),
+        Effect.flip,
+      )
+      expectAIError(blocked)
+      expect(blocked.reason).toMatchObject({ _tag: "Transport", phase: "connect", delivery: "not-sent" })
+      expect(isRetryable(blocked)).toBeTrue()
+    }).pipe(
+      // As core's constructor does under Bun (core/src/effect/websocket-constructor.ts).
+      Effect.provideService(
+        Socket.WebSocketConstructor,
+        (url, options) =>
+          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun's WebSocket takes handshake headers.
+          new globalThis.WebSocket(url, options as unknown as string[]),
+      ),
+    ),
+  )
+
   it.effect("preserves opening event errors and native send exceptions", () =>
     Effect.gen(function* () {
       const cause = new Error("native send failed")

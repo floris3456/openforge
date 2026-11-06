@@ -1,14 +1,30 @@
 export * as PacerConnection from "./connection.js"
 
+import { isDeepStrictEqual } from "node:util"
+import { Clock, Context, Effect, Layer, Queue, Result, Schema, Stream } from "effect"
+import { makeParser } from "effect/encoding/Sse"
+import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
-import { Context, type Effect, Schema } from "effect"
+import { Bus } from "../bus.js"
+import { Session } from "../session.js"
+import { SessionEvent } from "../session/event.js"
+import { PacerEndpoint } from "./endpoint.js"
+import { PacerHttp } from "./http.js"
+import { PacerModels } from "./models.js"
+import { PacerSessionID } from "./session-id.js"
+import { PacerWire } from "./wire.js"
 
 // The service's one connection to CPP, which every TUI reads through the `pacer.*` routes of `server.experimental`.
 // It follows CPP's change stream, reads the accounts, the chats' views and their requests, sets the chats' switches,
-// and publishes the `pacer.*` events (`Pacer.Event`). The interface only, for now: its layer and node follow, and the
-// node is registered once the real `PacerModels.node` is in. Fields may be added; none may be removed or renamed
-// without the server's handler and the TUI.
+// tells CPP of the chats' events, and publishes the `pacer.*` events (`Pacer.Event`). Fields may be added; none may be
+// removed or renamed without the server's handler and the TUI.
+//
+// What it costs: the session events of every chat reach it, and a chat CPP does not know costs one map lookup per
+// event. All of CPP's reads and writes run beside the chats, never in a step's path: a chat with work is put on one
+// queue (once, however often it is marked), which `READERS` fibers drain; a chat's work runs in order and reads its
+// view at most once per drain, so the reads after many steps coalesce. Notices coalesce the same way, one pending read
+// per kind. Nothing runs on a timer while CPP is up: when no chat runs, the only traffic is the open stream.
 
 /** CPP can't answer now: it isn't set up, is unreachable, or has no pacer, and nothing read before can stand in. */
 export class Unavailable extends Schema.TaggedError<Unavailable>()("PacerConnection.Unavailable", {
@@ -29,18 +45,28 @@ export interface RequestsInput {
 }
 
 export interface Interface {
-  /** The connection now. */
+  /** The connection now. Never waits on CPP. */
   readonly status: () => Effect.Effect<Pacer.Status>
-  /** Every account the key sees, as last read; undefined before the first read since CPP was set up. */
+  /**
+   * Every account the key sees, as last held: the meters are read at connect and after CPP's `reading` notices, so
+   * the held answer is never waited for. Read from CPP only while none is held and the pacer is on; undefined before
+   * the first read since CPP was set up.
+   */
   readonly accounts: () => Effect.Effect<Pacer.Accounts | undefined>
   /**
-   * The chat's view: as last read while that is current, else read from CPP while the pacer is on, else as last read
-   * (its `asOf` says when). Undefined when CPP knows nothing of the chat, or nothing was read while CPP can't answer.
+   * The chat's view, held from the last read (its `asOf` says when). A held view is answered at once; when it is out
+   * of date (after a reconnect, or CPP's `reading` or `settings` notices) and the pacer is on, it is read again in the
+   * background, and `pacer.chat.updated` follows if it changed. With none held, a chat CPP is known to have is read
+   * now; any other is answered undefined at once and looked up in the background (`pacer.chat.updated` when CPP has
+   * it). Undefined when CPP knows nothing of the chat, or nothing was read while CPP can't answer.
    */
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
   readonly update: (sessionID: SessionID, input: Pacer.ChatUpdate) => Effect.Effect<Pacer.Chat, Unavailable>
-  /** One page of the chat's requests with its subagents', newest first, read from CPP. */
+  /**
+   * One page of the chat's requests with its subagents', newest first, always read from CPP: the TUI holds the first
+   * page itself and reads it again on `pacer.requests.updated`.
+   */
   readonly requests: (sessionID: SessionID, input: RequestsInput) => Effect.Effect<Pacer.Requests, Unavailable>
   /**
    * What changed in one request's prompt (`Pacer.Request.id`): from the last 50 read, else read from CPP. Undefined
@@ -50,3 +76,1037 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerConnection") {}
+
+/** The first wait before connecting again; it doubles after each failed or short-lived try, up to the most. */
+export const RECONNECT_MS = 1_000
+export const MAX_RECONNECT_MS = 30_000
+/** CPP sends a heartbeat every 25 s; a stream silent this long is gone. */
+export const SILENCE_MS = 60_000
+/** The meters are read again at most this often. */
+export const METERS_MS = 10_000
+/** `pings.duration_minutes` while a chat waits on a foreground command or a subagent. */
+export const WAIT_MINUTES = 240
+/** Fibers that run the chats' work, and so the most reads and writes to CPP at once for them. */
+export const READERS = 4
+/** Chats held at most; the oldest without pending work go first. */
+export const CHATS = 1_000
+/** What-changed answers held. */
+export const PROMPTS = 50
+
+const provider: string = PacerEndpoint.id
+
+const followed = [
+  SessionEvent.Step.Started,
+  SessionEvent.Step.Streamed,
+  SessionEvent.Tool.Input.Started,
+  SessionEvent.Tool.Called,
+  SessionEvent.Tool.Success,
+  SessionEvent.Tool.Failed,
+  SessionEvent.Execution.Succeeded,
+  SessionEvent.Execution.Failed,
+  SessionEvent.Execution.Interrupted,
+  SessionEvent.Deleted,
+  SessionEvent.ModelSelected,
+  SessionEvent.AgentSelected,
+  SessionEvent.Renamed,
+  SessionEvent.RevertEvent.Staged,
+  SessionEvent.Compaction.Ended,
+] as const
+type Followed = Bus.SubscribePayload<typeof followed>
+
+/** The events that end a chat's pings; each is told once until the chat's next step. */
+type Stopping = "closed" | "compacted" | "reverted" | "agent_switched"
+type ChatEvent =
+  | { readonly type: Stopping }
+  | { readonly type: "model_changed"; readonly model: string | null }
+  | { readonly type: "label"; readonly label: string }
+
+interface Info {
+  readonly parentID?: SessionID
+  readonly agent?: string
+  readonly title?: string
+}
+
+/** One chat this service holds something for. */
+interface Chat {
+  readonly sessionID: SessionID
+  /** Its UUID on CPP (`X-Pacer-Session`). */
+  readonly uuid: string
+  /** CPP has it: a step of it went through CPP, or CPP named it. Events of any other chat are not followed. */
+  on: boolean
+  /** Its current step goes through CPP. */
+  step: boolean
+  /** From the session store, read once; undefined until then. */
+  info: Info | undefined
+  /** Its title as last seen, when renamed since `info` was read. */
+  title: string | undefined
+  /** CPP's view as last read or merged, and the same in openforge's shape. */
+  raw: PacerWire.View | undefined
+  view: Pacer.Chat | undefined
+  /** The view may be out of date. */
+  stale: boolean
+  /** A read of the view is due. */
+  read: boolean
+  /** CPP knew nothing of it at the last read. */
+  missing: boolean
+  /** CPP's number for it, for the request reads. */
+  storeID: number | undefined
+  /** Foreground shell and subagent calls by call ID, from their start until they end. */
+  readonly calls: Map<string, string>
+  /** The calls of `calls` being waited on. */
+  readonly waits: Set<string>
+  /** `pings.duration_minutes` as CPP holds it, when known. */
+  duration: number | null | undefined
+  /** CPP's label for it, as last read or told. */
+  label: string | undefined
+  /** Its last `model_changed`: the model, or null for another provider's. */
+  model: string | null | undefined
+  /** Events to tell CPP, in order; one per type. */
+  events: ChatEvent[]
+  /** The stopping events told since its last step. */
+  readonly stopped: Set<Stopping>
+  /** A subagent's run ended before `info` was read. */
+  ended: boolean
+  /** Deleted: forgotten once its events are told. */
+  removed: boolean
+  /** CPP asked to compact it (`named`), or to look whether it asks (`check`). */
+  compact: "named" | "check" | undefined
+  /** Its subagents were looked up for its request rows. */
+  children: boolean
+}
+
+/** The connection's own state. */
+interface Link {
+  endpoint: PacerEndpoint.Endpoint | undefined
+  status: Pacer.Status
+  /** When CPP last answered. */
+  contact: number | undefined
+  /** CPP's clock minus the service's: the largest of this connection's answers, as `Date` has whole seconds. */
+  offset: number
+  /** No answer of this connection gave an offset yet. */
+  fresh: boolean
+  accounts: Pacer.Accounts | undefined
+  /** Account aliases by `auth_index`, from the meters. */
+  aliases: Map<string, string>
+  /** The UUIDs of the chats CPP listed as active. */
+  active: Set<string>
+  /** The newest request row seen. */
+  newest: number | undefined
+}
+
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const http = yield* PacerHttp.Service
+    const endpoints = yield* PacerEndpoint.Service
+    const models = yield* PacerModels.Service
+    const bus = yield* Bus.Service
+    const sessions = yield* Session.Service
+
+    const link: Link = {
+      endpoint: undefined,
+      status: { state: "unset", since: yield* Clock.currentTimeMillis, refused: false },
+      contact: undefined,
+      offset: 0,
+      fresh: true,
+      accounts: undefined,
+      aliases: new Map(),
+      active: new Set(),
+      newest: undefined,
+    }
+    const chats = new Map<SessionID, Chat>()
+    const byUuid = new Map<string, SessionID>()
+    const prompts = new Map<string, Pacer.PromptChange>()
+
+    const on = () => link.status.state === "on"
+    const context = () => Effect.map(Clock.currentTimeMillis, (now) => ({ offset: link.offset, now }))
+    const alias = (account: string) => link.aliases.get(account) ?? account
+
+    const contact = (offset: number | undefined) =>
+      Effect.map(Clock.currentTimeMillis, (now) => {
+        link.contact = now
+        if (offset === undefined) return
+        link.offset = link.fresh ? offset : Math.max(link.offset, offset)
+        link.fresh = false
+      })
+
+    const setStatus = Effect.fnUntraced(function* (next: {
+      readonly state: Pacer.State
+      readonly message?: string
+      readonly refused?: boolean
+    }) {
+      const current = link.status
+      const refused = next.refused === true
+      if (current.state === next.state && current.message === next.message && current.refused === refused) return
+      const now = yield* Clock.currentTimeMillis
+      link.status = {
+        state: next.state,
+        since: current.state === next.state ? current.since : now,
+        ...(link.contact !== undefined ? { asOf: link.contact } : {}),
+        ...(next.message ? { message: next.message } : {}),
+        refused,
+      }
+      yield* bus.publish(Pacer.Event.StatusChanged, { status: link.status })
+    })
+
+    const unavailable = (error?: PacerHttp.Error) =>
+      new Unavailable({
+        state: link.status.state,
+        reason:
+          error?.message ??
+          (link.status.state === "unset"
+            ? "it is not set up"
+            : link.status.state === "no-pacer"
+              ? "this proxy has no pacer"
+              : (link.status.message ?? "it is unreachable")),
+      })
+    const requireOn = Effect.suspend(() => (on() ? Effect.void : Effect.fail(unavailable())))
+
+    const get = <A, I>(path: string, schema: Schema.Codec<A, I>) =>
+      Effect.gen(function* () {
+        if (!link.endpoint) return yield* new PacerHttp.NotSetUp()
+        const answer = yield* http.get(path, schema, { endpoint: link.endpoint })
+        yield* contact(answer.offset)
+        return answer.body
+      })
+    const send = <A, I>(method: "patch" | "post", path: string, body: unknown, schema: Schema.Codec<A, I>) =>
+      Effect.gen(function* () {
+        if (!link.endpoint) return yield* new PacerHttp.NotSetUp()
+        const answer = yield* http[method](path, body, schema, { endpoint: link.endpoint })
+        yield* contact(answer.offset)
+        return answer.body
+      })
+    const sessionPath = (chat: Chat) => `/pacer/v1/sessions/${encodeURIComponent(chat.uuid)}`
+
+    // ------------------------------------------------------------------ the chats held
+
+    const ready = yield* Queue.unbounded<SessionID>()
+    const queued = new Set<SessionID>()
+    const running = new Set<SessionID>()
+    const again = new Set<SessionID>()
+
+    /** Puts the chat's work on the queue, once; a chat marked while its work runs runs again after. */
+    const mark = (chat: Chat) => {
+      if (running.has(chat.sessionID)) return void again.add(chat.sessionID)
+      if (queued.has(chat.sessionID)) return
+      queued.add(chat.sessionID)
+      Queue.offerUnsafe(ready, chat.sessionID)
+    }
+
+    const pending = (chat: Chat) =>
+      chat.events.length > 0 ||
+      chat.read ||
+      chat.ended ||
+      chat.compact !== undefined ||
+      (chat.waits.size > 0 ? chat.duration !== WAIT_MINUTES : chat.duration === WAIT_MINUTES)
+
+    const busy = (chat: Chat) =>
+      pending(chat) || chat.waits.size > 0 || queued.has(chat.sessionID) || running.has(chat.sessionID)
+
+    const forget = (chat: Chat) => {
+      chats.delete(chat.sessionID)
+      byUuid.delete(chat.uuid)
+    }
+
+    /** The chat, held from now on and moved to the newest end. */
+    const touch = (sessionID: SessionID) => {
+      const found = chats.get(sessionID)
+      if (found) {
+        chats.delete(sessionID)
+        chats.set(sessionID, found)
+        return found
+      }
+      const chat: Chat = {
+        sessionID,
+        uuid: PacerSessionID.make(sessionID),
+        on: false,
+        step: false,
+        info: undefined,
+        title: undefined,
+        raw: undefined,
+        view: undefined,
+        stale: false,
+        read: false,
+        missing: false,
+        storeID: undefined,
+        calls: new Map(),
+        waits: new Set(),
+        duration: undefined,
+        label: undefined,
+        model: undefined,
+        events: [],
+        stopped: new Set(),
+        ended: false,
+        removed: false,
+        compact: undefined,
+        children: false,
+      }
+      chats.set(sessionID, chat)
+      byUuid.set(chat.uuid, sessionID)
+      if (chats.size > CHATS)
+        for (const held of chats.values()) {
+          if (chats.size <= CHATS) break
+          if (!busy(held)) forget(held)
+        }
+      return chat
+    }
+
+    /** The chat when CPP has it; for the rare events of a chat not seen this run, also when CPP lists it. */
+    const known = (sessionID: SessionID) => {
+      const chat = chats.get(sessionID)
+      if (chat?.on) return chat
+      if (link.active.size === 0 || !link.active.has(PacerSessionID.make(sessionID))) return undefined
+      const listed = touch(sessionID)
+      listed.on = true
+      return listed
+    }
+
+    const tell = (chat: Chat, event: ChatEvent) => {
+      if (event.type !== "model_changed" && event.type !== "label") {
+        if (chat.stopped.has(event.type)) return
+        chat.stopped.add(event.type)
+      }
+      chat.events = [...chat.events.filter((item) => item.type !== event.type), event]
+      mark(chat)
+    }
+
+    const close = (chat: Chat) => {
+      tell(chat, { type: "closed" })
+      chat.waits.clear()
+      chat.calls.clear()
+      chat.raw = undefined
+      chat.view = undefined
+    }
+
+    const labelOf = (chat: Chat) => {
+      const title = chat.title ?? chat.info?.title
+      return title ? truncate(title, 200) : undefined
+    }
+
+    /** Converts the held view, and tells the TUIs when it changed. */
+    const setView = Effect.fnUntraced(function* (chat: Chat) {
+      if (!chat.raw) return
+      const next = PacerWire.chat(chat.raw, chat.sessionID, { ...(yield* context()), alias })
+      const changed = !chat.view || !isDeepStrictEqual({ ...chat.view, asOf: 0 }, { ...next, asOf: 0 })
+      chat.view = next
+      if (changed) yield* bus.publish(Pacer.Event.ChatUpdated, { chat: next })
+    })
+
+    /** Holds a view CPP answered. */
+    const hold = Effect.fnUntraced(function* (chat: Chat, view: PacerWire.View) {
+      chat.raw = view
+      chat.on = true
+      chat.stale = false
+      chat.missing = false
+      if (typeof view.session_id === "number") chat.storeID = view.session_id
+      const duration = view.settings?.["pings.duration_minutes"]
+      if (typeof duration === "number" || duration === null) chat.duration = duration
+      chat.label = typeof view.label === "string" ? view.label : undefined
+      yield* setView(chat)
+      const label = labelOf(chat)
+      if (label && label !== chat.label) tell(chat, { type: "label", label })
+      // A wait this process never saw end (it started in an earlier one) is ended here.
+      if (chat.duration === WAIT_MINUTES && chat.waits.size === 0) mark(chat)
+    })
+
+    /** Merges the live part of a chat CPP listed into its held view. */
+    const merge = Effect.fnUntraced(function* (item: PacerWire.Listed) {
+      const uuid = item.id.toLowerCase()
+      link.active.add(uuid)
+      const sessionID = byUuid.get(uuid)
+      const chat = sessionID && chats.get(sessionID)
+      if (!chat) return
+      chat.on = true
+      if (typeof item.session_id === "number") chat.storeID = item.session_id
+      if (!chat.raw) return
+      chat.raw = {
+        ...chat.raw,
+        warm: item.warm,
+        warm_until: item.warm_until,
+        pings: item.pings,
+        ...(item.account ? { account: item.account } : {}),
+        ...(item.model ? { model: item.model } : {}),
+      }
+      yield* setView(chat)
+    })
+
+    /** Whether CPP answered (else the work is left for the reconnect); a refused write is dropped. */
+    const answered = (what: string) => (error: PacerHttp.Error) =>
+      error._tag === "PacerHttp.Unreachable" || error._tag === "PacerHttp.NotSetUp"
+        ? Effect.succeed(false)
+        : Effect.logWarning(`CLIProxyPacer refused ${what}`, { reason: error.message }).pipe(Effect.as(true))
+
+    const readView = (chat: Chat) =>
+      get(sessionPath(chat), PacerWire.View).pipe(
+        Effect.flatMap((view) => hold(chat, view)),
+        Effect.as(true),
+        Effect.catchTag("PacerHttp.NotFound", () =>
+          Effect.sync(() => {
+            chat.missing = true
+            chat.raw = undefined
+            chat.view = undefined
+            return true
+          }),
+        ),
+        Effect.catch(answered("a chat's view")),
+      )
+
+    const patch = (chat: Chat, body: Record<string, unknown>) =>
+      send("patch", sessionPath(chat), body, PacerWire.View).pipe(
+        Effect.flatMap((view) => hold(chat, view)),
+        Effect.as(true),
+        Effect.catch(answered("a chat's settings")),
+      )
+
+    const post = (chat: Chat, event: ChatEvent) =>
+      send("post", `${sessionPath(chat)}/events`, event, Schema.Unknown).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (event.type === "label") chat.label = event.label
+          }),
+        ),
+        Effect.as(true),
+        Effect.catch(answered(`a chat's ${event.type} event`)),
+      )
+
+    const lookup = (sessionID: SessionID) =>
+      sessions.get(sessionID).pipe(
+        Effect.map(
+          (info): Info => ({
+            ...(info.parentID ? { parentID: info.parentID } : {}),
+            ...(info.agent ? { agent: info.agent } : {}),
+            ...(info.title ? { title: info.title } : {}),
+          }),
+        ),
+        Effect.orElseSucceed((): Info => ({})),
+      )
+
+    /** Why the chat must not be compacted now, if it must not: a step running or queued keeps it warm. */
+    const leftAlone = Effect.fnUntraced(function* (sessionID: SessionID) {
+      if ((yield* sessions.active).has(sessionID)) return "it is running"
+      const inbox = yield* sessions.inbox(sessionID).pipe(Effect.orElseSucceed(() => undefined))
+      if (inbox === undefined) return "it is gone"
+      if (inbox.length > 0) return "it has queued input"
+      // Session.compact would commit a staged revert first.
+      const info = yield* sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
+      if (info?.revert) return "it has a staged revert"
+      return undefined
+    })
+
+    const compact = Effect.fnUntraced(function* (chat: Chat) {
+      const ask = chat.compact
+      chat.compact = undefined
+      if (ask === "check" && chat.view?.compactAt === undefined) return
+      const why = yield* leftAlone(chat.sessionID)
+      if (why) return yield* Effect.logInfo(`CLIProxyPacer asked to compact a chat; left alone: ${why}`)
+      yield* sessions
+        .compact({ sessionID: chat.sessionID })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("could not compact a chat CLIProxyPacer asked to", { reason: error.message }),
+          ),
+        )
+    })
+
+    /** One chat's work, in order: its events, its waits' duration, a read of its view, a compaction. */
+    const work = Effect.fnUntraced(function* (chat: Chat) {
+      if (!on()) return
+      if (chat.info === undefined) chat.info = yield* lookup(chat.sessionID)
+      if (chat.ended) {
+        chat.ended = false
+        if (chat.info.parentID) close(chat)
+      }
+      while (chat.events.length > 0) {
+        if (!(yield* post(chat, chat.events[0]))) return
+        chat.events = chat.events.slice(1)
+      }
+      if (chat.removed) return forget(chat)
+      const want = chat.waits.size > 0 ? WAIT_MINUTES : null
+      if (want === null ? chat.duration === WAIT_MINUTES : chat.duration !== WAIT_MINUTES) {
+        if (!(yield* patch(chat, { "pings.duration_minutes": want }))) return
+        // The answer is the view.
+        chat.read = false
+      }
+      if (chat.read) {
+        chat.read = false
+        if (!(yield* readView(chat))) return void (chat.read = true)
+      }
+      if (chat.compact) yield* compact(chat)
+    })
+
+    yield* Effect.forEach(
+      Array.from({ length: READERS }, () => undefined),
+      () =>
+        Queue.take(ready).pipe(
+          Effect.flatMap((sessionID) => {
+            queued.delete(sessionID)
+            const chat = chats.get(sessionID)
+            if (!chat) return Effect.void
+            running.add(sessionID)
+            return work(chat).pipe(
+              Effect.catchCause((cause) => Effect.logWarning("CLIProxyPacer: a chat's work failed", cause)),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  running.delete(sessionID)
+                  if (again.delete(sessionID)) mark(chat)
+                }),
+              ),
+            )
+          }),
+          Effect.forever,
+          Effect.forkScoped,
+        ),
+      { discard: true },
+    )
+
+    // ------------------------------------------------------------------ the reads after notices
+
+    /** A read run by one fiber, one pending at a time however often it is asked for; `gap` rests between two. */
+    const trigger = Effect.fnUntraced(function* (name: string, run: Effect.Effect<void, PacerHttp.Error>, gap = 0) {
+      const asked = yield* Queue.dropping<void>(1)
+      yield* Queue.take(asked).pipe(
+        Effect.andThen(
+          Effect.suspend(() => (on() ? run : Effect.void)).pipe(
+            Effect.catchCause((cause) => Effect.logWarning(`CLIProxyPacer: reading ${name} failed`, cause)),
+          ),
+        ),
+        Effect.andThen(gap > 0 ? Effect.sleep(gap) : Effect.void),
+        Effect.forever,
+        Effect.forkScoped,
+      )
+      return () => void Queue.offerUnsafe(asked, undefined)
+    })
+
+    const setAccounts = Effect.fnUntraced(function* (meters: ReadonlyArray<PacerWire.Meter>) {
+      link.aliases = new Map(meters.map((meter) => [meter.auth_index, meter.label || meter.auth_index]))
+      const next = PacerWire.accounts(meters, yield* context())
+      const changed = !link.accounts || !isDeepStrictEqual({ ...link.accounts, asOf: 0 }, { ...next, asOf: 0 })
+      link.accounts = next
+      if (changed) yield* bus.publish(Pacer.Event.AccountsUpdated, { accounts: next })
+    })
+
+    const staleViews = () => {
+      for (const chat of chats.values()) if (chat.raw) chat.stale = true
+    }
+
+    const readMeters = Effect.gen(function* () {
+      const meters = yield* get("/pacer/v1/meters", PacerWire.Meters)
+      // Where a chat goes next depends on the meters.
+      staleViews()
+      yield* setAccounts(PacerWire.meters(meters))
+    })
+
+    const readSessions = Effect.gen(function* () {
+      const answer = yield* get("/pacer/v1/sessions?limit=100", PacerWire.Sessions)
+      const items = PacerWire.listed(answer.items)
+      link.active = new Set()
+      for (const item of items) yield* merge(item)
+      return items
+    })
+
+    const readNew = Effect.gen(function* () {
+      const query = link.newest === undefined ? "limit=50" : `after=${link.newest}&limit=500`
+      const answer = yield* get(`/pacer/v1/monitor/requests?${query}&from=0`, PacerWire.Rows)
+      const rows = PacerWire.rows(answer.items)
+      link.newest = Math.max(link.newest ?? 0, ...rows.map((row) => row.id))
+      const named = new Set<SessionID>()
+      // More rows than one read takes, or a subagent's this service can't name: every TUI reads again.
+      let everyone = typeof answer.next === "string"
+      for (const row of rows) {
+        const sessionID = row.session_ext ? byUuid.get(row.session_ext.toLowerCase()) : undefined
+        if (!sessionID) {
+          everyone ||= row.subagent === true
+          continue
+        }
+        // A subagent's requests are also its parents'.
+        for (let id: SessionID | undefined = sessionID, depth = 0; id && depth < 8; depth++) {
+          named.add(id)
+          id = chats.get(id)?.info?.parentID
+        }
+      }
+      yield* Effect.forEach(named, (sessionID) => bus.publish(Pacer.Event.RequestsUpdated, { sessionID }), {
+        discard: true,
+      })
+      if (everyone) yield* bus.publish(Pacer.Event.RequestsUpdated, {})
+    })
+
+    const readState = Effect.gen(function* () {
+      yield* applyState(yield* get("/pacer/v1/state", PacerWire.State))
+    })
+
+    const applyState = Effect.fnUntraced(function* (state: typeof PacerWire.State.Type) {
+      yield* setAccounts(PacerWire.meters(state.meters))
+      const found = PacerWire.active(state)
+      link.active = new Set(found.numbers.keys())
+      for (const [uuid, number] of found.numbers) {
+        const sessionID = byUuid.get(uuid)
+        const chat = sessionID && chats.get(sessionID)
+        if (!chat) continue
+        chat.on = true
+        chat.storeID = number
+      }
+      for (const item of found.live) yield* merge(item)
+      staleViews()
+    })
+
+    const requests = yield* trigger("the new requests", readNew)
+    const listing = yield* trigger("the chats", Effect.asVoid(readSessions))
+    const meters = yield* trigger("the meters", readMeters, METERS_MS)
+    const capabilities = yield* trigger("the capabilities", models.refresh())
+    const settings = yield* trigger("the settings", models.refresh().pipe(Effect.andThen(Effect.sync(staleViews))))
+    const everything = yield* trigger(
+      "everything",
+      Effect.all([readState, models.refresh()], { concurrency: "unbounded", discard: true }).pipe(
+        Effect.andThen(Effect.sync(requests)),
+      ),
+    )
+    const askAll = yield* trigger(
+      "the chats CPP asks to compact",
+      Effect.gen(function* () {
+        for (const item of yield* readSessions) {
+          const sessionID = byUuid.get(item.id.toLowerCase())
+          const chat = sessionID && chats.get(sessionID)
+          if (!chat) continue
+          chat.compact = "check"
+          chat.read = true
+          mark(chat)
+        }
+      }),
+    )
+
+    /** A chat CPP names that this run has not seen: one of the newest sessions, if any. */
+    const find = Effect.fnUntraced(function* (uuid: string) {
+      const page = yield* sessions.list({ limit: 200 }).pipe(Effect.orElseSucceed(() => ({ data: [] })))
+      const info = page.data.find((item) => PacerSessionID.make(item.id) === uuid)
+      return info && touch(info.id)
+    })
+
+    const notice = Effect.fnUntraced(function* (event: string, data: string) {
+      if (event === "request") return requests()
+      if (event === "session") return listing()
+      if (event === "reading") return meters()
+      if (event === "settings") return settings()
+      if (event === "price" || event === "capabilities") return capabilities()
+      if (event === "resync") return everything()
+      if (event !== "compact") return
+      const asked = PacerWire.notice(data)
+      if (asked.many) askAll()
+      for (const uuid of asked.sessions) {
+        const sessionID = byUuid.get(uuid)
+        const chat = sessionID ? chats.get(sessionID) : yield* find(uuid)
+        if (!chat) continue
+        chat.on = true
+        chat.compact = "named"
+        mark(chat)
+      }
+    })
+
+    // ------------------------------------------------------------------ the connection
+
+    const reset = (endpoint: PacerEndpoint.Endpoint | undefined) => {
+      link.endpoint = endpoint
+      link.contact = undefined
+      link.offset = 0
+      link.fresh = true
+      link.accounts = undefined
+      link.aliases = new Map()
+      link.active = new Set()
+      link.newest = undefined
+      prompts.clear()
+      // Another CPP knows nothing of what this one said.
+      for (const chat of chats.values()) {
+        chat.raw = undefined
+        chat.view = undefined
+        chat.stale = false
+        chat.read = false
+        chat.missing = false
+        chat.storeID = undefined
+        chat.duration = undefined
+        chat.label = undefined
+        chat.model = undefined
+        chat.events = []
+        chat.compact = undefined
+      }
+    }
+
+    /** One connection: the state, then the stream until it ends. Fails when CPP can't be read. */
+    const attempt = (endpoint: PacerEndpoint.Endpoint, first: boolean) =>
+      Effect.gen(function* () {
+        link.fresh = true
+        // The views first, then the stream: nothing is replayed after a reconnect. A proxy without the pacer answers
+        // this read 404 or 503 `unavailable` (PacerHttp.NoPacer).
+        yield* readState
+        const stream = yield* http.stream("/pacer/v1/stream", { endpoint })
+        yield* contact(stream.offset)
+        yield* setStatus({ state: "on" })
+        // The first time the catalog reads itself, on the endpoint's change; after a reconnect it is read again.
+        if (!first) capabilities()
+        for (const chat of chats.values()) if (pending(chat)) mark(chat)
+        const events: Array<{ readonly event: string; readonly data: string }> = []
+        const parser = makeParser((event) => {
+          if (event._tag === "Event") events.push(event)
+        })
+        yield* stream.body.pipe(
+          Stream.timeout(SILENCE_MS),
+          Stream.decodeText(),
+          Stream.runForEach((text) =>
+            Effect.gen(function* () {
+              yield* contact(undefined)
+              if (parser.feed(text)) return yield* new PacerHttp.Unexpected({ reason: "the change stream is not SSE" })
+              for (const item of events.splice(0)) yield* notice(item.event, item.data)
+            }),
+          ),
+          // A stream that breaks has ended; reading again says whether CPP is still there.
+          Effect.catch(() => Effect.void),
+        )
+      })
+
+    const follow = Effect.fnUntraced(function* (endpoint: PacerEndpoint.Endpoint) {
+      let delay = RECONNECT_MS
+      for (let first = true; ; first = false) {
+        const begun = yield* Clock.currentTimeMillis
+        const result = yield* attempt(endpoint, first).pipe(Effect.result)
+        if (Result.isFailure(result)) {
+          const error = result.failure
+          if (error._tag === "PacerHttp.NotSetUp") return yield* Effect.never
+          // A refused key is tried again only once the address or the key changes.
+          if (error._tag === "PacerHttp.Refused") {
+            yield* setStatus({ state: "unreachable", message: error.message, refused: true })
+            return yield* Effect.never
+          }
+          if (error._tag === "PacerHttp.NoPacer") {
+            yield* setStatus({ state: "no-pacer", message: error.reason })
+            yield* pacerBack
+            delay = RECONNECT_MS
+            continue
+          }
+          yield* setStatus({ state: "unreachable", message: error.message })
+          yield* Effect.sleep(Math.max(delay, error._tag === "PacerHttp.Unreachable" ? (error.retryAfter ?? 0) : 0))
+        }
+        if (Result.isSuccess(result)) {
+          // A stream that lasted is a working connection: its end starts the waits from a second again.
+          if ((yield* Clock.currentTimeMillis) - begun >= MAX_RECONNECT_MS) delay = RECONNECT_MS
+          // The status stays on until a read fails.
+          yield* Effect.sleep(delay)
+        }
+        delay = Math.min(delay * 2, MAX_RECONNECT_MS)
+      }
+    })
+
+    /** Waits for a later catalog read that finds the pacer (the provider reads it again, as the model picker opens). */
+    const pacerBack = models.changes().pipe(
+      // The catalog held now said nothing new: CPP has just answered without its pacer.
+      Stream.drop(1),
+      Stream.filter((catalog) => catalog !== undefined && catalog.pacer !== null),
+      Stream.runHead,
+    )
+
+    yield* endpoints.changes().pipe(
+      Stream.changesWith(PacerEndpoint.same),
+      Stream.switchMap((endpoint) =>
+        Stream.fromEffect(
+          Effect.gen(function* () {
+            reset(endpoint)
+            if (!endpoint) return yield* setStatus({ state: "unset" })
+            return yield* follow(endpoint)
+          }),
+        ),
+      ),
+      Stream.runDrain,
+      Effect.forkScoped({ startImmediately: true }),
+    )
+
+    // ------------------------------------------------------------------ the chats' events
+
+    const observe = (event: Followed) => {
+      const sessionID = event.data.sessionID
+      switch (event.type) {
+        case "session.step.started": {
+          const cpp = event.data.model.providerID === provider
+          const chat = cpp ? touch(sessionID) : chats.get(sessionID)
+          if (!chat) return
+          chat.step = cpp
+          if (!cpp) return
+          chat.on = true
+          chat.missing = false
+          chat.stopped.clear()
+          if (chat.info === undefined) mark(chat)
+          return
+        }
+        case "session.step.streamed": {
+          const chat = chats.get(sessionID)
+          if (!chat?.step) return
+          chat.read = true
+          return mark(chat)
+        }
+        case "session.tool.input.started": {
+          const chat = chats.get(sessionID)
+          if (!chat?.step || (event.data.name !== "shell" && event.data.name !== "subagent")) return
+          chat.calls.set(event.data.id, event.data.name)
+          return
+        }
+        case "session.tool.called": {
+          const chat = chats.get(sessionID)
+          if (!chat?.calls.has(event.data.id)) return
+          // A background shell or subagent does not hold the chat: a dev server would keep it warm for hours.
+          if (event.data.input.background === true) return void chat.calls.delete(event.data.id)
+          chat.waits.add(event.data.id)
+          if (chat.waits.size === 1) mark(chat)
+          return
+        }
+        case "session.tool.success":
+        case "session.tool.failed": {
+          const chat = chats.get(sessionID)
+          if (!chat?.calls.delete(event.data.id)) return
+          if (chat.waits.delete(event.data.id) && chat.waits.size === 0) mark(chat)
+          return
+        }
+        case "session.execution.succeeded":
+        case "session.execution.failed":
+        case "session.execution.interrupted": {
+          // A shutdown or a run taken over ends nothing.
+          if (
+            event.type === "session.execution.interrupted" &&
+            (event.data.reason === "shutdown" || event.data.reason === "superseded")
+          )
+            return
+          const chat = chats.get(sessionID)
+          if (!chat?.on) return
+          // A run that ended waits on nothing, also when it stopped before a call's end was published.
+          chat.calls.clear()
+          if (chat.waits.size > 0) {
+            chat.waits.clear()
+            mark(chat)
+          }
+          // Only a subagent's run ending closes its chat on CPP.
+          if (chat.info === undefined) {
+            chat.ended = true
+            return mark(chat)
+          }
+          if (chat.info.parentID) close(chat)
+          return
+        }
+        case "session.deleted": {
+          const chat = known(sessionID)
+          if (!chat) return
+          close(chat)
+          chat.removed = true
+          return mark(chat)
+        }
+        case "session.model.selected": {
+          const chat = known(sessionID)
+          if (!chat) return
+          const model = event.data.model.providerID === provider ? event.data.model.id : null
+          if (chat.model === model) return
+          chat.model = model
+          return tell(chat, { type: "model_changed", model })
+        }
+        case "session.agent.selected": {
+          const chat = known(sessionID)
+          if (!chat || event.data.agent === event.data.previous) return
+          return tell(chat, { type: "agent_switched" })
+        }
+        case "session.renamed": {
+          const chat = known(sessionID)
+          if (!chat) return
+          chat.title = event.data.title
+          const label = labelOf(chat)
+          if (label && label !== chat.label) tell(chat, { type: "label", label })
+          return
+        }
+        case "session.revert.staged": {
+          const chat = known(sessionID)
+          return chat && tell(chat, { type: "reverted" })
+        }
+        case "session.compaction.ended": {
+          // CPP saw a compaction that went through it; one through another provider is told.
+          if (event.data.model?.providerID === provider) return
+          const chat = known(sessionID)
+          return chat && tell(chat, { type: "compacted" })
+        }
+      }
+    }
+
+    yield* bus.subscribe(followed).pipe(
+      Stream.runForEach((event) => Effect.sync(() => observe(event))),
+      Effect.forkScoped({ startImmediately: true }),
+    )
+
+    // ------------------------------------------------------------------ the routes
+
+    /** Who sent each row: the chats by CPP's UUID, and their agents; a chat's subagents are looked up once. */
+    const senders = Effect.fnUntraced(function* (chat: Chat | undefined, rows: ReadonlyArray<PacerWire.Row>) {
+      const exts = new Set(rows.flatMap((row) => (row.session_ext ? [row.session_ext.toLowerCase()] : [])))
+      if (chat && !chat.children && [...exts].some((ext) => !byUuid.has(ext))) {
+        chat.children = true
+        yield* descendants(chat.sessionID)
+      }
+      const found = new Map<string, PacerWire.Sender>()
+      for (const ext of exts) {
+        const sessionID = byUuid.get(ext)
+        const held = sessionID && chats.get(sessionID)
+        if (!held) continue
+        if (held.info === undefined) held.info = yield* lookup(held.sessionID)
+        found.set(ext, { sessionID: held.sessionID, ...(held.info.agent ? { agent: held.info.agent } : {}) })
+      }
+      return (row: PacerWire.Row) => (row.session_ext ? (found.get(row.session_ext.toLowerCase()) ?? {}) : {})
+    })
+
+    /** Holds the chat's subagents, three levels down, so their rows name them. */
+    const descendants = Effect.fnUntraced(function* (root: SessionID) {
+      let level = [root]
+      for (let depth = 0; depth < 3 && level.length > 0; depth++) {
+        const pages = yield* Effect.forEach(
+          level,
+          (parentID) =>
+            sessions.list({ parentID, limit: 200 }).pipe(
+              Effect.map((page) => page.data),
+              Effect.orElseSucceed(() => []),
+            ),
+          { concurrency: READERS },
+        )
+        const children = pages.flat()
+        for (const child of children) {
+          const held = touch(child.id)
+          held.info ??= {
+            ...(child.parentID ? { parentID: child.parentID } : {}),
+            ...(child.agent ? { agent: child.agent } : {}),
+            ...(child.title ? { title: child.title } : {}),
+          }
+        }
+        level = children.map((child) => child.id)
+      }
+    })
+
+    const remember = (requestID: string, change: Pacer.PromptChange) => {
+      prompts.delete(requestID)
+      prompts.set(requestID, change)
+      for (const key of prompts.keys()) {
+        if (prompts.size <= PROMPTS) break
+        prompts.delete(key)
+      }
+    }
+
+    const oneRow = (request: string | number) =>
+      get(
+        `/pacer/v1/monitor/requests?request=${encodeURIComponent(String(request))}&limit=1&from=0`,
+        PacerWire.Rows,
+      ).pipe(Effect.map((answer) => PacerWire.rows(answer.items)[0]))
+
+    return Service.of({
+      status: () =>
+        Effect.sync(() => (on() && link.contact !== undefined ? { ...link.status, asOf: link.contact } : link.status)),
+      accounts: () =>
+        Effect.gen(function* () {
+          if (link.accounts || !on()) return link.accounts
+          yield* readMeters.pipe(Effect.ignore)
+          return link.accounts
+        }),
+      chat: (sessionID) =>
+        Effect.gen(function* () {
+          const chat = touch(sessionID)
+          if (chat.view) {
+            if (chat.stale && on()) {
+              chat.read = true
+              mark(chat)
+            }
+            return chat.view
+          }
+          if (!on() || chat.missing) return undefined
+          if (!chat.on && !link.active.has(chat.uuid)) {
+            chat.read = true
+            mark(chat)
+            return undefined
+          }
+          yield* readView(chat)
+          return chat.view
+        }),
+      update: (sessionID, input) =>
+        Effect.gen(function* () {
+          yield* requireOn
+          const chat = touch(sessionID)
+          const view = yield* send(
+            "patch",
+            sessionPath(chat),
+            {
+              ...(input.warming !== undefined ? { "pings.enabled": input.warming } : {}),
+              ...(input.compactBeforeCold !== undefined
+                ? { "warming.compact_before_cold": input.compactBeforeCold }
+                : {}),
+            },
+            PacerWire.View,
+          ).pipe(Effect.mapError(unavailable))
+          yield* hold(chat, view)
+          return chat.view ?? PacerWire.chat(view, sessionID, { ...(yield* context()), alias })
+        }),
+      requests: (sessionID, input) =>
+        Effect.gen(function* () {
+          yield* requireOn
+          const chat = touch(sessionID)
+          if (chat.storeID === undefined && !chat.missing) yield* readView(chat)
+          const now = yield* context()
+          if (chat.storeID === undefined) return { items: [], asOf: now.now }
+          const query = new URLSearchParams({
+            session: String(chat.storeID),
+            children: "1",
+            from: "0",
+            limit: String(Math.min(Math.max(input.limit ?? 50, 1), 500)),
+            ...(input.cursor ? { cursor: input.cursor } : {}),
+            ...(input.filter === "misses" ? { verdict: "miss,partial" } : {}),
+          })
+          const answer = yield* get(`/pacer/v1/monitor/requests?${query}`, PacerWire.Rows).pipe(
+            Effect.mapError(unavailable),
+          )
+          const rows = PacerWire.rows(answer.items)
+          const sender = yield* senders(chat, rows)
+          return {
+            items: rows.map((row) => PacerWire.request(row, sender(row), now)),
+            ...(answer.next ? { cursor: answer.next } : {}),
+            asOf: now.now,
+          }
+        }),
+      prompt: (requestID) =>
+        Effect.gen(function* () {
+          const held = prompts.get(requestID)
+          if (held) {
+            remember(requestID, held)
+            return held
+          }
+          yield* requireOn
+          const [prompt, row] = yield* Effect.all(
+            [
+              get(`/pacer/v1/prompts/${encodeURIComponent(requestID)}?rows=1`, PacerWire.Prompt).pipe(
+                Effect.catchTag("PacerHttp.NotFound", () => Effect.succeed(undefined)),
+              ),
+              oneRow(requestID),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(Effect.mapError(unavailable))
+          if (!row) return undefined
+          const compared = row.cache_base ?? prompt?.previous ?? undefined
+          const base =
+            compared === undefined ? undefined : yield* oneRow(compared).pipe(Effect.orElseSucceed(() => undefined))
+          const sessionID = row.session_ext ? byUuid.get(row.session_ext.toLowerCase()) : undefined
+          const sender = yield* senders(sessionID && chats.get(sessionID), [row])
+          const now = yield* context()
+          const change = PacerWire.promptChange(prompt, PacerWire.request(row, sender(row), now), base, now)
+          // CPP may store a prompt just after its request's row: an answer without one is not kept.
+          if (change.kept !== "none") remember(requestID, change)
+          return change
+        }),
+    })
+  }),
+)
+
+export const node = makeGlobalNode({
+  service: Service,
+  layer,
+  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, Session.node],
+})
+
+/** At most `bytes` bytes of UTF-8, cut at a character. */
+function truncate(text: string, bytes: number) {
+  const encoded = new TextEncoder().encode(text)
+  if (encoded.length <= bytes) return text
+  return new TextDecoder().decode(encoded.subarray(0, bytes)).replace(/\uFFFD$/u, "")
+}

@@ -688,7 +688,7 @@ export const layer = Layer.effect(
       for (const item of items) yield* merge(item)
       // A held view the list left out may have changed as any: it is read again when asked for.
       for (const chat of chats.values()) if (chat.raw && !link.active.has(chat.uuid)) chat.stale = true
-      return { items, full: answer.items.length >= LISTED }
+      return { items, full: (answer.items?.length ?? 0) >= LISTED }
     })
 
     const readNew = Effect.gen(function* () {

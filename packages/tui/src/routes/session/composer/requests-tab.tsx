@@ -178,7 +178,13 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
 
   const toggleDetail = () => {
     if (view.detail !== undefined) {
-      setView({ detail: undefined, detailTop: 0 })
+      // Back on the row it was opened on; if that is still the newest, the cursor is on the newest again and follows
+      // new requests.
+      const newest = items()[0]?.id === view.selected[which()]
+      batch(() => {
+        setView({ detail: undefined, detailTop: 0 })
+        if (newest) setView("selected", which(), undefined)
+      })
       return
     }
     const request = selected()

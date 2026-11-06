@@ -354,6 +354,25 @@ describe("the list", () => {
     await setup.settle()
     await setup.frame(() => selectedTime(setup) === time(-8))
   })
+
+  test("back from what changed on the newest row, new requests come in under the cursor again", async () => {
+    // Found live (round 5): after Ctrl+Enter and Esc on the newest row, the next request pushed the cursor down, as
+    // what changed holds the row it was opened on.
+    await using setup = await requestsTab({ delay: 20 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
+    using recorder = recordFrames(setup.app)
+    setup.fake.requests[CHAT] = [request(-1), ...setup.fake.requests[CHAT]!]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
+    await setup.settle()
+    finished(recorder, [list(range(0, 6)), list(range(-1, 5))])
+    for (const frame of recorder.frames) expect(selected(frame)).toBe(rowsOf(frame.text)[0])
+  })
 })
 
 describe("what changed", () => {

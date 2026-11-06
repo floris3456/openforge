@@ -64,12 +64,15 @@ test("exposes every standard HTTP API group", () => {
     "schedule",
     "artifacts",
     "service",
+    "pacer",
     "shell",
     "migration",
     "usage",
     "config",
   ])
   expect(Object.keys(client.experimental.service)).toEqual(["status", "pause", "resume"])
+  expect(Object.keys(client.experimental.pacer)).toEqual(["status", "accounts", "chat", "prompt"])
+  expect(Object.keys(client.experimental.pacer.chat)).toEqual(["get", "update", "requests"])
   expect(Object.keys(client.experimental.session)).toEqual([
     "stats",
     "import",

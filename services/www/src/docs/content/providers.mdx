@@ -131,7 +131,7 @@ When CPP has web tools, every chat gets them while CPP is set up: chats on any p
   for each call. With only a Codex login, that is `web_search` alone.
 - A chat that gets CPP's `web_search` doesn't get the built-in [web search](/websearch); `webfetch` stays.
 - Each chat keeps its own copy of the tools, which CPP changes only where the chat's prompt cache is lost anyway. A key
-  added to CPP shows in new chats, and in a running chat once it is compacted, goes cold or changes model.
+  added to CPP shows in new chats, and in a running chat once it is compacted or changes model.
 - A research or a crawl can take longer than one call's 50 seconds. The call then says that its job still runs, and the
   model calls the tool again with the job's ID. A finished job's answer stays at CPP for 48 hours.
 - A call CPP can't serve, or whose arguments it refuses, is a failed tool call, and the model reads why.

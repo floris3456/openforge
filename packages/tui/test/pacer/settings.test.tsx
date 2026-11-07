@@ -218,11 +218,18 @@ test("Summaries written by and Keep my messages in summaries, after the other tw
   const frame = await setup.frame((frame) => frame.includes("Summaries written by"))
   expect(frame).toMatch(row("Summaries written by", "CLIProxyPacer"))
   expect(frame).toMatch(row("Keep my messages in summaries", "off"))
-  // The category's header, then its four rows in order.
+  // The category's header, then all its rows in order, up to the blank line before the next header: the cache notices'
+  // six (notices.test.tsx), then CLIProxyPacer's own four.
   const lines = frame.split("\n").map((line) => line.trim())
   const header = lines.indexOf("CLIProxyPacer")
   expect(header).toBeGreaterThan(0)
-  expect(lines.slice(header + 1, header + 5).map((line) => line.replace(/ {2,}.*$/, ""))).toEqual([
+  expect(lines.slice(header + 1, lines.indexOf("", header)).map((line) => line.replace(/ {2,}.*$/, ""))).toEqual([
+    "Cache notices",
+    "Cache notices from",
+    "Cache notice lifetime",
+    "Cache notice minimum",
+    "Cache notices for",
+    "Opened cache notice disappears",
     "Compact cold chats first",
     "Compact before cold",
     "Summaries written by",

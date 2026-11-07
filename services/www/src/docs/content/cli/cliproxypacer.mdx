@@ -72,7 +72,8 @@ time      kind        model               account       read/write    verdict   
 14:00:02  title       claude-haiku-5-5    claude-max-2  0/0                                            $0.0004
 ```
 
-- **kind** is `step`, the agent of a subagent's step, `ping`, `title` or `compaction`.
+- **kind** is `step`, the agent of a subagent's step, `ping`, `title`, `compaction` or `search`, a call of one of CPP's
+  [web tools](#web-tools): its model is the tool, its account the service's key.
 - **read/write** are the tokens read from and written to the prompt cache.
 - **verdict** is CPP's cache verdict. A miss shows its cause and the part of the prompt that changed, as a warning; a
   failed or refused request shows as an error.
@@ -137,3 +138,13 @@ Cache warming off for this chat
 
 **Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
 asks CPP to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't count.
+
+## Web tools
+
+When CPP has web tools, every chat gets them, also a chat on another provider's model: `web_search`, `web_research`,
+`web_extract` and `web_crawl` (see [Web tools](/providers#web-tools)). They show in the chat as tool calls.
+
+- A call asks first, as the built-in web search and `webfetch` do (see [Approvals](/permissions#approvals)).
+- A call CPP can't serve shows as a failed tool call, with CPP's reason, which the model reads too.
+- A research or a crawl that outlasts one call shows the job's ID; the model's next call of the tool, with that ID, gets
+  the result.

@@ -42,6 +42,14 @@ describe("PacerHeaders", () => {
       })
   })
 
+  test("names a tool list read's or tool call's chat, and a subagent's parent, whatever the chat's provider", () => {
+    expect(PacerHeaders.chat({ sessionID })).toEqual({ "X-Pacer-Session": chat })
+    expect(PacerHeaders.chat({ sessionID, parentID })).toEqual({
+      "X-Pacer-Session": chat,
+      "X-Pacer-Parent-Session": parent,
+    })
+  })
+
   test("adds nothing for another provider", () => {
     for (const providerID of ["anthropic", "openai", "cliproxyapi", "CLIProxyPacer"])
       expect(PacerHeaders.make({ providerID, kind: "primary", sessionID, parentID, auto: true })).toEqual({})

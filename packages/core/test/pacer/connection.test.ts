@@ -338,7 +338,7 @@ function row(id: number, fields: Json = {}): Json {
 
 const catalog = (at: number, pacer = true): PacerModels.Catalog => ({
   at,
-  pacer: pacer ? { compactTokens: ["auto", "before-cold"] } : null,
+  pacer: pacer ? { compactTokens: ["auto", "before-cold"], webTools: false } : null,
   models: [],
 })
 

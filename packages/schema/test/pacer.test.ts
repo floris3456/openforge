@@ -120,6 +120,35 @@ describe("pacer shapes", () => {
     expect(Schema.decodeUnknownSync(Pacer.ChatUpdate)({ compactColdFirst: true })).toEqual({ compactColdFirst: true })
   })
 
+  // Spec cliproxypacer-server-summaries, section 2.
+  test("who writes the summaries and whether they keep your messages, for all chats: decode, absent while unknown", () => {
+    const settings: Pacer.Settings = {
+      compactColdFirst: false,
+      compactBeforeCold: false,
+      summaryWriter: "cliproxypacer",
+      keepUserMessages: true,
+    }
+    expect(Schema.decodeUnknownSync(Pacer.Settings)(Schema.encodeSync(Pacer.Settings)(settings))).toEqual(settings)
+    expect(Schema.decodeUnknownSync(Pacer.Settings)({ ...settings, summaryWriter: "openforge" }).summaryWriter).toBe(
+      "openforge",
+    )
+    // A service that can't tell leaves them out.
+    expect(Schema.decodeUnknownSync(Pacer.Settings)({ compactColdFirst: true, compactBeforeCold: false })).toEqual({
+      compactColdFirst: true,
+      compactBeforeCold: false,
+    })
+    // CLIProxyPacer's own words for the writer are the service's to map.
+    expect(() => Schema.decodeUnknownSync(Pacer.Settings)({ ...settings, summaryWriter: "server" })).toThrow()
+    expect(() => Schema.decodeUnknownSync(Pacer.Settings)({ ...settings, keepUserMessages: "on" })).toThrow()
+    expect(Schema.decodeUnknownSync(Pacer.SettingsUpdate)({ summaryWriter: "openforge" })).toEqual({
+      summaryWriter: "openforge",
+    })
+    expect(Schema.decodeUnknownSync(Pacer.SettingsUpdate)({ keepUserMessages: false })).toEqual({
+      keepUserMessages: false,
+    })
+    expect(() => Schema.decodeUnknownSync(Pacer.SettingsUpdate)({ summaryWriter: "client" })).toThrow()
+  })
+
   test("events carry the shapes", () => {
     expect(Pacer.Event.ChatUpdated.data.make({ chat })).toEqual({ chat })
     expect(Pacer.Event.RequestsUpdated.data.make({ sessionID })).toEqual({ sessionID })

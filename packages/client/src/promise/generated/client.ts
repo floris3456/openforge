@@ -1902,6 +1902,8 @@ export function make(options: ClientOptions) {
                 body: {
                   compactColdFirst: input?.["compactColdFirst"],
                   compactBeforeCold: input?.["compactBeforeCold"],
+                  summaryWriter: input?.["summaryWriter"],
+                  keepUserMessages: input?.["keepUserMessages"],
                 },
                 successStatus: 200,
                 declaredStatuses: [400, 401, 503],

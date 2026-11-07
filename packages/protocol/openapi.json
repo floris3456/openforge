@@ -14969,7 +14969,7 @@
             }
           }
         },
-        "description": "Whether CLIProxyPacer compacts cold chats first and compacts chats before they go cold, for all of the key's chats: its key-level settings as they apply (the key's own, else the server's, else the default). A chat's own switch wins over them. Read from CLIProxyPacer; unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
+        "description": "Whether CLIProxyPacer compacts cold chats first and compacts chats before they go cold, who writes the summaries and whether they keep the user's earlier messages, for all of the key's chats: its key-level settings as they apply (the key's own, else the server's, else the default). A chat's own switch wins over them. The summaries' two are absent while the service can't tell. Read from CLIProxyPacer; unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
         "summary": "Get CLIProxyPacer's compaction asks for all chats"
       },
       "patch": {
@@ -15026,7 +15026,7 @@
             }
           }
         },
-        "description": "Set compact-cold-first or compact-before-cold at the key level on CLIProxyPacer, and return both as they apply after the change. A value equal to what CLIProxyPacer applies without the key level (the server's, else the default) clears the key level instead of being stored, so that a later server default reaches the key's chats. Unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
+        "description": "Set compact-cold-first, compact-before-cold, who writes the summaries or whether they keep the user's earlier messages at the key level on CLIProxyPacer, and return them as they apply after the change. A value equal to what CLIProxyPacer applies without the key level (the server's, else the default) clears the key level instead of being stored, so that a later server default reaches the key's chats. Unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
         "summary": "Switch CLIProxyPacer's compaction asks for all chats",
         "requestBody": {
           "content": {
@@ -22873,6 +22873,12 @@
           },
           "compactBeforeCold": {
             "type": "boolean"
+          },
+          "summaryWriter": {
+            "$ref": "#/components/schemas/Pacer.SummaryWriter"
+          },
+          "keepUserMessages": {
+            "type": "boolean"
           }
         },
         "required": ["compactColdFirst", "compactBeforeCold"],
@@ -22885,6 +22891,12 @@
             "type": "boolean"
           },
           "compactBeforeCold": {
+            "type": "boolean"
+          },
+          "summaryWriter": {
+            "$ref": "#/components/schemas/Pacer.SummaryWriter"
+          },
+          "keepUserMessages": {
             "type": "boolean"
           }
         },
@@ -22934,6 +22946,10 @@
         },
         "required": ["state", "since", "refused"],
         "additionalProperties": false
+      },
+      "Pacer.SummaryWriter": {
+        "type": "string",
+        "enum": ["cliproxypacer", "openforge"]
       },
       "Pacer.Switches": {
         "type": "object",
@@ -25632,6 +25648,9 @@
           "summary": {
             "type": "string"
           },
+          "writer": {
+            "$ref": "#/components/schemas/Session.Message.Compaction.Writer"
+          },
           "cost": {
             "$ref": "#/components/schemas/Money.USD"
           },
@@ -25722,6 +25741,28 @@
           }
         },
         "required": ["type", "id", "time", "status", "reason", "summary"],
+        "additionalProperties": false
+      },
+      "Session.Message.Compaction.Writer": {
+        "type": "object",
+        "properties": {
+          "by": {
+            "type": "string",
+            "enum": ["cliproxypacer", "openforge"]
+          },
+          "cold": {
+            "type": "boolean"
+          },
+          "userMessages": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "fallback": {
+            "type": "string"
+          }
+        },
+        "required": ["by"],
         "additionalProperties": false
       },
       "Session.Message.ID": {

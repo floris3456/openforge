@@ -2658,6 +2658,8 @@ export type ExperimentalPacerSettingsGetOperation<E = never> = () => Effect.Effe
 export type ExperimentalPacerSettingsUpdateInput = {
   readonly compactColdFirst?: boolean | undefined
   readonly compactBeforeCold?: boolean | undefined
+  readonly summaryWriter?: Pacer.SummaryWriter | undefined
+  readonly keepUserMessages?: boolean | undefined
 }
 export type ExperimentalPacerSettingsUpdateOutput = Pacer.Settings
 export type ExperimentalPacerSettingsUpdateOperation<E = never> = (

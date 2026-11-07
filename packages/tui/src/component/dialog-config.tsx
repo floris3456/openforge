@@ -463,6 +463,29 @@ export const settings: Setting[] = [
     keywords: ["cliproxypacer", "compaction", "summary", "warm cache", "idle"],
   },
   {
+    title: "Summaries written by",
+    category: "CLIProxyPacer",
+    path: ["cliproxypacer", "summary_writer"],
+    pacer: "summaryWriter",
+    description:
+      "For all chats: who writes a chat's summary when it compacts; openforge does whenever CLIProxyPacer can't",
+    default: "cliproxypacer",
+    values: ["cliproxypacer", "openforge"],
+    labels: ["CLIProxyPacer", "openforge"],
+    keywords: ["cliproxypacer", "compaction", "summary", "writer", "server"],
+  },
+  {
+    title: "Keep my messages in summaries",
+    category: "CLIProxyPacer",
+    path: ["cliproxypacer", "keep_user_messages"],
+    pacer: "keepUserMessages",
+    description: "For all chats: whether CLIProxyPacer keeps your earlier messages word for word after its summaries",
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["cliproxypacer", "compaction", "summary", "user messages", "prompts"],
+  },
+  {
     title: "Developer tools",
     category: "Debug",
     path: ["debug", "devtools"],
@@ -492,8 +515,8 @@ export function DialogConfig(props: { current?: string }) {
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
 
-  // CLIProxyPacer's rows: read when Settings opens, and again when CLIProxyPacer answers again while it is open; shown
-  // while it is on and its read answered.
+  // CLIProxyPacer's rows: read when Settings opens, and again when CLIProxyPacer answers again while it is open; each
+  // shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
     on(
@@ -512,9 +535,10 @@ export function DialogConfig(props: { current?: string }) {
   // from it, and the cache notices' rows tune what only it sends.
   const shown = (setting: Setting) =>
     setting.category !== "CLIProxyPacer" ||
-    (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues() !== undefined))
-  // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered.
-  const opening = () => (shown(settings[current]) ? current : undefined)
+    (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
+  // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
+  // new values don't move the selection back to it.
+  const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
 
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
@@ -565,7 +589,8 @@ export function DialogConfig(props: { current?: string }) {
     setSaving(true)
     if (setting.pacer) {
       await pacer!
-        .updateSettings({ [setting.pacer]: next === true })
+        // One of the row's own values, which are the setting's.
+        .updateSettings({ [setting.pacer]: next } as Partial<PacerSettings>)
         .then((values) => setPacerValues(values))
         .catch(toast.error)
         .finally(() => setSaving(false))

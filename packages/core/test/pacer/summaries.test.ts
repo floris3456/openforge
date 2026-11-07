@@ -21,8 +21,8 @@ import { PacerStatus } from "@opencode/core/pacer/status"
 import { PacerSummaries } from "@opencode/core/pacer/summaries"
 import { testEffect } from "../lib/effect"
 
-// Spec cliproxypacer-server-summaries, sections 2 and 3, and the interim warm/cold rule the lead set on 2026-11-07:
-// who writes a summary of a chat on CLIProxyPacer, and how its answer is read. The fake CPP answers in CPP's shapes
+// Spec cliproxypacer-server-summaries, sections 2 and 3: who writes a summary of a chat on CLIProxyPacer, and how its
+// answer is read. The fake CPP answers in CPP's shapes
 // (pacer_sessions.rs, settings.rs) with synthetic data only.
 
 const it = testEffect(Layer.empty)
@@ -99,52 +99,20 @@ describe("PacerSummaries, read", () => {
   })
 })
 
-describe("PacerSummaries, warm or cold", () => {
-  const own = "claude-e2e"
-  test("a cold ask is cold; a move is warm unless its 409's models say the account ran out", () => {
-    expect(PacerSummaries.warmth({ reason: "cold", models: [own] }, own)).toBe(false)
-    // CLIENT-GUIDE 4.2: while the account has not run out and the chat is warm there, `models` starts with the chat's
-    // own model; otherwise it is `routing.compaction_models` alone.
-    expect(PacerSummaries.warmth({ reason: "move", models: ["Claude-E2E", "claude-e2e-mini"] }, own)).toBe(true)
-    expect(PacerSummaries.warmth({ reason: "move", models: ["claude-e2e-mini", own] }, own)).toBe(false)
-    expect(PacerSummaries.warmth({ reason: "move", models: [] }, own)).toBe(true)
-    // Everything else: the chat's view.
-    for (const reason of ["auto", "overflow", "manual"] as const)
-      expect(PacerSummaries.warmth({ reason }, own)).toBe("view")
-    expect(PacerSummaries.warmth({ reason: "manual", models: [own] }, own)).toBe("view")
-  })
-
-  test("by the view: warm, and warm until a time not past; no view is warm", () => {
-    const now = 1_000_000
-    expect(PacerSummaries.viewWarm(undefined, now)).toBe(true)
-    expect(PacerSummaries.viewWarm({ warm: false }, now)).toBe(false)
-    expect(PacerSummaries.viewWarm({ warm: true }, now)).toBe(true)
-    expect(PacerSummaries.viewWarm({ warm: true, warmUntil: now + 1 }, now)).toBe(true)
-    expect(PacerSummaries.viewWarm({ warm: true, warmUntil: now }, now)).toBe(false)
-    expect(PacerSummaries.viewWarm({ warm: false, warmUntil: now + 60_000 }, now)).toBe(false)
-  })
-
-  test("the interim rule: only a Messages chat that is warm gets openforge's own summary", () => {
-    expect(PacerSummaries.openforgeWhileWarm({ messages: true, warm: true })).toBe(true)
-    expect(PacerSummaries.openforgeWhileWarm({ messages: true, warm: false })).toBe(false)
-    expect(PacerSummaries.openforgeWhileWarm({ messages: false, warm: true })).toBe(false)
-    expect(PacerSummaries.openforgeWhileWarm({ messages: false, warm: false })).toBe(false)
-  })
-
-  test("who writes: the chat's writer first, then the rule, then the route", () => {
+describe("PacerSummaries, who writes", () => {
+  // Only these two: whether the chat is warm, and whether its steps go to CPP in the Messages format (Claude), don't
+  // matter (they did in 0.0.9, which gave a warm Claude chat openforge's own summary).
+  test("the chat's writer, then the route; a warm Claude chat as any other", () => {
     const decide = (input: Partial<Parameters<typeof PacerSummaries.decide>[0]>) =>
-      PacerSummaries.decide({ writer: "server", writes: true, messages: false, warm: true, ...input })
+      PacerSummaries.decide({ writer: "server", writes: true, ...input })
     expect(decide({})).toEqual({ by: "cliproxypacer" })
     expect(decide({ writer: undefined })).toEqual({ by: "cliproxypacer" })
     expect(decide({ writer: "client" })).toEqual({ by: "openforge" })
     expect(decide({ writer: "client", writes: false })).toEqual({ by: "openforge" })
-    expect(decide({ messages: true })).toEqual({ by: "openforge" })
-    expect(decide({ messages: true, warm: false })).toEqual({ by: "cliproxypacer" })
     expect(decide({ writes: false })).toEqual({
       by: "openforge",
       fallback: "it writes no summaries on this model's route",
     })
-    expect(decide({ writes: false, messages: true })).toEqual({ by: "openforge" })
   })
 })
 
@@ -270,22 +238,16 @@ const start = Effect.fnUntraced(function* () {
 
 const sessionID = "ses_summaries_test_chat_000000000000000000000000000000000000000000000000000000000000000" as SessionID
 const uuid = PacerSessionID.make(sessionID)
-/** The chat's view at CPP, holding `own` as its own `compaction.writer` (none when null). */
-const view = (own: string | null, warm: Json = { warm: true }) => ({
+/** The chat's view at CPP, holding `own` as its own `compaction.writer` (none when null), with `fields` over it. */
+const view = (own: string | null, fields: Json = { warm: true }) => ({
   id: uuid,
   session_id: 7,
   provider: "kimi",
   model: "kimi-e2e",
   settings: own === null ? {} : { "compaction.writer": own },
-  ...warm,
+  ...fields,
 })
-const plan = (input: Partial<PacerSummaries.PlanInput>) => ({
-  sessionID,
-  model: "kimi-e2e",
-  messages: false,
-  warm: "view" as const,
-  ...input,
-})
+const plan = (input: Partial<PacerSummaries.PlanInput>) => ({ sessionID, model: "kimi-e2e", ...input })
 
 describe("PacerSummaries.plan", () => {
   // The key level decides, as the Settings row shows it, so a choice there reaches every chat (the lead's fix of
@@ -358,26 +320,23 @@ describe("PacerSummaries.plan", () => {
     }),
   )
 
-  it.live("the interim rule: a Messages chat warm by its view or its move gets openforge's own, cold CPP's", () =>
+  it.live("a Claude chat warm by its view gets CPP's summary as any other: its unset writer set to `server` once", () =>
     Effect.gen(function* () {
       const { cpp, summaries } = yield* start()
-      const claude = { model: "claude-e2e", messages: true }
-      cpp.views.set(uuid, view("server", { warm: true, warm_until: Date.now() + 60_000 }))
-      expect(yield* summaries.plan(plan(claude))).toEqual({ by: "openforge" })
-      expect(yield* summaries.plan(plan({ ...claude, warm: true }))).toEqual({ by: "openforge" })
-      expect(yield* summaries.plan(plan({ ...claude, warm: false }))).toEqual({ by: "cliproxypacer" })
-      // Warm by the flag, but its time is past: cold.
-      cpp.views.set(uuid, view("server", { warm: true, warm_until: Date.now() - 60_000 }))
+      const writes = () => cpp.seen.filter((item) => item.method === "PATCH")
+      const claude = { model: "claude-e2e" }
+      const warm = { warm: true, warm_until: Date.now() + 60_000, provider: "claude", model: "claude-e2e" }
+      cpp.views.set(uuid, view(null, warm))
       expect(yield* summaries.plan(plan(claude))).toEqual({ by: "cliproxypacer" })
-      cpp.views.set(uuid, view("server", { warm: false }))
+      expect(writes()).toEqual([
+        { method: "PATCH", path: `/pacer/v1/sessions/${uuid}`, body: { "compaction.writer": "server" } },
+      ])
+      // Its own `server` now applies: no second write.
       expect(yield* summaries.plan(plan(claude))).toEqual({ by: "cliproxypacer" })
-      // A Responses chat, warm or cold: CPP's.
-      cpp.views.set(uuid, view("server", { warm: true, warm_until: Date.now() + 60_000 }))
-      expect(yield* summaries.plan(plan({}))).toEqual({ by: "cliproxypacer" })
-      // An unset writer is set only when CPP is to write.
-      cpp.views.set(uuid, view(null, { warm: true, warm_until: Date.now() + 60_000 }))
+      expect(writes()).toHaveLength(1)
+      // The key level's `client` still decides for it.
+      cpp.keyWriter = "client"
       expect(yield* summaries.plan(plan(claude))).toEqual({ by: "openforge" })
-      expect(cpp.seen.filter((item) => item.method === "PATCH")).toEqual([])
     }),
   )
 

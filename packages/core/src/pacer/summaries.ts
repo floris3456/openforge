@@ -1,11 +1,11 @@
 export * as PacerSummaries from "./summaries.js"
 
 import { ai, AIError, LanguageModel, LLMRequest, type Message } from "@opencode/ai/effect"
-import { AnthropicMessages, OpenAICompatibleResponses } from "@opencode/ai/protocols"
+import { OpenAICompatibleResponses } from "@opencode/ai/protocols"
 import type { HttpMiddleware } from "@opencode/ai/route"
 import type { SessionID } from "@opencode/schema/session-id"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { Clock, Context, Effect, Layer, Option, Result, Schema } from "effect"
+import { Context, Effect, Layer, Option, Result, Schema } from "effect"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
@@ -27,11 +27,6 @@ export const WAIT = "4 minutes"
 
 /** The provider whose chats CPP writes summaries for: `PacerEndpoint.id`. */
 export const provider: string = PacerEndpoint.id
-
-/** Whether a chat's model sends its steps to CPP in the Messages format (CPP's Claude models), not Responses. */
-export function messages(model: LanguageModel) {
-  return model.route.protocol === AnthropicMessages.protocol.id
-}
 
 /**
  * The request a chat's next step would send, up to the recent part openforge keeps (`session/compaction.ts`), made a
@@ -146,52 +141,7 @@ export function capture(inner: HttpMiddleware | undefined, seen: (value: string 
   }
 }
 
-// ------------------------------------------------------------------ warm or cold
-
-/** What the compaction is, as far as warmth goes. */
-export interface Asked {
-  readonly reason: "auto" | "overflow" | "manual" | "move" | "cold"
-  /** CPP's picks, as its 409 (or a `compact` notice) names them. */
-  readonly models?: ReadonlyArray<string>
-}
-
-/**
- * How warm the chat's cache is at this compaction, from what openforge knows then: a cold ask is cold; a move is warm
- * unless its 409 says the account ran out, which its `models` tell (CLIENT-GUIDE 4.2: while the chat's account has not
- * run out and the chat is warm there, they start with the chat's own model, `model`; otherwise they are
- * `routing.compaction_models` alone); anything else (automatic, overflow, `/compact`, a `compact` notice) is read from
- * the chat's view ({@link viewWarm}).
- */
-export function warmth(asked: Asked, model: string): boolean | "view" {
-  if (asked.reason === "cold") return false
-  if (asked.reason !== "move") return "view"
-  const first = asked.models?.[0]
-  return first === undefined || first.toLowerCase() === model.toLowerCase()
-}
-
-/** A chat's view as far as warmth goes, on this clock. */
-export interface Warmth {
-  readonly warm: boolean
-  readonly warmUntil?: number
-}
-
-/** Warm by the chat's view: CPP says warm and its warm-until is not past. No view counts as warm. */
-export function viewWarm(view: Warmth | undefined, now: number) {
-  if (view === undefined) return true
-  return view.warm && (view.warmUntil === undefined || view.warmUntil > now)
-}
-
-/**
- * THE INTERIM WARM/COLD RULE (the lead's recommendation of 2026-11-07, for the spec's open question). A chat whose
- * steps go to CPP in the Messages format (Claude) gets openforge's own summary while its cache is warm: CPP's summary
- * through `/responses/compact` does not read a Messages chat's conversation cache, which its next step would then
- * write again (step 0's measurement, `run/evidence/cpp-summaries/measure/`). The same chat cold, and every other chat
- * warm or cold, gets CPP's. Delete this function and its one use in {@link decide} once CPP writes summaries for
- * Messages requests without losing the cache, or the owner chooses CPP's anyway.
- */
-export function openforgeWhileWarm(chat: { readonly messages: boolean; readonly warm: boolean }) {
-  return chat.messages && chat.warm
-}
+// ------------------------------------------------------------------ who writes
 
 /** Who writes a summary of a chat on CPP. `fallback` says why CPP couldn't, when it was meant to. */
 export type Decision = { readonly by: "cliproxypacer" } | { readonly by: "openforge"; readonly fallback?: string }
@@ -199,20 +149,18 @@ export type Decision = { readonly by: "cliproxypacer" } | { readonly by: "openfo
 export const ROUTE = "it writes no summaries on this model's route"
 
 /**
- * Who writes, in this order: the writer ({@link writerFor}: `client` is openforge, `server` or unset CPP); the interim
- * rule; then only where CPP writes for the model's route with `server`.
+ * Who writes, in this order: the writer ({@link writerFor}: `client` is openforge, `server` or unset CPP); then only
+ * where CPP writes for the model's route with `server`. Whether the chat is warm, and in which format its steps go to
+ * CPP, don't matter: a Claude chat's summary reads its cache too (CPP's `2e83d820`,
+ * `run/evidence/cpp-summaries/measure-2/`).
  */
 export function decide(input: {
   /** Who writes by the settings ({@link writerFor}); undefined while unset. */
   readonly writer: "server" | "client" | undefined
   /** CPP writes on the writing model's route with `server` (`PacerModels.writes`). */
   readonly writes: boolean
-  /** The chat's steps go to CPP in the Messages format. */
-  readonly messages: boolean
-  readonly warm: boolean
 }): Decision {
   if (input.writer === "client") return { by: "openforge" }
-  if (openforgeWhileWarm(input)) return { by: "openforge" }
   if (!input.writes) return { by: "openforge", fallback: ROUTE }
   return { by: "cliproxypacer" }
 }
@@ -239,17 +187,13 @@ export interface PlanInput {
   readonly parentID?: SessionID
   /** CPP's ID of the model that would write it: one of CPP's picks, else the chat's own. */
   readonly model: string
-  /** The chat's steps go to CPP in the Messages format (Claude), not Responses. */
-  readonly messages: boolean
-  /** Known from the compaction ({@link warmth}), else read from the chat's view. */
-  readonly warm: boolean | "view"
 }
 
 export interface Interface {
   /**
    * Who writes the summary, asking CPP only while the connection is on (`PacerStatus`). Unreachable, openforge writes,
    * saying so ({@link UNREACHABLE}); without a pacer, or not set up, undefined: openforge writes, naming no writer, as
-   * for a chat on any provider. On, it reads the chat's view now (its own writer, its effective one, its warmth), the
+   * for a chat on any provider. On, it reads the chat's view now (its own writer, its effective one, its provider), the
    * key level's listing ({@link writerFor}), and the catalog for the model's routes. When CPP is to write and the
    * chat's effective writer isn't `server`, sets the chat's own `server` first (one `PATCH`): an unset writer answers
    * Claude with a capsule only CPP opens. Never fails: openforge writes, saying why, when CPP can't be asked.
@@ -287,8 +231,7 @@ export const layer = Layer.effect(
       if (Option.isNone(answer)) return undefined
       const decoded = decodeView(answer.value.body)
       if (Option.isNone(decoded)) return yield* new PacerHttp.Unexpected({ reason: "the chat's view does not decode" })
-      const offset = answer.value.offset
-      return { view: decoded.value, offset: offset ? Math.round((offset.low + offset.high) / 2) : 0 }
+      return decoded.value
     })
 
     const plan = Effect.fn("PacerSummaries.plan")(function* (input: PlanInput) {
@@ -307,28 +250,19 @@ export const layer = Layer.effect(
           return {
             writer: writerFor({
               key: key === undefined ? undefined : PacerWire.writers[key],
-              own: writerOf(held?.view.settings?.[PacerWire.settingNames.summaryWriter]),
+              own: writerOf(held?.settings?.[PacerWire.settingNames.summaryWriter]),
             }),
-            effective: writerOf(held?.view.effective?.compaction_writer),
-            provider: held?.view.provider ?? undefined,
-            warmth: held
-              ? { warm: held.view.warm === true, warmUntil: PacerWire.local(held.view.warm_until, held.offset) }
-              : undefined,
+            effective: writerOf(held?.effective?.compaction_writer),
+            provider: held?.provider ?? undefined,
           }
         }),
       )
       if (Result.isFailure(read)) return { by: "openforge", fallback: UNREACHABLE } satisfies Decision
       const chat = read.success
-      const now = yield* Clock.currentTimeMillis
       const catalog = yield* models.get()
       const wanted = input.model.toLowerCase()
       const model = catalog?.models.find((item) => item.id === input.model || item.id.toLowerCase() === wanted)
-      const decision = decide({
-        writer: chat.writer,
-        writes: PacerModels.writes(model, chat.provider),
-        messages: input.messages,
-        warm: input.warm === "view" ? viewWarm(chat.warmth, now) : input.warm,
-      })
+      const decision = decide({ writer: chat.writer, writes: PacerModels.writes(model, chat.provider) })
       if (decision.by !== "cliproxypacer" || chat.effective === "server") return decision
       const claimed = yield* Effect.result(
         http.patch(path, { [PacerWire.settingNames.summaryWriter]: PacerWire.writers.cliproxypacer }, Schema.Unknown, {

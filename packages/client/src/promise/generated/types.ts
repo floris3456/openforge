@@ -1691,6 +1691,7 @@ export type SessionCompactionEnded = {
     model?: ModelRef
     native?: SessionMessageNative1
     text: string
+    writer?: SessionMessageCompactionWriter
     cost?: MoneyUSD
     tokens?: TokenUsageInfo
   }

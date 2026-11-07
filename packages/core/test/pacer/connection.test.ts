@@ -189,7 +189,8 @@ const fakeCpp = (now: () => number) =>
             }
           return answer(
             cpp.registry.map((name) => {
-              const fallback = name === "pings.enabled" ? null : false
+              // CPP's defaults: unset for the pings switch and the summaries' writer, else off.
+              const fallback = name === "pings.enabled" || name === "compaction.writer" ? null : false
               const key = cpp.key[name] ?? null
               const server = cpp.server[name] ?? null
               return {
@@ -1660,6 +1661,53 @@ describe("PacerConnection chats", () => {
       h.cpp.registry = ["pings.enabled", "warming.compact_before_cold"]
       yield* h.connection.updateSettings({ compactColdFirst: false })
       expect(patches().at(-1)).toEqual({ "warming.compact_cold_first": false })
+    }),
+  )
+
+  it.effect("reads and sets who writes the summaries and whether they keep the user's messages, at the key level", () =>
+    Effect.gen(function* () {
+      // Spec cliproxypacer-server-summaries, section 2: CPP's `compaction.writer` (`server`, `client`, unset) and
+      // `compaction.user_messages`, shown as they apply. An unset writer is CLIProxyPacer's: openforge sets each chat's
+      // own `server` before its first summary.
+      const h = yield* harness()
+      yield* online(h)
+      const patches = () => seen(h, "/pacer/v1/settings", "PATCH").map((item) => item.body)
+      // An older CPP lists neither: the service can't tell.
+      expect(yield* h.connection.settings()).toEqual({ compactColdFirst: false, compactBeforeCold: false })
+
+      h.cpp.registry = [...h.cpp.registry, "compaction.writer", "compaction.user_messages"]
+      expect(yield* h.connection.settings()).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: false,
+        summaryWriter: "cliproxypacer",
+        keepUserMessages: false,
+      })
+      expect(yield* h.connection.updateSettings({ summaryWriter: "openforge", keepUserMessages: true })).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: false,
+        summaryWriter: "openforge",
+        keepUserMessages: true,
+      })
+      expect(h.cpp.key).toEqual({ "compaction.writer": "client", "compaction.user_messages": true })
+      // Back to what applies without the key's own (task 1's rule): unset, which is CLIProxyPacer's, and off.
+      const back = yield* h.connection.updateSettings({ summaryWriter: "cliproxypacer", keepUserMessages: false })
+      expect(back).toMatchObject({ summaryWriter: "cliproxypacer", keepUserMessages: false })
+      expect(h.cpp.key).toEqual({})
+      // With the server's writer `client`, CLIProxyPacer's is the key's own `server`.
+      h.cpp.server["compaction.writer"] = "client"
+      expect((yield* h.connection.settings()).summaryWriter).toBe("openforge")
+      expect((yield* h.connection.updateSettings({ summaryWriter: "cliproxypacer" })).summaryWriter).toBe(
+        "cliproxypacer",
+      )
+      expect(h.cpp.key).toEqual({ "compaction.writer": "server" })
+      expect((yield* h.connection.updateSettings({ summaryWriter: "openforge" })).summaryWriter).toBe("openforge")
+      expect(h.cpp.key).toEqual({})
+      expect(patches()).toEqual([
+        { "compaction.writer": "client", "compaction.user_messages": true },
+        { "compaction.writer": null, "compaction.user_messages": null },
+        { "compaction.writer": "server" },
+        { "compaction.writer": null },
+      ])
     }),
   )
 

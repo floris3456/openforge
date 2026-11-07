@@ -3,7 +3,7 @@ export * as PacerWire from "./wire.js"
 import { Option, Schema } from "effect"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
-import type { Pacer } from "@opencode/schema/pacer"
+import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 
 // CPP's answers to the reads of the connection (`crates/cpa-server/src/pacer_sessions.rs`, `pacer_api.rs`,
@@ -380,12 +380,18 @@ export interface Sender {
   readonly agent?: string
 }
 
+/**
+ * A row's request ID: CPP's (`ext`), else its row's ({@link Pacer.rowRequestID}). CPP records a web tool call without
+ * one (spec cliproxypacer-step-2), so all such rows of a chat went by the same empty ID.
+ */
+export const requestID = (row: Pick<Row, "id" | "ext">) => row.ext || Pacer.rowRequestID(row.id)
+
 /** A request row in openforge's shape. */
 export function request(row: Row, sender: Sender, context: Context): Pacer.Request {
   const verdict = row.cache_verdict ?? undefined
   const subagent = row.subagent === true
   return {
-    id: row.ext,
+    id: requestID(row),
     at: local(row.at, context.offset) ?? row.at,
     ...(sender.sessionID ? { sessionID: sender.sessionID } : {}),
     subagent,

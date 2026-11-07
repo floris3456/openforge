@@ -213,10 +213,23 @@ export const Tokens = Schema.Struct({
   cacheWrite: NonNegativeInt,
 }).annotate({ identifier: "Pacer.Tokens" })
 
+/**
+ * The `id` of a request CPP recorded without a request ID, as it does a call of its web tools (spec
+ * cliproxypacer-step-2): `row:` and CPP's number for its row, distinct and stable across reads. CPP's request IDs are
+ * UUIDs, so the two never meet.
+ */
+export const rowRequestID = (row: number) => `row:${row}`
+
+/** Whether a request's `id` is its row's ({@link rowRequestID}): it sent no prompt, so it has none to compare. */
+export const promptless = (requestID: string) => requestID.startsWith("row:")
+
 /** One request CPP recorded for a chat or one of its subagents. */
 export interface Request extends Schema.Schema.Type<typeof Request> {}
 export const Request = Schema.Struct({
-  /** CPP's request ID: the `proxyRequestID` of the assistant message whose step sent it. */
+  /**
+   * CPP's request ID: the `proxyRequestID` of the assistant message whose step sent it. A request without one, such as
+   * a web tool call, goes by its row ({@link rowRequestID}) and has no prompt.
+   */
   id: Schema.String,
   /**
    * When CPP received it. Held once answered, for the last 1,000 rows read: later answers give the same time, though

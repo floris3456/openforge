@@ -369,7 +369,7 @@ describe("the list", () => {
     setup.app.mockInput.pressArrow("up")
     await setup.frame(() => selectedTime(setup) === time(-8))
     setup.app.mockInput.pressEnter({ ctrl: true })
-    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    await setup.frame((frame) => frame.includes("CLIProxyPacer has no record of this request"))
     setup.fake.requests[CHAT] = [request(-9), ...setup.fake.requests[CHAT]!]
     setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
     await until(() => setup.pacer.page(CHAT, "all")!.items[0]!.id === "req_-9", 5_000)
@@ -386,7 +386,7 @@ describe("the list", () => {
     await clickCacheItem(setup)
     await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
     setup.app.mockInput.pressEnter({ ctrl: true })
-    await setup.frame((frame) => frame.includes("CPP has no record of this request"))
+    await setup.frame((frame) => frame.includes("CLIProxyPacer has no record of this request"))
     setup.app.mockInput.pressEscape()
     await setup.frame((frame) => rowsOf(frame).length > 0 && selectedTime(setup) === time(0))
     using recorder = recordFrames(setup.app)
@@ -637,7 +637,7 @@ describe("CPP going away and coming back", () => {
     await setup.frame((frame) => rowsOf(frame).length > 0)
     using recorder = recordFrames(setup.app)
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW }) } })
-    const greyed = await setup.frame((frame) => frame.includes("CPP unreachable · as of 14:02"))
+    const greyed = await setup.frame((frame) => frame.includes("CLIProxyPacer unreachable · as of 14:02"))
     expect(rowsOf(greyed)).toEqual(range(0, 6))
     expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
     // Back: a new request came meanwhile; the page is read again in 300 ms, and swapped in one frame.
@@ -646,7 +646,7 @@ describe("CPP going away and coming back", () => {
     await setup.frame((frame) => rowsOf(frame)[0] === time(-1))
     expect(setup.app.captureCharFrame()).not.toContain("CPP unreachable")
     expect(styleOf(setup.app, time(3))).toEqual({ fg: setup.theme.text.base.toInts(), dim: false })
-    const notice = (frame: string) => frame.includes("CPP unreachable · as of 14:02")
+    const notice = (frame: string) => frame.includes("CLIProxyPacer unreachable · as of 14:02")
     finished(recorder, [
       (frame) => list(range(0, 6))(frame) && !notice(frame),
       (frame) => list(range(0, 6))(frame) && notice(frame),
@@ -685,7 +685,7 @@ describe("empty and hidden", () => {
   test("unreachable with nothing held", async () => {
     await using setup = await requestsTab({ state: "unreachable" })
     setup.pacer.openRequests(CHAT)
-    const frame = await setup.frame((frame) => frame.includes("CPP unreachable · as of 14:02"))
+    const frame = await setup.frame((frame) => frame.includes("CLIProxyPacer unreachable · as of 14:02"))
     expect(rowsOf(frame)).toEqual([])
   })
 

@@ -391,7 +391,7 @@ describe("what changed (section 7)", () => {
       "changed  dropped    messages[2]  4.0K chars",
       "removed: messages[7]",
       "45 unchanged",
-      "CPP kept only fingerprints of some items",
+      "CLIProxyPacer kept only fingerprints of some items",
     ])
   })
 
@@ -413,7 +413,7 @@ describe("what changed (section 7)", () => {
     })
     // CPP records a web tool call so; were it to record another request so, the line doesn't call it one.
     expect(promptlessLines({ kind: "other" }).head.map((line) => line.text)).toEqual([
-      "CPP recorded this request without a request ID, so it keeps no prompt to compare",
+      "CLIProxyPacer recorded this request without a request ID, so it keeps no prompt to compare",
     ])
     expect(promptless(request(0).id)).toBe(false)
   })

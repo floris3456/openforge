@@ -14487,7 +14487,7 @@
             }
           }
         },
-        "description": "The state of the service's connection to CLIProxyPacer (not set up, unreachable, no pacer, or on), and when CPP last answered. Experimental: may change without compatibility guarantees.",
+        "description": "The state of the service's connection to CLIProxyPacer (not set up, unreachable, no pacer, or on), and when CLIProxyPacer last answered. Experimental: may change without compatibility guarantees.",
         "summary": "Get CLIProxyPacer status"
       }
     },
@@ -14543,7 +14543,7 @@
             }
           }
         },
-        "description": "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CPP. Experimental: may change without compatibility guarantees.",
+        "description": "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CLIProxyPacer. Experimental: may change without compatibility guarantees.",
         "summary": "List CLIProxyPacer accounts"
       }
     },
@@ -14608,7 +14608,7 @@
             }
           }
         },
-        "description": "How CPP sees the chat: its account, cache, pings, next use, forced move and switches. Answers the view held from the last read at once, and never waits on CPP. When that view may be out of date (after a step of the chat, a reconnect, CPP's notices) or none is held, and the pacer is on, one read starts in the background and `pacer.chat.updated` follows if the view changed. Null while none is held, and when CPP knows nothing of the chat. Experimental: may change without compatibility guarantees.",
+        "description": "How CLIProxyPacer sees the chat: its account, cache, pings, next use, forced move and switches. Answers the view held from the last read at once, and never waits on CPP. When that view may be out of date (after a step of the chat, a reconnect, CPP's notices) or none is held, and the pacer is on, one read starts in the background and `pacer.chat.updated` follows if the view changed. Null while none is held, and when CPP knows nothing of the chat. Experimental: may change without compatibility guarantees.",
         "summary": "Get a chat on CLIProxyPacer"
       },
       "patch": {
@@ -14800,7 +14800,7 @@
             }
           }
         },
-        "description": "One page of the requests CPP recorded for the chat and its subagents, newest first. Read from CPP; unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
+        "description": "One page of the requests CLIProxyPacer recorded for the chat and its subagents, newest first. Read from CLIProxyPacer; unavailable unless the pacer is on. Experimental: may change without compatibility guarantees.",
         "summary": "List a chat's CLIProxyPacer requests"
       }
     },
@@ -14835,7 +14835,7 @@
             }
           }
         },
-        "description": "Start reading CPP's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up. Experimental: may change without compatibility guarantees.",
+        "description": "Start reading CLIProxyPacer's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up. Experimental: may change without compatibility guarantees.",
         "summary": "Read CLIProxyPacer's models again"
       }
     },
@@ -14910,7 +14910,7 @@
             }
           }
         },
-        "description": "What changed in the prompt of one request (by its CPP request ID) against the request CPP compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt. Experimental: may change without compatibility guarantees.",
+        "description": "What changed in the prompt of one request (by its CLIProxyPacer request ID) against the request CLIProxyPacer compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt. Experimental: may change without compatibility guarantees.",
         "summary": "Get what changed in a request's prompt"
       }
     },

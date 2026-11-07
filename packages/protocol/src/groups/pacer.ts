@@ -38,7 +38,7 @@ export const PacerEndpoints = [
     annotations(
       "status",
       "Get CLIProxyPacer status",
-      "The state of the service's connection to CLIProxyPacer (not set up, unreachable, no pacer, or on), and when CPP last answered.",
+      "The state of the service's connection to CLIProxyPacer (not set up, unreachable, no pacer, or on), and when CLIProxyPacer last answered.",
     ),
   ),
   HttpApiEndpoint.get("pacer.accounts", "/api/experimental/pacer/accounts", {
@@ -47,7 +47,7 @@ export const PacerEndpoints = [
     annotations(
       "accounts",
       "List CLIProxyPacer accounts",
-      "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CPP.",
+      "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CLIProxyPacer.",
     ),
   ),
   HttpApiEndpoint.get("pacer.chat.get", "/api/experimental/pacer/chat/:sessionID", {
@@ -57,7 +57,7 @@ export const PacerEndpoints = [
     annotations(
       "chat.get",
       "Get a chat on CLIProxyPacer",
-      "How CPP sees the chat: its account, cache, pings, next use, forced move and switches. Answers the view held from the last read at once, and never waits on CPP. When that view may be out of date (after a step of the chat, a reconnect, CPP's notices) or none is held, and the pacer is on, one read starts in the background and `pacer.chat.updated` follows if the view changed. Null while none is held, and when CPP knows nothing of the chat.",
+      "How CLIProxyPacer sees the chat: its account, cache, pings, next use, forced move and switches. Answers the view held from the last read at once, and never waits on CPP. When that view may be out of date (after a step of the chat, a reconnect, CPP's notices) or none is held, and the pacer is on, one read starts in the background and `pacer.chat.updated` follows if the view changed. Null while none is held, and when CPP knows nothing of the chat.",
     ),
   ),
   HttpApiEndpoint.patch("pacer.chat.update", "/api/experimental/pacer/chat/:sessionID", {
@@ -81,7 +81,7 @@ export const PacerEndpoints = [
     annotations(
       "chat.requests",
       "List a chat's CLIProxyPacer requests",
-      "One page of the requests CPP recorded for the chat and its subagents, newest first. Read from CPP; unavailable unless the pacer is on.",
+      "One page of the requests CLIProxyPacer recorded for the chat and its subagents, newest first. Read from CLIProxyPacer; unavailable unless the pacer is on.",
     ),
   ),
   HttpApiEndpoint.post("pacer.refresh", "/api/experimental/pacer/refresh", {
@@ -90,7 +90,7 @@ export const PacerEndpoints = [
     annotations(
       "refresh",
       "Read CLIProxyPacer's models again",
-      "Start reading CPP's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up.",
+      "Start reading CLIProxyPacer's model list, capabilities and prices again in the background, and answer at once; while one such read runs, another call starts none. When the models changed, `model.updated` follows. Answers the same when no CPP is set up.",
     ),
   ),
   HttpApiEndpoint.get("pacer.prompt", "/api/experimental/pacer/prompt/:requestID", {
@@ -101,7 +101,7 @@ export const PacerEndpoints = [
     annotations(
       "prompt",
       "Get what changed in a request's prompt",
-      "What changed in the prompt of one request (by its CPP request ID) against the request CPP compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt.",
+      "What changed in the prompt of one request (by its CLIProxyPacer request ID) against the request CLIProxyPacer compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt.",
     ),
   ),
   HttpApiEndpoint.get("pacer.settings.get", "/api/experimental/pacer/settings", {

@@ -605,7 +605,7 @@ export const layer = Layer.effect(
       // Session.compact would commit a staged revert first.
       const info = yield* sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
       if (info?.revert) return "it has a staged revert"
-      if (info?.model && info.model.providerID !== provider) return "its model is no longer on CPP"
+      if (info?.model && info.model.providerID !== provider) return "its model is no longer on CLIProxyPacer"
       const [last] = yield* sessions
         .messages({ sessionID, type: "assistant", order: "desc", limit: 1 })
         .pipe(Effect.orElseSucceed(() => []))
@@ -613,7 +613,7 @@ export const layer = Layer.effect(
       const models: Model.Ref[] = []
       for (const model of [answered, info?.model])
         if (model && !models.some((pick) => sameModel(pick, model))) models.push(model)
-      return models.length > 0 ? models : "its last answer did not come through CPP"
+      return models.length > 0 ? models : "its last answer did not come through CLIProxyPacer"
     })
 
     const compact = Effect.fnUntraced(function* (chat: Chat) {
@@ -823,7 +823,7 @@ export const layer = Layer.effect(
       ),
     )
     const askAll = yield* trigger(
-      "the chats CPP asks to compact",
+      "the chats CLIProxyPacer asks to compact",
       Effect.gen(function* () {
         const listed = yield* readSessions
         const asked = new Set<Chat>()

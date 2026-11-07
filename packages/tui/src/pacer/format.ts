@@ -359,7 +359,7 @@ export function promptChangeLines(change: PacerPromptChange) {
   const tail = [
     change.removed.length ? `removed: ${change.removed.join(", ")}` : undefined,
     `${change.unchanged} unchanged`,
-    change.kept === "part" ? "CPP kept only fingerprints of some items" : undefined,
+    change.kept === "part" ? "CLIProxyPacer kept only fingerprints of some items" : undefined,
   ].filter((part): part is string => part !== undefined)
   return {
     head,
@@ -381,7 +381,7 @@ export function promptlessLines(request: Pick<PacerRequest, "kind"> | undefined)
   const text =
     request?.kind === "search"
       ? "A web tool call sends no prompt, so there is nothing to compare"
-      : "CPP recorded this request without a request ID, so it keeps no prompt to compare"
+      : "CLIProxyPacer recorded this request without a request ID, so it keeps no prompt to compare"
   return { head: [{ text, tone: "muted" as const }], items: [] }
 }
 

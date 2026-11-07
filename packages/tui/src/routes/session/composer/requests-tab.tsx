@@ -236,7 +236,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     const current = change()
     if (current === undefined) return undefined
     if (current === null)
-      return { head: [{ text: "CPP has no record of this request", tone: "muted" as const }], items: [] }
+      return { head: [{ text: "CLIProxyPacer has no record of this request", tone: "muted" as const }], items: [] }
     return promptChangeLines(current)
   })
   // The footer grows to at most half the window; the items scroll under the lines above them.
@@ -368,7 +368,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
               <Switch>
                 <Match when={asOf() !== undefined}>
                   <text fg={theme.text.muted} wrapMode="none" truncate>
-                    CPP unreachable · as of {clockTime(asOf()!)}
+                    CLIProxyPacer unreachable · as of {clockTime(asOf()!)}
                   </text>
                 </Match>
                 <Match when={page() && items().length === 0}>

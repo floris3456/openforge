@@ -13,13 +13,15 @@ import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
+import { PacerNotices } from "./notices.js"
 import { PacerSessionID } from "./session-id.js"
 import { PacerWire } from "./wire.js"
 
 // The service's one connection to CPP, which every TUI reads through the `pacer.*` routes of `server.experimental`.
 // It follows CPP's change stream, reads the accounts, the chats' views and their requests, sets the chats' switches,
-// tells CPP of the chats' events, and publishes the `pacer.*` events (`Pacer.Event`). Fields may be added; none may be
-// removed or renamed without the server's handler and the TUI.
+// tells CPP of the chats' events, and publishes the `pacer.*` events (`Pacer.Event`). The request rows it reads go to the
+// cache notices (`PacerNotices`). Fields may be added; none may be removed or renamed without the server's handler and
+// the TUI.
 //
 // What it costs: the session events of every chat reach it, and a chat CPP does not know costs one map lookup per
 // event. All of CPP's reads and writes run beside the chats, never in a step's path: a chat with work is put on one
@@ -244,6 +246,7 @@ export const layer = Layer.effect(
     const models = yield* PacerModels.Service
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
+    const notices = yield* PacerNotices.Service
 
     const link: Link = {
       endpoint: undefined,
@@ -661,6 +664,7 @@ export const layer = Layer.effect(
       if (chat.requests) {
         chat.requests = false
         yield* requestsUpdated(yield* lineage(chat.sessionID))
+        yield* notices.named(chat.uuid, chat.sessionID)
       }
       if (chat.ended) {
         chat.ended = false
@@ -784,6 +788,7 @@ export const layer = Layer.effect(
       yield* requestsUpdated(named)
       // More rows than one read takes: every TUI reads again.
       if (typeof answer.next === "string") yield* bus.publish(Pacer.Event.RequestsUpdated, {})
+      yield* notices.read(rows, (uuid) => byUuid.get(uuid), yield* context())
     })
 
     const readState = Effect.gen(function* () {
@@ -1378,7 +1383,7 @@ export const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, Session.node],
+  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, PacerNotices.node, Bus.node, Session.node],
 })
 
 /** At most `bytes` bytes of UTF-8, cut at a character. */

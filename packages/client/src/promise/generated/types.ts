@@ -503,6 +503,20 @@ export type SessionMessageCompactionRunning = {
   summary: string
 }
 
+export type PacerNotice = {
+  requestID: string
+  sessionID: SessionID
+  rootID: SessionID
+  title?: string
+  agent?: AgentID
+  model: string
+  verdict: "miss" | "partial"
+  tokens?: number
+  cause: string
+  missCost?: MoneyUSD
+  at: number
+}
+
 export type UsageLimitsBudgetModel = { providerID: ProviderID; modelID: string; name: string; spent?: MoneyUSD }
 
 export type FileSystemEntry = { path: RelativePath; type: "file" | "directory" }
@@ -2072,6 +2086,24 @@ export type PacerRequestsUpdated = {
   data: { sessionID?: SessionID }
 }
 
+export type PacerNoticeAdded = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.notice.added"
+  location?: LocationRef
+  data: { notice: PacerNotice }
+}
+
+export type PacerNoticeDismissed = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.notice.dismissed"
+  location?: LocationRef
+  data: { requestID: string }
+}
+
 export type SessionStatusUpdated = {
   id: EventID
   created: number
@@ -3122,6 +3154,8 @@ export type V2Event =
   | PacerAccountsUpdated
   | PacerChatUpdated
   | PacerRequestsUpdated
+  | PacerNoticeAdded
+  | PacerNoticeDismissed
   | SessionStatusUpdated
   | SessionIdle
   | TuiPromptAppend
@@ -4621,6 +4655,8 @@ export type EventSubscribeInput = {
         | "pacer.accounts.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"
+        | "pacer.notice.added"
+        | "pacer.notice.dismissed"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -4975,6 +5011,12 @@ export type ExperimentalPacerSettingsUpdateInput = {
 }
 
 export type ExperimentalPacerSettingsUpdateOutput = { data: PacerSettings }["data"]
+
+export type ExperimentalPacerNoticesListOutput = { data: Array<PacerNotice> }["data"]
+
+export type ExperimentalPacerNoticesDismissInput = { readonly requestID: string }
+
+export type ExperimentalPacerNoticesDismissOutput = { data: true }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

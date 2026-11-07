@@ -7,6 +7,7 @@ import type {
   PacerRequest,
   PacerWindow,
 } from "@opencode/client"
+import { Pacer } from "@opencode/schema/pacer"
 import { Locale } from "../util/locale"
 import { stringWidth } from "../util/string-width"
 
@@ -153,9 +154,8 @@ export function requestVerdict(request: PacerRequest) {
   if (request.failed) return `failed ${request.status}`
   if (request.verdict === undefined) return ""
   if (!request.miss) return request.verdict
-  return [request.verdict, request.cause, request.changedPart]
-    .filter((part): part is string => part !== undefined && part !== "")
-    .join(" · ")
+  // One wording with the cache notices, which the service builds.
+  return [request.verdict, Pacer.causeText(request)].filter((part) => part !== "").join(" · ")
 }
 
 /** How a row is drawn: misses as warnings, failures as errors. */

@@ -291,6 +291,9 @@ import type {
   ExperimentalPacerSettingsGetOutput,
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
+  ExperimentalPacerNoticesListOutput,
+  ExperimentalPacerNoticesDismissInput,
+  ExperimentalPacerNoticesDismissOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1873,6 +1876,23 @@ const EndpointExperimentalPacerSettingsUpdate =
       ),
     )
 
+const EndpointExperimentalPacerNoticesList = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerNoticesListOutput>()(
+    raw["pacer.notices.list"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalPacerNoticesDismiss =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerNoticesDismissInput) =>
+    preserveEffect<ExperimentalPacerNoticesDismissOutput>()(
+      raw["pacer.notices.dismiss"]({ params: { requestID: input["requestID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1923,6 +1943,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     refresh: EndpointExperimentalPacerRefresh(raw),
     prompt: EndpointExperimentalPacerPrompt(raw),
     settings: { get: EndpointExperimentalPacerSettingsGet(raw), update: EndpointExperimentalPacerSettingsUpdate(raw) },
+    notices: { list: EndpointExperimentalPacerNoticesList(raw), dismiss: EndpointExperimentalPacerNoticesDismiss(raw) },
   },
 })
 

@@ -293,6 +293,9 @@ import type {
   ExperimentalPacerSettingsGetOutput,
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
+  ExperimentalPacerNoticesListOutput,
+  ExperimentalPacerNoticesDismissInput,
+  ExperimentalPacerNoticesDismissOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1902,6 +1905,30 @@ export function make(options: ClientOptions) {
                 },
                 successStatus: 200,
                 declaredStatuses: [400, 401, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+        },
+        notices: {
+          list: (requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerNoticesListOutput }>(
+              {
+                method: "GET",
+                path: `/api/experimental/pacer/notices`,
+                successStatus: 200,
+                declaredStatuses: [400, 401],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+          dismiss: (input: ExperimentalPacerNoticesDismissInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerNoticesDismissOutput }>(
+              {
+                method: "POST",
+                path: `/api/experimental/pacer/notices/${encodeURIComponent(input.requestID)}/dismiss`,
+                successStatus: 200,
+                declaredStatuses: [400, 401],
                 empty: false,
               },
               requestOptions,

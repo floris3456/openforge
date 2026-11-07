@@ -2139,6 +2139,8 @@ export type EventSubscribeInput = {
         | "pacer.accounts.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"
+        | "pacer.notice.added"
+        | "pacer.notice.dismissed"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -2662,6 +2664,18 @@ export type ExperimentalPacerSettingsUpdateOperation<E = never> = (
   input?: ExperimentalPacerSettingsUpdateInput,
 ) => Effect.Effect<ExperimentalPacerSettingsUpdateOutput, E>
 
+export type ExperimentalPacerNoticesListOutput = ReadonlyArray<Pacer.Notice>
+export type ExperimentalPacerNoticesListOperation<E = never> = () => Effect.Effect<
+  ExperimentalPacerNoticesListOutput,
+  E
+>
+
+export type ExperimentalPacerNoticesDismissInput = { readonly requestID: string }
+export type ExperimentalPacerNoticesDismissOutput = true
+export type ExperimentalPacerNoticesDismissOperation<E = never> = (
+  input: ExperimentalPacerNoticesDismissInput,
+) => Effect.Effect<ExperimentalPacerNoticesDismissOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2714,6 +2728,10 @@ export interface ExperimentalApi<E = never> {
     readonly settings: {
       readonly get: ExperimentalPacerSettingsGetOperation<E>
       readonly update: ExperimentalPacerSettingsUpdateOperation<E>
+    }
+    readonly notices: {
+      readonly list: ExperimentalPacerNoticesListOperation<E>
+      readonly dismiss: ExperimentalPacerNoticesDismissOperation<E>
     }
   }
 }

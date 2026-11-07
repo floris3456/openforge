@@ -16,6 +16,7 @@ import { PacerConnection } from "@opencode/core/pacer/connection"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerNotices } from "@opencode/core/pacer/notices"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -380,6 +381,8 @@ interface Harness {
   /** A folder of its own, where the test's chats are. */
   readonly location: Location.Ref
   readonly connection: PacerConnection.Interface
+  /** The cache notices the connection gives its rows to. */
+  readonly notices: PacerNotices.Interface
   readonly bus: Bus.Interface
   readonly sessions: Session.Interface
   /** Queues input for the chat without running it. */
@@ -463,6 +466,11 @@ const harness = Effect.fnUntraced(function* () {
         return sessions.get(sessionID)
       }),
   })
+  // Over the store uncounted: its lookups are the notices', not the connection's.
+  const notices = yield* PacerNotices.make.pipe(
+    Effect.provideService(Bus.Service, bus),
+    Effect.provideService(Session.Service, sessions),
+  )
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
@@ -479,6 +487,7 @@ const harness = Effect.fnUntraced(function* () {
           ),
           Layer.succeed(Bus.Service, bus),
           Layer.succeed(Session.Service, counted),
+          Layer.succeed(PacerNotices.Service, notices),
         ),
       ),
     ),
@@ -487,6 +496,7 @@ const harness = Effect.fnUntraced(function* () {
     cpp,
     location: Location.Ref.make({ directory: AbsolutePath.make(folder.path) }),
     connection: Context.get(pacer, PacerConnection.Service),
+    notices,
     bus,
     sessions,
     enqueue: (sessionID: SessionID) =>
@@ -2235,5 +2245,167 @@ describe("PacerConnection reads", () => {
         ["row:1", second + 200],
       ])
     }),
+  )
+})
+
+describe("PacerConnection cache notices", () => {
+  // Spec cliproxypacer-cache-notices, section 1: the notices come from the rows read on CPP's `request` notices. Which
+  // rows count and how they are held is tested with the notices alone (notices.test.ts).
+
+  /** Every `pacer.notice.added` from now on, in order. */
+  const listen = Effect.fnUntraced(function* (h: Harness) {
+    const added: Pacer.Notice[] = []
+    yield* h.bus.subscribe([Pacer.Event.NoticeAdded]).pipe(
+      Stream.runForEach((event) => Effect.sync(() => void added.push(event.data.notice))),
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    return added
+  })
+
+  it.effect(
+    "raises a notice for each miss or partial reuse read on a request notice, a subagent's naming its top chat",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const added = yield* listen(h)
+        yield* online(h)
+        const parent = yield* chat(h)
+        const child = yield* chat(h, parent)
+        yield* step(h, parent)
+        yield* step(h, child)
+        yield* until("both held", () => h.lookups.count >= 2)
+        h.cpp.rows = [
+          // A hit and a ping's miss raise none.
+          row(1, { session_ext: PacerSessionID.make(parent) }),
+          row(2, { session_ext: PacerSessionID.make(parent), kind: 1, cache_verdict: "miss" }),
+          row(3, {
+            session_ext: PacerSessionID.make(child),
+            subagent: true,
+            cache_verdict: "miss",
+            cache_cause: "prefix",
+            changed_part: "system",
+            cache_shortfall: 152_000,
+          }),
+          row(4, {
+            session_ext: PacerSessionID.make(parent),
+            kind: 3,
+            cache_verdict: "partial",
+            cache_cause: "ttl",
+            cache_shortfall: 18_000,
+          }),
+        ]
+        h.cpp.notice("request", { keys: [1], at: 1 })
+        yield* until("noticed", () => added.length === 2)
+        yield* settle
+
+        // The read the connection makes anyway: none more.
+        expect(seen(h, "/pacer/v1/monitor/requests").map((item) => item.query.toString())).toEqual(["limit=50&from=0"])
+        expect(added.map((notice) => [notice.requestID, notice.sessionID, notice.rootID, notice.verdict])).toEqual([
+          ["req-3", child, parent, "miss"],
+          ["req-4", parent, parent, "partial"],
+        ])
+        // CPP's times on this clock, which CPP's `Date` (whole seconds) tells within a second; CPP's clock is this one.
+        const listed = yield* h.notices.list()
+        for (const notice of listed)
+          expect(Math.abs(notice.at - (1_000_000 + Number(notice.requestID.slice(4))))).toBeLessThan(1_000)
+        expect(listed.map((notice) => ({ ...notice, at: 0 }))).toEqual([
+          {
+            requestID: "req-4",
+            sessionID: parent,
+            rootID: parent,
+            model: "model-a",
+            verdict: "partial",
+            tokens: 18_000,
+            cause: "ttl",
+            at: 0,
+          },
+          {
+            requestID: "req-3",
+            sessionID: child,
+            rootID: parent,
+            model: "model-a",
+            verdict: "miss",
+            tokens: 152_000,
+            cause: "prefix · system",
+            at: 0,
+          },
+        ])
+      }),
+  )
+
+  it.effect("raises a notice for a row read after a reconnect, while it is within the lifetime", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const added = yield* listen(h)
+      yield* online(h)
+      const id = yield* chat(h)
+      yield* step(h, id)
+      yield* until("held", () => h.lookups.count >= 1)
+      const uuid = PacerSessionID.make(id)
+      h.cpp.rows = [row(1, { session_ext: uuid, at: h.cpp.time() })]
+      h.cpp.notice("request", { keys: [1], at: 1 })
+      yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+
+      // CPP goes away for three hours, recording a miss of the chat at the start and one a minute before it is back.
+      h.cpp.failure = { status: 503 }
+      h.cpp.end()
+      yield* ahead("unreachable", () => status(h).state === "unreachable")
+      h.cpp.rows = [...h.cpp.rows, row(2, { session_ext: uuid, cache_verdict: "miss", at: h.cpp.time() })]
+      yield* TestClock.adjust("3 hours")
+      h.cpp.rows = [...h.cpp.rows, row(3, { session_ext: uuid, cache_verdict: "miss", at: h.cpp.time() - 60_000 })]
+      h.cpp.failure = undefined
+      yield* ahead("on again", () => status(h).state === "on" && h.cpp.streams() === 1)
+
+      // The rows recorded meanwhile are read at the next request notice: the one within the lifetime raises its notice.
+      h.cpp.notice("request", { keys: [1], at: 2 })
+      yield* until("read again", () => seen(h, "/pacer/v1/monitor/requests").length === 2)
+      yield* until("noticed", () => added.length === 1)
+      yield* settle
+      expect(seen(h, "/pacer/v1/monitor/requests")[1].query.toString()).toBe("after=1&limit=500&from=0")
+      expect(added.map((notice) => notice.requestID)).toEqual(["req-3"])
+      expect((yield* h.notices.list()).map((notice) => notice.requestID)).toEqual(["req-3"])
+    }),
+  )
+
+  it.effect("raises the notice of a row CPP recorded before the chat's step was seen here, once it is", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const added = yield* listen(h)
+      yield* online(h)
+      const early = yield* chat(h)
+      h.cpp.rows = [row(1, { session_ext: PacerSessionID.make(early), cache_verdict: "miss" })]
+      h.cpp.notice("request", { keys: [1], at: 1 })
+      yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+      yield* settle
+      expect(added).toEqual([])
+
+      yield* step(h, early)
+      yield* until("noticed", () => added.length === 1)
+      expect(added.map((notice) => [notice.requestID, notice.sessionID])).toEqual([["req-1", early]])
+    }),
+  )
+
+  it.effect(
+    "raises none for rows CPP received before the service started, as the first read after a restart lists",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.adjust("5 hours")
+        const h = yield* harness()
+        const added = yield* listen(h)
+        yield* online(h)
+        const id = yield* chat(h)
+        yield* step(h, id)
+        yield* until("held", () => h.lookups.count >= 1)
+        const now = h.cpp.time()
+        h.cpp.rows = [
+          row(1, { session_ext: PacerSessionID.make(id), cache_verdict: "miss", at: now - 600_000 }),
+          row(2, { session_ext: PacerSessionID.make(id), cache_verdict: "miss", at: now + 1_000 }),
+        ]
+        h.cpp.notice("request", { keys: [1], at: 1 })
+        yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+        yield* until("noticed", () => added.length === 1)
+        yield* settle
+        expect(added.map((notice) => notice.requestID)).toEqual(["req-2"])
+      }),
   )
 })

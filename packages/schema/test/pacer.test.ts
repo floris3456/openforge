@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
+import { Agent } from "../src/agent.js"
 import { EventManifest } from "../src/event-manifest.js"
+import { Money } from "../src/money.js"
 import { Pacer } from "../src/pacer.js"
 import { SessionID } from "../src/session-id.js"
 
@@ -46,6 +48,8 @@ describe("pacer shapes", () => {
       "pacer.accounts.updated",
       "pacer.chat.updated",
       "pacer.requests.updated",
+      "pacer.notice.added",
+      "pacer.notice.dismissed",
     ])
     for (const definition of Pacer.Event.Definitions) {
       expect(EventManifest.ServerDefinitions).toContain(definition)
@@ -122,5 +126,55 @@ describe("pacer shapes", () => {
     expect(Pacer.Event.RequestsUpdated.data.make({})).toEqual({})
     const status: Pacer.Status = { state: "unreachable", since: 1, asOf: 0, message: "timed out", refused: false }
     expect(Pacer.Event.StatusChanged.data.make({ status })).toEqual({ status })
+  })
+
+  test("a cache notice encodes without its absent fields and decodes back; its event carries it", () => {
+    // Spec cliproxypacer-cache-notices, section 2.
+    const notice: Pacer.Notice = {
+      requestID: "req-1",
+      sessionID,
+      rootID: SessionID.make("ses_pacer_root"),
+      title: "a chat",
+      agent: Agent.ID.make("explore"),
+      model: "model-a",
+      verdict: "partial",
+      tokens: 18_000,
+      cause: "prefix · tools",
+      missCost: Money.USD.make(0.12),
+      at: 980_000,
+    }
+    expect(
+      Schema.decodeUnknownSync(Pacer.Notice)(JSON.parse(JSON.stringify(Schema.encodeSync(Pacer.Notice)(notice)))),
+    ).toEqual(notice)
+    const bare: Pacer.Notice = {
+      requestID: "req-2",
+      sessionID,
+      rootID: sessionID,
+      model: "model-a",
+      verdict: "miss",
+      cause: "unknown cause",
+      at: 1,
+    }
+    expect(Object.keys(Schema.encodeSync(Pacer.Notice)(bare)).toSorted()).toEqual([
+      "at",
+      "cause",
+      "model",
+      "requestID",
+      "rootID",
+      "sessionID",
+      "verdict",
+    ])
+    expect(() => Schema.decodeUnknownSync(Pacer.Notice)({ ...bare, verdict: "hit" })).toThrow()
+    expect(() => Schema.decodeUnknownSync(Pacer.Notice)({ ...bare, tokens: -1 })).toThrow()
+    expect(Pacer.Event.NoticeAdded.data.make({ notice })).toEqual({ notice })
+    expect(Pacer.Event.NoticeDismissed.data.make({ requestID: "req-1" })).toEqual({ requestID: "req-1" })
+  })
+
+  test("says a miss's cause as the Requests tab does: the cause and the part that changed, each when given", () => {
+    expect(Pacer.causeText({ cause: "prefix", changedPart: "tools" })).toBe("prefix · tools")
+    expect(Pacer.causeText({ cause: "provider" })).toBe("provider")
+    expect(Pacer.causeText({ changedPart: "system" })).toBe("system")
+    expect(Pacer.causeText({ cause: "", changedPart: "" })).toBe("")
+    expect(Pacer.causeText({})).toBe("")
   })
 })

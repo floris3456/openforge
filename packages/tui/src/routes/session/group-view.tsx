@@ -11,6 +11,7 @@ import { groupID } from "./anchors"
 import { instructionPaths, type PartRef, type SessionEntry, type SessionGroup, type SessionNode } from "./grouping/session"
 import { summarizeActivity } from "./activity-summary"
 import { InlineToolRow, reasoningContent, toolDisplay } from "./message-parts"
+import { webTool } from "../../pacer/web-tools"
 import { use } from "./render-context"
 import { resolvePart } from "./rows"
 import { generateThinkingSyntax } from "./thinking-syntax"
@@ -116,7 +117,11 @@ function GroupContent(props: GroupProps) {
     const counts = tools().reduce<Record<string, number>>((result, part) => {
       const tool = toolDisplay(part.name)
       const name =
-        tool === "grep" || tool === "glob" || tool === "websearch" ? "search" : tool === "webfetch" ? "fetch" : tool
+        tool === "grep" || tool === "glob" || tool === "websearch"
+          ? "search"
+          : tool === "webfetch"
+            ? "fetch"
+            : (webTool(tool)?.kind ?? tool)
       result[name] = (result[name] ?? 0) + 1
       return result
     }, {})

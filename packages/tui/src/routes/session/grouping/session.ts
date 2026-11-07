@@ -1,5 +1,6 @@
 import type { SessionMessageAssistant, SessionMessageInfo } from "@opencode/client"
 import { groupEntries, mergeGroups, splitGroups, type GroupNode } from "./tree"
+import { WEB_TOOLS } from "../../../pacer/web-tools"
 
 export type PartRef = {
   messageID: string
@@ -75,7 +76,7 @@ function unwrap(node: GroupNode<ProjectionEntry, GroupKind>): GroupNode<SessionE
   return { ...node, children: node.children.map(unwrap) }
 }
 
-const explorationTools = new Set(["read", "glob", "grep", "webfetch", "websearch"])
+const explorationTools = new Set(["read", "glob", "grep", "webfetch", "websearch", ...WEB_TOOLS])
 
 /**
  * Grouping path for an assistant part. Adjacent thoughts group, as do reads, searches

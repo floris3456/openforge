@@ -15,6 +15,7 @@ import { Locale } from "../../util/locale"
 import { use } from "./render-context"
 import { generateThinkingSyntax } from "./thinking-syntax"
 import { canonicalToolName } from "../../util/tool-display"
+import { WEB_TOOLS } from "../../pacer/web-tools"
 
 export const INLINE_TOOL_ICON_WIDTH = 2
 
@@ -33,6 +34,7 @@ const toolDisplays = new Set([
   "todowrite",
   "question",
   "skill",
+  ...WEB_TOOLS,
 ])
 
 export function toolDisplay(tool: string) {

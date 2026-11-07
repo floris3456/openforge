@@ -28,6 +28,7 @@ import {
 import { formatPath } from "../util/path-format"
 import { isRecord } from "../util/record"
 import { parseTodos, todoMarker } from "../util/todo"
+import { webTool, webToolTitle } from "../pacer/web-tools"
 import type { RunEntryBody, StreamCommit, ToolSnapshot } from "./types"
 
 export { canonicalToolName } from "../util/tool-display"
@@ -127,6 +128,10 @@ type ToolName =
   | "lsp"
   | "webfetch"
   | "websearch"
+  | "web_search"
+  | "web_research"
+  | "web_extract"
+  | "web_crawl"
   | "skill"
 
 type ToolRule = {
@@ -422,6 +427,13 @@ function runWebSearch(p: ToolProps): ToolInline {
   return {
     icon: "◈",
     title: p.input.query ? `${title} "${p.input.query}"` : title,
+  }
+}
+
+function runWebTool(p: ToolProps): ToolInline {
+  return {
+    icon: webTool(p.frame.name)?.icon ?? "⚙",
+    title: webToolTitle(p.frame.name, p.input, p.metadata),
   }
 }
 
@@ -911,6 +923,23 @@ function scrollWebSearchStart(p: ToolProps): string {
   return `◈ ${title} "${query}"`
 }
 
+function scrollWebToolStart(p: ToolProps): string {
+  const tool = runWebTool(p)
+  return `${tool.icon} ${tool.title}`
+}
+
+// CLIProxyPacer's web tools (spec cliproxypacer-step-2, section 4), as websearch and webfetch.
+const webToolRule = {
+  view: {
+    output: false,
+    final: false,
+  },
+  run: runWebTool,
+  scroll: {
+    start: scrollWebToolStart,
+  },
+}
+
 const TOOL_RULES = {
   invalid: {
     view: {
@@ -1090,6 +1119,10 @@ const TOOL_RULES = {
       start: scrollWebSearchStart,
     },
   },
+  web_search: webToolRule,
+  web_research: webToolRule,
+  web_extract: webToolRule,
+  web_crawl: webToolRule,
   skill: {
     view: {
       output: false,

@@ -308,6 +308,26 @@ describe("the list", () => {
     expect(frame).toContain("claude-sonnet-4-5-20250929  claude-apikey-2")
   })
 
+  test("a call of CPP's web tools is a row of the chat, as search (spec cliproxypacer-step-2, section 4)", async () => {
+    const search = request(0, {
+      kind: "search",
+      model: "web_search",
+      provider: "exa",
+      account: "exa-1",
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: 0.005 as PacerRequest["cost"],
+      verdict: undefined,
+    })
+    await using setup = await requestsTab({
+      requests: [search, ...Array.from({ length: 5 }, (_, index) => request(index + 1))],
+      width: 100,
+    })
+    await clickCacheItem(setup)
+    const frame = await setup.frame((frame) => rowsOf(frame).length === 5)
+    const row = frame.split("\n").find((line) => line.includes(time(0)))!
+    expect(row).toMatch(new RegExp(`${time(0)} {2}search +web_search +exa-1 +0/0 +\\$0\\.005`))
+  })
+
   test("watched from the newest row, new requests come in under the cursor on the top line, past the six rows", async () => {
     // Found live: a cursor left on the newest row was pushed down by each new request until the view followed it
     // off the top, and the newest requests stopped showing.

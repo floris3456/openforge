@@ -182,8 +182,9 @@ function Notices(props: { pacer: Pacer }) {
         </For>
         <Show when={noticesMore(visible().length, shown())}>
           {(more) => (
-            <text fg={theme.text.muted} wrapMode="none">
-              {more()}
+            // On the cards' background, a space either side: a text's own spaces let what is beneath show through.
+            <text fg={theme.text.muted} bg={theme.background.raised.high} wrapMode="none">
+              {` ${more()} `}
             </text>
           )}
         </Show>

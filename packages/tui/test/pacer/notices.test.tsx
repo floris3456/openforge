@@ -204,6 +204,28 @@ describe("the cards (section 3)", () => {
     expect(frame).toContain("+2 more cache notices")
   })
 
+  test("over a chat's text, the cards and the line under them read whole", async () => {
+    // Found in the frames of tui-1: the line's spaces let the transcript through ("+2tmoreacache…").
+    const fake = pacerFake()
+    fake.status = status("on")
+    fake.notices = Array.from({ length: 6 }, (_, index) => notice(index))
+    await using setup = await renderPacer({
+      fake,
+      width: 120,
+      height: 40,
+      content: () => (
+        <box width="100%" height="100%">
+          <text>{"Text of the chat beneath. ".repeat(160)}</text>
+          <PacerNotices />
+        </box>
+      ),
+    })
+    const frame = await setup.frame((frame) => frame.includes("Fix the flaky test"))
+    expect(frame).toContain("+2 more cache notices")
+    expect(frame).toContain("┃ Cache miss · 152K tokens not reused              just now ×  ┃")
+    expect(frame).toContain("┃ Fix the flaky test · build · claude-opus-4-5                 ┃")
+  })
+
   test("a short terminal shows fewer cards", async () => {
     for (const [height, shown] of [
       [16, 2],

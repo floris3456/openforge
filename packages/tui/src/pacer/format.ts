@@ -6,6 +6,7 @@ import type {
   PacerPromptItem,
   PacerRequest,
   PacerWindow,
+  SessionMessageCompactionWriter,
 } from "@opencode/client"
 import { Locale } from "../util/locale"
 import { stringWidth } from "../util/string-width"
@@ -91,6 +92,50 @@ export function cacheLabel(chat: PacerChat, now: number): CacheLabel {
   if (chat.pings.failed) return { text: "keep-alive stopped · warm ", tone: "warning", until }
   if (!chat.switches.warming) return { text: "warming off · warm ", tone: "muted", until }
   return { text: "warm ", tone: "muted", until }
+}
+
+/**
+ * The compaction divider's words for a summary whose writer is known (spec cliproxypacer-server-summaries, section 3),
+ * at most `width` cells: `Compaction · by CLIProxyPacer on <model> · cold · 12 of your messages kept · <usage>`, or
+ * `Compaction · by openforge · CLIProxyPacer couldn't: <reason> · <usage>`, each part only when known. When it doesn't
+ * fit, the optional parts go in this order: the usage, the messages kept, the model, `cold`. The reason, the only free
+ * text, is cut first and goes once not one character of it fits. What is left of the head is cut last.
+ */
+export function compactionLine(
+  compaction: { writer: SessionMessageCompactionWriter; model?: string; usage?: string },
+  width: number,
+) {
+  const writer = compaction.writer
+  const head = `Compaction · by ${writer.by === "cliproxypacer" ? "CLIProxyPacer" : "openforge"}`
+  const fallback = writer.fallback?.replace(/\s+/g, " ").trim()
+  // In the order they show, each with its rank: the lowest goes first.
+  const known: { text: string | false | undefined; rank: number; cut?: boolean }[] =
+    writer.by === "cliproxypacer"
+      ? [
+          { text: compaction.model && ` on ${compaction.model}`, rank: 2 },
+          { text: writer.cold && " · cold", rank: 3 },
+          { text: writer.userMessages !== undefined && ` · ${writer.userMessages} of your messages kept`, rank: 1 },
+          { text: compaction.usage && ` · ${compaction.usage}`, rank: 0 },
+        ]
+      : [
+          { text: fallback && ` · CLIProxyPacer couldn't: ${fallback}`, rank: 1, cut: true },
+          { text: compaction.usage && ` · ${compaction.usage}`, rank: 0 },
+        ]
+  const parts = known.flatMap((part) =>
+    part.text ? [{ text: part.text, rank: part.rank, cut: part.cut === true }] : [],
+  )
+  const line = () => head + parts.map((part) => part.text).join("")
+  while (parts.length > 0 && stringWidth(line()) > width) {
+    const lowest = parts.reduce((low, part) => (part.rank < low.rank ? part : low))
+    const room = width - (stringWidth(line()) - stringWidth(lowest.text))
+    const prefix = " · CLIProxyPacer couldn't: "
+    if (lowest.cut && room - stringWidth(prefix) >= 2) {
+      lowest.text = prefix + Locale.truncateWidth(fallback!, room - stringWidth(prefix))
+      break
+    }
+    parts.splice(parts.indexOf(lowest), 1)
+  }
+  return Locale.truncateWidth(line(), width)
 }
 
 /** The cache item as one string, with its countdown unpadded. */

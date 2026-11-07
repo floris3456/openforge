@@ -76,6 +76,7 @@ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
 import { UsageLimitNotice, useLimitNotice, useUsageAlerts } from "../../component/usage"
 import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
+import { compactionLine } from "../../pacer/format"
 import { usePacerSession } from "../../pacer/jump"
 import { webTool, webToolJobRunning, webToolProvider, webToolSubject } from "../../pacer/web-tools"
 import { filetype } from "../../util/filetype"
@@ -2192,6 +2193,13 @@ function CompactionMessage(props: { message: Extract<SessionMessageInfo, { type:
     if (input + output <= 0) return
     return `${Locale.number(input)} in · ${Locale.number(output)} out`
   }
+  // A summary whose writer is known names it, on one line with two cells of rule on each side (spec
+  // cliproxypacer-server-summaries, section 3); the usage is then one of its parts.
+  const written = () => {
+    const message = props.message
+    if (message.status !== "completed" || !message.writer) return
+    return compactionLine({ writer: message.writer, model: message.model?.id, usage: usage() }, ctx.width - 6)
+  }
   return (
     <box>
       <box flexDirection="row" alignItems="center">
@@ -2207,15 +2215,16 @@ function CompactionMessage(props: { message: Extract<SessionMessageInfo, { type:
               <text fg={color()}>✗</text>
             </Match>
           </Switch>
-          <text fg={color()}>
-            {props.message.status === "completed" && props.message.native?.messages
-              ? "Provider compaction"
-              : "Compaction"}
+          <text fg={color()} wrapMode={written() ? "none" : undefined}>
+            {written() ??
+              (props.message.status === "completed" && props.message.native?.messages
+                ? "Provider compaction"
+                : "Compaction")}
           </text>
           <Show when={cancelled()}>
             <text fg={color()}>· cancelled</text>
           </Show>
-          <Show when={usage()}>
+          <Show when={!written() && usage()}>
             <text fg={color()}>· {usage()}</text>
           </Show>
         </box>

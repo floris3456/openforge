@@ -884,13 +884,21 @@ describe("PacerConnection states", () => {
     Effect.gen(function* () {
       const h = yield* harness()
       yield* online(h)
+      // `online` sees the stream open at CPP, maybe before the connection read its first bytes. The silence counts from
+      // the last bytes the connection read, so the clock moves on only once it read them: a notice, whose catalog read
+      // says so.
+      yield* TestClock.adjust("1 second")
+      const refreshes = h.refreshes.count
+      h.cpp.notice("capabilities", { at: 1 })
+      yield* until("the notice read", () => h.refreshes.count === refreshes + 1)
       for (let second = 0; second < 59; second++) yield* TestClock.adjust("1 second")
       yield* settle
       expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
+      expect(h.cpp.streams()).toBe(1)
+      // Silent 60 s: the connection hangs up, and connects again after its wait.
       yield* TestClock.adjust("1 second")
-      yield* settle
-      yield* TestClock.adjust("1 second")
-      yield* until("a second stream", () => seen(h, "/pacer/v1/stream").length === 2)
+      yield* until("the silent stream closed", () => h.cpp.streams() === 0)
+      yield* ahead("a second stream", () => seen(h, "/pacer/v1/stream").length === 2)
     }),
   )
 

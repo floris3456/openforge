@@ -119,6 +119,13 @@ export type SessionStructuredError = {
   retryAfterMs?: number
 }
 
+export type SessionMessageCompactionWriter = {
+  by: "cliproxypacer" | "openforge"
+  cold?: boolean
+  userMessages?: number
+  fallback?: string
+}
+
 export type SessionGenerateResponse = { data: { text: string } }
 
 export type SessionInterruptResponse = { interrupted: boolean }
@@ -386,7 +393,7 @@ export type PacerPromptItem = {
   error: boolean
 }
 
-export type PacerSettings = { compactColdFirst: boolean; compactBeforeCold: boolean }
+export type PacerSummaryWriter = "cliproxypacer" | "openforge"
 
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
@@ -1038,6 +1045,13 @@ export type PacerRequest = {
   missCost?: MoneyUSD
 }
 
+export type PacerSettings = {
+  compactColdFirst: boolean
+  compactBeforeCold: boolean
+  summaryWriter?: PacerSummaryWriter
+  keepUserMessages?: boolean
+}
+
 export type VcsInfo = { provider?: string; branch: VcsBranch }
 
 export type WebSearchProvider = { id: WebSearchID; name: string }
@@ -1107,6 +1121,7 @@ export type SessionMessageCompactionCompleted = {
   model?: ModelRef
   native?: SessionMessageNative
   summary: string
+  writer?: SessionMessageCompactionWriter
   cost?: MoneyUSD
   tokens?: TokenUsageInfo
 }
@@ -4972,6 +4987,8 @@ export type ExperimentalPacerSettingsGetOutput = { data: PacerSettings }["data"]
 export type ExperimentalPacerSettingsUpdateInput = {
   readonly compactColdFirst?: boolean | undefined
   readonly compactBeforeCold?: boolean | undefined
+  readonly summaryWriter?: ("cliproxypacer" | "openforge") | undefined
+  readonly keepUserMessages?: boolean | undefined
 }
 
 export type ExperimentalPacerSettingsUpdateOutput = { data: PacerSettings }["data"]

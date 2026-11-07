@@ -364,9 +364,12 @@ The viewer shows recent output and stays open after exit; output redirected to a
 | `pacer.warming.toggle`             | `<leader>k`              | Switch cache warming for this chat            |
 | `pacer.compact_before_cold.toggle` | `<leader>j`              | Switch compact before cold for this chat      |
 | `pacer.compact_cold_first.toggle`  | `<leader>f`              | Switch compact cold chats first for this chat |
+| `pacer.notice.open`                | `<leader>o`              | Open the newest cache notice                  |
+| `pacer.notices.dismiss`            | `none`                   | Dismiss cache notices                         |
 
 The request keys work in the composer's **Requests** tab, which a chat that used CLIProxyPacer has. The three switches, and their entries in the command palette, exist only while the chat's model is served through CLIProxyPacer.
 In the **Requests** tab, **Ctrl+A** shows only cache misses, **Page Up/Down** move a page, and **Esc** returns from what changed to the list.
+`<leader>o` works while a [cache notice](/cli/cliproxypacer#cache-notices) shows and no dialog is open. **Dismiss cache notices** is in the command palette while one shows; bind `pacer.notices.dismiss` to give it a key.
 
 ## Dialogs and autocomplete
 

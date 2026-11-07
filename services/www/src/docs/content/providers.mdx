@@ -58,10 +58,10 @@ enabled.
 
 ## CLIProxyPacer
 
-CLIProxyPacer (CPP) is a proxy in front of your model accounts. It paces chats across the accounts, keeps their prompt
-caches warm with pings, and asks for a compaction before it moves a chat to another account. It is built in as the
-provider **CLIProxyPacer**, with the ID `cliproxypacer`. Connect it with CPP's address and a client key you made for
-openforge in CPP.
+CLIProxyPacer is a proxy in front of your model accounts. It paces chats across the accounts, keeps their prompt caches
+warm with pings, asks for a compaction before it moves a chat to another account, and writes the chats' summaries. It is
+built in as the provider **CLIProxyPacer**, with the ID `cliproxypacer`. Connect it with CLIProxyPacer's address and a
+client key you made for openforge in CLIProxyPacer.
 
 ```text
 /connect
@@ -76,8 +76,8 @@ openforge auth login cliproxypacer
 ```
 
 The key is saved as a provider account in the server's database, like any API key (see
-[Provider accounts](/cli/providers#storage)). It is sent only to CPP's address, as a bearer token, and never to where a
-redirect to another address points.
+[Provider accounts](/cli/providers#storage)). It is sent only to CLIProxyPacer's address, as a bearer token, and never
+to where a redirect to another address points.
 
 ### Address
 
@@ -95,16 +95,17 @@ To skip the address question, set it in your global config; `/connect` then asks
 }
 ```
 
-- Only the global config counts, never a project's: the background service keeps one connection to CPP for every
-  project.
+- Only the global config counts, never a project's: the background service keeps one connection to CLIProxyPacer for
+  every project.
 - An address in config wins over the one `/connect` saved.
 - `settings.apiKey` works as a fallback when no account is saved, but then the key sits in a file; prefer `/connect`.
 
-### CPP's models
+### CLIProxyPacer's models
 
-The models are CPP's own list (`/v1/models`), as `cliproxypacer/<model>`. Their context and output limits come from
-CPP's capabilities, and their prices from CPP, so the cost openforge shows is what CPP counts. A model CPP has no price
-for shows no price in the model picker, not "Free", and its steps cost nothing unless CPP's answer says what they cost.
+The models are CLIProxyPacer's own list (`/v1/models`), as `cliproxypacer/<model>`. Their context and output limits
+come from CLIProxyPacer's capabilities, and their prices from CLIProxyPacer, so the cost openforge shows is what
+CLIProxyPacer counts. A model CLIProxyPacer has no price for shows no price in the model picker, not "Free", and its
+steps cost nothing unless CLIProxyPacer's answer says what they cost.
 
 ```text
 /models
@@ -113,12 +114,95 @@ for shows no price in the model picker, not "Free", and its steps cost nothing u
 
 - Claude models speak Anthropic Messages (`/v1/messages`); every other model speaks OpenAI Responses (`/v1/responses`).
 - Both go over HTTP, never a WebSocket.
-- The list is read when the service connects and when CPP announces a change. Opening the model picker reads CPP's model
-  list again.
+- The list is read when the service connects and when CLIProxyPacer announces a change. Opening the model picker reads
+  CLIProxyPacer's model list again.
+
+### Compaction asks
+
+CLIProxyPacer can ask openforge to compact a chat, so that its next steps start from a short summary instead of the
+whole history. It asks only while its setting for the ask is on, and both are off unless your CLIProxyPacer's server
+turns them on.
+
+| Ask | CLIProxyPacer asks | The summary is written on |
+| --- | --- | --- |
+| Compact cold chats first | before the next step of a chat whose prompt cache went cold and that is large, once per cold spell: that step would pay for the whole history again | the first of CLIProxyPacer's cheap models for summaries that the chat can use |
+| Compact before cold | while the chat is idle, before its prompt cache goes cold | the chat's own model, whose cache is still warm |
+
+Large means at least CLIProxyPacer's `warming.fresh_tokens`, 70,000 tokens unless it is set otherwise. Switch each ask
+for all your chats in **Settings**, under CLIProxyPacer, or for one chat with its key; a chat's own switch wins:
+
+```text
+Settings › CLIProxyPacer › Compact cold chats first   on
+<leader>f   Compact cold chats first for this chat
+<leader>j   Compact before cold for this chat
+```
+
+See [Settings](/cli/cliproxypacer#settings) and [Switches](/cli/cliproxypacer#switches) in the TUI. openforge doesn't
+change either setting by itself.
+
+- openforge answers the cold ask only while [automatic compaction](/compaction) is on. With `compaction.auto` off,
+  CLIProxyPacer doesn't ask.
+- When the chat can use none of CLIProxyPacer's models for it, or has no finished reply yet, openforge doesn't compact:
+  it sends the step again, and CLIProxyPacer lets it through, cold.
+- A summary that fails still sends the step again.
+- For compact before cold, openforge leaves the chat alone while a step runs, a prompt is queued or a revert is staged,
+  and when its model is no longer on CLIProxyPacer.
+- Either compaction shows in the chat as an automatic one does, its divider naming who wrote it
+  ([Summaries](/cli/cliproxypacer#summaries)). The toolbar says `cache cold · compacts first` for a cold chat that is
+  large enough, while its switch is on.
+
+### Summaries
+
+When a chat on CLIProxyPacer compacts, CLIProxyPacer writes the summary by default, with its own summary prompt.
+openforge keeps it as its own summary, so the chat goes on the same way on any model and provider.
+
+```text
+Compaction · by CLIProxyPacer on gemini-3.8-flash-high · cold · 20,182 in · 214 out
+```
+
+- This covers every compaction of a chat whose model is CLIProxyPacer's: automatic, on overflow, `/compact`, and the
+  ones CLIProxyPacer asks for.
+- The model is one of CLIProxyPacer's picks for a move or a cold ask, else the chat's own; `agents.compaction.model`
+  doesn't apply then. CLIProxyPacer may write a cold chat's summary on a cheaper model; the divider then names that
+  model and says `cold`.
+- The recent conversation openforge keeps word for word (`compaction.keep.tokens`) stays after the summary;
+  CLIProxyPacer summarizes what comes before it.
+
+Two rows in **Settings**, under CLIProxyPacer, are CLIProxyPacer's settings for all your chats:
+
+| Row | Choices | Does |
+| --- | --- | --- |
+| Summaries written by | CLIProxyPacer (default), openforge | Who writes a chat's summary. With openforge, it is written as on any other provider ([Compaction](/compaction)). |
+| Keep my messages in summaries | off (default), on | Whether CLIProxyPacer adds your own earlier messages, word for word, after its summary. |
+
+openforge writes the summary itself in these cases, and the divider says why when CLIProxyPacer was meant to write it:
+
+| When | The divider says |
+| --- | --- |
+| **Summaries written by** is openforge | `Compaction · by openforge` |
+| for now, a Claude chat whose prompt cache is warm (below) | `Compaction · by openforge` |
+| CLIProxyPacer doesn't write summaries for the model, as when it passes that model's compactions on to its provider: a Codex API key, xAI or an OpenAI-compatible upstream | `… CLIProxyPacer couldn't: it writes no summaries on this model's route` |
+| CLIProxyPacer refused, failed, or answered without a summary | `… CLIProxyPacer couldn't: it answered 501`, `it failed` or `no readable summary` |
+| no answer within 4 minutes | `… CLIProxyPacer couldn't: no answer in 4 minutes` |
+| CLIProxyPacer couldn't be reached, or openforge couldn't set the chat's own writer (below) | `… CLIProxyPacer couldn't: it could not be reached` or `the chat's writer could not be set` |
+
+**Claude chats, for now.** Claude models talk Messages to CLIProxyPacer, and CLIProxyPacer's summary of such a chat
+doesn't reuse the conversation's prompt cache, so a warm chat's summary would pay for the whole conversation again.
+Until CLIProxyPacer's summaries keep that cache, a Claude chat gets openforge's own summary while its cache is warm, and
+CLIProxyPacer's once it is cold. A cold ask counts as cold, and so does a move whose summary CLIProxyPacer wants on
+another model. This rule may change.
+
+- Before CLIProxyPacer's first summary of a chat, openforge sets that chat's own writer to CLIProxyPacer, unless one is
+  set for your key or the server. A chat's own setting wins over Settings, so switching **Summaries written by** to
+  openforge later doesn't reach those chats.
+- [Background compaction](/compaction#background-compaction) isn't used when CLIProxyPacer writes.
+- A summary is a request of the chat at CLIProxyPacer, with its cost: a `compaction` row of its
+  [**Requests** tab](/cli/cliproxypacer#requests-tab).
 
 ### Web tools
 
-When CPP has web tools, every chat gets them while CPP is set up: chats on any provider's model, and subagents.
+When CLIProxyPacer has web tools, every chat gets them while CLIProxyPacer is set up: chats on any provider's model, and
+subagents.
 
 | Tool           | Does                                      | Asks as                        |
 | -------------- | ----------------------------------------- | ------------------------------ |
@@ -127,15 +211,15 @@ When CPP has web tools, every chat gets them while CPP is set up: chats on any p
 | `web_extract`  | reads pages                               | `webfetch`, with the URLs      |
 | `web_crawl`    | reads a site, starting from one URL       | `webfetch`, with the URL       |
 
-- Which tools a chat gets, and their parameters, depend on the web services CPP has keys for, and CPP picks the service
-  for each call. With only a Codex login, that is `web_search` alone.
-- A chat that gets CPP's `web_search` doesn't get the built-in [web search](/websearch); `webfetch` stays.
-- Each chat keeps its own copy of the tools, which CPP changes only where the chat's prompt cache is lost anyway. A key
-  added to CPP shows in new chats, and in a running chat once it is compacted or changes model.
+- Which tools a chat gets, and their parameters, depend on the web services CLIProxyPacer has keys for, and
+  CLIProxyPacer picks the service for each call. With only a Codex login, that is `web_search` alone.
+- A chat that gets CLIProxyPacer's `web_search` doesn't get the built-in [web search](/websearch); `webfetch` stays.
+- Each chat keeps its own copy of the tools, which CLIProxyPacer changes only where the chat's prompt cache is lost
+  anyway. A key added to CLIProxyPacer shows in new chats, and in a running chat once it is compacted or changes model.
 - A research or a crawl can take longer than one call's 50 seconds. The call then says that its job still runs, and the
-  model calls the tool again with the job's ID. A finished job's answer stays at CPP for 48 hours.
-- A call CPP can't serve, or whose arguments it refuses, is a failed tool call, and the model reads why.
-- Each call is a request of the chat at CPP, with its cost, and a `search` row of its
+  model calls the tool again with the job's ID. A finished job's answer stays at CLIProxyPacer for 48 hours.
+- A call CLIProxyPacer can't serve, or whose arguments it refuses, is a failed tool call, and the model reads why.
+- Each call is a request of the chat at CLIProxyPacer, with its cost, and a `search` row of its
   [**Requests** tab](/cli/cliproxypacer#requests-tab).
 
 To turn them off, deny their permissions, for every agent or for one (see [Permissions](/permissions)). Denying
@@ -156,21 +240,23 @@ built-in web search only.
 ### Without the pacer
 
 Pointed at a proxy without the pacer, such as a plain CLIProxyAPI, the provider still lists that proxy's models and
-chats normally. The extras have nothing to show: the toolbar shows no cache timer, the sidebar's Account section says
-"no pacer", and the **Requests** tab says the proxy keeps no request records. Models get the limits the proxy's list
-gives, if any, and no price.
+chats normally, and openforge writes their summaries. The extras have nothing to show: the toolbar shows no cache timer,
+the sidebar's Account section says "no pacer", the **Requests** tab says the proxy keeps no request records, and no
+cache notice or Settings section shows. Models get the limits the proxy's list gives, if any, and no price.
 
-### What openforge does on CPP's answers
+### What openforge does on CLIProxyPacer's answers
 
-| CPP answers | openforge does |
+| CLIProxyPacer answers | openforge does |
 | --- | --- |
-| `409`, asking to compact before a move | Writes a summary of the chat with the first model CPP suggests that the chat can use, else the chat's own model, then sends the step again. A chat with nothing to summarize yet is sent again at once. After three asks in one step, the error shows. CPP asks only while [automatic compaction](/compaction) is on. |
-| `429`, or a `503` other than "CPP is down", with `Retry-After` | Waits at least that long, with the usual retry countdown, and tries again, up to 10 times. |
-| `502` | The first in a row is tried again after about 2 seconds: CPP sends it when one instance of a pair could not reach the other, and the next request usually reaches the one that serves. A second in a row waits CPP's `Retry-After`. |
-| no answer: a refused connection, a `502` or `504`, or a `503` "CPP is down" | Keeps trying, every 10 seconds or after CPP's `Retry-After`, for up to 30 minutes from the first failure, also across a restart of the service. Then the error shows. |
+| `409`, asking to compact before a move | Compacts the chat on the first model CLIProxyPacer suggests that the chat can use, else on the chat's own model, then sends the step again; who writes the summary is under [Summaries](#summaries). A chat with nothing to summarize yet is sent again at once. After three asks in one step, moves and cold asks together, the error shows. CLIProxyPacer asks only while [automatic compaction](/compaction) is on. |
+| `409`, asking to compact a cold chat first | Compacts the chat on the first of CLIProxyPacer's models for it that the chat can use, then sends the step again. With none it can use, or nothing to summarize yet, it sends the step again at once, without a summary. Counts toward the same three asks per step. See [Compaction asks](#compaction-asks). |
+| `429`, or a `503` other than one that says CLIProxyPacer is down, with `Retry-After` | Waits at least that long, with the usual retry countdown, and tries again, up to 10 times. |
+| `502` | The first in a row is tried again after about 2 seconds: CLIProxyPacer sends it when one instance of a pair could not reach the other, and the next request usually reaches the one that serves. A second in a row waits CLIProxyPacer's `Retry-After`. |
+| no answer: a refused connection, a `502` or `504`, or a `503` that says CLIProxyPacer is down | Keeps trying, every 10 seconds or after CLIProxyPacer's `Retry-After`, for up to 30 minutes from the first failure, also across a restart of the service. Then the error shows. |
 
-openforge's own keep-alive ([Warming](/warming)) skips chats on CPP, which pings them itself. What the toolbar,
-sidebar and **Requests** tab show is on [CLIProxyPacer in the TUI](/cli/cliproxypacer).
+openforge's own keep-alive ([Warming](/warming)) skips chats on CLIProxyPacer, which pings them itself. What the
+toolbar, sidebar, **Requests** tab, cache notices and Settings show is on
+[CLIProxyPacer in the TUI](/cli/cliproxypacer).
 
 ## Custom
 

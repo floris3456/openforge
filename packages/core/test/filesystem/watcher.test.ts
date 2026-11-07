@@ -539,30 +539,26 @@ function nextUpdate<E>(check: (event: WatcherEvent) => boolean, trigger: Effect.
   })
 }
 
-function eventuallyUpdate<E>(check: (event: WatcherEvent) => boolean, trigger: () => Effect.Effect<void, E>) {
-  return Effect.gen(function* () {
-    while (true) {
-      const result = yield* maybeNextUpdate(check, trigger(), "250 millis")
-      if (Option.isSome(result)) return result.value
-    }
-  }).pipe(
-    Effect.timeoutOrElse({
-      duration: "5 seconds",
-      orElse: () => Effect.fail(new Error("timed out waiting for file watcher readiness")),
+/**
+ * The native watcher, telling `started` the path it watches once the watch is acquired and its listener registered
+ * (`onReady`). Tests wait for that, not for a probe write's event: Bun's fs.watch drops an event with the path and
+ * type of the one before it within a millisecond (`ChangeEvent::should_emit` in its path_watcher.rs), so a probe
+ * write's event can swallow the next write's.
+ */
+const startedWatcher = Effect.gen(function* () {
+  const started = yield* Deferred.make<string>()
+  const watcher = Layer.effect(
+    Watcher.Service,
+    Effect.gen(function* () {
+      const service = yield* Watcher.Service
+      return Watcher.Service.of({
+        subscribe: (input, onReady) =>
+          service.subscribe(input, Deferred.succeed(started, input.path).pipe(Effect.andThen(onReady ?? Effect.void))),
+      })
     }),
-  )
-}
-
-function ready(file: string, eventFile = file) {
-  return Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
-    const content = (yield* fs.readFileStringSafe(file)) ?? `ready-${Math.random()}`
-    yield* eventuallyUpdate(
-      (event) => event.file === eventFile,
-      () => fs.writeFileString(file, content),
-    ).pipe(Effect.asVoid)
-  })
-}
+  ).pipe(Layer.provide(AppNodeBuilder.build(Watcher.node)))
+  return { started, watcher }
+})
 
 describeNative("LocationWatcher", () => {
   it.live("limits file watches to the exact target", () =>
@@ -613,83 +609,78 @@ describeNative("LocationWatcher", () => {
   )
 
   it.live("publishes .git/HEAD events", () =>
-    withTmp(
-      (directory) =>
-        Effect.gen(function* () {
-          const fs = yield* FSUtil.Service
-          const head = path.join(directory, ".git", "HEAD")
-          const branch = `watch-${Math.random().toString(36).slice(2)}`
-          yield* ready(head)
-          yield* Effect.promise(() => $`git branch ${branch}`.cwd(directory).quiet())
-          expect(
-            yield* nextUpdate((event) => event.file === head, fs.writeFileString(head, `ref: refs/heads/${branch}\n`)),
-          ).toEqual({ file: head, event: "change" })
-        }),
-      { vcs: "git" },
-    ),
+    Effect.gen(function* () {
+      const watch = yield* startedWatcher
+      return yield* withTmp(
+        (directory) =>
+          Effect.gen(function* () {
+            const fs = yield* FSUtil.Service
+            const head = path.join(directory, ".git", "HEAD")
+            const branch = `watch-${Math.random().toString(36).slice(2)}`
+            expect(yield* Deferred.await(watch.started)).toBe(head)
+            yield* Effect.promise(() => $`git branch ${branch}`.cwd(directory).quiet())
+            expect(
+              yield* nextUpdate(
+                (event) => event.file === head,
+                fs.writeFileString(head, `ref: refs/heads/${branch}\n`),
+              ),
+            ).toEqual({ file: head, event: "change" })
+          }),
+        { vcs: "git", watcher: watch.watcher },
+      )
+    }),
   )
 
   const describeSymlink = process.platform !== "win32" ? describe : describe.skip
   describeSymlink("symlinked .git", () => {
     it.live("publishes .git/HEAD events through a symlinked .git directory", () =>
-      withTmp(
-        (directory) =>
-          Effect.gen(function* () {
-            const afs = yield* FSUtil.Service
-            const actual = path.join(directory, "..", `actual_${path.basename(directory)}`)
-            yield* Effect.addFinalizer(() => Effect.promise(() => fs.rm(actual, { recursive: true, force: true })))
-            const head = path.join(directory, ".git", "HEAD")
-            yield* ready(head, path.join(actual, "HEAD"))
-            const branch = `watch-${Math.random().toString(36).slice(2)}`
-            yield* Effect.promise(() => $`git branch ${branch}`.cwd(directory).quiet())
-            expect(
-              yield* nextUpdate(
-                (event) => event.file === path.join(actual, "HEAD"),
-                afs.writeFileString(head, `ref: refs/heads/${branch}\n`),
-              ),
-            ).toEqual({ file: path.join(actual, "HEAD"), event: "change" })
-          }),
-        {
-          vcs: "git",
-          init: async (directory) => {
-            const actual = path.join(directory, "..", `actual_${path.basename(directory)}`)
-            await fs.rename(path.join(directory, ".git"), actual)
-            await fs.symlink(actual, path.join(directory, ".git"))
+      Effect.gen(function* () {
+        const watch = yield* startedWatcher
+        return yield* withTmp(
+          (directory) =>
+            Effect.gen(function* () {
+              const afs = yield* FSUtil.Service
+              const actual = path.join(directory, "..", `actual_${path.basename(directory)}`)
+              yield* Effect.addFinalizer(() => Effect.promise(() => fs.rm(actual, { recursive: true, force: true })))
+              const head = path.join(directory, ".git", "HEAD")
+              expect(yield* Deferred.await(watch.started)).toBe(path.join(actual, "HEAD"))
+              const branch = `watch-${Math.random().toString(36).slice(2)}`
+              yield* Effect.promise(() => $`git branch ${branch}`.cwd(directory).quiet())
+              expect(
+                yield* nextUpdate(
+                  (event) => event.file === path.join(actual, "HEAD"),
+                  afs.writeFileString(head, `ref: refs/heads/${branch}\n`),
+                ),
+              ).toEqual({ file: path.join(actual, "HEAD"), event: "change" })
+            }),
+          {
+            vcs: "git",
+            watcher: watch.watcher,
+            init: async (directory) => {
+              const actual = path.join(directory, "..", `actual_${path.basename(directory)}`)
+              await fs.rename(path.join(directory, ".git"), actual)
+              await fs.symlink(actual, path.join(directory, ".git"))
+            },
           },
-        },
-      ),
+        )
+      }),
     )
   })
 
   it.live("publishes .hg/branch events", () =>
     Effect.gen(function* () {
-      const started = yield* Deferred.make<string>()
-      const watcher = Layer.effect(
-        Watcher.Service,
-        Effect.gen(function* () {
-          const service = yield* Watcher.Service
-          return Watcher.Service.of({
-            subscribe: (input, onReady) =>
-              service.subscribe(
-                input,
-                Deferred.succeed(started, input.path).pipe(Effect.andThen(onReady ?? Effect.void)),
-              ),
-          })
-        }),
-      ).pipe(Layer.provide(AppNodeBuilder.build(Watcher.node)))
+      const watch = yield* startedWatcher
       return yield* withTmp(
         (directory) =>
           Effect.gen(function* () {
             const fs = yield* FSUtil.Service
             const branch = path.join(directory, ".hg", "branch")
-            // Use the actual acquisition barrier, not a probe write whose event
-            // callback can race the next write in Bun's filesystem watcher.
-            expect(yield* Deferred.await(started)).toBe(branch)
+            expect(yield* Deferred.await(watch.started)).toBe(branch)
             expect(
               yield* nextUpdate((event) => event.file === branch, fs.writeFileString(branch, "feature\n")),
             ).toMatchObject({ file: branch })
           }),
-        { vcs: "hg", watcher },
+        { vcs: "hg", watcher: watch.watcher },
       )
     }),
   )

@@ -65,6 +65,8 @@ interface Cpp {
   /** Settings at the server's level and at the key's, by name; `GET|PATCH /pacer/v1/settings` list them. */
   readonly server: Json
   readonly key: Json
+  /** The settings CPP's registry has: an older CPP may lack one. */
+  registry: string[]
   /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
    * them until the first bytes. */
   quiet: boolean
@@ -187,7 +189,7 @@ const fakeCpp = (now: () => number) =>
               else cpp.key[name] = value
             }
           return answer(
-            ["pings.enabled", "warming.compact_before_cold", "warming.compact_cold_first"].map((name) => {
+            cpp.registry.map((name) => {
               const fallback = name === "pings.enabled" ? null : false
               const key = cpp.key[name] ?? null
               const server = cpp.server[name] ?? null
@@ -250,6 +252,7 @@ const fakeCpp = (now: () => number) =>
         prompts: new Map(),
         server: {},
         key: {},
+        registry: ["pings.enabled", "warming.compact_before_cold", "warming.compact_cold_first"],
         holds: new Set(),
         release: () => {
           cpp.holds.clear()
@@ -1603,15 +1606,16 @@ describe("PacerConnection chats", () => {
         compactColdFirst: false,
         compactBeforeCold: false,
       })
+      // Compact-cold-first back at its default clears the key's own (below).
       expect(seen(h, "/pacer/v1/settings", "PATCH").map((item) => item.body)).toEqual([
         { "warming.compact_cold_first": true },
-        { "warming.compact_before_cold": false, "warming.compact_cold_first": false },
+        { "warming.compact_before_cold": false, "warming.compact_cold_first": null },
       ])
-      expect(h.cpp.key).toEqual({ "warming.compact_before_cold": false, "warming.compact_cold_first": false })
-      // A change of nothing writes nothing: it reads.
+      expect(h.cpp.key).toEqual({ "warming.compact_before_cold": false })
+      // A change of nothing writes nothing: it reads. Each change read what applies without the key's first.
       expect(yield* h.connection.updateSettings({})).toEqual({ compactColdFirst: false, compactBeforeCold: false })
       expect(seen(h, "/pacer/v1/settings", "PATCH")).toHaveLength(2)
-      expect(seen(h, "/pacer/v1/settings")).toHaveLength(2)
+      expect(seen(h, "/pacer/v1/settings")).toHaveLength(4)
 
       // A chat without its own switch follows the key's: a view held from before is read again when asked for.
       yield* settle
@@ -1624,6 +1628,48 @@ describe("PacerConnection chats", () => {
       const refused = yield* h.connection.updateSettings({ compactColdFirst: true }).pipe(Effect.flip)
       expect(refused.state).toBe("on")
       h.cpp.failure = undefined
+    }),
+  )
+
+  it.effect("stores no key value equal to what CPP applies without one: the server's, else the default", () =>
+    Effect.gen(function* () {
+      // Spec cliproxypacer-cold-ask, the decision of 2026-11-07: a stored key value would hide a server default the
+      // owner sets later from this key's chats for good.
+      const h = yield* harness()
+      h.cpp.server["warming.compact_before_cold"] = true
+      yield* online(h)
+      const patches = () => seen(h, "/pacer/v1/settings", "PATCH").map((item) => item.body)
+
+      // The server's value: nothing of the key's is stored.
+      expect(yield* h.connection.updateSettings({ compactBeforeCold: true })).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: true,
+      })
+      expect(h.cpp.key).toEqual({})
+      // Another value is the key's own; back at the server's, it is cleared again.
+      expect((yield* h.connection.updateSettings({ compactBeforeCold: false })).compactBeforeCold).toBe(false)
+      expect(h.cpp.key).toEqual({ "warming.compact_before_cold": false })
+      expect((yield* h.connection.updateSettings({ compactBeforeCold: true })).compactBeforeCold).toBe(true)
+      expect(h.cpp.key).toEqual({})
+      // Without a server value, the default.
+      expect((yield* h.connection.updateSettings({ compactColdFirst: true })).compactColdFirst).toBe(true)
+      expect((yield* h.connection.updateSettings({ compactColdFirst: false })).compactColdFirst).toBe(false)
+      expect(h.cpp.key).toEqual({})
+      expect(patches()).toEqual([
+        { "warming.compact_before_cold": null },
+        { "warming.compact_before_cold": false },
+        { "warming.compact_before_cold": null },
+        { "warming.compact_cold_first": true },
+        { "warming.compact_cold_first": null },
+      ])
+      // So a default the owner sets on the server later reaches the key's chats.
+      h.cpp.server["warming.compact_cold_first"] = true
+      expect(yield* h.connection.settings()).toEqual({ compactColdFirst: true, compactBeforeCold: true })
+
+      // A setting CPP doesn't list (an older CPP): the value itself.
+      h.cpp.registry = ["pings.enabled", "warming.compact_before_cold"]
+      yield* h.connection.updateSettings({ compactColdFirst: false })
+      expect(patches().at(-1)).toEqual({ "warming.compact_cold_first": false })
     }),
   )
 

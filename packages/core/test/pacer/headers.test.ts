@@ -13,11 +13,11 @@ describe("PacerHeaders", () => {
   test("marks a step with the chat and the compaction asks it acts on, and no kind", () => {
     expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind: "primary", sessionID, auto: true })).toEqual({
       "X-Pacer-Session": chat,
-      "X-Pacer-Compact": "auto, before-cold",
+      "X-Pacer-Compact": "auto, cold, before-cold",
     })
   })
 
-  test("leaves auto out of a step's asks while the chat does not compact automatically", () => {
+  test("leaves auto and cold out of a step's asks while the chat does not compact automatically", () => {
     expect(PacerHeaders.make({ providerID: PacerEndpoint.id, kind: "primary", sessionID, auto: false })).toEqual({
       "X-Pacer-Session": chat,
       "X-Pacer-Compact": "before-cold",

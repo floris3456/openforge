@@ -75,18 +75,23 @@ export type Trigger =
   /**
    * `move`: the provider must move the chat to another account and asked for a summary first (CLIProxyPacer's 409).
    * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
-   * own model. Always a summary written here, never a provider's native compaction, and a summary held from the
-   * background only when the model picked wrote it. Skipped before the chat's first finished step, when there is
-   * nothing to summarize but the prompt.
+   * own model. `cold`: the provider asked to compact the chat first because its prompt cache went cold and it is
+   * large (CLIProxyPacer's 409 `cold`); only one of its picks writes it, so when the chat can use none it is skipped:
+   * compacting on the chat's own, dearer model is what the ask is meant to avoid. Either is always a summary written
+   * here, never a provider's native compaction, and a summary held from the background only when the model picked
+   * wrote it. Skipped before the chat's first finished step, when there is nothing to summarize but the prompt.
    */
   | {
-      readonly reason: "move"
+      readonly reason: "move" | "cold"
       readonly context: SessionContext.Loaded
       readonly models: ReadonlyArray<Model.Ref>
     }
 
 export type Outcome =
-  /** Only `auto` skips: the context fits, or automatic compaction is off. */
+  /**
+   * Not compacted: automatic compaction is off, or `auto`'s context fits, or a `move` or `cold` came before the chat's
+   * first finished step, or none of a `cold` ask's models can be used.
+   */
   | { readonly status: "skipped" }
   | { readonly status: "completed" }
   | { readonly status: "failed"; readonly error: SessionError.Error }
@@ -299,8 +304,8 @@ export const layer = Layer.effect(
 
     /**
      * The model that writes the summary, and the request size it aims for: the compaction agent's model, else the
-     * chat's. Picks (a move's, or a compaction item's) replace the agent's: the first the chat can use, else the chat's
-     * model.
+     * chat's. Picks (a move's or a cold ask's, or a compaction item's) replace the agent's: the first the chat can use,
+     * else the chat's model. `picked` says whether one of them was.
      */
     const selectModel = Effect.fnUntraced(function* (
       context: SessionContext.Loaded,
@@ -320,7 +325,7 @@ export const layer = Layer.effect(
       const cap = Number.isFinite(ceiling)
         ? ceiling
         : calculateCeiling({ ...model.limit, context: UNKNOWN_WINDOW }, buffer)
-      return { context: model === context.model ? context : { ...context, model }, cap }
+      return { context: model === context.model ? context : { ...context, model }, cap, picked: picked !== undefined }
     })
 
     const compact = Effect.fn("SessionCompaction.compact")(function* (trigger: Trigger): Effect.fn.Return<Outcome> {
@@ -331,7 +336,7 @@ export const layer = Layer.effect(
       if (trigger.reason !== "manual" && !settings.auto) return { status: "skipped" }
       // A summary of the prompt alone would be a wasted request.
       if (
-        trigger.reason === "move" &&
+        (trigger.reason === "move" || trigger.reason === "cold") &&
         !context.messages.some((message) => message.type === "assistant" && message.time.completed !== undefined)
       )
         return { status: "skipped" }
@@ -340,11 +345,17 @@ export const layer = Layer.effect(
         !due(context, calculateCeiling(context.model.limit, settings.buffer), trigger.estimate)
       )
         return { status: "skipped" }
+      const native =
+        trigger.reason !== "move" && trigger.reason !== "cold" && context.model.compaction?.type === "native"
+      const picks =
+        trigger.reason === "move" || trigger.reason === "cold" || trigger.reason === "manual"
+          ? trigger.models
+          : undefined
+      const model = yield* selectModel(context, settings.buffer, native, picks)
+      // A cold ask is answered only on one of its picks; without one, a summary held from the background stays held.
+      if (trigger.reason === "cold" && !model.picked) return { status: "skipped" }
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
-      const native = trigger.reason !== "move" && context.model.compaction?.type === "native"
-      const picks = trigger.reason === "move" || trigger.reason === "manual" ? trigger.models : undefined
-      const model = yield* selectModel(context, settings.buffer, native, picks)
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
       const budget =
         trigger.reason === "overflow"
@@ -356,8 +367,8 @@ export const layer = Layer.effect(
       // opens here, before any wait, so a background summary still being written shows as a running compaction.
       if (trigger.reason !== "manual")
         yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: context.session.id, reason: "auto" })
-      // A compaction whose item names the models to write it (CLIProxyPacer's compact notice, a move) takes a summary
-      // held from the background only when the model it picked wrote it, not the compaction agent's.
+      // A compaction whose item names the models to write it (CLIProxyPacer's compact notice, a move, a cold ask) takes
+      // a summary held from the background only when the model it picked wrote it, not the compaction agent's.
       const usable = held && (picks === undefined || sameRef(held.writer, model.context.model.ref)) ? held : undefined
       if (held && !usable) yield* Fiber.interrupt(held.fiber)
       const swapped = usable ? yield* usePrecomputed(selected, usable, budget, settings) : undefined

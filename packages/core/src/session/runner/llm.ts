@@ -41,7 +41,11 @@ const CONTINUE_AFTER_INCOMPLETE_STREAM =
 const CONTINUE_AFTER_OUTPUT_LIMIT =
   "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces."
 
-/** How often one step answers CLIProxyPacer's ask to compact before a move (its CLIENT-GUIDE: "do not loop on a 409"). */
+/**
+ * How often one step answers CLIProxyPacer's asks to compact first, before a move and for a cold chat together (its
+ * CLIENT-GUIDE: "do not loop on a 409"). It asks once per move and once per cold spell, so a step needs one of each at
+ * most.
+ */
 const MAX_MOVES = 3
 
 const layer = Layer.effect(
@@ -283,7 +287,7 @@ const layer = Layer.effect(
       let finishing = resume?.rest.kind === "tools" ? resume.rest : undefined
       let recoverOverflow = true
       let recoverContinuation = true
-      let moves = 0
+      let asks = 0
       if (resume?.rest.kind === "retry") {
         yield* retry.resume(resume.rest)
         if (resume.rest.mode === "continue") {
@@ -376,12 +380,13 @@ const layer = Layer.effect(
                   .pipe(Effect.map((result) => result.status === "completed"))
               : Effect.succeed(false),
           ),
-          // CPP asks once per move; a summary that fails or is skipped still sends the step again, which then moves
-          // the chat without it. A provider that keeps asking gets its refusal shown after MAX_MOVES rounds.
-          recoverMove: (ask) =>
+          // CPP asks once per move and once per cold spell; a summary that fails or is skipped still sends the step
+          // again, which then moves the chat without it, or goes through cold. A provider that keeps asking gets its
+          // refusal shown after MAX_MOVES rounds of either.
+          recoverAsk: (ask) =>
             Effect.suspend(() =>
-              moves++ < MAX_MOVES
-                ? compaction.compact({ reason: "move", context: loaded, models: ask.models }).pipe(Effect.as(true))
+              asks++ < MAX_MOVES
+                ? compaction.compact({ reason: ask.reason, context: loaded, models: ask.models }).pipe(Effect.as(true))
                 : Effect.succeed(false),
             ),
           step,
@@ -447,7 +452,7 @@ const layer = Layer.effect(
             recoverOverflow = false
             assistantMessageID = SessionMessage.ID.create()
           }),
-          Moved: Effect.fnUntraced(function* () {
+          Asked: Effect.fnUntraced(function* () {
             assistantMessageID = SessionMessage.ID.create()
           }),
           RecoverFull: Effect.fnUntraced(function* () {

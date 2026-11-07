@@ -730,6 +730,29 @@ const pacerMoveAsk = (models: readonly string[] = []) => {
     }),
   })
 }
+/** CPP's ask to compact a cold chat first (pacer_routing.rs, `cold_refusal`), as the route's executor turns it. */
+const pacerColdAsk = (models: readonly string[] = []) => {
+  const body = JSON.stringify({
+    error: {
+      type: "pacer_compact_required",
+      reason: "cold",
+      message:
+        "This chat's prompt cache went cold (14 min idle) and it holds about 152000 tokens: compact it first, then continue.",
+      writer: "provider",
+      models,
+      size_tokens: 152_000,
+      idle_seconds: 840,
+    },
+  })
+  return new AIError({
+    reason: classifyProviderFailure({
+      message: `HTTP 409: ${body}`,
+      status: 409,
+      rawBody: body,
+      http: new HttpContext({ url: "https://cpp.test/v1/chat/completions", status: 409, headers: {} }),
+    }),
+  })
+}
 const pacedModel = LanguageModel.make({ id: "recovery", provider: "cliproxypacer", route: OpenAIChat.route })
 const summaryPrompts = [SessionCompaction.buildPrompt(false), SessionCompaction.buildPrompt(true)]
 const isSummaryRequest = (request: LLMRequest) => summaryPrompts.includes(userTexts(request).at(-1) ?? "")
@@ -3653,7 +3676,7 @@ describe("SessionRunnerLLM", () => {
     // The summary is the answer's pick, written here: neither the chat's model nor a native compaction.
     expect(s.requests[1]?.model).toBe(replacementModel)
     expect(s.requests[2]?.model).toBe(pacedModel)
-    expect(s.requests[2]?.http?.headers).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
+    expect(s.requests[2]?.http?.headers).toMatchObject({ "X-Pacer-Compact": "auto, cold, before-cold" })
     expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Moved summary\n</summary>")
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Moved summary" },
@@ -3700,7 +3723,7 @@ describe("SessionRunnerLLM", () => {
 
   // A summary held from the background is written by the compaction agent's model when one is set; a compaction whose
   // item names the models to write it takes that summary only when the model it names wrote it.
-  for (const ask of ["compact notice", "move ask"] as const)
+  for (const ask of ["compact notice", "move ask", "cold ask"] as const)
     for (const agentModel of [true, false])
       scenario(
         agentModel
@@ -3739,7 +3762,8 @@ describe("SessionRunnerLLM", () => {
             })
             yield* s.resume
           } else {
-            yield* s.llm.push(Stream.fail(pacerMoveAsk(["recovery"])), ...named, TestLLM.text("Moved", "text-moved"))
+            const refused = ask === "move ask" ? pacerMoveAsk(["recovery"]) : pacerColdAsk(["recovery"])
+            yield* s.llm.push(Stream.fail(refused), ...named, TestLLM.text("Moved", "text-moved"))
             yield* s.runPrompt("Continue")
           }
           expect(s.requests.filter(isSummaryRequest).map((request) => request.model)).toEqual(
@@ -3802,6 +3826,176 @@ describe("SessionRunnerLLM", () => {
       error: expect.objectContaining({ message: expect.stringContaining("compact it first, then continue") }),
     })
     expect(yield* recordedEventTypes(sessionID)).not.toContain(Bus.versionedType(SessionEvent.RetryScheduled.type, 1))
+  })
+
+  // Spec cliproxypacer-cold-ask, section 1: CLIProxyPacer's ask to compact a cold, large chat first.
+  scenario(
+    "compacts on CLIProxyPacer's cold ask with the first of its models the chat can use, then sends the step from the summary",
+    function* (s) {
+      yield* setupOverflowRecovery(s)
+      s.currentModel = pacedModel
+      s.unavailableModels.add("gone")
+      yield* s.llm.push(
+        Stream.fail(pacerColdAsk(["gone", "replacement"])),
+        TestLLM.text("## Objective\n- Cold summary", "text-cold-summary"),
+        TestLLM.text("Continued", "text-after-cold"),
+      )
+      yield* s.runPrompt("Continue")
+
+      expect(s.requests).toHaveLength(3)
+      expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false])
+      // The summary is the answer's first usable pick, written here: neither the chat's model nor a native compaction.
+      expect(s.requests[1]?.model).toBe(replacementModel)
+      expect(s.requests[2]?.model).toBe(pacedModel)
+      // The refused step carried the history; the step sent again carries the summary in its place.
+      expect(userTexts(s.requests[0])[0]).toStartWith("Earlier question")
+      expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Cold summary\n</summary>")
+      expect(userTexts(s.requests[2]).some((text) => text.startsWith("Earlier question"))).toBe(false)
+      // It shows as an automatic compaction does, with the model that wrote it.
+      expect(yield* s.context).toMatchObject([
+        {
+          type: "compaction",
+          status: "completed",
+          reason: "auto",
+          model: expect.objectContaining({ id: "replacement" }),
+          summary: "## Objective\n- Cold summary",
+        },
+        { type: "assistant", finish: "stop" },
+      ])
+    },
+  )
+
+  scenario(
+    "writes a cold ask's summary on CLIProxyPacer as a compaction, and sends the step again with its asks",
+    function* (s) {
+      yield* setupOverflowRecovery(s)
+      s.currentModel = pacedModel
+      s.unavailableModels.add("gone")
+      // `cold-pick` is a model of CLIProxyPacer's the chat can use.
+      yield* s.llm.push(
+        Stream.fail(pacerColdAsk(["gone", "cold-pick"])),
+        TestLLM.text("## Objective\n- Cold summary", "text-cold-summary"),
+        TestLLM.text("Continued", "text-after-cold"),
+      )
+      yield* s.runPrompt("Continue")
+
+      expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false])
+      const [step, summary, again] = s.requests.map((request) => request.http?.headers)
+      expect(step).toMatchObject({ "X-Pacer-Compact": "auto, cold, before-cold" })
+      expect(summary).toMatchObject({ "X-Pacer-Session": PacerSessionID.make(sessionID), "X-Pacer-Kind": "compaction" })
+      expect(summary).not.toHaveProperty("X-Pacer-Compact")
+      expect(again).toMatchObject({ "X-Pacer-Compact": "auto, cold, before-cold" })
+      expect(again).not.toHaveProperty("X-Pacer-Kind")
+    },
+  )
+
+  for (const [models, why] of [
+    [["gone", "also-gone"], "none of whose models the chat can use"],
+    [[], "that names no model"],
+  ] as const)
+    scenario(`sends the step again uncompacted on a cold ask ${why}, never on the chat's own model`, function* (s) {
+      yield* setupOverflowRecovery(s)
+      s.currentModel = pacedModel
+      s.unavailableModels.add("gone")
+      s.unavailableModels.add("also-gone")
+      yield* s.llm.push(Stream.fail(pacerColdAsk(models)), TestLLM.text("Continued uncompacted", "text-uncompacted"))
+      yield* s.runPrompt("Continue")
+
+      // CLIProxyPacer asks once per cold spell and lets the step sent again through.
+      expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+      expect(s.requests.every((request) => request.model === pacedModel)).toBe(true)
+      expect(userTexts(s.requests[1])).toEqual(userTexts(s.requests[0]))
+      expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+      expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+      expect(yield* recordedEventTypes(sessionID)).not.toContain(
+        Bus.versionedType(SessionEvent.Compaction.Started.type, 1),
+      )
+    })
+
+  scenario("sends the step again at once on a cold ask before the chat's first answer", function* (s) {
+    s.currentModel = pacedModel
+    yield* s.llm.push(Stream.fail(pacerColdAsk(["replacement"])), TestLLM.text("Answered", "text-cold-new-chat"))
+    yield* s.runPrompt("A new chat")
+
+    // Nothing to summarize but the prompt: no summary request, and the step goes again.
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false])
+    expect(s.requests.every((request) => request.model === pacedModel)).toBe(true)
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    expect(yield* recordedEventTypes(sessionID)).not.toContain(
+      Bus.versionedType(SessionEvent.Compaction.Started.type, 1),
+    )
+  })
+
+  scenario("sends the step again, from the history, after a cold ask's summary failed", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    // The summary and its reminder both ignore the template.
+    yield* s.llm.push(
+      Stream.fail(pacerColdAsk(["replacement"])),
+      TestLLM.text("Not a summary", "text-not-summary"),
+      TestLLM.text("Still not a summary", "text-still-not-summary"),
+      TestLLM.text("Continued from the history", "text-after-failed-cold"),
+    )
+    yield* s.runPrompt("Continue")
+
+    expect(s.requests).toHaveLength(4)
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false, false])
+    expect(s.requests[1]?.model).toBe(replacementModel)
+    expect(s.requests[3]?.model).toBe(pacedModel)
+    expect(userTexts(s.requests[3])).toEqual(userTexts(s.requests[0]))
+    expect(yield* s.context).toContainEqual(expect.objectContaining({ type: "compaction", status: "failed" }))
+    expect((yield* s.context).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+  })
+
+  scenario(
+    "counts cold asks and move asks together, three in one step, then shows CLIProxyPacer's refusal",
+    function* (s) {
+      yield* setupOverflowRecovery(s)
+      s.currentModel = pacedModel
+      let summaries = 0
+      let steps = 0
+      // Asks of each kind in turn: cold, move, cold, then the move that is shown.
+      yield* s.llm.serve((request) =>
+        isSummaryRequest(request)
+          ? TestLLM.text(`## Objective\n- Summary ${++summaries}`, `text-summary-${summaries}`)
+          : Stream.fail(steps++ % 2 === 0 ? pacerColdAsk(["replacement"]) : pacerMoveAsk(["replacement"])),
+      )
+      yield* s.admit("Continue")
+      expect((yield* s.resume.pipe(Effect.flip)).message).toContain("The pacer moves this chat")
+
+      expect(s.requests.filter((request) => !isSummaryRequest(request))).toHaveLength(4)
+      // The first ask's summary; after it the chat has no finished step to summarize, so the next asks find nothing.
+      expect(summaries).toBe(1)
+      expect((yield* s.context).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+        error: expect.objectContaining({ message: expect.stringContaining("The pacer moves this chat") }),
+      })
+      expect(yield* recordedEventTypes(sessionID)).not.toContain(Bus.versionedType(SessionEvent.RetryScheduled.type, 1))
+    },
+  )
+
+  scenario("writes a cold ask's summary itself on a chat whose model compacts natively", function* (s) {
+    yield* setupOverflowRecovery(s)
+    s.currentModel = pacedModel
+    s.compaction = { type: "native" }
+    yield* s.llm.push(
+      Stream.fail(pacerColdAsk(["replacement"])),
+      TestLLM.text("## Objective\n- Written summary", "text-written-summary"),
+      TestLLM.text("Continued", "text-after-written"),
+    )
+    yield* s.runPrompt("Continue")
+
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false])
+    expect(s.requests[1]?.model).toBe(replacementModel)
+    const compaction = (yield* s.context)[0]
+    expect(compaction).toMatchObject({
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\n- Written summary",
+    })
+    expect(compaction).not.toHaveProperty("native")
   })
 
   scenario("refreshes preparation after overflow compaction without promoting new input", function* (s) {
@@ -5264,7 +5458,7 @@ describe("SessionRunnerLLM", () => {
     expect(step).toMatchObject({
       "x-opencode-session-id": sessionID,
       "X-Pacer-Session": PacerSessionID.make(sessionID),
-      "X-Pacer-Compact": "auto, before-cold",
+      "X-Pacer-Compact": "auto, cold, before-cold",
     })
     expect(step).not.toHaveProperty("X-Pacer-Kind")
     expect(step).not.toHaveProperty("X-Pacer-Parent-Session")
@@ -5272,7 +5466,7 @@ describe("SessionRunnerLLM", () => {
       "x-opencode-parent-session-id": parentID,
       "X-Pacer-Session": PacerSessionID.make(sessionID),
       "X-Pacer-Parent-Session": PacerSessionID.make(parentID),
-      "X-Pacer-Compact": "auto, before-cold",
+      "X-Pacer-Compact": "auto, cold, before-cold",
     })
   })
 
@@ -5286,7 +5480,7 @@ describe("SessionRunnerLLM", () => {
 
     const [off, on] = s.requests.map((request) => request.http?.headers)
     expect(off).toMatchObject({ "X-Pacer-Session": PacerSessionID.make(sessionID), "X-Pacer-Compact": "before-cold" })
-    expect(on).toMatchObject({ "X-Pacer-Compact": "auto, before-cold" })
+    expect(on).toMatchObject({ "X-Pacer-Compact": "auto, cold, before-cold" })
   })
 
   scenario("uses parent cache affinity for child model requests", function* (s) {

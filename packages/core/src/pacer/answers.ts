@@ -11,28 +11,35 @@ const CompactRequired = Schema.fromJsonString(
   Schema.Struct({
     error: Schema.Struct({
       type: Schema.Literal("pacer_compact_required"),
+      reason: Schema.optional(Schema.Unknown),
       models: Schema.optional(Schema.Array(Schema.String)),
     }),
   }),
 )
 const decodeCompactRequired = Schema.decodeUnknownOption(CompactRequired)
 
-/** CPP asks to compact a chat it must move to another account; `models` are its picks for the summary, first first. */
-export interface MoveAsk {
+/**
+ * CPP asks to compact a chat first: `move`, before it moves the chat to another account; `cold`, before the next step
+ * of a chat whose prompt cache went cold and that is large. `models` are its picks for the summary, first first.
+ */
+export interface CompactAsk {
+  readonly reason: "move" | "cold"
   readonly models: ReadonlyArray<Model.Ref>
 }
 
 /**
- * CPP's ask to compact before it moves the chat (its CLIENT-GUIDE, "Compaction"): a 409 whose body's error type is
- * `pacer_compact_required`, on a request to the CLIProxyPacer provider. Any `reason` is a move, as the guide says, and
- * openforge announces only `auto`. The answer's models are CPP's own IDs, so each is a model of the chat's provider.
+ * CPP's ask to compact first (its CLIENT-GUIDE, "Compaction", "The three asks"): a 409 whose body's error type is
+ * `pacer_compact_required`, on a request to the CLIProxyPacer provider. `reason: "cold"` is a cold ask; every other
+ * reason, or none, is a move, as the guide says. Its `writer` is not read: openforge writes every summary itself, which
+ * the guide allows for both. The answer's models are CPP's own IDs, so each is a model of the chat's provider.
  */
-export function moveAsk(model: Model.Ref, failure: unknown): MoveAsk | undefined {
+export function compactAsk(model: Model.Ref, failure: unknown): CompactAsk | undefined {
   if (model.providerID !== provider || !(failure instanceof AIError)) return undefined
   if (failure.reason.http?.status !== 409 || failure.reason.body === undefined) return undefined
   return Option.match(decodeCompactRequired(failure.reason.body), {
     onNone: () => undefined,
     onSome: (answer) => ({
+      reason: answer.error.reason === "cold" ? "cold" : "move",
       models: (answer.error.models ?? []).map((id) =>
         Model.Ref.make({ id: Model.ID.make(id), providerID: model.providerID }),
       ),

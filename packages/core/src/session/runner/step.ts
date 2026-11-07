@@ -41,8 +41,11 @@ export type Outcome = Data.TaggedEnum<{
   }
   RecoverFull: {}
   Compacted: {}
-  /** The provider asked to compact before it moves the chat; the runner did, and sends the step again. */
-  Moved: {}
+  /**
+   * The provider asked to compact the chat first, before it moves it or for a cold chat's next step; the runner
+   * answered, and sends the step again.
+   */
+  Asked: {}
   OutputLimit: { readonly needsContinuation: boolean }
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
@@ -63,10 +66,10 @@ interface Input {
   /** The runner owns compaction policy; the attempt invokes it only before durable output. */
   readonly recoverOverflow: Effect.Effect<boolean>
   /**
-   * Answers CLIProxyPacer's ask to compact before a move, only before durable output. Absent, or false once the runner
-   * stops answering: the refusal then shows, without a retry.
+   * Answers CLIProxyPacer's ask to compact first (before a move, or a cold chat's next step), only before durable
+   * output. Absent, or false once the runner stops answering: the refusal then shows, without a retry.
    */
-  readonly recoverMove?: (ask: PacerAnswers.MoveAsk) => Effect.Effect<boolean>
+  readonly recoverAsk?: (ask: PacerAnswers.CompactAsk) => Effect.Effect<boolean>
   /** The logical step, recorded with the step's checkpoint so a restart continues the turn's count. */
   readonly step: number
   /** Finishes a step whose reply streamed before a restart, instead of calling the model. */
@@ -270,13 +273,17 @@ export const make = Effect.gen(function* () {
           return Outcome.Compacted()
         }
 
-        const move = publisher.record().outputStarted ? undefined : PacerAnswers.moveAsk(input.model.ref, streamFailure)
-        if (move && input.recoverMove && (yield* restore(input.recoverMove(move)))) {
-          yield* Effect.logInfo("CLIProxyPacer asked to compact before it moves the chat; compacted", {
-            sessionID: input.sessionID,
-            model: input.model.ref,
-          })
-          return Outcome.Moved()
+        const ask = publisher.record().outputStarted
+          ? undefined
+          : PacerAnswers.compactAsk(input.model.ref, streamFailure)
+        if (ask && input.recoverAsk && (yield* restore(input.recoverAsk(ask)))) {
+          yield* Effect.logInfo(
+            ask.reason === "cold"
+              ? "CLIProxyPacer asked to compact the cold chat first; answered"
+              : "CLIProxyPacer asked to compact before it moves the chat; answered",
+            { sessionID: input.sessionID, model: input.model.ref },
+          )
+          return Outcome.Asked()
         }
 
         if (overflowFailure) yield* publisher.publish(overflowFailure)
@@ -305,8 +312,8 @@ export const make = Effect.gen(function* () {
                 input.retry(
                   llmFailure,
                   llmError,
-                  // A move ask the runner no longer answers would come back the same, so it shows instead.
-                  move === undefined &&
+                  // An ask the runner no longer answers would come back the same, so it shows instead.
+                  ask === undefined &&
                     (SessionRunnerRetry.isRetryable(llmFailure) ||
                       (recorded.outputStarted && isInterruptedStream(llmFailure))),
                 ),

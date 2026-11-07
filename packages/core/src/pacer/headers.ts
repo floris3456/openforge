@@ -13,8 +13,9 @@ export interface Input {
   readonly sessionID: SessionID
   readonly parentID?: SessionID
   /**
-   * Whether the chat compacts automatically. Only then does a step announce `auto`, the ask to compact before CPP
-   * moves the chat: CPP's guide says to send only the asks the client acts on.
+   * Whether the chat compacts automatically. Only then does a step announce `auto` and `cold`, the asks to compact
+   * before CPP moves the chat and to compact a cold, large chat first: CPP's guide says to send only the asks the
+   * client acts on.
    */
   readonly auto: boolean
 }
@@ -30,7 +31,7 @@ export function make(input: Input): Readonly<Record<string, string>> {
   return {
     ...chat(input),
     ...(kind === "primary"
-      ? { "X-Pacer-Compact": input.auto ? "auto, before-cold" : "before-cold" }
+      ? { "X-Pacer-Compact": input.auto ? "auto, cold, before-cold" : "before-cold" }
       : { "X-Pacer-Kind": kind }),
   }
 }

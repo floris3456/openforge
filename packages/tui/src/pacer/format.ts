@@ -340,6 +340,52 @@ export function promptlessLines(request: Pick<PacerRequest, "kind"> | undefined)
   return { head: [{ text, tone: "muted" as const }], items: [] }
 }
 
+// Cache notices (spec cliproxypacer-cache-notices, section 3): OpenCodePlus's cards, their texts and their stacking.
+
+/** 152K, 18.4K, 1.2M: tokens as a card counts them. */
+export function formatTokens(tokens: number) {
+  const value = Math.round(tokens)
+  if (value < 1_000) return String(value)
+  if (value < 999_500) return `${trimTokens(value / 1_000)}K`
+  return `${trimTokens(value / 1_000_000)}M`
+}
+
+function trimTokens(value: number) {
+  return value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "")
+}
+
+/** A card's first line: `Cache miss · 152K tokens not reused`, or without a count when the row has none. */
+export function noticeTitle(notice: { readonly verdict: "miss" | "partial"; readonly tokens?: number }) {
+  const kind = notice.verdict === "miss" ? "Cache miss" : "Partial cache reuse"
+  return notice.tokens === undefined ? kind : `${kind} · ${formatTokens(notice.tokens)} tokens not reused`
+}
+
+/** A card's age at `now`: `just now`, then `3 min ago`. */
+export function noticeAge(at: number, now: number) {
+  const minutes = Math.floor(Math.max(0, now - at) / 60_000)
+  return minutes === 0 ? "just now" : `${minutes} min ago`
+}
+
+/** A card's second line: the chat's title (its ID without one), agent and model. */
+export function noticeSubject(notice: {
+  readonly sessionID: string
+  readonly title?: string
+  readonly agent?: string
+  readonly model?: string
+}) {
+  return [notice.title || notice.sessionID, notice.agent, notice.model].filter(Boolean).join(" · ")
+}
+
+/** The cards a stack shows in a terminal `height` rows high, four rows each: at most 4, at least 1. */
+export function noticesShown(height: number) {
+  return Math.max(1, Math.min(4, Math.floor((height - 8) / 4)))
+}
+
+/** The line under the cards for those beyond them. */
+export function noticesMore(count: number, shown: number) {
+  return count > shown ? `+${count - shown} more cache notices` : undefined
+}
+
 /** `changed  system  messages[0].content[0]  12.3K chars  You are…`. */
 export function promptItemLine(item: PacerPromptItem) {
   return [

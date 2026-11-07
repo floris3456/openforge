@@ -16,6 +16,8 @@ export interface ComposerTab {
 export const ComposerContext = createContext<{
   register: (tab: ComposerTab) => () => void
   active: (id: string) => boolean
+  /** Makes a tab the active one, as ←/→ do: a tab asked for from outside the composer (a cache notice opened). */
+  select: (id: string) => void
   close: () => void
 }>()
 

@@ -71,8 +71,10 @@ export interface Interface {
   /** The compaction asks for all of the key's chats, as they apply at its level; always read from CPP. */
   readonly settings: () => Effect.Effect<Pacer.Settings, Unavailable>
   /**
-   * Sets the compaction asks for all of the key's chats at its level and answers them after the change. The views
-   * held may have changed with them: each is read again when next asked for. A change of nothing writes nothing.
+   * Sets the compaction asks for all of the key's chats at its level and answers them after the change. A value equal
+   * to what CPP applies without the key's own (the server's, else the default) clears the key's own instead of being
+   * stored. The views held may have changed with them: each is read again when next asked for. A change of nothing
+   * writes nothing.
    */
   readonly updateSettings: (input: Pacer.SettingsUpdate) => Effect.Effect<Pacer.Settings, Unavailable>
   /**
@@ -1295,9 +1297,14 @@ export const layer = Layer.effect(
               : {}),
           }
           if (Object.keys(change).length === 0) return yield* readSettings
-          const listing = yield* send("patch", "/pacer/v1/settings", change, PacerWire.Settings).pipe(
-            Effect.mapError(unavailable),
-          )
+          // What CPP applies without the key's own decides whether a value is stored or the key's own cleared.
+          const current = yield* get("/pacer/v1/settings", PacerWire.Settings).pipe(Effect.mapError(unavailable))
+          const listing = yield* send(
+            "patch",
+            "/pacer/v1/settings",
+            PacerWire.keyChange(current, change),
+            PacerWire.Settings,
+          ).pipe(Effect.mapError(unavailable))
           // A chat without its own switch follows the key's; CPP's `settings` notice says so too, a moment later.
           staleViews()
           return PacerWire.settings(listing)

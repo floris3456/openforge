@@ -122,7 +122,7 @@ export const PacerEndpoints = [
     annotations(
       "settings.update",
       "Switch CLIProxyPacer's compaction asks for all chats",
-      "Set compact-cold-first or compact-before-cold at the key level on CLIProxyPacer, and return both as they apply after the change. Unavailable unless the pacer is on.",
+      "Set compact-cold-first or compact-before-cold at the key level on CLIProxyPacer, and return both as they apply after the change. A value equal to what CLIProxyPacer applies without the key level (the server's, else the default) clears the key level instead of being stored, so that a later server default reaches the key's chats. Unavailable unless the pacer is on.",
     ),
   ),
 ] as const

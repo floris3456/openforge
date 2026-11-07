@@ -197,9 +197,15 @@ export type Prompt = typeof Prompt.Type
 
 /**
  * One row of `GET|PATCH /pacer/v1/settings` (cpa-pacer `settings.rs`, `settings_listing`): a setting the key may set,
- * with `value` what applies to the key, its own else the server's else the default.
+ * with `value` what applies to the key, its own else the server's else the default; `server` is null while the server
+ * holds none.
  */
-const Setting = Schema.Struct({ name: Schema.String, value: Schema.optional(Schema.Unknown) })
+const Setting = Schema.Struct({
+  name: Schema.String,
+  value: Schema.optional(Schema.Unknown),
+  server: Schema.optional(Schema.Unknown),
+  default: Schema.optional(Schema.Unknown),
+})
 /** `GET|PATCH /pacer/v1/settings`: the key level's listing. */
 export const Settings = Schema.Array(Schema.Unknown)
 
@@ -255,6 +261,22 @@ export function settings(items: ReadonlyArray<unknown>): Pacer.Settings {
     compactColdFirst: values.get(settingNames.compactColdFirst) === true,
     compactBeforeCold: values.get(settingNames.compactBeforeCold) === true,
   }
+}
+
+/**
+ * The key level's write for `change` (values by CPP's names), given CPP's listing: `null`, which clears the key's own,
+ * where a value is what CPP applies without it (the server's, else the default), so that a server default the owner
+ * sets later reaches the key's chats (spec cliproxypacer-cold-ask, the decision of 2026-11-07); else the value itself,
+ * also for a setting CPP doesn't list.
+ */
+export function keyChange(items: ReadonlyArray<unknown>, change: Readonly<Record<string, unknown>>) {
+  const rows = new Map(each(items, decodeSetting).map((item) => [item.name, item]))
+  return Object.fromEntries(
+    Object.entries(change).map(([name, value]) => {
+      const row = rows.get(name)
+      return [name, row !== undefined && (row.server ?? row.default) === value ? null : value]
+    }),
+  )
 }
 
 /** What a notice names: the chats a `compact` notice asks to compact, or `many`. */

@@ -180,17 +180,10 @@ openforge writes the summary itself in these cases, and the divider says why whe
 | When | The divider says |
 | --- | --- |
 | **Summaries written by** is openforge | `Compaction · by openforge` |
-| for now, a Claude chat whose prompt cache is warm (below) | `Compaction · by openforge` |
 | CLIProxyPacer doesn't write summaries for the model, as when it passes that model's compactions on to its provider: a Codex API key, xAI or an OpenAI-compatible upstream | `… CLIProxyPacer couldn't: it writes no summaries on this model's route` |
 | CLIProxyPacer refused, failed, or answered without a summary | `… CLIProxyPacer couldn't: it answered 501`, `it failed` or `no readable summary` |
 | no answer within 4 minutes | `… CLIProxyPacer couldn't: no answer in 4 minutes` |
 | CLIProxyPacer couldn't be reached, or openforge couldn't set the chat's own writer (below) | `… CLIProxyPacer couldn't: it could not be reached` or `the chat's writer could not be set` |
-
-**Claude chats, for now.** Claude models talk Messages to CLIProxyPacer, and CLIProxyPacer's summary of such a chat
-doesn't reuse the conversation's prompt cache, so a warm chat's summary would pay for the whole conversation again.
-Until CLIProxyPacer's summaries keep that cache, a Claude chat gets openforge's own summary while its cache is warm, and
-CLIProxyPacer's once it is cold. A cold ask counts as cold, and so does a move whose summary CLIProxyPacer wants on
-another model. This rule may change.
 
 - Before CLIProxyPacer's first summary of a chat, openforge sets that chat's own writer to CLIProxyPacer, unless one is
   set for your key or the server. Who writes still follows **Summaries written by**: switching it to openforge later

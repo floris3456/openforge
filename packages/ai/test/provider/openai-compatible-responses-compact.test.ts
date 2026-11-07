@@ -111,6 +111,52 @@ it.effect("sends a turn's conversation, instructions and tools to <endpoint>/com
   }),
 )
 
+// For a turn that went out in another format, which the endpoint renders back (CLIProxyPacer's Claude chats speak
+// Messages): CLIProxyPacer turns `instructions` into one system block and each text part of a `system` input item into
+// one more (`claude_responses.rs`), so the turn's system parts go as such parts, in order, not joined.
+it.effect("compactSystemParts: the system parts as a first system item, one input_text each; no instructions", () =>
+  Effect.gen(function* () {
+    const withSystem = (system: ReadonlyArray<string>, endpoint: typeof Protocol.compact) =>
+      LLMRequest.update(request, {
+        model: LanguageModel.update(model, { route: model.route.with({ compact: { endpoint } }) }),
+        system: system.map((text) => ({ type: "text" as const, text })),
+      })
+    const bodyOf = (compacting: LLMRequest) =>
+      Effect.gen(function* () {
+        calls.length = 0
+        if (!ai.canCompact(compacting)) throw new Error("not compactable")
+        yield* ai.compact(compacting)
+        return JSON.parse(calls[0]!.body) as Record<string, unknown>
+      })
+    const parts = ["You are a coding agent.\n", "# Your Model\n- fixture-model", "", "A worktree hint."]
+    const joined = yield* bodyOf(withSystem(parts, Protocol.compact))
+    const split = yield* bodyOf(withSystem(parts, Protocol.compactSystemParts))
+
+    expect(joined.instructions).toBe(parts.join("\n"))
+    expect(split).not.toHaveProperty("instructions")
+    // The empty part makes no block, as in a Messages turn.
+    expect(split.input).toEqual([
+      {
+        type: "message",
+        role: "system",
+        content: [
+          { type: "input_text", text: "You are a coding agent.\n" },
+          { type: "input_text", text: "# Your Model\n- fixture-model" },
+          { type: "input_text", text: "A worktree hint." },
+        ],
+      },
+      ...(joined.input as unknown[]),
+    ])
+    for (const key of ["model", "tools", "prompt_cache_key", "include"])
+      expect(JSON.stringify(split[key])).toBe(JSON.stringify(joined[key]))
+
+    // Without system parts: neither the item nor instructions.
+    const bare = yield* bodyOf(withSystem([], Protocol.compactSystemParts))
+    expect(bare).not.toHaveProperty("instructions")
+    expect(bare.input).toEqual(joined.input)
+  }),
+)
+
 it.effect("the route itself still has no compact endpoint: a provider that has one sets it", () =>
   Effect.sync(() => {
     expect(ai.canCompact(request)).toBe(false)

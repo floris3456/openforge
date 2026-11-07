@@ -420,16 +420,10 @@ export const layer = Layer.effect(
     const pacerWriter = (trigger: Trigger, writing: SessionContext.Loaded) => {
       const context = trigger.context
       if (context.model.ref.providerID !== PacerSummaries.provider) return Effect.succeed(undefined)
-      const picks = "models" in trigger ? trigger.models : undefined
       return summaries.plan({
         sessionID: context.session.id,
         ...(context.session.parentID ? { parentID: context.session.parentID } : {}),
         model: writing.model.ref.id,
-        messages: PacerSummaries.messages(context.model.model),
-        warm: PacerSummaries.warmth(
-          { reason: trigger.reason, ...(picks ? { models: picks.map((pick) => pick.id) } : {}) },
-          context.model.ref.id,
-        ),
       })
     }
 

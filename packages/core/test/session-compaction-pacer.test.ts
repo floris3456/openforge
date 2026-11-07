@@ -1,5 +1,5 @@
 import { afterAll, expect } from "bun:test"
-import { LLMClient, type LanguageModel } from "@opencode/ai/effect"
+import { ai, CacheHint, LLMClient, type LanguageModel, Message } from "@opencode/ai/effect"
 import { AnthropicCompatible, OpenAICompatibleResponses } from "@opencode/ai/providers"
 import { Auth, RequestExecutor } from "@opencode/ai/route"
 import { Agent } from "@opencode/core/agent"
@@ -9,7 +9,10 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { llmClient } from "@opencode/core/effect/app-node-platform"
 import { Instructions } from "@opencode/core/instructions/index"
 import { Location } from "@opencode/core/location"
+import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerStatus } from "@opencode/core/pacer/status"
 import { PacerSummaries } from "@opencode/core/pacer/summaries"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Project } from "@opencode/core/project"
@@ -62,6 +65,11 @@ const fake = {
   users: false,
   /** Resolves when a `/responses/compact` request arrives. */
   arrived: Promise.withResolvers<void>(),
+  /**
+   * CLIProxyPacer's view of each chat, by its ID there, each with its own settings, for the real
+   * `PacerSummaries.plan`; a chat without one is unknown to it (404). The key and server levels hold no writer.
+   */
+  views: new Map<string, Record<string, unknown>>(),
 }
 
 /** The user messages' texts in a Responses body's input. */
@@ -87,6 +95,22 @@ const server = Bun.serve({
     const text = await request.text()
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {}
     fake.seen.push({ method: request.method, path: url.pathname, headers: Object.fromEntries(request.headers), body })
+    // A PATCH writes the chat's own settings and answers its view; a view says how they apply (pacer_sessions.rs).
+    const chatID = url.pathname.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
+    if (chatID) {
+      const held = fake.views.get(chatID)
+      const view =
+        request.method === "PATCH"
+          ? { ...(held ?? { id: chatID }), settings: { ...(held?.settings as object | undefined), ...body } }
+          : held
+      if (view === undefined)
+        return Response.json({ error: { type: "not_found", message: "no such session" } }, { status: 404 })
+      fake.views.set(chatID, view)
+      const own = (view.settings as Record<string, unknown> | undefined)?.["compaction.writer"]
+      return Response.json({ ...view, effective: { compaction_writer: own ?? null } })
+    }
+    if (url.pathname === "/pacer/v1/settings")
+      return Response.json([{ name: "compaction.writer", default: null, server: null, key: null, value: null }])
     if (url.pathname === "/v1/responses/compact") {
       fake.arrived.resolve()
       if (fake.compact === "hang") return new Promise<Response>(() => {})
@@ -193,53 +217,90 @@ const pacerRef = (id: string) =>
 const plans: PacerSummaries.PlanInput[] = []
 const decision: { current: PacerSummaries.Decision | undefined } = { current: { by: "cliproxypacer" } }
 
-const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([
-      Database.node,
-      Bus.node,
-      SessionProjector.node,
-      SessionStore.node,
-      SessionCompaction.node,
-      SessionModelRequest.node,
-      PluginHooks.node,
-      llmClient,
-    ]),
-    [
-      Bus.node.replace(Bus.configured({ persist: true })),
-      llmClient.replace(
-        LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.provide(FetchHttpClient.layer)),
-      ),
-      Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
-      PacerSummaries.node.replace(
-        Layer.succeed(
-          PacerSummaries.Service,
-          PacerSummaries.Service.of({
-            plan: (input) =>
-              Effect.sync(() => {
-                plans.push(input)
-                return decision.current
+const nodes = [
+  Database.node,
+  Bus.node,
+  SessionProjector.node,
+  SessionStore.node,
+  SessionCompaction.node,
+  SessionModelRequest.node,
+  PluginHooks.node,
+  llmClient,
+] as const
+const replacements = [
+  Bus.node.replace(Bus.configured({ persist: true })),
+  llmClient.replace(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.provide(FetchHttpClient.layer))),
+  Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+  SessionRunnerModel.node.replace(
+    Layer.mock(SessionRunnerModel.Service)({
+      resolve: (session) => {
+        const found = session.model && byID.get(String(session.model.id))
+        return found
+          ? Effect.succeed(found)
+          : Effect.fail(
+              new SessionRunnerModel.ModelUnavailableError({
+                providerID: session.model?.providerID ?? Provider.ID.make("none"),
+                modelID: session.model?.id ?? Model.ID.make("none"),
               }),
-          }),
-        ),
-      ),
-      SessionRunnerModel.node.replace(
-        Layer.mock(SessionRunnerModel.Service)({
-          resolve: (session) => {
-            const found = session.model && byID.get(String(session.model.id))
-            return found
-              ? Effect.succeed(found)
-              : Effect.fail(
-                  new SessionRunnerModel.ModelUnavailableError({
-                    providerID: session.model?.providerID ?? Provider.ID.make("none"),
-                    modelID: session.model?.id ?? Model.ID.make("none"),
-                  }),
-                )
-          },
+            )
+      },
+    }),
+  ),
+]
+
+const it = testEffect(
+  AppNodeBuilder.build(LayerNode.group([...nodes]), [
+    ...replacements,
+    PacerSummaries.node.replace(
+      Layer.succeed(
+        PacerSummaries.Service,
+        PacerSummaries.Service.of({
+          plan: (input) =>
+            Effect.sync(() => {
+              plans.push(input)
+              return decision.current
+            }),
         }),
       ),
-    ],
-  ),
+    ),
+  ]),
+)
+
+/**
+ * The same with the real `PacerSummaries.plan`, which asks the fake CLIProxyPacer for the chat's view and the key
+ * level, and finds its models in this catalog: CLIProxyPacer writes for Claude and Kimi.
+ */
+const planned = testEffect(
+  AppNodeBuilder.build(LayerNode.group([...nodes, PacerStatus.node]), [
+    ...replacements,
+    PacerEndpoint.node.replace(
+      Layer.succeed(
+        PacerEndpoint.Service,
+        PacerEndpoint.Service.of({
+          get: () => Effect.succeed(PacerEndpoint.resolve({ baseURL, apiKey: key }, undefined)),
+          changes: () => Effect.die("unused") as never,
+        }),
+      ),
+    ),
+    PacerModels.node.replace(
+      Layer.succeed(
+        PacerModels.Service,
+        PacerModels.Service.of({
+          get: () =>
+            Effect.succeed({
+              at: 0,
+              pacer: { compactTokens: ["auto", "cold", "before-cold"], webTools: false },
+              models: [
+                { id: "claude-e2e", summaries: [{ provider: "claude", writes: true }] },
+                { id: "kimi-e2e", summaries: [{ provider: "kimi", writes: true }] },
+              ],
+            }),
+          changes: () => Effect.die("unused") as never,
+          refresh: () => Effect.void,
+        }),
+      ),
+    ),
+  ]),
 )
 
 const reset = (next: PacerSummaries.Decision = { by: "cliproxypacer" }) => {
@@ -248,6 +309,7 @@ const reset = (next: PacerSummaries.Decision = { by: "cliproxypacer" }) => {
   fake.header = "warm; model=kimi-e2e; writer=server"
   fake.users = false
   fake.arrived = Promise.withResolvers<void>()
+  fake.views.clear()
   plans.length = 0
   decision.current = next
 }
@@ -356,9 +418,7 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
       yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
     ).toEqual({ status: "completed" })
 
-    expect(plans).toEqual([
-      { sessionID: session.id, parentID: session.parentID, model: "kimi-e2e", messages: false, warm: "view" },
-    ])
+    expect(plans).toEqual([{ sessionID: session.id, parentID: session.parentID, model: "kimi-e2e" }])
     // The request on the wire: the summary's headers, the step's body in the Responses format.
     const [sent] = compactions()
     expect(compactions()).toHaveLength(1)
@@ -399,10 +459,14 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
   }),
 )
 
-/** The body of the step `context` would send with `messages`, through the runner's request path and client. */
+/**
+ * The body of the step `context` would send with `messages`, through the runner's request path and client, to `path`
+ * (a Claude model's step goes to `/v1/messages`).
+ */
 const stepBody = Effect.fnUntraced(function* (
   context: SessionContext.Loaded,
   messages: ReadonlyArray<SessionMessage.Info>,
+  path = "/v1/responses",
 ) {
   const transcript = SessionModelRequest.baseTranscript({
     agent: context.agent.info,
@@ -421,9 +485,16 @@ const stepBody = Effect.fnUntraced(function* (
   })
   const before = fake.seen.length
   yield* (yield* LLMClient.Service).stream(step.request, step.options).pipe(Stream.runDrain)
-  const sent = fake.seen.slice(before).filter((item) => item.path === "/v1/responses")
+  const sent = fake.seen.slice(before).filter((item) => item.path === path)
   expect(sent).toHaveLength(1)
   return sent[0]!.body
+})
+
+/** A Messages step's system blocks as the `system` input item CLIProxyPacer turns back into the same blocks. */
+const systemItem = (step: Record<string, unknown>) => ({
+  type: "message",
+  role: "system",
+  content: (step.system as Array<{ text: string }>).map((block) => ({ type: "input_text", text: block.text })),
 })
 
 const occurrences = (body: Record<string, unknown>, text: string) =>
@@ -472,29 +543,265 @@ it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as
   Effect.gen(function* () {
     reset()
     fake.header = "cold; model=kimi-e2e-mini; writer=server"
-    const { session, context } = yield* chat("messages", claude)
+    const { session, messages, context } = yield* chat("messages", claude)
+    const step = yield* stepBody(context, messages, "/v1/messages")
+    fake.seen.length = 0
     const compaction = yield* SessionCompaction.Service
     expect(
       yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
     ).toEqual({ status: "completed" })
-    expect(plans[0]).toMatchObject({ model: "claude-e2e", messages: true, warm: "view" })
+    expect(plans).toEqual([{ sessionID: session.id, parentID: session.parentID, model: "claude-e2e" }])
     const [sent] = compactions()
     expect(own()).toEqual([])
     expect(sent?.headers.authorization).toBe(`Bearer ${key}`)
     expect(sent?.headers["x-pacer-kind"]).toBe("compaction")
+    // The step's system blocks first, each its own part, as CLIProxyPacer renders them back; nothing joined into
+    // `instructions`.
+    expect(sent?.body).not.toHaveProperty("instructions")
     expect(sent?.body).toMatchObject({
       model: "claude-e2e",
       input: [
+        systemItem(step),
         { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
       ],
     })
-    expect(sent?.body.input).toHaveLength(2)
+    expect(sent?.body.input).toHaveLength(3)
     // Written on CLIProxyPacer's cheaper model for the cold chat, as its header says.
     const stored = yield* record(session.id)
     expect(stored.writer).toEqual({ by: "cliproxypacer", cold: true })
     expect(stored.model).toEqual(pacerRef("kimi-e2e-mini"))
   }),
+)
+
+// CLIProxyPacer renders a Messages chat's summary request back into Messages (`claude_responses.rs`): `instructions`
+// becomes one system block, and each text part of a `system` input item one more, in order. Joined into `instructions`,
+// four system blocks came back as one (on a Claude login, CLIProxyPacer's first user message then differed from the
+// step's at the first join: `run/evidence/cpp-summaries/live-warm-claude/`).
+it.effect("a Messages chat's summary request carries its step's four system blocks as one system item, in order", () =>
+  Effect.gen(function* () {
+    reset()
+    const hint = new CacheHint({ type: "ephemeral" })
+    const system = [
+      { type: "text" as const, text: "You are an agent.\nFollow the user's lead.\n", cache: hint },
+      { type: "text" as const, text: "# Your Model\n- claude-e2e" },
+      { type: "text" as const, text: "# Code Mode\n\nCall tools as code." },
+      { type: "text" as const, text: "A worktree hint.", cache: hint },
+    ]
+    const request = ai.request({
+      model: claude.model,
+      system,
+      messages: [Message.user("Plan a dark mode."), Message.assistant("Here is a five-step plan.")],
+    })
+    const llm = yield* LLMClient.Service
+    yield* llm.stream(request).pipe(Stream.runDrain)
+    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+    const sent = compactions()[0]!.body
+
+    expect((step.system as Array<{ text: string }>).map((block) => block.text)).toEqual(system.map((part) => part.text))
+    expect(sent).not.toHaveProperty("instructions")
+    // The cache hints have no Responses form: the parts carry the text alone.
+    expect(sent.input).toEqual([
+      systemItem(step),
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Here is a five-step plan." }],
+      },
+    ])
+  }),
+)
+
+/**
+ * The conversation in a body, item by item, as CLIProxyPacer renders a Responses body back into Messages
+ * (`claude_responses.rs`): a reasoning item is the thinking block `{thinking: summary text, signature: encrypted
+ * content}`, or a redacted one for `claude-redacted-thinking:<data>`. A Messages body's blocks read the same way.
+ */
+const REDACTED = "claude-redacted-thinking:"
+const conversation = (body: Record<string, unknown>) =>
+  "messages" in body
+    ? (body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>).flatMap((message) =>
+        message.content.map((block) => {
+          if (block.type === "thinking") return `thinking ${JSON.stringify([block.thinking, block.signature])}`
+          if (block.type === "redacted_thinking") return `thinking ${JSON.stringify(["", `${REDACTED}${block.data}`])}`
+          if (block.type === "tool_use") return `tool_use ${block.id}`
+          if (block.type === "tool_result") return `tool_result ${block.tool_use_id}`
+          return `${message.role} ${block.text}`
+        }),
+      )
+    : (body.input as Array<Record<string, unknown>>).flatMap((item) => {
+        if (item.type === "reasoning") {
+          const text = (item.summary as Array<{ text: string }>).map((part) => part.text).join("")
+          return [`thinking ${JSON.stringify([text, item.encrypted_content])}`]
+        }
+        if (item.type === "function_call") return [`tool_use ${item.call_id}`]
+        if (item.type === "function_call_output") return [`tool_result ${item.call_id}`]
+        if (item.role === "system") return []
+        return (item.content as Array<{ text: string }>).map((part) => `${item.role} ${part.text}`)
+      })
+
+// The step's thinking blocks go to CLIProxyPacer as reasoning items in the same places, with the same text and
+// signatures, so the summary's prefix is the step's (`run/evidence/cpp-summaries/live-warm-claude-2/`: without them,
+// the read stopped at the first assistant message with thinking).
+it.effect(
+  "a Messages chat's summary request carries exactly its step's thinking blocks, in place, as reasoning items",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      const key = claude.model.route.providerMetadataKey ?? claude.model.provider
+      const signed = (text: string, signature: string) => ({
+        type: "reasoning" as const,
+        text,
+        providerMetadata: { [key]: { signature } },
+      })
+      const request = ai.request({
+        model: claude.model,
+        system: "You are an agent.",
+        messages: [
+          Message.user("Plan a dark mode."),
+          Message.assistant([
+            signed("I should read the styles first.", "sig-1"),
+            { type: "tool-call", id: "toolu_1", name: "read", input: { path: "styles.css" } },
+          ]),
+          Message.make({
+            role: "tool",
+            content: [{ type: "tool-result", id: "toolu_1", name: "read", result: { type: "text", value: "body {}" } }],
+          }),
+          Message.assistant([
+            // Safety-filtered thinking: no text, its data alone.
+            { type: "reasoning", text: "", providerMetadata: { [key]: { redactedData: "opaque-1" } } },
+            signed("The styles use one variable.", "sig-2"),
+            { type: "text", text: "Here is the plan." },
+          ]),
+          Message.user("Now list three risks."),
+          Message.assistant([
+            // Another model's readable reasoning, without a signature: the step leaves it out.
+            { type: "reasoning", text: "Thinking on another model." },
+            signed("Contrast first.", "sig-3"),
+            signed("Then preferences.", "sig-4"),
+            { type: "text", text: "Missed styles, contrast, preference behaviour." },
+          ]),
+        ],
+      })
+      const llm = yield* LLMClient.Service
+      yield* llm.stream(request).pipe(Stream.runDrain)
+      const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+      yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+      const sent = compactions()[0]!.body
+
+      // Item by item the same conversation, the thinking blocks included, byte for byte.
+      expect(conversation(sent)).toEqual(conversation(step))
+      expect(conversation(step).filter((item) => item.startsWith("thinking"))).toEqual([
+        `thinking ${JSON.stringify(["I should read the styles first.", "sig-1"])}`,
+        `thinking ${JSON.stringify(["", `${REDACTED}opaque-1`])}`,
+        `thinking ${JSON.stringify(["The styles use one variable.", "sig-2"])}`,
+        `thinking ${JSON.stringify(["Contrast first.", "sig-3"])}`,
+        `thinking ${JSON.stringify(["Then preferences.", "sig-4"])}`,
+      ])
+      expect(JSON.stringify(sent)).not.toContain("Thinking on another model.")
+      // The reasoning items as sent; a redacted one has no summary.
+      expect((sent.input as Array<Record<string, unknown>>).filter((item) => item.type === "reasoning")).toEqual([
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "I should read the styles first." }],
+          encrypted_content: "sig-1",
+        },
+        { type: "reasoning", summary: [], encrypted_content: `${REDACTED}opaque-1` },
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "The styles use one variable." }],
+          encrypted_content: "sig-2",
+        },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "Contrast first." }], encrypted_content: "sig-3" },
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Then preferences." }],
+          encrypted_content: "sig-4",
+        },
+      ])
+    }),
+)
+
+it.effect("a Messages chat whose reasoning came from another model: its summary request carries none", () =>
+  Effect.gen(function* () {
+    reset()
+    const request = ai.request({
+      model: claude.model,
+      system: "You are an agent.",
+      messages: [
+        Message.user("Plan a dark mode."),
+        Message.assistant([
+          { type: "reasoning", text: "Readable reasoning of another model." },
+          { type: "text", text: "Here is the plan." },
+        ]),
+      ],
+    })
+    const llm = yield* LLMClient.Service
+    yield* llm.stream(request).pipe(Stream.runDrain)
+    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+    const sent = compactions()[0]!.body
+    expect(JSON.stringify(step)).not.toContain("Readable reasoning of another model.")
+    expect((sent.input as Array<{ type: string }>).some((item) => item.type === "reasoning")).toBe(false)
+    expect(conversation(sent)).toEqual(conversation(step))
+  }),
+)
+
+planned.live(
+  "a warm Claude chat: CLIProxyPacer writes its summary, its own writer set to server first; none of openforge's own",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      fake.header = "warm; model=claude-e2e; writer=server"
+      yield* (yield* PacerStatus.Service).set({ state: "on", since: 0, refused: false })
+      const { session, messages, context } = yield* chat("claude-warm", claude)
+      const uuid = PacerSessionID.make(session.id)
+      // Warm at CLIProxyPacer for ten more minutes; no writer of its own, none at the key or server level.
+      fake.views.set(uuid, {
+        id: uuid,
+        session_id: 7,
+        provider: "claude",
+        model: "claude-e2e",
+        warm: true,
+        warm_until: Date.now() + 600_000,
+        settings: {},
+      })
+      expect(
+        yield* (yield* SessionCompaction.Service).compact({
+          reason: "auto",
+          context,
+          estimate: { measured: 190_000, estimated: 0 },
+        }),
+      ).toEqual({ status: "completed" })
+
+      expect(fake.seen.map((item) => `${item.method} ${item.path}`)).toEqual([
+        `GET /pacer/v1/sessions/${uuid}`,
+        "GET /pacer/v1/settings",
+        `PATCH /pacer/v1/sessions/${uuid}`,
+        "POST /v1/responses/compact",
+      ])
+      expect(fake.seen[2]?.body).toEqual({ "compaction.writer": "server" })
+      expect(own()).toEqual([])
+      const [sent] = compactions()
+      expect(sent?.headers).toMatchObject({ "x-pacer-session": uuid, "x-pacer-kind": "compaction" })
+      expect(sent?.body.model).toBe("claude-e2e")
+      // The step's system parts as the first item, then the history before the kept exchange.
+      expect(sent?.body).not.toHaveProperty("instructions")
+      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual([
+        "system",
+        "user",
+        "assistant",
+      ])
+
+      const stored = yield* record(session.id)
+      expect(stored.summary).toBe(cppSummary)
+      expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false })
+      expect(stored.model).toEqual(pacerRef("claude-e2e"))
+      expect(stored.metadata?.keepID).toBe(messages[2]!.id)
+    }),
 )
 
 it.effect("openforge writes when it is to: its own summary on the chat's route, the record saying so", () =>
@@ -571,11 +878,11 @@ it.effect("no answer within 4 minutes: openforge writes it", () =>
   }),
 )
 
-it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usable pick writes it", () =>
+it.effect("a move and a cold ask: CLIProxyPacer's first usable pick writes it; a cold ask's record says cold", () =>
   Effect.gen(function* () {
     const ref = pacerRef
     const compaction = yield* SessionCompaction.Service
-    // A move whose picks start with the chat's own model: warm, on that model.
+    // A move whose picks start with the chat's own model: on that model.
     reset()
     const warm = yield* chat("move-warm", kimi)
     yield* compaction.compact({
@@ -583,9 +890,9 @@ it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usa
       context: warm.context,
       models: [ref("kimi-e2e"), ref("kimi-e2e-mini")],
     })
-    expect(plans[0]).toMatchObject({ model: "kimi-e2e", warm: true })
+    expect(plans[0]).toMatchObject({ model: "kimi-e2e" })
     expect(compactions()[0]?.body.model).toBe("kimi-e2e")
-    // A move whose picks are the compaction models alone (the account ran out): cold, on the first usable one.
+    // A move whose picks are the compaction models alone (the account ran out): on the first usable one.
     reset()
     fake.header = "warm; model=kimi-e2e-mini; writer=server"
     const out = yield* chat("move-out", kimi)
@@ -594,7 +901,7 @@ it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usa
       context: out.context,
       models: [ref("not-served"), ref("kimi-e2e-mini"), ref("kimi-e2e")],
     })
-    expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini", warm: false })
+    expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini" })
     expect(compactions()[0]?.body.model).toBe("kimi-e2e-mini")
     expect((yield* record(out.session.id)).model).toEqual(ref("kimi-e2e-mini"))
     // The move's record: as CLIProxyPacer's header says.
@@ -604,7 +911,7 @@ it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usa
     fake.header = "warm; model=kimi-e2e-mini; writer=server"
     const cold = yield* chat("cold-ask", claude)
     yield* compaction.compact({ reason: "cold", context: cold.context, models: [ref("kimi-e2e-mini")] })
-    expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini", messages: true, warm: false })
+    expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini" })
     expect(compactions()[0]?.body.model).toBe("kimi-e2e-mini")
     expect((yield* record(cold.session.id)).writer).toEqual({ by: "cliproxypacer", cold: true })
     // And without any header (lost behind keep-alive bytes).

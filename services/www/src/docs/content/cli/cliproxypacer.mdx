@@ -25,17 +25,17 @@ The keys are listed on [Keybinds](/cli/keybinds#cliproxypacer).
 The toolbar under the prompt shows one cache item after the context and cost. It counts down to when the chat's prompt
 cache goes cold if nothing more is sent, including the pings CLIProxyPacer still plans.
 
-| It shows                                         | When                                                                                                                                                    |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `warm 23:41`                                     | the cache is warm and CLIProxyPacer pings it                                                                                                            |
-| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                                                                    |
-| `cache cold`                                     | the cache went cold, shown as a warning                                                                                                                 |
-| `cache cold · compacts first`                    | the cache went cold, [compact cold chats first](/providers#compaction-asks) is on for the chat, and the chat is large enough for it, shown as a warning |
-| `keep-alive stopped · warm 2:10`                 | CLIProxyPacer's pings stopped on a failure, shown as a warning                                                                                          |
-| `compacts at 14:32`                              | compact before cold is on, and CLIProxyPacer has set the time it asks for it                                                                            |
-| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning                                                                                        |
-| `warm`                                           | the cache is warm and CLIProxyPacer gives no time                                                                                                       |
-| nothing                                          | the proxy has no pacer, CLIProxyPacer knows nothing of the chat yet, or the chat's model is another provider's                                          |
+| It shows                                         | When                                                                                                                                                                              |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `warm 23:41`                                     | the cache is warm and CLIProxyPacer pings it                                                                                                                                      |
+| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                                                                                              |
+| `cache cold`                                     | the cache went cold, shown as a warning                                                                                                                                           |
+| `cache cold · compacts first`                    | the cache went cold, [compact cold chats first](/providers#compaction-asks) and automatic compaction are on for the chat, and the chat is large enough for it, shown as a warning |
+| `keep-alive stopped · warm 2:10`                 | CLIProxyPacer's pings stopped on a failure, shown as a warning                                                                                                                    |
+| `compacts at 14:32`                              | compact before cold is on, and CLIProxyPacer has set the time it asks for it                                                                                                      |
+| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning                                                                                                                  |
+| `warm`                                           | the cache is warm and CLIProxyPacer gives no time                                                                                                                                 |
+| nothing                                          | the proxy has no pacer, CLIProxyPacer knows nothing of the chat yet, or the chat's model is another provider's                                                                    |
 
 - While CLIProxyPacer is unreachable the item keeps its last text, greyed, with the time it is from:
   `warm 12:05 · as of 14:02`. It stops counting until CLIProxyPacer answers again.

@@ -149,7 +149,7 @@ change either setting by itself.
   and when its model is no longer on CLIProxyPacer.
 - Either compaction shows in the chat as an automatic one does, its divider naming who wrote it
   ([Summaries](/cli/cliproxypacer#summaries)). The toolbar says `cache cold · compacts first` for a cold chat that is
-  large enough, while its switch is on.
+  large enough, while its switch and automatic compaction are on.
 
 ### Summaries
 
@@ -193,8 +193,8 @@ CLIProxyPacer's once it is cold. A cold ask counts as cold, and so does a move w
 another model. This rule may change.
 
 - Before CLIProxyPacer's first summary of a chat, openforge sets that chat's own writer to CLIProxyPacer, unless one is
-  set for your key or the server. A chat's own setting wins over Settings, so switching **Summaries written by** to
-  openforge later doesn't reach those chats.
+  set for your key or the server. Who writes still follows **Summaries written by**: switching it to openforge later
+  reaches those chats too. A chat set to openforge on CLIProxyPacer's own page gets openforge's summaries as well.
 - [Background compaction](/compaction#background-compaction) isn't used when CLIProxyPacer writes.
 - A summary is a request of the chat at CLIProxyPacer, with its cost: a `compaction` row of its
   [**Requests** tab](/cli/cliproxypacer#requests-tab).

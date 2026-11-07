@@ -197,11 +197,11 @@ export type Decision = { readonly by: "cliproxypacer" } | { readonly by: "openfo
 export const ROUTE = "it writes no summaries on this model's route"
 
 /**
- * Who writes, in this order: the chat's effective `compaction.writer` (`client` is openforge, `server` or unset CPP);
- * the interim rule; then only where CPP writes for the model's route with `server`.
+ * Who writes, in this order: the writer ({@link writerFor}: `client` is openforge, `server` or unset CPP); the interim
+ * rule; then only where CPP writes for the model's route with `server`.
  */
 export function decide(input: {
-  /** The chat's effective `compaction.writer`; undefined while unset. */
+  /** Who writes by the settings ({@link writerFor}); undefined while unset. */
   readonly writer: "server" | "client" | undefined
   /** CPP writes on the writing model's route with `server` (`PacerModels.writes`). */
   readonly writes: boolean
@@ -213,6 +213,21 @@ export function decide(input: {
   if (openforgeWhileWarm(input)) return { by: "openforge" }
   if (!input.writes) return { by: "openforge", fallback: ROUTE }
   return { by: "cliproxypacer" }
+}
+
+/**
+ * Who writes by the settings (spec cliproxypacer-server-summaries, section 2): the key level, as Settings shows it
+ * (`compaction.writer` of the key, else the server's, else the default), so that a choice there reaches every chat,
+ * those with the own `server` openforge set too; and a chat's own `client`, which someone else set (CPP's dashboard).
+ * Not the chat's effective value: its own `server` would outvote the key's `client`.
+ */
+export function writerFor(settings: {
+  /** The key level's `compaction.writer`; undefined while unset. */
+  readonly key: "server" | "client" | undefined
+  /** The chat's own; undefined while it holds none. */
+  readonly own: "server" | "client" | undefined
+}): "server" | "client" {
+  return settings.key === "client" || settings.own === "client" ? "client" : "server"
 }
 
 // ------------------------------------------------------------------ the service
@@ -230,10 +245,10 @@ export interface PlanInput {
 
 export interface Interface {
   /**
-   * Who writes the summary: reads the chat's view now (its writer and warmth; for a chat CPP knows nothing of, the
-   * key's writer), and the catalog for the model's routes. When CPP is to write and the chat's writer is unset, sets
-   * the chat's own `server` first (one `PATCH`): an unset writer answers Claude with a capsule only CPP opens. Never
-   * fails: openforge writes, saying why, when CPP can't be asked.
+   * Who writes the summary: reads the chat's view now (its own writer, its effective one, its warmth), the key level's
+   * listing ({@link writerFor}), and the catalog for the model's routes. When CPP is to write and the chat's effective
+   * writer isn't `server`, sets the chat's own `server` first (one `PATCH`): an unset writer answers Claude with a
+   * capsule only CPP opens. Never fails: openforge writes, saying why, when CPP can't be asked.
    */
   readonly plan: (input: PlanInput) => Effect.Effect<Decision>
 }
@@ -276,21 +291,21 @@ export const layer = Layer.effect(
       const path = `/pacer/v1/sessions/${encodeURIComponent(PacerSessionID.make(input.sessionID))}`
       const read = yield* Effect.result(
         Effect.gen(function* () {
+          // Undefined for a chat CPP knows nothing of yet: it has no writer of its own.
           const held = yield* view(path, endpoint)
-          if (held)
-            return {
-              writer: writerOf(held.view.effective?.compaction_writer),
-              provider: held.view.provider ?? undefined,
-              warmth: {
-                warm: held.view.warm === true,
-                warmUntil: PacerWire.local(held.view.warm_until, held.offset),
-              } satisfies Warmth as Warmth | undefined,
-            }
-          // A chat CPP knows nothing of yet follows the key's writer.
           const listing = yield* http.get("/pacer/v1/settings", PacerWire.Settings, { endpoint })
-          const key = PacerWire.settings(listing.body)
-          const writer: "client" | undefined = key.summaryWriter === "openforge" ? "client" : undefined
-          return { writer, provider: undefined, warmth: undefined }
+          const key = PacerWire.settings(listing.body).summaryWriter
+          return {
+            writer: writerFor({
+              key: key === undefined ? undefined : PacerWire.writers[key],
+              own: writerOf(held?.view.settings?.[PacerWire.settingNames.summaryWriter]),
+            }),
+            effective: writerOf(held?.view.effective?.compaction_writer),
+            provider: held?.view.provider ?? undefined,
+            warmth: held
+              ? { warm: held.view.warm === true, warmUntil: PacerWire.local(held.view.warm_until, held.offset) }
+              : undefined,
+          }
         }),
       )
       if (Result.isFailure(read)) return { by: "openforge", fallback: UNREACHABLE } satisfies Decision
@@ -305,7 +320,7 @@ export const layer = Layer.effect(
         messages: input.messages,
         warm: input.warm === "view" ? viewWarm(chat.warmth, now) : input.warm,
       })
-      if (decision.by !== "cliproxypacer" || chat.writer === "server") return decision
+      if (decision.by !== "cliproxypacer" || chat.effective === "server") return decision
       const claimed = yield* Effect.result(
         http.patch(path, { [PacerWire.settingNames.summaryWriter]: PacerWire.writers.cliproxypacer }, Schema.Unknown, {
           endpoint,

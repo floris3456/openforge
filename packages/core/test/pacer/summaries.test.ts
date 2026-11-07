@@ -151,9 +151,11 @@ type Json = Record<string, unknown>
 interface Cpp {
   readonly origin: string
   readonly seen: Array<{ readonly method: string; readonly path: string; readonly body: unknown }>
+  /** The chats' views, each with its own settings; `effective` is worked out when answered. */
   readonly views: Map<string, Json>
-  /** The key level's `compaction.writer`, for a chat CPP holds no view of. */
+  /** `compaction.writer` at the key's own level, and at the server's. */
   keyWriter: string | null
+  serverWriter: string | null
   /** Every answer to these paths: this status. */
   readonly failing: Map<string, number>
 }
@@ -171,24 +173,36 @@ const fakeCpp = Effect.acquireRelease(
         cpp.seen.push({ method: request.method, path, body })
         const failing = cpp.failing.get(`${request.method} ${path}`)
         if (failing) return Response.json({ error: { type: "internal", message: "synthetic" } }, { status: failing })
+        // A setting resolves session, key, server, default (settings.rs); a view says how it applies to the chat.
+        const answer = (view: Json) => {
+          const own = (view.settings as Json | undefined)?.["compaction.writer"]
+          return Response.json({
+            ...view,
+            effective: { compaction_writer: own ?? cpp.keyWriter ?? cpp.serverWriter ?? null },
+          })
+        }
         const session = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
         if (session) {
           const view = cpp.views.get(session)
           if (request.method === "PATCH") {
             // A PATCH writes the chat's own settings, a new chat's too, and answers its view (pacer_sessions.rs).
-            const settings = { ...(view?.settings as Json | undefined), ...(body as Json) }
-            const writer = settings["compaction.writer"] ?? cpp.keyWriter
-            const next = { ...(view ?? { id: session }), settings, effective: { compaction_writer: writer } }
+            const next = { ...(view ?? { id: session }), settings: { ...(view?.settings as Json), ...(body as Json) } }
             cpp.views.set(session, next)
-            return Response.json(next)
+            return answer(next)
           }
           return view
-            ? Response.json(view)
+            ? answer(view)
             : Response.json({ error: { type: "not_found", message: "no such session" } }, { status: 404 })
         }
         if (path === "/pacer/v1/settings")
           return Response.json([
-            { name: "compaction.writer", default: null, server: null, key: cpp.keyWriter, value: cpp.keyWriter },
+            {
+              name: "compaction.writer",
+              default: null,
+              server: cpp.serverWriter,
+              key: cpp.keyWriter,
+              value: cpp.keyWriter ?? cpp.serverWriter ?? null,
+            },
           ])
         return Response.json({ error: { type: "not_found", message: "no route" } }, { status: 404 })
       },
@@ -198,6 +212,7 @@ const fakeCpp = Effect.acquireRelease(
       seen: [],
       views: new Map(),
       keyWriter: null,
+      serverWriter: null,
       failing: new Map(),
     }
     return { cpp, server }
@@ -248,13 +263,13 @@ const start = Effect.fnUntraced(function* () {
 
 const sessionID = "ses_summaries_test_chat_000000000000000000000000000000000000000000000000000000000000000" as SessionID
 const uuid = PacerSessionID.make(sessionID)
-const view = (writer: string | null, warm: Json = { warm: true }) => ({
+/** The chat's view at CPP, holding `own` as its own `compaction.writer` (none when null). */
+const view = (own: string | null, warm: Json = { warm: true }) => ({
   id: uuid,
   session_id: 7,
   provider: "kimi",
   model: "kimi-e2e",
-  settings: {},
-  effective: { compaction_writer: writer },
+  settings: own === null ? {} : { "compaction.writer": own },
   ...warm,
 })
 const plan = (input: Partial<PacerSummaries.PlanInput>) => ({
@@ -266,10 +281,41 @@ const plan = (input: Partial<PacerSummaries.PlanInput>) => ({
 })
 
 describe("PacerSummaries.plan", () => {
-  it.live("follows the chat's writer, setting its own `server` once when unset, never the key's", () =>
+  // The key level decides, as the Settings row shows it, so a choice there reaches every chat (the lead's fix of
+  // 2026-11-07): a chat's own `server`, which openforge sets, never outvotes the key's `client`.
+  it.live("follows the key level as Settings shows it: its `client` is openforge's, whatever the chat's own says", () =>
     Effect.gen(function* () {
       const { cpp, summaries } = yield* start()
       const writes = () => cpp.seen.filter((item) => item.method === "PATCH")
+      // The key's own `client`, the chat's own `server`.
+      cpp.keyWriter = "client"
+      cpp.views.set(uuid, view("server"))
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge" })
+      // The key's own unset, the server's `client`: the key level is `client` all the same.
+      cpp.keyWriter = null
+      cpp.serverWriter = "client"
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge" })
+      expect(writes()).toEqual([])
+      expect(cpp.seen.filter((item) => item.path === "/pacer/v1/settings")).toHaveLength(2)
+    }),
+  )
+
+  it.live("a chat's own `client`, set by someone else, is openforge's too", () =>
+    Effect.gen(function* () {
+      const { cpp, summaries } = yield* start()
+      cpp.views.set(uuid, view("client"))
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge" })
+      cpp.keyWriter = "server"
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge" })
+      expect(cpp.seen.filter((item) => item.method === "PATCH")).toEqual([])
+    }),
+  )
+
+  it.live("the key level unset or `server`: CPP's, setting the chat's own `server` once where it isn't already", () =>
+    Effect.gen(function* () {
+      const { cpp, summaries } = yield* start()
+      const writes = () => cpp.seen.filter((item) => item.method === "PATCH")
+      // Unset everywhere: the one PATCH, so CPP's answer is readable.
       cpp.views.set(uuid, view(null))
       expect(yield* summaries.plan(plan({}))).toEqual({ by: "cliproxypacer" })
       expect(writes()).toEqual([
@@ -278,11 +324,9 @@ describe("PacerSummaries.plan", () => {
       // Its own `server` now applies: no second write.
       expect(yield* summaries.plan(plan({}))).toEqual({ by: "cliproxypacer" })
       expect(writes()).toHaveLength(1)
-
-      cpp.views.set(uuid, view("client"))
-      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge" })
-      expect(writes()).toHaveLength(1)
-      cpp.views.set(uuid, view("server"))
+      // The key's `server` applies to a chat without its own: nothing to write.
+      cpp.keyWriter = "server"
+      cpp.views.set(uuid, view(null))
       expect(yield* summaries.plan(plan({}))).toEqual({ by: "cliproxypacer" })
       expect(writes()).toHaveLength(1)
     }),

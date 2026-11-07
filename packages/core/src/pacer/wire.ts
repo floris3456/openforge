@@ -67,6 +67,11 @@ export const View = Schema.Struct({
       compact_reason: maybe(Schema.String),
     }),
   ),
+  /**
+   * Whether CPP's asks take effect for the chat (`feature`): `available` while its newest request since CPP started
+   * carried the ask's `X-Pacer-Compact` token.
+   */
+  features: maybe(Schema.Struct({ compact_cold_first: maybe(Schema.Struct({ available: maybe(Schema.Unknown) })) })),
   next_use: maybe(Schema.Struct({ credential: Schema.String, reason: maybe(Schema.String) })),
   force_use: maybe(Schema.Struct({ credential: Schema.String, when: maybe(Schema.String) })),
   label: maybe(Schema.Unknown),
@@ -376,6 +381,7 @@ export function chat(
   const state = live(view, context)
   const size = view.warming?.size_tokens
   const threshold = view.warming?.threshold
+  const announced = view.features?.compact_cold_first?.available
   return {
     sessionID,
     ...(view.model ? { model: view.model } : {}),
@@ -399,6 +405,7 @@ export function chat(
       compactBeforeCold: view.effective?.compact_before_cold === true,
       compactColdFirst: view.effective?.compact_cold_first === true,
     },
+    ...(typeof announced === "boolean" ? { coldAskAnnounced: announced } : {}),
     ...(typeof size === "number" && typeof threshold === "number"
       ? { size: { tokens: count(size), threshold: count(threshold) } }
       : {}),

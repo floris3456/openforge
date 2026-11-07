@@ -996,6 +996,7 @@ export type PacerChat = {
   nextUse?: PacerNextUse
   forceUse?: PacerForceUse
   switches: PacerSwitches
+  coldAskAnnounced?: boolean
   size?: PacerSize
   asOf: number
 }

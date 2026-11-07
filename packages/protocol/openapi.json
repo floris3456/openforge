@@ -22441,6 +22441,9 @@
           "switches": {
             "$ref": "#/components/schemas/Pacer.Switches"
           },
+          "coldAskAnnounced": {
+            "type": "boolean"
+          },
           "size": {
             "$ref": "#/components/schemas/Pacer.Size"
           },

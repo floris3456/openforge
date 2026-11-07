@@ -81,6 +81,25 @@ describe("PacerWire", () => {
     })
   })
 
+  // The toolbar says a cold chat compacts first only when openforge would act on CPP's ask (the lead's fix of
+  // 2026-11-07): CPP's `features.compact_cold_first.available` says whether the chat's newest primary request carried
+  // the `cold` token, which openforge sends only with automatic compaction on (pacer_sessions.rs, `feature`).
+  test("tells whether the chat's newest step announced the cold ask, only when CPP says", () => {
+    const at = (fields: Record<string, unknown>) =>
+      PacerWire.chat(decodeView({ id: "uuid-a", ...fields }), sessionID, { offset: 0, now: 0, alias: (a) => a })
+    const feature = (available: unknown) => ({
+      features: {
+        compact_before_cold: { available: true, why: null },
+        compact_cold_first: { available, why: available === true ? null : "The client did not announce support." },
+      },
+    })
+    expect(at(feature(true)).coldAskAnnounced).toBe(true)
+    expect(at(feature(false)).coldAskAnnounced).toBe(false)
+    // CPP before its features, or a value it could not read as a flag: not told.
+    expect(at({})).not.toHaveProperty("coldAskAnnounced")
+    expect(at(feature(null))).not.toHaveProperty("coldAskAnnounced")
+  })
+
   test("reads the compaction asks for all chats from CPP's settings listing: what applies to the key", () => {
     // `GET|PATCH /pacer/v1/settings` (cpa-pacer settings.rs, `settings_listing`): one row per setting the key may set.
     const row = (name: string, server: unknown, key: unknown, value: unknown, source: string) => ({

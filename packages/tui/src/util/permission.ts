@@ -1,6 +1,7 @@
 import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import { Locale } from "./locale"
 import { canonicalToolName, finiteNumber, webSearchProviderLabel } from "./tool-display"
+import { webToolPermission } from "../pacer/web-tools"
 
 type Dict = Record<string, unknown>
 
@@ -19,6 +20,8 @@ export type PermissionPresentationInput = {
   metadata?: unknown
   input?: unknown
   toolMetadata?: unknown
+  /** The name of the tool that asks, when known. */
+  tool?: string
 }
 
 export function permissionPresentation(
@@ -82,6 +85,10 @@ export function permissionPresentation(
       lines: description ? [`◉ ${description}`] : [],
     }
   }
+
+  // CLIProxyPacer's web tools ask as upstream's search and fetch do, with their own arguments.
+  const web = action === "websearch" || action === "webfetch" ? webToolPermission(source.tool ?? "", input) : undefined
+  if (web) return web
 
   if (action === "webfetch") {
     const url = text(input.url) || text(metadata.url)

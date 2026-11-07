@@ -1040,3 +1040,85 @@ describe("Open Responses-compatible route", () => {
     }),
   )
 })
+
+// CLIProxyPacer's `web_search` is a client function tool of that name, which the Responses hosted tool shares.
+describe("Open Responses-compatible client tool named web_search", () => {
+  const model = configure({
+    apiKey: "test-key",
+    baseURL: "https://responses.example.test/v1",
+    provider: "example",
+  }).model("example-model")
+  const webSearch = new ToolDefinition({
+    name: "web_search",
+    description: "Search the web and get the results as text with their links.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", maxLength: 1000, description: "What to search for, in words." } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  })
+
+  it.effect("is sent, read back and replayed as a function call, never as the hosted search", () =>
+    Effect.gen(function* () {
+      const sent = yield* compileRequest(ai.request({ model, prompt: "Search.", tools: [webSearch] }))
+      expect(sent.body.tools).toEqual([
+        {
+          type: "function",
+          name: "web_search",
+          description: webSearch.description,
+          parameters: webSearch.inputSchema,
+          strict: false,
+        },
+      ])
+
+      const item = { type: "function_call", id: "fc_1", call_id: "call_1", name: "web_search" }
+      const response = yield* LLMClient.generate(ai.request({ model, prompt: "Search.", tools: [webSearch] })).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents(
+              { type: "response.output_item.added", output_index: 0, item },
+              {
+                type: "response.function_call_arguments.done",
+                item_id: "fc_1",
+                output_index: 0,
+                arguments: '{"query":"rust 1.95"}',
+              },
+              {
+                type: "response.output_item.done",
+                output_index: 0,
+                item: { ...item, arguments: '{"query":"rust 1.95"}' },
+              },
+              { type: "response.completed", response: { id: "resp_1" } },
+            ),
+          ),
+        ),
+      )
+      expect(response.toolCalls).toEqual([
+        expect.objectContaining({ id: "call_1", name: "web_search", input: { query: "rust 1.95" } }),
+      ])
+      expect(response.toolCalls[0]?.providerExecuted).toBeUndefined()
+
+      const replayed = yield* compileRequest(
+        ai.request({
+          model,
+          tools: [webSearch],
+          messages: [
+            Message.user("Search."),
+            response.message,
+            Message.tool({ id: "call_1", name: "web_search", result: "1. Rust 1.95 released" }),
+          ],
+        }),
+      )
+      expect(replayed.body.input.slice(1)).toEqual([
+        expect.objectContaining({
+          type: "function_call",
+          call_id: "call_1",
+          name: "web_search",
+          arguments: '{"query":"rust 1.95"}',
+        }),
+        { type: "function_call_output", call_id: "call_1", output: '"1. Rust 1.95 released"' },
+      ])
+    }),
+  )
+})

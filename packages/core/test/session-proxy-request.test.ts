@@ -84,6 +84,17 @@ describe("SessionProxyRequest.capture", () => {
     expect(response.headers["x-cpa-trace-id"]).toBe("rewritten")
     expect(proxy.current()).toBe(requestID)
   })
+
+  test("hands each answer's X-Pacer-Tools on, and undefined for an answer without it", async () => {
+    const versions: Array<string | undefined> = []
+    const proxy = SessionProxyRequest.capture(undefined, (version) => versions.push(version))
+    const request = HttpClientRequest.post("https://proxy.test/v1/messages")
+    await Effect.runPromise(
+      proxy.http(request, (input) => Effect.succeed(answer(input, { "X-Pacer-Tools": "3f9a1c0b7d2e4a68" }))),
+    )
+    await Effect.runPromise(proxy.http(request, (input) => Effect.succeed(answer(input))))
+    expect(versions).toEqual(["3f9a1c0b7d2e4a68", undefined])
+  })
 })
 
 const session = Session.Info.make({

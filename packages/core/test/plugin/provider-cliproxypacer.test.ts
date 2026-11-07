@@ -48,7 +48,7 @@ const storedKey = PacerEndpoint.resolve(
 
 const catalog: PacerModels.Catalog = {
   at: 1,
-  pacer: { compactTokens: ["auto", "before-cold", "cold"] },
+  pacer: { compactTokens: ["auto", "before-cold", "cold"], webTools: false },
   models: [
     {
       id: "claude-test-1",

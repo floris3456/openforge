@@ -75,7 +75,8 @@ export interface Interface {
   readonly requests: (sessionID: SessionID, input: RequestsInput) => Effect.Effect<Pacer.Requests, Unavailable>
   /**
    * What changed in one request's prompt (`Pacer.Request.id`): from the last 50 read, else read from CPP. Undefined
-   * when CPP has no request with that ID for the key.
+   * when CPP has no request with that ID for the key, and at once, reading nothing, for a request that goes by its row
+   * (`Pacer.promptless`): it sent no prompt.
    */
   readonly prompt: (requestID: string) => Effect.Effect<Pacer.PromptChange | undefined, Unavailable>
 }
@@ -251,8 +252,8 @@ export const layer = Layer.effect(
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
-    // Request rows as CPP last answered them, by CPP's number, and CPP's number by request ID; and the time on this
-    // clock first answered for each, by CPP's number.
+    // Request rows as CPP last answered them, by CPP's number, and CPP's number by request ID for those that have one;
+    // and the time on this clock first answered for each, by CPP's number.
     const heldRows = new Map<number, PacerWire.Row>()
     const heldIDs = new Map<string, number>()
     const heldAt = new Map<number, number>()
@@ -1184,13 +1185,14 @@ export const layer = Layer.effect(
       for (const row of items) {
         heldRows.delete(row.id)
         heldRows.set(row.id, row)
-        heldIDs.set(row.ext, row.id)
+        // A row without a request ID has no prompt to read: nothing looks it up by one.
+        if (row.ext) heldIDs.set(row.ext, row.id)
       }
       for (const [id, row] of heldRows) {
         if (heldRows.size <= ROWS) break
         heldRows.delete(id)
         heldAt.delete(id)
-        if (heldIDs.get(row.ext) === id) heldIDs.delete(row.ext)
+        if (row.ext && heldIDs.get(row.ext) === id) heldIDs.delete(row.ext)
       }
     }
 
@@ -1294,6 +1296,8 @@ export const layer = Layer.effect(
         }),
       prompt: (requestID) =>
         Effect.gen(function* () {
+          // A request that goes by its row sent no prompt; CPP's reads by request ID can't name it.
+          if (Pacer.promptless(requestID)) return undefined
           const held = prompts.get(requestID)
           if (held) {
             remember(requestID, held)
@@ -1325,7 +1329,7 @@ export const layer = Layer.effect(
           const change = PacerWire.promptChange(
             prompt,
             shape(row, sender(row), now),
-            base && { id: base.ext, at: rowAt(base, now) },
+            base && { id: PacerWire.requestID(base), at: rowAt(base, now) },
             now,
           )
           // CPP may store a prompt just after its request's row: an answer without one is not kept.

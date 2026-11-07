@@ -57,6 +57,7 @@ import { Mcp } from "../mcp/index.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerTools } from "../pacer/tools.js"
 import { Permission } from "../permission.js"
 import { Reference } from "../reference.js"
 import { WebSearch } from "../websearch.js"
@@ -80,6 +81,7 @@ import { GrepTool } from "../tool/plugin/grep.js"
 import { ImageGenerateTool } from "../tool/plugin/image-generate.js"
 import { McpResourceTools } from "../tool/plugin/mcp-resource.js"
 import { OpenCodeTools } from "../tool/plugin/opencode.js"
+import { PacerWebTools } from "../tool/plugin/pacer-web.js"
 import { QuestionTool } from "../tool/plugin/question.js"
 import { ReadToolFileSystem } from "../tool/read-filesystem.js"
 import { ReadTool } from "../tool/plugin/read.js"
@@ -148,6 +150,7 @@ const services = [
   Npm.Service,
   PacerEndpoint.Service,
   PacerModels.Service,
+  PacerTools.Service,
   Permission.Service,
   Form.Service,
   ReadToolFileSystem.Service,
@@ -207,6 +210,7 @@ export const requirements = LayerNode.group([
   Npm.node,
   PacerEndpoint.node,
   PacerModels.node,
+  PacerTools.node,
   Permission.node,
   Form.node,
   ReadToolFileSystem.node,
@@ -271,6 +275,7 @@ const pre = [
   TodoTool.Plugin,
   WebFetchTool.Plugin,
   WebSearchTool.Plugin,
+  PacerWebTools.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]

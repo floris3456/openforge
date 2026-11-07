@@ -61,6 +61,20 @@ it.live("answers as not set up without a connection to CPP", () =>
   }),
 )
 
+it.live(
+  "answers a request that goes by its row, a web tool call's, with no prompt at once, even with no CPP set up",
+  () =>
+    Effect.gen(function* () {
+      // Spec cliproxypacer-step-2, the decision of 2026-11-07. A client sends its ID encoded, as the TUI's does. With CPP
+      // on, the connection's own test shows that nothing is read (core's test/pacer/connection.test.ts).
+      const call = yield* server()
+      expect(yield* call(`/api/experimental/pacer/prompt/${encodeURIComponent("row:41")}`)).toEqual({
+        status: 200,
+        body: { data: null },
+      })
+    }),
+)
+
 it.live("rejects malformed pacer requests", () =>
   Effect.gen(function* () {
     const call = yield* server()

@@ -2556,3 +2556,80 @@ describe("Anthropic Messages route", () => {
     }),
   )
 })
+
+// CLIProxyPacer's `web_search` is a client function tool of that name, which Anthropic's server tool shares.
+describe("Anthropic Messages client tool named web_search", () => {
+  const webSearch = new ToolDefinition({
+    name: "web_search",
+    description: "Search the web and get the results as text with their links.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", maxLength: 1000, description: "What to search for, in words." } },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  })
+
+  it.effect("is sent, read back and replayed as the client's tool, never as the server's", () =>
+    Effect.gen(function* () {
+      const sent = yield* compileRequest(ai.request({ model, prompt: "Search.", tools: [webSearch], cache: "none" }))
+      // The definition as given: no server tool type, the schema's bytes unchanged.
+      expect(JSON.stringify(sent.body.tools)).toBe(
+        JSON.stringify([
+          { name: webSearch.name, description: webSearch.description, input_schema: webSearch.inputSchema },
+        ]),
+      )
+
+      const response = yield* LLMClient.generate(ai.request({ model, prompt: "Search.", tools: [webSearch] })).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents(
+              { type: "message_start", message: { usage: { input_tokens: 5 } } },
+              {
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "tool_use", id: "toolu_1", name: "web_search", input: {} },
+              },
+              {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "input_json_delta", partial_json: '{"query":"rust 1.95"}' },
+              },
+              { type: "content_block_stop", index: 0 },
+              { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
+              { type: "message_stop" },
+            ),
+          ),
+        ),
+      )
+      expect(response.toolCalls).toEqual([
+        expect.objectContaining({ id: "toolu_1", name: "web_search", input: { query: "rust 1.95" } }),
+      ])
+      expect(response.toolCalls[0]?.providerExecuted).toBeUndefined()
+      expect(response.message.content.some((part) => part.type === "tool-result")).toBe(false)
+
+      const replayed = yield* compileRequest(
+        ai.request({
+          model,
+          tools: [webSearch],
+          messages: [
+            Message.user("Search."),
+            response.message,
+            Message.tool({ id: "toolu_1", name: "web_search", result: "1. Rust 1.95 released" }),
+          ],
+          cache: "none",
+        }),
+      )
+      expect(replayed.body.messages.slice(1)).toEqual([
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: "web_search", input: { query: "rust 1.95" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: '"1. Rust 1.95 released"' }],
+        },
+      ])
+    }),
+  )
+})

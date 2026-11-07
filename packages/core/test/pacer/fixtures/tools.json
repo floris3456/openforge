@@ -1,0 +1,874 @@
+{
+  "version": "47aaf5e842bb9c28",
+  "frozen": false,
+  "refreshed": false,
+  "made_at": null,
+  "model": "claude-haiku-5-5",
+  "tools": {
+    "claude": [
+      {
+        "name": "web_search",
+        "description": "Search the web and get the results as text with their links. Say what you need with the parameters (a topic, how deep, how much text); the search best at it serves the call.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "maxLength": 1000, "description": "What to search for, in words." },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "description": "How many results (default 5)."
+            },
+            "recency": {
+              "type": "string",
+              "enum": ["day", "week", "month", "year"],
+              "description": "Only results published within the last day, week, month or year."
+            },
+            "date_from": {
+              "type": "string",
+              "format": "date",
+              "description": "Only results published on or after this day (YYYY-MM-DD)."
+            },
+            "date_to": {
+              "type": "string",
+              "format": "date",
+              "description": "Only results published on or before this day (YYYY-MM-DD)."
+            },
+            "include_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Search only these sites (domain names)."
+            },
+            "exclude_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out results from these sites."
+            },
+            "country": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 2,
+              "description": "Results for this country (ISO 3166-1 alpha-2, such as US)."
+            },
+            "language": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 3,
+              "description": "Results in this language (ISO 639-1, such as en)."
+            },
+            "topic": {
+              "type": "string",
+              "enum": [
+                "general",
+                "news",
+                "academic",
+                "company",
+                "people",
+                "finance",
+                "code",
+                "patents",
+                "legal",
+                "local",
+                "shopping",
+                "images"
+              ],
+              "description": "What kind of results you need (default general)."
+            },
+            "engine": {
+              "type": "string",
+              "enum": ["any", "google", "bing", "youtube", "amazon"],
+              "description": "Results as this search engine ranks them (default any)."
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["quick", "balanced", "thorough"],
+              "description": "How hard to search: quick, balanced (default) or thorough (slower, more sources)."
+            },
+            "objective": {
+              "type": "string",
+              "maxLength": 500,
+              "description": "What you want to find out, in a sentence, to rank the results by."
+            },
+            "content": {
+              "type": "string",
+              "enum": ["none", "snippet", "highlights", "full"],
+              "description": "How much of each page: none, a snippet (default), the most relevant highlights, or the full text."
+            },
+            "answer": { "type": "boolean", "description": "Also write a short answer from the results." },
+            "similar_to": { "type": "string", "format": "uri", "description": "Find pages like this one (a URL)." },
+            "snapshot_date": {
+              "type": "string",
+              "format": "date",
+              "description": "Search the web as it looked on this day (YYYY-MM-DD)."
+            },
+            "domains_mode": {
+              "type": "string",
+              "enum": ["only", "prefer"],
+              "description": "With include_domains: only those sites (default), or prefer them."
+            },
+            "location": { "type": "string", "maxLength": 200, "description": "A city or address, for local results." }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "web_extract",
+        "description": "Read web pages (or PDF and Word files) and get their text.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "urls": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 10,
+              "description": "The pages to read (1 to 10 URLs)."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["markdown", "text"],
+              "description": "markdown (default) or plain text."
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 200000,
+              "description": "The most characters per page."
+            },
+            "focus": { "type": "string", "maxLength": 500, "description": "Return only what is relevant to this." },
+            "render": {
+              "type": "string",
+              "enum": ["auto", "static", "javascript"],
+              "description": "Run the page's scripts first (javascript), or not (static); default auto."
+            },
+            "protected": {
+              "type": "boolean",
+              "description": "The pages block bots: read them the way a browser would."
+            },
+            "actions": {
+              "type": "array",
+              "items": { "type": "object" },
+              "maxItems": 20,
+              "description": "Click, scroll, wait or fill before reading."
+            },
+            "schema": { "type": "object", "description": "Return these fields (a JSON Schema) instead of the text." },
+            "summary": { "type": "boolean", "description": "Return a summary of each page." },
+            "freshness": {
+              "type": "string",
+              "enum": ["cached_ok", "live"],
+              "description": "A recent copy is fine (default), or read the live page."
+            },
+            "snapshot_date": {
+              "type": "string",
+              "format": "date",
+              "description": "The page as it was on this day (YYYY-MM-DD)."
+            },
+            "screenshot": { "type": "boolean", "description": "Also take a screenshot of each page." },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "web_crawl",
+        "description": "Follow the links of a site from one page and read the pages found.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string", "format": "uri", "description": "Where to start." },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "The most pages (default 50)."
+            },
+            "max_depth": { "type": "integer", "minimum": 0, "maximum": 10, "description": "How many links deep." },
+            "include_paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Only pages whose path matches one of these."
+            },
+            "exclude_paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out pages whose path matches one of these."
+            },
+            "subdomains": { "type": "boolean", "description": "Follow links to subdomains too." },
+            "format": {
+              "type": "string",
+              "enum": ["markdown", "text"],
+              "description": "markdown (default) or plain text."
+            },
+            "map_only": { "type": "boolean", "description": "Only list the pages, without their text." },
+            "instructions": { "type": "string", "maxLength": 1000, "description": "Which pages matter, in words." },
+            "render": {
+              "type": "string",
+              "enum": ["static", "javascript"],
+              "description": "Run each page's scripts first (javascript), or not (static); default auto."
+            },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "web_research",
+        "description": "Research a question on the web and get a cited report.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "question": { "type": "string", "maxLength": 4000, "description": "The question, in words." },
+            "include_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Use only these sites."
+            },
+            "exclude_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out these sites."
+            },
+            "recency": {
+              "type": "string",
+              "enum": ["day", "week", "month", "year"],
+              "description": "Only sources from the last day, week, month or year."
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["quick", "standard", "deep"],
+              "description": "quick, standard (default) or deep (slower, more sources)."
+            },
+            "sources": {
+              "type": "string",
+              "enum": ["web", "academic", "finance", "medical", "patents", "company"],
+              "description": "Where to look (default web)."
+            },
+            "output": {
+              "type": "string",
+              "enum": ["report", "short", "structured", "entities", "decision"],
+              "description": "What to return: a report (default), a short answer, structured fields, a list of entities, or a decision."
+            },
+            "schema": {
+              "type": "object",
+              "description": "The fields to return (a JSON Schema), with output structured."
+            },
+            "files": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 10,
+              "description": "Files to read too (PDF, CSV, XLSX URLs)."
+            },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "responses": [
+      {
+        "type": "function",
+        "name": "web_search",
+        "description": "Search the web and get the results as text with their links. Say what you need with the parameters (a topic, how deep, how much text); the search best at it serves the call.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "maxLength": 1000, "description": "What to search for, in words." },
+            "max_results": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "description": "How many results (default 5)."
+            },
+            "recency": {
+              "type": "string",
+              "enum": ["day", "week", "month", "year"],
+              "description": "Only results published within the last day, week, month or year."
+            },
+            "date_from": {
+              "type": "string",
+              "format": "date",
+              "description": "Only results published on or after this day (YYYY-MM-DD)."
+            },
+            "date_to": {
+              "type": "string",
+              "format": "date",
+              "description": "Only results published on or before this day (YYYY-MM-DD)."
+            },
+            "include_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Search only these sites (domain names)."
+            },
+            "exclude_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out results from these sites."
+            },
+            "country": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 2,
+              "description": "Results for this country (ISO 3166-1 alpha-2, such as US)."
+            },
+            "language": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 3,
+              "description": "Results in this language (ISO 639-1, such as en)."
+            },
+            "topic": {
+              "type": "string",
+              "enum": [
+                "general",
+                "news",
+                "academic",
+                "company",
+                "people",
+                "finance",
+                "code",
+                "patents",
+                "legal",
+                "local",
+                "shopping",
+                "images"
+              ],
+              "description": "What kind of results you need (default general)."
+            },
+            "engine": {
+              "type": "string",
+              "enum": ["any", "google", "bing", "youtube", "amazon"],
+              "description": "Results as this search engine ranks them (default any)."
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["quick", "balanced", "thorough"],
+              "description": "How hard to search: quick, balanced (default) or thorough (slower, more sources)."
+            },
+            "objective": {
+              "type": "string",
+              "maxLength": 500,
+              "description": "What you want to find out, in a sentence, to rank the results by."
+            },
+            "content": {
+              "type": "string",
+              "enum": ["none", "snippet", "highlights", "full"],
+              "description": "How much of each page: none, a snippet (default), the most relevant highlights, or the full text."
+            },
+            "answer": { "type": "boolean", "description": "Also write a short answer from the results." },
+            "similar_to": { "type": "string", "format": "uri", "description": "Find pages like this one (a URL)." },
+            "snapshot_date": {
+              "type": "string",
+              "format": "date",
+              "description": "Search the web as it looked on this day (YYYY-MM-DD)."
+            },
+            "domains_mode": {
+              "type": "string",
+              "enum": ["only", "prefer"],
+              "description": "With include_domains: only those sites (default), or prefer them."
+            },
+            "location": { "type": "string", "maxLength": 200, "description": "A city or address, for local results." }
+          },
+          "required": ["query"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "web_extract",
+        "description": "Read web pages (or PDF and Word files) and get their text.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "urls": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 10,
+              "description": "The pages to read (1 to 10 URLs)."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["markdown", "text"],
+              "description": "markdown (default) or plain text."
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 200000,
+              "description": "The most characters per page."
+            },
+            "focus": { "type": "string", "maxLength": 500, "description": "Return only what is relevant to this." },
+            "render": {
+              "type": "string",
+              "enum": ["auto", "static", "javascript"],
+              "description": "Run the page's scripts first (javascript), or not (static); default auto."
+            },
+            "protected": {
+              "type": "boolean",
+              "description": "The pages block bots: read them the way a browser would."
+            },
+            "actions": {
+              "type": "array",
+              "items": { "type": "object" },
+              "maxItems": 20,
+              "description": "Click, scroll, wait or fill before reading."
+            },
+            "schema": { "type": "object", "description": "Return these fields (a JSON Schema) instead of the text." },
+            "summary": { "type": "boolean", "description": "Return a summary of each page." },
+            "freshness": {
+              "type": "string",
+              "enum": ["cached_ok", "live"],
+              "description": "A recent copy is fine (default), or read the live page."
+            },
+            "snapshot_date": {
+              "type": "string",
+              "format": "date",
+              "description": "The page as it was on this day (YYYY-MM-DD)."
+            },
+            "screenshot": { "type": "boolean", "description": "Also take a screenshot of each page." },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "web_crawl",
+        "description": "Follow the links of a site from one page and read the pages found.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string", "format": "uri", "description": "Where to start." },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "The most pages (default 50)."
+            },
+            "max_depth": { "type": "integer", "minimum": 0, "maximum": 10, "description": "How many links deep." },
+            "include_paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Only pages whose path matches one of these."
+            },
+            "exclude_paths": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out pages whose path matches one of these."
+            },
+            "subdomains": { "type": "boolean", "description": "Follow links to subdomains too." },
+            "format": {
+              "type": "string",
+              "enum": ["markdown", "text"],
+              "description": "markdown (default) or plain text."
+            },
+            "map_only": { "type": "boolean", "description": "Only list the pages, without their text." },
+            "instructions": { "type": "string", "maxLength": 1000, "description": "Which pages matter, in words." },
+            "render": {
+              "type": "string",
+              "enum": ["static", "javascript"],
+              "description": "Run each page's scripts first (javascript), or not (static); default auto."
+            },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "web_research",
+        "description": "Research a question on the web and get a cited report.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "question": { "type": "string", "maxLength": 4000, "description": "The question, in words." },
+            "include_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Use only these sites."
+            },
+            "exclude_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 20,
+              "description": "Leave out these sites."
+            },
+            "recency": {
+              "type": "string",
+              "enum": ["day", "week", "month", "year"],
+              "description": "Only sources from the last day, week, month or year."
+            },
+            "depth": {
+              "type": "string",
+              "enum": ["quick", "standard", "deep"],
+              "description": "quick, standard (default) or deep (slower, more sources)."
+            },
+            "sources": {
+              "type": "string",
+              "enum": ["web", "academic", "finance", "medical", "patents", "company"],
+              "description": "Where to look (default web)."
+            },
+            "output": {
+              "type": "string",
+              "enum": ["report", "short", "structured", "entities", "decision"],
+              "description": "What to return: a report (default), a short answer, structured fields, a list of entities, or a decision."
+            },
+            "schema": {
+              "type": "object",
+              "description": "The fields to return (a JSON Schema), with output structured."
+            },
+            "files": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 10,
+              "description": "Files to read too (PDF, CSV, XLSX URLs)."
+            },
+            "job_id": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+            },
+            "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "chat": [
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "description": "Search the web and get the results as text with their links. Say what you need with the parameters (a topic, how deep, how much text); the search best at it serves the call.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": { "type": "string", "maxLength": 1000, "description": "What to search for, in words." },
+              "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "How many results (default 5)."
+              },
+              "recency": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"],
+                "description": "Only results published within the last day, week, month or year."
+              },
+              "date_from": {
+                "type": "string",
+                "format": "date",
+                "description": "Only results published on or after this day (YYYY-MM-DD)."
+              },
+              "date_to": {
+                "type": "string",
+                "format": "date",
+                "description": "Only results published on or before this day (YYYY-MM-DD)."
+              },
+              "include_domains": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Search only these sites (domain names)."
+              },
+              "exclude_domains": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Leave out results from these sites."
+              },
+              "country": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 2,
+                "description": "Results for this country (ISO 3166-1 alpha-2, such as US)."
+              },
+              "language": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 3,
+                "description": "Results in this language (ISO 639-1, such as en)."
+              },
+              "topic": {
+                "type": "string",
+                "enum": [
+                  "general",
+                  "news",
+                  "academic",
+                  "company",
+                  "people",
+                  "finance",
+                  "code",
+                  "patents",
+                  "legal",
+                  "local",
+                  "shopping",
+                  "images"
+                ],
+                "description": "What kind of results you need (default general)."
+              },
+              "engine": {
+                "type": "string",
+                "enum": ["any", "google", "bing", "youtube", "amazon"],
+                "description": "Results as this search engine ranks them (default any)."
+              },
+              "depth": {
+                "type": "string",
+                "enum": ["quick", "balanced", "thorough"],
+                "description": "How hard to search: quick, balanced (default) or thorough (slower, more sources)."
+              },
+              "objective": {
+                "type": "string",
+                "maxLength": 500,
+                "description": "What you want to find out, in a sentence, to rank the results by."
+              },
+              "content": {
+                "type": "string",
+                "enum": ["none", "snippet", "highlights", "full"],
+                "description": "How much of each page: none, a snippet (default), the most relevant highlights, or the full text."
+              },
+              "answer": { "type": "boolean", "description": "Also write a short answer from the results." },
+              "similar_to": { "type": "string", "format": "uri", "description": "Find pages like this one (a URL)." },
+              "snapshot_date": {
+                "type": "string",
+                "format": "date",
+                "description": "Search the web as it looked on this day (YYYY-MM-DD)."
+              },
+              "domains_mode": {
+                "type": "string",
+                "enum": ["only", "prefer"],
+                "description": "With include_domains: only those sites (default), or prefer them."
+              },
+              "location": { "type": "string", "maxLength": 200, "description": "A city or address, for local results." }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_extract",
+          "description": "Read web pages (or PDF and Word files) and get their text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "urls": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 10,
+                "description": "The pages to read (1 to 10 URLs)."
+              },
+              "format": {
+                "type": "string",
+                "enum": ["markdown", "text"],
+                "description": "markdown (default) or plain text."
+              },
+              "max_chars": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 200000,
+                "description": "The most characters per page."
+              },
+              "focus": { "type": "string", "maxLength": 500, "description": "Return only what is relevant to this." },
+              "render": {
+                "type": "string",
+                "enum": ["auto", "static", "javascript"],
+                "description": "Run the page's scripts first (javascript), or not (static); default auto."
+              },
+              "protected": {
+                "type": "boolean",
+                "description": "The pages block bots: read them the way a browser would."
+              },
+              "actions": {
+                "type": "array",
+                "items": { "type": "object" },
+                "maxItems": 20,
+                "description": "Click, scroll, wait or fill before reading."
+              },
+              "schema": { "type": "object", "description": "Return these fields (a JSON Schema) instead of the text." },
+              "summary": { "type": "boolean", "description": "Return a summary of each page." },
+              "freshness": {
+                "type": "string",
+                "enum": ["cached_ok", "live"],
+                "description": "A recent copy is fine (default), or read the live page."
+              },
+              "snapshot_date": {
+                "type": "string",
+                "format": "date",
+                "description": "The page as it was on this day (YYYY-MM-DD)."
+              },
+              "screenshot": { "type": "boolean", "description": "Also take a screenshot of each page." },
+              "job_id": {
+                "type": "string",
+                "maxLength": 64,
+                "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+              },
+              "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_crawl",
+          "description": "Follow the links of a site from one page and read the pages found.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "url": { "type": "string", "format": "uri", "description": "Where to start." },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "The most pages (default 50)."
+              },
+              "max_depth": { "type": "integer", "minimum": 0, "maximum": 10, "description": "How many links deep." },
+              "include_paths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Only pages whose path matches one of these."
+              },
+              "exclude_paths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Leave out pages whose path matches one of these."
+              },
+              "subdomains": { "type": "boolean", "description": "Follow links to subdomains too." },
+              "format": {
+                "type": "string",
+                "enum": ["markdown", "text"],
+                "description": "markdown (default) or plain text."
+              },
+              "map_only": { "type": "boolean", "description": "Only list the pages, without their text." },
+              "instructions": { "type": "string", "maxLength": 1000, "description": "Which pages matter, in words." },
+              "render": {
+                "type": "string",
+                "enum": ["static", "javascript"],
+                "description": "Run each page's scripts first (javascript), or not (static); default auto."
+              },
+              "job_id": {
+                "type": "string",
+                "maxLength": 64,
+                "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+              },
+              "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_research",
+          "description": "Research a question on the web and get a cited report.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "question": { "type": "string", "maxLength": 4000, "description": "The question, in words." },
+              "include_domains": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Use only these sites."
+              },
+              "exclude_domains": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 20,
+                "description": "Leave out these sites."
+              },
+              "recency": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"],
+                "description": "Only sources from the last day, week, month or year."
+              },
+              "depth": {
+                "type": "string",
+                "enum": ["quick", "standard", "deep"],
+                "description": "quick, standard (default) or deep (slower, more sources)."
+              },
+              "sources": {
+                "type": "string",
+                "enum": ["web", "academic", "finance", "medical", "patents", "company"],
+                "description": "Where to look (default web)."
+              },
+              "output": {
+                "type": "string",
+                "enum": ["report", "short", "structured", "entities", "decision"],
+                "description": "What to return: a report (default), a short answer, structured fields, a list of entities, or a decision."
+              },
+              "schema": {
+                "type": "object",
+                "description": "The fields to return (a JSON Schema), with output structured."
+              },
+              "files": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 10,
+                "description": "Files to read too (PDF, CSV, XLSX URLs)."
+              },
+              "job_id": {
+                "type": "string",
+                "maxLength": 64,
+                "description": "The job_id an earlier call of this tool answered: wait for that job and get its result (no other arguments needed)."
+              },
+              "cancel": { "type": "boolean", "description": "With job_id: stop that job." }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      }
+    ]
+  }
+}

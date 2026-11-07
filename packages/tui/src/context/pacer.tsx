@@ -6,6 +6,7 @@ import type {
   PacerRequests,
   PacerStatus,
 } from "@opencode/client"
+import { promptless } from "@opencode/schema/pacer"
 import { SystemClock, type Clock, type TimerHandle } from "@opentui/core"
 import {
   batch,
@@ -354,6 +355,7 @@ function createPacer(input: { clock: Clock }) {
   // Each ID is read once; a read that failed is tried again only when asked for or reached by the cursor. An answer
   // read ahead that CPP kept no prompt isn't held: CPP may store a prompt just after its request's row, and the newest
   // row is read as soon as it is listed. It is read again only when asked for, and that answer is held whatever it is.
+  // A request that goes by its row, a web tool call's, sent no prompt: nothing is read for it.
   const promptOrder: string[] = []
   const promptReads = new Map<string, Promise<PacerPromptChange | null>>()
   const promptFailed = new Set<string>()
@@ -363,7 +365,8 @@ function createPacer(input: { clock: Clock }) {
   const ahead = new Set<string>()
   let cursorWant: string | undefined
   const known = (requestID: string) => requestID in unwrap(store.prompts) || promptReads.has(requestID)
-  const wanted = (requestID: string) => !known(requestID) && !promptFailed.has(requestID) && !promptNone.has(requestID)
+  const wanted = (requestID: string) =>
+    !promptless(requestID) && !known(requestID) && !promptFailed.has(requestID) && !promptNone.has(requestID)
   const readAhead = (items: readonly PacerRequest[], first?: PacerRequest) => {
     if (state() !== "on") return
     if (first && wanted(first.id)) readPrompt(first.id)
@@ -451,9 +454,12 @@ function createPacer(input: { clock: Clock }) {
     /** What changed in a request, if held: null when CPP has no such request. */
     held: (requestID: string) => store.prompts[requestID],
     prompt,
-    /** The row under the cursor: read ahead next, unless it is held or was read ahead without a prompt kept. */
+    /**
+     * The row under the cursor: read ahead next, unless it is held, was read ahead without a prompt kept, or sent no
+     * prompt.
+     */
     cursor(requestID: string) {
-      if (state() !== "on" || known(requestID) || promptNone.has(requestID)) return
+      if (state() !== "on" || promptless(requestID) || known(requestID) || promptNone.has(requestID)) return
       cursorWant = requestID
       pump()
     },

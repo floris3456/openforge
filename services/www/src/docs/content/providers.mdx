@@ -116,6 +116,43 @@ for shows no price in the model picker, not "Free", and its steps cost nothing u
 - The list is read when the service connects and when CPP announces a change. Opening the model picker reads CPP's model
   list again.
 
+### Web tools
+
+When CPP has web tools, every chat gets them while CPP is set up: chats on any provider's model, and subagents.
+
+| Tool           | Does                                      | Asks as                        |
+| -------------- | ----------------------------------------- | ------------------------------ |
+| `web_search`   | searches the web                          | `websearch`, with the query    |
+| `web_research` | researches a question and writes a report | `websearch`, with the question |
+| `web_extract`  | reads pages                               | `webfetch`, with the URLs      |
+| `web_crawl`    | reads a site, starting from one URL       | `webfetch`, with the URL       |
+
+- Which tools a chat gets, and their parameters, depend on the web services CPP has keys for, and CPP picks the service
+  for each call. With only a Codex login, that is `web_search` alone.
+- A chat that gets CPP's `web_search` doesn't get the built-in [web search](/websearch); `webfetch` stays.
+- Each chat keeps its own copy of the tools, which CPP changes only where the chat's prompt cache is lost anyway. A key
+  added to CPP shows in new chats, and in a running chat once it is compacted or changes model.
+- A research or a crawl can take longer than one call's 50 seconds. The call then says that its job still runs, and the
+  model calls the tool again with the job's ID. A finished job's answer stays at CPP for 48 hours.
+- A call CPP can't serve, or whose arguments it refuses, is a failed tool call, and the model reads why.
+- Each call is a request of the chat at CPP, with its cost, and a `search` row of its
+  [**Requests** tab](/cli/cliproxypacer#requests-tab).
+
+To turn them off, deny their permissions, for every agent or for one (see [Permissions](/permissions)). Denying
+`websearch` removes `web_search` and `web_research`, and the built-in web search with them; denying `webfetch` removes
+`web_extract`, `web_crawl` and the built-in `webfetch`. The `websearch` setting, `false` or a provider, applies to the
+built-in web search only.
+
+```jsonc title="~/.config/openforge/opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permissions": [
+    { "action": "websearch", "resource": "*", "effect": "deny" },
+    { "action": "webfetch", "resource": "*", "effect": "deny" },
+  ],
+}
+```
+
 ### Without the pacer
 
 Pointed at a proxy without the pacer, such as a plain CLIProxyAPI, the provider still lists that proxy's models and

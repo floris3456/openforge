@@ -175,7 +175,7 @@ describe("PacerModels", () => {
       const server = yield* serve(cpp())
       const { models } = yield* start(endpoint(server.origin))
       const catalog = yield* until(models, loaded)
-      expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"] })
+      expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
       expect(catalog?.models).toEqual([
         {
           id: "claude-test-1",
@@ -227,6 +227,37 @@ describe("PacerModels", () => {
         },
       ])
       expect(server.seen.toSorted()).toEqual(["/pacer/v1/capabilities", "/pacer/v1/models", "/v1/models"])
+    }),
+  )
+
+  it.live("says the server has the web tools while capabilities' pacer block names their list's path", () =>
+    Effect.gen(function* () {
+      const webTools = {
+        tools: "/pacer/v1/tools",
+        call: "/pacer/v1/tools/{name}",
+        version_header: "X-Pacer-Tools",
+        fallback: true,
+        mcp: "/pacer/v1/mcp",
+        mcp_revision: "2025-11-25",
+      }
+      const told = (web_tools: unknown) =>
+        Effect.gen(function* () {
+          const server = yield* serve({
+            ...cpp(),
+            "/pacer/v1/capabilities": () =>
+              Response.json({ ...capabilities, pacer: { ...capabilities.pacer, web_tools } }),
+          })
+          const { models } = yield* start(endpoint(server.origin))
+          return yield* until(models, loaded)
+        })
+      expect((yield* told(webTools))?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: true })
+      expect((yield* told({ tools: "/pacer/v1/tools" }))?.pacer?.webTools).toBe(true)
+      // An older server leaves the block out; one this version cannot read is no web tools, and the rest stands.
+      for (const unread of [undefined, null, { call: "/pacer/v1/tools/{name}" }, { tools: 7 }, "yes"]) {
+        const catalog = yield* told(unread)
+        expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
+        expect(catalog?.models).toHaveLength(5)
+      }
     }),
   )
 

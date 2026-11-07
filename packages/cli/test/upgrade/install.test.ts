@@ -201,6 +201,27 @@ describe("kept releases", () => {
     }),
   )
 
+  it.live("keeps the newest three by number, past a two-digit patch", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const layout = ReleaseLayout.at(paths(directory).data)
+      yield* Effect.promise(() =>
+        Promise.all(
+          ["0.0.7", "0.0.8", "0.0.9", "0.0.10"].map((version) =>
+            fakeBinary(ReleaseLayout.binary(layout, version), version),
+          ),
+        ),
+      )
+      const removed = yield* ReleaseLayout.prune(layout, ["0.0.10", "0.0.9"]).pipe(Effect.provide(layer(directory)))
+      expect(removed).toEqual(["0.0.7"])
+      expect(yield* ReleaseLayout.installed(layout).pipe(Effect.provide(layer(directory)))).toEqual([
+        "0.0.10",
+        "0.0.9",
+        "0.0.8",
+      ])
+    }),
+  )
+
   it.live("never removes a release whose tool runner still runs", () =>
     Effect.gen(function* () {
       const directory = yield* root

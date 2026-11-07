@@ -3,7 +3,8 @@ import { webSearchProviderName } from "../util/tool-display"
 // CLIProxyPacer's web tools in the chat (spec cliproxypacer-step-2, section 4). A call shows as upstream's search and
 // fetch rows do and is grouped with them: search and research as searches, extract and crawl as fetches. The row is
 // made of the call's input, CPP's arguments as the model wrote them, and its metadata: `provider`, the service's name
-// from CPP's answer, which a running call doesn't have yet. A job's next call names no subject, only its `job_id`.
+// from CPP's answer, which a running call doesn't have yet; each of the four names it, as CPP may have chosen a paid
+// one. A job's next call names no subject, only its `job_id`.
 
 const tools = {
   web_search: { kind: "search", icon: "◈", label: "Web Search", subject: "query", pending: "Searching web…" },
@@ -48,9 +49,9 @@ export function webToolSubject(name: string, input: Record<string, unknown>) {
   return tool.kind === "search" ? `"${value}"` : value
 }
 
-/** The service a search or research names, once CPP's answer gave it; extract and crawl name none. */
+/** The service the call names, once CPP's answer gave it. */
 export function webToolProvider(name: string, metadata: Record<string, unknown>) {
-  if (webTool(name)?.kind !== "search") return ""
+  if (!webTool(name)) return ""
   return webSearchProviderName(metadata.provider)
 }
 

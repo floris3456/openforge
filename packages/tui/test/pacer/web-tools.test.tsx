@@ -230,9 +230,9 @@ describe("the rows", () => {
   const expected = [
     `◈ Web Search via ChatGPT "${QUERY}"`,
     `◈ Web Research via Exa "${QUESTION}"`,
-    `% Web Extract ${URLS[0]} (+2 more)`,
-    `% Web Extract ${URLS[0]}`,
-    `% Web Crawl ${SITE}`,
+    `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
+    `% Web Extract via You.com ${URLS[0]}`,
+    `% Web Crawl via Firecrawl ${SITE}`,
     `◈ Web Research via You.com job ${JOB}`,
     `% Web Crawl cancel job ${JOB}`,
   ]
@@ -257,7 +257,7 @@ describe("the rows", () => {
     expect(frame).toContain(`◈ Web Search via ChatGPT "${QUERY}"`)
     expect(frame).toContain(`◈ Web Research via Exa "${QUESTION}"`)
     // A URL longer than the line breaks inside it; the row still ends with how many more.
-    expect(frame.replace(/ /g, "")).toContain(`%WebExtract${URLS[0]}(+2more)`)
+    expect(frame.replace(/ /g, "")).toContain(`%WebExtractviaFirecrawl${URLS[0]}(+2more)`)
   })
 
   test("they are drawn as upstream's search and fetch rows, finished and failed alike", async () => {
@@ -266,7 +266,7 @@ describe("the rows", () => {
         call("call_upstream", "websearch", completed({ query: "upstream" }, { provider: "exa" })),
         call("call_search", "web_search", completed({ query: QUERY }, { provider: "ChatGPT" })),
         call("call_fetch", "webfetch", completed({ url: SITE })),
-        call("call_crawl", "web_crawl", completed({ url: SITE })),
+        call("call_crawl", "web_crawl", completed({ url: SITE }, { provider: "Tavily" })),
         call("call_upstream_failed", "websearch", failed({ query: "upstream failed" }, "Web search request failed")),
         call("call_failed", "web_search", failed({ query: "failed" }, "Web search: unavailable.")),
       ]),
@@ -276,7 +276,7 @@ describe("the rows", () => {
       `◈ Web Search via Exa "upstream"`,
       `◈ Web Search via ChatGPT "${QUERY}"`,
       `% WebFetch ${SITE}`,
-      `% Web Crawl ${SITE}`,
+      `% Web Crawl via Tavily ${SITE}`,
       `◈ Web Search "upstream failed"`,
       `◈ Web Search "failed"`,
     ])
@@ -305,13 +305,17 @@ describe("a call as it runs", () => {
     {
       name: "web_extract",
       input: { urls: URLS },
-      states: ["Fetching from the web…", `% Web Extract ${URLS[0]} (+2 more)`],
+      states: [
+        "Fetching from the web…",
+        `% Web Extract ${URLS[0]} (+2 more)`,
+        `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
+      ],
       provider: "Firecrawl",
     },
     {
       name: "web_crawl",
       input: { url: SITE },
-      states: ["Crawling the web…", `% Web Crawl ${SITE}`],
+      states: ["Crawling the web…", `% Web Crawl ${SITE}`, `% Web Crawl via Tavily ${SITE}`],
       provider: "Tavily",
     },
   ]
@@ -376,13 +380,13 @@ describe("a call as it runs", () => {
     await setup.frame((frame) => rows(frame).includes(`% Web Crawl job ${JOB}`))
     setup.emit(events.success("call_next", { provider: "Firecrawl" }))
     await setup.waitForVisualIdle({ quietFrames: 3 })
-    expect(rows(setup.captureCharFrame())).toEqual([`% Web Crawl ${SITE}`, `% Web Crawl job ${JOB}`])
+    expect(rows(setup.captureCharFrame())).toEqual([`% Web Crawl ${SITE}`, `% Web Crawl via Firecrawl job ${JOB}`])
     expect(setup.recorder.missed).toBe(0)
     // The first row stays as it was on every frame; the next call's row is its pending words, then the job, for good.
     expect(since().filter((frame) => rows(frame.text)[0] !== `% Web Crawl ${SITE}`)).toEqual([])
-    const states = ["Crawling the web…", `% Web Crawl job ${JOB}`]
+    const states = ["Crawling the web…", `% Web Crawl job ${JOB}`, `% Web Crawl via Firecrawl job ${JOB}`]
     inOrder(since(), states, (frame) => {
-      const line = lines(frame).find((line) => line.endsWith(states[0]!) || line.includes("Web Crawl job"))
+      const line = lines(frame).find((line) => line.endsWith(states[0]!) || line.includes(`job ${JOB}`))
       return line?.endsWith(states[0]!) ? states[0] : line
     })
   })
@@ -393,9 +397,9 @@ describe("grouped with upstream's search and fetch", () => {
     call("call_upstream_search", "websearch", completed({ query: "upstream" }, { provider: "exa" })),
     call("call_search", "web_search", completed({ query: QUERY }, { provider: "ChatGPT" })),
     call("call_upstream_fetch", "webfetch", completed({ url: SITE })),
-    call("call_extract", "web_extract", completed({ urls: URLS })),
+    call("call_extract", "web_extract", completed({ urls: URLS }, { provider: "Firecrawl" })),
     call("call_research", "web_research", completed({ question: QUESTION }, { provider: "Exa" })),
-    call("call_crawl", "web_crawl", completed({ url: SITE })),
+    call("call_crawl", "web_crawl", completed({ url: SITE }, { provider: "Tavily" })),
   ]
 
   test("searches and research count as searches, extracts and crawls as fetches; expanded, the rows in order", async () => {
@@ -411,9 +415,9 @@ describe("grouped with upstream's search and fetch", () => {
       `◈ Web Search via Exa "upstream"`,
       `◈ Web Search via ChatGPT "${QUERY}"`,
       `% WebFetch ${SITE}`,
-      `% Web Extract ${URLS[0]} (+2 more)`,
+      `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
       `◈ Web Research via Exa "${QUESTION}"`,
-      `% Web Crawl ${SITE}`,
+      `% Web Crawl via Tavily ${SITE}`,
     ])
   })
 

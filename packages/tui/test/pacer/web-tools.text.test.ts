@@ -43,9 +43,12 @@ describe("opencode run's lines", () => {
     [done("web_research", { question: "Who ships it?" }, "Exa"), '◈ Web Research via Exa "Who ships it?"'],
     [
       done("web_extract", { urls: ["https://a.example/", "https://b.example/"] }, "Exa"),
-      "% Web Extract https://a.example/ (+1 more)",
+      "% Web Extract via Exa https://a.example/ (+1 more)",
     ],
-    [done("web_crawl", { url: "https://a.example/docs" }, "Firecrawl"), "% Web Crawl https://a.example/docs"],
+    [
+      done("web_crawl", { url: "https://a.example/docs" }, "Firecrawl"),
+      "% Web Crawl via Firecrawl https://a.example/docs",
+    ],
     [done("web_research", { job_id: JOB }, "You.com"), `◈ Web Research via You.com job ${JOB}`],
     [done("web_crawl", { job_id: JOB, cancel: true }), `% Web Crawl cancel job ${JOB}`],
   ]

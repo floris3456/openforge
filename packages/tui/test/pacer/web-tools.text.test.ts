@@ -53,6 +53,22 @@ describe("opencode run's lines", () => {
     [done("web_crawl", { job_id: JOB, cancel: true }), `% Web Crawl cancel job ${JOB}`],
   ]
 
+  test.each([
+    ["starting", " · job running"],
+    ["running", " · job running"],
+    ["done", ""],
+    ["failed", ""],
+    ["cancelled", ""],
+  ])("an answer whose job is %s: the line ends with %p", (status, end) => {
+    const part = canonicalToolPart("web_research", {
+      status: "completed",
+      input: { question: "Who ships it?" },
+      metadata: { provider: "Exa", job: { id: JOB, status } },
+      content: [{ type: "text", text: "CPP's text" }],
+    })
+    expect(toolInlineInfo(part).title).toBe(`Web Research via Exa "Who ships it?"${end}`)
+  })
+
   test.each(cases)("%#: the inline line and the scrollback's are the chat's row", (part, line) => {
     const inline = toolInlineInfo(part)
     expect(`${inline.icon} ${inline.title}`).toBe(line)

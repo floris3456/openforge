@@ -1,10 +1,12 @@
+import { isRecord } from "../util/record"
 import { webSearchProviderName } from "../util/tool-display"
 
 // CLIProxyPacer's web tools in the chat (spec cliproxypacer-step-2, section 4). A call shows as upstream's search and
 // fetch rows do and is grouped with them: search and research as searches, extract and crawl as fetches. The row is
 // made of the call's input, CPP's arguments as the model wrote them, and its metadata: `provider`, the service's name
 // from CPP's answer, which a running call doesn't have yet; each of the four names it, as CPP may have chosen a paid
-// one. A job's next call names no subject, only its `job_id`.
+// one. A job's next call names no subject, only its `job_id`; a call whose answer says its job still runs ends its row
+// with `· job running`.
 
 const tools = {
   web_search: { kind: "search", icon: "◈", label: "Web Search", subject: "query", pending: "Searching web…" },
@@ -55,13 +57,19 @@ export function webToolProvider(name: string, metadata: Record<string, unknown>)
   return webSearchProviderName(metadata.provider)
 }
 
+/** Whether CPP's answer says the call's job still runs: its `job.status` is `starting` or `running`. */
+export function webToolJobRunning(metadata: Record<string, unknown>) {
+  return isRecord(metadata.job) && (metadata.job.status === "starting" || metadata.job.status === "running")
+}
+
 /** The row as one line, without its icon: `Web Search via ChatGPT "rust 1.95 release notes"`. */
 export function webToolTitle(name: string, input: Record<string, unknown>, metadata: Record<string, unknown>) {
   const tool = webTool(name)
   if (!tool) return name
   const provider = webToolProvider(name, metadata)
   const subject = webToolSubject(name, input)
-  return [tool.label, ...(provider ? ["via", provider] : []), ...(subject ? [subject] : [])].join(" ")
+  const words = [tool.label, ...(provider ? ["via", provider] : []), ...(subject ? [subject] : [])].join(" ")
+  return webToolJobRunning(metadata) ? `${words} · job running` : words
 }
 
 /** The permission a call asks before it goes: what it searches for or reads, before any service is chosen. */

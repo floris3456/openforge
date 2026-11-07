@@ -77,7 +77,7 @@ import { UsageLimitNotice, useLimitNotice, useUsageAlerts } from "../../componen
 import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
 import { usePacerSession } from "../../pacer/jump"
-import { webTool, webToolProvider, webToolSubject } from "../../pacer/web-tools"
+import { webTool, webToolJobRunning, webToolProvider, webToolSubject } from "../../pacer/web-tools"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -3302,6 +3302,7 @@ function WebTool(props: ToolProps & { web: NonNullable<ReturnType<typeof webTool
         )}
       </Show>
       <Show when={subject()}> {subject()}</Show>
+      <Show when={webToolJobRunning(props.metadata)}> · job running</Show>
     </InlineTool>
   )
 }

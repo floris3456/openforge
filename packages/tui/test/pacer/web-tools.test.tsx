@@ -224,8 +224,26 @@ describe("the rows", () => {
     call("call_extract", "web_extract", completed({ urls: URLS }, { provider: "Firecrawl" })),
     call("call_extract_one", "web_extract", completed({ urls: [URLS[0]] }, { provider: "You.com" })),
     call("call_crawl", "web_crawl", completed({ url: SITE, limit: 20 }, { provider: "Firecrawl" })),
-    call("call_job", "web_research", completed({ job_id: JOB }, { provider: "You.com" })),
-    call("call_cancel", "web_crawl", completed({ job_id: JOB, cancel: true })),
+    call(
+      "call_job",
+      "web_research",
+      completed({ job_id: JOB }, { provider: "You.com", job: { id: JOB, status: "done" } }),
+    ),
+    call(
+      "call_cancel",
+      "web_crawl",
+      completed({ job_id: JOB, cancel: true }, { job: { id: JOB, status: "cancelled" } }),
+    ),
+    call(
+      "call_job_starting",
+      "web_crawl",
+      completed({ url: SITE, limit: 50 }, { provider: "Firecrawl", job: { id: JOB, status: "starting" } }),
+    ),
+    call(
+      "call_job_running",
+      "web_research",
+      completed({ job_id: JOB }, { provider: "Exa", job: { id: JOB, status: "running" } }),
+    ),
   ]
   const expected = [
     `◈ Web Search via ChatGPT "${QUERY}"`,
@@ -235,6 +253,8 @@ describe("the rows", () => {
     `% Web Crawl via Firecrawl ${SITE}`,
     `◈ Web Research via You.com job ${JOB}`,
     `% Web Crawl cancel job ${JOB}`,
+    `% Web Crawl via Firecrawl ${SITE} · job running`,
+    `◈ Web Research via Exa job ${JOB} · job running`,
   ]
 
   test("each finished call shows its row as the spec writes it, on every frame", async () => {
@@ -250,7 +270,7 @@ describe("the rows", () => {
   })
 
   test("in a narrow window a long row wraps, its words whole and in order", async () => {
-    await using setup = await transcript(chat(all.slice(0, 3)), { width: 44 })
+    await using setup = await transcript(chat([...all.slice(0, 3), all.at(-1)!]), { width: 44 })
     const words = (frame: string) => frame.replace(/[┃│]/g, " ").replace(/\s+/g, " ")
     await setup.frame((frame) => words(frame).includes(`(+2 more)`))
     const frame = words(setup.captureCharFrame())
@@ -258,6 +278,8 @@ describe("the rows", () => {
     expect(frame).toContain(`◈ Web Research via Exa "${QUESTION}"`)
     // A URL longer than the line breaks inside it; the row still ends with how many more.
     expect(frame.replace(/ /g, "")).toContain(`%WebExtractviaFirecrawl${URLS[0]}(+2more)`)
+    // So does a job's id; the row still ends with the job's state.
+    expect(frame.replace(/ /g, "")).toContain(`◈WebResearchviaExajob${JOB}·jobrunning`)
   })
 
   test("they are drawn as upstream's search and fetch rows, finished and failed alike", async () => {
@@ -369,26 +391,48 @@ describe("a call as it runs", () => {
     expect(frame.replace(/\s+/g, " ")).toContain(text)
   })
 
-  test("a job: the first call ends with the job, the next one is the same row with its id", async () => {
+  test("a job: each answer that says it still runs ends the row with it; the next calls are the same row with its id, on every frame", async () => {
+    const running = { provider: "Firecrawl", job: { id: JOB, status: "running" } }
     await using setup = await transcript(
-      chat([call("call_first", "web_crawl", completed({ url: SITE }, { job: { id: JOB, status: "running" } }))], false),
+      chat([call("call_first", "web_crawl", completed({ url: SITE }, running))], false),
     )
-    await setup.frame((frame) => rows(frame).includes(`% Web Crawl ${SITE}`))
+    const first = `% Web Crawl via Firecrawl ${SITE} · job running`
+    await setup.frame((frame) => rows(frame).includes(first))
     const since = setup.recorder.mark()
+    // The next call: CPP waited 50 s and the job still runs.
     setup.emit(events.started("call_next", "web_crawl"))
     setup.emit(events.called("call_next", { job_id: JOB }))
     await setup.frame((frame) => rows(frame).includes(`% Web Crawl job ${JOB}`))
-    setup.emit(events.success("call_next", { provider: "Firecrawl" }))
+    setup.emit(events.success("call_next", running))
+    await setup.frame((frame) => rows(frame).includes(`% Web Crawl via Firecrawl job ${JOB} · job running`))
+    // The one after: the job is done.
+    setup.emit(events.started("call_last", "web_crawl"))
+    setup.emit(events.called("call_last", { job_id: JOB }))
+    await setup.frame((frame) => rows(frame).at(-1) === `% Web Crawl job ${JOB}`)
+    setup.emit(events.success("call_last", { provider: "Firecrawl", job: { id: JOB, status: "done" } }))
+    await setup.frame((frame) => rows(frame).at(-1) === `% Web Crawl via Firecrawl job ${JOB}`)
     await setup.waitForVisualIdle({ quietFrames: 3 })
-    expect(rows(setup.captureCharFrame())).toEqual([`% Web Crawl ${SITE}`, `% Web Crawl via Firecrawl job ${JOB}`])
+    expect(rows(setup.captureCharFrame())).toEqual([
+      first,
+      `% Web Crawl via Firecrawl job ${JOB} · job running`,
+      `% Web Crawl via Firecrawl job ${JOB}`,
+    ])
     expect(setup.recorder.missed).toBe(0)
-    // The first row stays as it was on every frame; the next call's row is its pending words, then the job, for good.
-    expect(since().filter((frame) => rows(frame.text)[0] !== `% Web Crawl ${SITE}`)).toEqual([])
-    const states = ["Crawling the web…", `% Web Crawl job ${JOB}`, `% Web Crawl via Firecrawl job ${JOB}`]
-    inOrder(since(), states, (frame) => {
-      const line = lines(frame).find((line) => line.endsWith(states[0]!) || line.includes(`job ${JOB}`))
-      return line?.endsWith(states[0]!) ? states[0] : line
-    })
+    // On every frame: the first row as it was; each next call's row its pending words, running, then its answer, for good.
+    expect(since().filter((frame) => rows(frame.text)[0] !== first)).toEqual([])
+    const pending = "Crawling the web…"
+    const nexts = (frame: string) =>
+      lines(frame).flatMap((line) => (line.endsWith(pending) ? [pending] : line.includes(`job ${JOB}`) ? [line] : []))
+    inOrder(
+      since(),
+      [pending, `% Web Crawl job ${JOB}`, `% Web Crawl via Firecrawl job ${JOB} · job running`],
+      (frame) => nexts(frame)[0],
+    )
+    inOrder(
+      since(),
+      [pending, `% Web Crawl job ${JOB}`, `% Web Crawl via Firecrawl job ${JOB}`],
+      (frame) => nexts(frame)[1],
+    )
   })
 })
 

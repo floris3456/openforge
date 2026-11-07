@@ -8,7 +8,7 @@ import { writeFile } from "fs/promises"
 import path from "path"
 import { createEffect, Show } from "solid-js"
 import { createStore } from "solid-js/store"
-import { settings } from "../../src/component/dialog-config"
+import { DialogConfig, settings } from "../../src/component/dialog-config"
 import { Keymap } from "../../src/context/keymap"
 import { useRoute } from "../../src/context/route"
 import { usePacerSession } from "../../src/pacer/jump"
@@ -547,6 +547,31 @@ describe("settings (section 4)", () => {
     await setup.frame((frame) => frame.includes(TITLE) && !frame.includes("Partly reused"))
     await setup.configure((draft) => (draft.cliproxypacer = { notices: { lifetime: 30, enabled: false } }))
     await setup.frame((frame) => !frame.includes("Cache miss") && !frame.includes("Partial cache reuse"))
+  })
+
+  test("the Settings dialog shows the rows under CLIProxyPacer and writes this TUI's config; the cards follow", async () => {
+    await using setup = await cards({
+      height: 60,
+      notices: [notice(0), notice(1, { verdict: "partial", tokens: 18_000, title: "Partly reused" })],
+    })
+    await setup.frame((frame) => frame.includes("Partly reused"))
+    setup.dialog.replace(() => <DialogConfig current="cliproxypacer.notices.kinds" />)
+    const frame = await setup.frame((frame) => frame.includes("Opened cache notice disappears"))
+    const row = (title: string) => frame.split("\n").find((line) => line.includes(title))!
+    expect(frame).toContain("CLIProxyPacer")
+    expect(row("Cache notices  ")).toMatch(/Cache notices +on/)
+    expect(row("Cache notices from")).toMatch(/Cache notices from +all chats/)
+    expect(row("Cache notice lifetime")).toMatch(/Cache notice lifetime +15 minutes/)
+    expect(row("Cache notice minimum")).toMatch(/Cache notice minimum +any loss/)
+    expect(row("Cache notices for")).toMatch(/Cache notices for +misses and partial reuse/)
+    expect(row("Opened cache notice disappears")).toMatch(/Opened cache notice disappears +in every TUI/)
+    // → on the row it opened at: misses only, written to this TUI's config, and the partial reuse's card goes.
+    await until(() => setup.app.renderer.currentFocusedRenderable !== null, 2_000, "the dialog's focus")
+    setup.app.mockInput.pressArrow("right")
+    await setup.frame((frame) => /Cache notices for +misses only/.test(frame))
+    expect(setup.config().cliproxypacer).toEqual({ notices: { kinds: "misses" } })
+    setup.dialog.clear()
+    await setup.frame((frame) => frame.includes("Cache miss · 152K") && !frame.includes("Partly reused"))
   })
 
   test("Opened cache notice disappears only in this TUI: none sent, kept in this TUI's storage for a day", async () => {

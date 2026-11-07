@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { PacerRequest, PacerWindow } from "@opencode/client"
+import { promptless } from "@opencode/schema/pacer"
 import { mergeFirst } from "../../src/context/pacer"
 import {
   cacheLabel,
@@ -10,6 +11,7 @@ import {
   formatReset,
   nextUseLine,
   promptChangeLines,
+  promptlessLines,
   requestHeader,
   requestLayout,
   requestRow,
@@ -18,7 +20,7 @@ import {
 } from "../../src/pacer/format"
 import { requestTarget } from "../../src/pacer/jump"
 import { listTop } from "../../src/routes/session/composer/requests-tab"
-import { chat, miss, NOW, promptChange, request, step } from "./fixture"
+import { chat, miss, NOW, promptChange, request, step, webCall } from "./fixture"
 
 // Written from spec cliproxypacer-step-1: section 4's table, section 5's texts and section 7's rows, Enter and
 // what changed.
@@ -372,6 +374,20 @@ describe("what changed (section 7)", () => {
     )
     expect(lines.items[0]).toEqual({ text: "new      result     messages[9]  50 chars  error  exit 1", tone: "error" })
   })
+
+  test("a web tool call sent no prompt (spec cliproxypacer-step-2, section 4); nor did any request that goes by its row", () => {
+    const call = webCall(0, 300)
+    expect(promptless(call.id)).toBe(true)
+    expect(promptlessLines(call)).toEqual({
+      head: [{ text: "A web tool call sends no prompt, so there is nothing to compare", tone: "muted" }],
+      items: [],
+    })
+    // CPP records a web tool call so; were it to record another request so, the line doesn't call it one.
+    expect(promptlessLines({ kind: "other" }).head.map((line) => line.text)).toEqual([
+      "CPP recorded this request without a request ID, so it keeps no prompt to compare",
+    ])
+    expect(promptless(request(0).id)).toBe(false)
+  })
 })
 
 describe("Enter: where a request ended (section 7)", () => {
@@ -430,6 +446,20 @@ describe("holding rows", () => {
     expect(merged.cursor).toBe("req_5")
     // A first page that is the whole list replaces it.
     expect(mergeFirst(held, { items: [request(0)], asOf: NOW }).items).toHaveLength(1)
+  })
+
+  test("a first page read again keeps every web tool call held beyond it (spec cliproxypacer-step-2, section 4)", () => {
+    // CPP gives the calls no request ID: each goes by its row, so none takes another's place.
+    const held = { items: [webCall(2, 302), request(3), webCall(4, 304), webCall(5, 305)], cursor: "row:305" }
+    const fresh = { items: [webCall(0, 300), webCall(1, 301), webCall(2, 302), request(3)], cursor: "req_3", asOf: NOW }
+    expect(mergeFirst(held, fresh).items.map((item) => item.id)).toEqual([
+      "row:300",
+      "row:301",
+      "row:302",
+      "req_3",
+      "row:304",
+      "row:305",
+    ])
   })
 
   test("the first row on screen stays where it was unless the selection would leave the screen", () => {

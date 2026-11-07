@@ -324,6 +324,18 @@ export function promptChangeLines(change: PacerPromptChange) {
   }
 }
 
+/**
+ * What changed for a request that goes by its row (`Pacer.promptless`; spec cliproxypacer-step-2, section 4): a web
+ * tool call, or any other request CPP recorded without a request ID. It sent no prompt, so nothing is read.
+ */
+export function promptlessLines(request: Pick<PacerRequest, "kind"> | undefined) {
+  const text =
+    request?.kind === "search"
+      ? "A web tool call sends no prompt, so there is nothing to compare"
+      : "CPP recorded this request without a request ID, so it keeps no prompt to compare"
+  return { head: [{ text, tone: "muted" as const }], items: [] }
+}
+
 /** `changed  system  messages[0].content[0]  12.3K chars  You are…`. */
 export function promptItemLine(item: PacerPromptItem) {
   return [

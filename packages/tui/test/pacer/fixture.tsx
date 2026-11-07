@@ -8,7 +8,9 @@ import type {
   PacerStatus,
   SessionMessageInfo,
 } from "@opencode/client"
+import { PacerWire } from "@opencode/core/pacer/wire"
 import type { Plugin } from "@opencode/plugin/tui"
+import { SessionID } from "@opencode/schema/session-id"
 import { TextAttributes } from "@opentui/core"
 import { ManualClock } from "@opentui/core/testing"
 import { testRender } from "@opentui/solid"
@@ -121,6 +123,28 @@ export function request(index: number, extra: Partial<PacerRequest> = {}): Pacer
     miss: false,
     ...extra,
   }
+}
+
+/**
+ * A call of CPP's web tools at `index` (one second older per index, as `request`), as the service shapes CPP's row of
+ * it, `row` its number at CPP: kind 6, without a request ID (spec cliproxypacer-step-2, the decision of 2026-11-07).
+ */
+export function webCall(index: number, row: number): PacerRequest {
+  const [cpp] = PacerWire.rows([
+    {
+      id: row,
+      at: NOW - index * 1000,
+      ext: "",
+      kind: 6,
+      provider: "exa",
+      alias: "web_search",
+      account: "exa-1",
+      status: 200,
+      cost_api: 5_000_000,
+      session_ext: "0b6d1c52-5e0a-4f8e-9a51-2c4b7f1d9e30",
+    },
+  ])
+  return PacerWire.request(cpp!, { sessionID: SessionID.make(CHAT) }, { offset: 0, now: NOW })
 }
 
 export function miss(index: number, extra: Partial<PacerRequest> = {}) {

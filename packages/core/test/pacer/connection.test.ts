@@ -2029,4 +2029,117 @@ describe("PacerConnection reads", () => {
       expect(reads(second)).toEqual(["/pacer/v1/prompts/req-3", "req-3"])
     }),
   )
+
+  // Spec cliproxypacer-step-2, section 4 and the decision of 2026-11-07: CPP records a call of its web tools as a kind
+  // 6 row without a request ID (`ext` is empty), and every such row of a chat went by the same empty ID.
+  /** A call of CPP's web tools, as CPP records it. */
+  const webCall = (id: number, fields: Record<string, unknown> = {}) =>
+    row(id, {
+      ext: "",
+      kind: 6,
+      provider: "exa",
+      model: "web_search",
+      alias: "web_search",
+      account: "exa-1",
+      input: 0,
+      output: 0,
+      cache_read: 0,
+      cache_write_5m: 0,
+      cost_api: 5_000_000,
+      cache_verdict: null,
+      ...fields,
+    })
+
+  it.effect(
+    "each web tool call goes by its row, on every page and every read; none has a prompt, so none is read",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const parent = yield* chat(h)
+        const uuid = PacerSessionID.make(parent)
+        h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+        h.cpp.rows = [
+          row(1, { session_ext: uuid }),
+          webCall(2, { session_ext: uuid }),
+          webCall(3, { session_ext: uuid }),
+          // Were CPP to compare a request with one, what changed names it as the list does.
+          row(4, { session_ext: uuid, cache_verdict: "miss", cache_base: 3 }),
+          webCall(5, { session_ext: uuid }),
+          webCall(6, { session_ext: uuid }),
+        ]
+        h.cpp.prompts.set("req-4", { kept: true, previous: 3, rows: [] })
+
+        // Two pages of three: two calls on each, every one its own.
+        const first = yield* h.connection.requests(parent, { filter: "all", limit: 3 })
+        const next = yield* h.connection.requests(parent, { filter: "all", limit: 3, cursor: first.cursor })
+        expect([...first.items, ...next.items].map((item) => [item.id, item.kind, item.model])).toEqual([
+          ["row:6", "search", "web_search"],
+          ["row:5", "search", "web_search"],
+          ["req-4", "step", "model-a"],
+          ["row:3", "search", "web_search"],
+          ["row:2", "search", "web_search"],
+          ["req-1", "step", "model-a"],
+        ])
+        // Read again, they go by the same names.
+        expect(
+          (yield* h.connection.requests(parent, { filter: "all", limit: 3 })).items.map((item) => item.id),
+        ).toEqual(["row:6", "row:5", "req-4"])
+
+        // What changed of a call: none, at once, reading nothing from CPP.
+        const reads = h.cpp.seen.length
+        for (const id of ["row:6", "row:5", "row:3", "row:2"]) expect(yield* h.connection.prompt(id)).toBeUndefined()
+        expect(h.cpp.seen).toHaveLength(reads)
+        // A request with an ID reads its own, as before.
+        expect(yield* h.connection.prompt("req-4")).toMatchObject({
+          request: { id: "req-4", verdict: "miss" },
+          comparedWith: { id: "row:3" },
+          kept: "all",
+        })
+        expect(h.cpp.seen.slice(reads).map((item) => item.query.get("request") ?? item.path)).toEqual([
+          "/pacer/v1/prompts/req-4",
+          "req-4",
+        ])
+      }),
+  )
+
+  it.effect("each web tool call keeps the time first answered for it, as the offset to CPP's clock narrows", () =>
+    Effect.gen(function* () {
+      // As in "a request's time never changes once answered" above: the middle of CPP's offset is offset - 400 at
+      // first, offset + 50 once narrowed.
+      const h = yield* harness()
+      const offset = 120_000
+      yield* TestClock.setTime(1_800_000_000_900)
+      h.cpp.offset = offset
+      yield* online(h)
+      const parent = yield* chat(h)
+      const uuid = PacerSessionID.make(parent)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+      const second = 1_800_000_010_000
+      const cpp = (at: number) => at + offset - 400
+      h.cpp.rows = [
+        webCall(1, { session_ext: uuid, at: cpp(second + 200) }),
+        webCall(2, { session_ext: uuid, at: cpp(second + 3_200) }),
+        webCall(3, { session_ext: uuid, at: cpp(second + 5_200) }),
+      ]
+      const times = (page: Pacer.Requests) => page.items.map((item) => [item.id, item.at])
+      expect(times(yield* h.connection.requests(parent, { filter: "all" }))).toEqual([
+        ["row:3", second + 5_200],
+        ["row:2", second + 3_200],
+        ["row:1", second + 200],
+      ])
+
+      // A tenth of a second later CPP's answers narrow the offset; a call first answered then is on it, and each one
+      // answered before keeps its own time.
+      yield* TestClock.adjust("100 millis")
+      yield* h.connection.requests(parent, { filter: "all" })
+      h.cpp.rows = [...h.cpp.rows, webCall(4, { session_ext: uuid, at: cpp(second + 9_200) })]
+      expect(times(yield* h.connection.requests(parent, { filter: "all" }))).toEqual([
+        ["row:4", second + 9_200 - 450],
+        ["row:3", second + 5_200],
+        ["row:2", second + 3_200],
+        ["row:1", second + 200],
+      ])
+    }),
+  )
 })

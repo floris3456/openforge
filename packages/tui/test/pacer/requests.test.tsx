@@ -23,6 +23,7 @@ import {
   styleOf,
   SUBAGENT,
   Toolbar,
+  webCall,
 } from "./fixture"
 
 // Section 7 of spec cliproxypacer-step-1 and its Proof and Benchmarks: the Requests tab, what changed, no flicker.
@@ -30,7 +31,7 @@ import {
 // it. Every frame the renderer draws is recorded and checked, not only the last.
 
 const FAR = 300
-const KIND = /(\d\d:\d\d:\d\d) {2}(step|ping|title|compaction|explore)\b/
+const KIND = /(\d\d:\d\d:\d\d) {2}(step|ping|title|compaction|explore|search)\b/
 
 /** The times of the request rows a frame shows, top to bottom. */
 function rowsOf(frame: string) {
@@ -323,7 +324,7 @@ describe("the list", () => {
       width: 100,
     })
     await clickCacheItem(setup)
-    const frame = await setup.frame((frame) => rowsOf(frame).length === 5)
+    const frame = await setup.frame((frame) => rowsOf(frame).length === 6)
     const row = frame.split("\n").find((line) => line.includes(time(0)))!
     expect(row).toMatch(new RegExp(`${time(0)} {2}search +web_search +exa-1 +0/0 +\\$0\\.005`))
   })
@@ -702,6 +703,122 @@ describe("Enter moves the chat to where the request ended", () => {
   })
 })
 
+// Spec cliproxypacer-step-2, section 4 and the decision of 2026-11-07: CPP records a call of its web tools without a
+// request ID, so each goes by its row; it sent no prompt. The rows are shaped by the service's own code from CPP's.
+describe("a web tool call's row", () => {
+  const NO_PROMPT = "A web tool call sends no prompt, so there is nothing to compare"
+
+  test("every call is its own row, on the first page and the next, and the list read again keeps them all", async () => {
+    const calls = new Set([1, 2, 4, 50, 51, 53])
+    const requests = Array.from({ length: 56 }, (_, index) =>
+      calls.has(index) ? webCall(index, 1_000 - index) : request(index),
+    )
+    await using setup = await requestsTab({ requests, delay: 0 })
+    const ids = () => setup.pacer.page(CHAT, "all")!.items.map((item) => item.id)
+    await clickCacheItem(setup)
+    const first = await setup.frame((frame) => rowsOf(frame).length === 6)
+    expect(rowsOf(first)).toEqual(range(0, 6))
+    expect(first.split("\n").filter((line) => / {2}search +web_search +exa-1 /.test(line))).toHaveLength(3)
+    // Down near the end: the next page is read, and each call on it is added too.
+    for (let index = 0; index < 45; index++) setup.app.mockInput.pressArrow("down")
+    await until(() => setup.pacer.page(CHAT, "all")!.cursor === undefined, 5_000, "the next page")
+    expect(ids()).toEqual(requests.map((item) => item.id))
+    expect(new Set(ids()).size).toBe(56)
+    for (let index = 0; index < 10; index++) setup.app.mockInput.pressArrow("down")
+    const end = await setup.frame((frame) => rowsOf(frame).at(-1) === time(55))
+    expect(rowsOf(end)).toEqual(range(50, 56))
+    // A new request: the first page is read again, and the rows held beyond it stay, every call among them.
+    setup.fake.requests[CHAT] = [request(-1), ...requests]
+    setup.emit({ type: "pacer.requests.updated", data: { sessionID: CHAT } })
+    await until(() => ids()[0] === "req_-1", 5_000, "the list read again")
+    expect(ids()).toEqual(["req_-1", ...requests.map((item) => item.id)])
+  })
+
+  test("the cursor on a call selects that call alone, on every frame", async () => {
+    const requests = [webCall(0, 300), webCall(1, 299), webCall(2, 298), request(3), request(4)]
+    await using setup = await requestsTab({ requests, delay: 0 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length === 5 && selectedTime(setup) === time(0))
+    using recorder = recordFrames(setup.app)
+    const keys = [
+      ["down", 1],
+      ["down", 2],
+      ["down", 3],
+      ["up", 2],
+      ["up", 1],
+      ["up", 0],
+    ] as const
+    for (const [key, index] of keys) {
+      setup.app.mockInput.pressArrow(key)
+      await setup.frame(() => selectedTime(setup) === time(index))
+    }
+    expect(recorder.missed).toBe(0)
+    expect(recorder.frames.length).toBeGreaterThan(0)
+    for (const frame of recorder.frames) expect(selectedLines(frame)).toHaveLength(1)
+  })
+
+  test("nothing is read for a call, ahead or on Ctrl+Enter or Alt+Enter, which says it sends no prompt", async () => {
+    // The newest row, a call, is where the tab opens: a step's would be read with the first page.
+    const requests = [webCall(0, 300), webCall(1, 299), request(2), miss(3)]
+    await using setup = await requestsTab({ requests, delay: 0, prompts: { req_3: promptChange(miss(3)) } })
+    // The miss is read ahead, as any.
+    await until(() => setup.pacer.held("req_3") !== undefined, 5_000, "the miss read ahead")
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length === 4)
+    setup.app.mockInput.pressArrow("down")
+    await setup.frame(() => selectedTime(setup) === time(1))
+    await setup.settle()
+    using recorder = recordFrames(setup.app)
+    const start = performance.now()
+    setup.app.mockInput.pressEnter({ ctrl: true })
+    const detail = await setup.frame((frame) => frame.includes(NO_PROMPT))
+    const drawn = recorder.frames.find((frame) => frame.text.includes(NO_PROMPT))!
+    expect(drawn.at - start).toBeLessThan(100)
+    // In what changed's place and look: the list gone, the line muted, Esc to go back.
+    expect(rowsOf(detail)).toEqual([])
+    expect(styleOf(setup.app, NO_PROMPT)).toEqual({ fg: setup.theme.text.muted.toInts(), dim: false })
+    expect(detail).toMatch(/back +esc/)
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame).length === 4)
+    expect(selectedTime(setup)).toBe(time(1))
+    // Alt+Enter on the newest, there and back.
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame(() => selectedTime(setup) === time(0))
+    setup.app.mockInput.pressEnter({ meta: true })
+    await setup.frame((frame) => frame.includes(NO_PROMPT))
+    setup.app.mockInput.pressEnter({ meta: true })
+    await setup.frame((frame) => rowsOf(frame).length === 4)
+    await setup.settle()
+    // The one read of what changed is the miss's.
+    expect(setup.fake.calls.filter((call) => call.path.startsWith("prompt/")).map((call) => call.path)).toEqual([
+      "prompt/req_3",
+    ])
+    finished(recorder, [list(range(0, 4)), (frame) => frame.includes(NO_PROMPT) && rowsOf(frame).length === 0])
+  })
+
+  test("Enter on a call moves the chat to its first step that started after it, as for any request no message names", async () => {
+    const messages = [
+      step("msg_1", { created: NOW - 50_000, completed: NOW - 45_000, proxyRequestID: "req_50" }),
+      step("msg_2", { created: NOW - 12_000, completed: NOW - 11_000, proxyRequestID: "req_12" }),
+      step("msg_3", { created: NOW - 2_000, completed: NOW - 1_000, proxyRequestID: "req_2" }),
+    ]
+    const requests = [request(2), webCall(3, 203), webCall(13, 193), request(50)]
+    await using setup = await requestsTab({ requests, messages, delay: 0 })
+    await clickCacheItem(setup)
+    await setup.frame((frame) => rowsOf(frame).length === 4)
+    for (const [index, moves] of [
+      [1, 1],
+      [2, 2],
+    ] as const) {
+      setup.app.mockInput.pressArrow("down")
+      await setup.frame(() => selectedTime(setup) === time(index === 1 ? 3 : 13))
+      setup.app.mockInput.pressEnter()
+      await until(() => setup.moves.length === moves, 5_000, `move ${moves}`)
+    }
+    expect(setup.moves).toEqual([`${CHAT} msg_3`, `${CHAT} msg_2`])
+  })
+})
+
 test("500 rows scroll with six rows mounted", async () => {
   const requests = Array.from({ length: 500 }, (_, index) => request(index))
   await using setup = await requestsTab({ requests, delay: 0 })
@@ -747,6 +864,11 @@ function selectedTime(setup: Setup) {
     ?.spans.map((span) => span.text)
     .join("")
     .match(KIND)?.[1]
+}
+
+/** The lines a frame draws selected (bold). */
+function selectedLines(frame: RecordedFrame) {
+  return frame.lines.filter((line) => line.spans.some((span) => KIND.test(span.text) && span.attributes & 1))
 }
 
 function mountedRows(node: Renderable): number {

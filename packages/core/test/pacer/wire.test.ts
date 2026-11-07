@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
+import { Pacer } from "@opencode/schema/pacer"
 import { SessionID } from "@opencode/schema/session-id"
 import { PacerWire } from "@opencode/core/pacer/wire"
 
@@ -204,6 +205,23 @@ describe("PacerWire", () => {
       refusal: "accounts_quota",
       miss: false,
     })
+  })
+
+  test("a row without a request ID, as CPP records a web tool call, goes by its row; one with an ID keeps it", () => {
+    // Spec cliproxypacer-step-2, the decision of 2026-11-07: every such row of a chat went by the same empty ID.
+    const rows = PacerWire.rows([
+      { id: 41, at: 1, ext: "", kind: 6, alias: "web_search", provider: "exa" },
+      { id: 42, at: 2, ext: "", kind: 6, alias: "web_research", provider: "exa" },
+      { id: 43, at: 3, ext: "0b6d1c52-5e0a-4f8e-9a51-2c4b7f1d9e30", kind: 0 },
+    ])
+    const shaped = rows.map((row) => PacerWire.request(row, {}, { offset: 0, now: 0 }))
+    expect(shaped.map((request) => [request.id, request.kind, request.model])).toEqual([
+      ["row:41", "search", "web_search"],
+      ["row:42", "search", "web_research"],
+      ["0b6d1c52-5e0a-4f8e-9a51-2c4b7f1d9e30", "step", ""],
+    ])
+    expect(shaped.map((request) => Pacer.promptless(request.id))).toEqual([true, true, false])
+    expect(PacerWire.requestID(rows[0])).toBe(Pacer.rowRequestID(41))
   })
 
   test("says what changed in a prompt, and whether CPP still holds it", () => {

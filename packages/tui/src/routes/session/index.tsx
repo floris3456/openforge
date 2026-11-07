@@ -1463,6 +1463,9 @@ export function Session(props: {
     bindings: [...baseAndUnfocusedCommands, ...baseCommands()].map((command) => command.id),
   }))
 
+  // Leaving a chat closes the composer. Deferred: the route is mounted again for each chat (keyed by its ID in
+  // app.tsx), with the composer closed and nothing to clear, and a run at mount would close the Requests tab a cache
+  // notice of this chat has just opened (usePacerSession, above).
   createEffect(
     on(
       () => route.sessionID,
@@ -1470,6 +1473,7 @@ export function Session(props: {
         setComposer("open", false)
         clearMessageNavigation()
       },
+      { defer: true },
     ),
   )
 

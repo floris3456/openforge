@@ -10,6 +10,7 @@ import {
   miss,
   notice,
   NOW,
+  OTHER,
   pacerFake,
   promptChange,
   request,
@@ -54,24 +55,35 @@ function messages(providerID: string): SessionMessageInfo[] {
 /** The model a chat moves to, off CPP. */
 const OTHER_MODEL = { id: "gpt-5", providerID: "openai" }
 
-async function app(input: { state: Parameters<typeof status>[0]; providerID: string }) {
+/** `shown`: the chat the TUI starts on, `CHAT` or `OTHER` (another chat on CPP, with one reply). */
+async function app(input: { state: Parameters<typeof status>[0]; providerID: string; shown?: string }) {
   const fake = pacerFake()
   fake.status = status(input.state)
   fake.chats[CHAT] = chat()
+  fake.chats[OTHER] = chat({ sessionID: OTHER })
   fake.accounts = accounts()
   fake.requests[CHAT] = [request(0, { id: "req_0", at: NOW - 10_000 }), request(1, { id: "req_1", at: NOW - 50_000 })]
+  fake.requests[OTHER] = [request(2, { id: "req_other", sessionID: OTHER, at: NOW - 5_000 })]
   const transcript = messages(input.providerID)
+  const other = [
+    { type: "user", id: "msg_o1", text: "Other question", time: { created: NOW - 8_000 } },
+    { ...messages(input.providerID).at(-1)!, id: "msg_o2", content: [{ type: "text", text: "Other chat's reply" }] },
+  ] as SessionMessageInfo[]
   const setup = await createAppFixture({
     width: 160,
     height: 40,
     config: { animations: false, keybinds: { "model.list": "f8" } },
-    args: { sessionID: CHAT },
+    args: { sessionID: input.shown ?? CHAT },
     fetch: async (url, request) => {
       const pacer = await fake.handle(url, request)
       if (pacer) return pacer
       if (url.pathname === `/api/session/${CHAT}`)
         return json({ data: sessionInfo(CHAT, input.providerID, undefined, 1.23) })
       if (url.pathname === `/api/session/${CHAT}/message`) return json({ data: transcript.toReversed(), cursor: {} })
+      if (url.pathname === `/api/session/${OTHER}`) return json({ data: sessionInfo(OTHER, input.providerID) })
+      if (url.pathname === `/api/session/${OTHER}/message`) return json({ data: other.toReversed(), cursor: {} })
+      if (url.pathname === `/api/session/${OTHER}/inbox` || url.pathname === `/api/session/${OTHER}/permission`)
+        return json({ data: [] })
       // The message a model switch adds, read back after its event.
       const switched = url.pathname.match(/^\/api\/session\/[^/]+\/message\/(msg_[^/]+)$/)?.[1]
       if (switched)
@@ -208,4 +220,52 @@ test("a cache notice shows in the corner over the chat, waits behind a dialog, a
   expect(
     fake.calls.filter((call) => call.method === "POST" && call.path.startsWith("notices/")).map((call) => call.path),
   ).toEqual(["notices/req_1/dismiss"])
+})
+
+test("a cache notice of another chat, opened by key or by click, opens that chat's Requests tab on its request with what changed", async () => {
+  // Found in the pilotty run of cpp-next (tui-1): the TUI moved to the chat, but the session route mounted for it
+  // closed the composer its notice had just opened. By key the route was also mounted twice, and the copy left alive
+  // off screen took the notice's request.
+  for (const way of ["key", "click"] as const) {
+    const { setup, fake } = await app({ state: "on", providerID: "cliproxypacer", shown: OTHER })
+    await using _ = setup
+    fake.prompts.req_1 = promptChange(miss(1, { id: "req_1" }))
+    await waitForHighlightedFrame(setup, (frame) => frame.includes("Other chat's reply"), { maxPasses: 200 })
+    setup.events.emit({
+      id: `evt_notice_${way}`,
+      created: NOW,
+      type: "pacer.notice.added",
+      data: { notice: notice(1, { requestID: "req_1", at: NOW - 50_000 }) },
+    } as unknown as Parameters<typeof setup.events.emit>[0])
+    const frame = await setup.waitForFrame((frame) => frame.includes("Cache miss · 152K tokens not reused"), {
+      maxPasses: 100,
+    })
+    if (way === "key") {
+      setup.mockInput.pressKey("x", { ctrl: true })
+      setup.mockInput.pressKey("o")
+    } else {
+      const lines = frame.split("\n")
+      const row = lines.findIndex((line) => line.includes("Cache miss"))
+      await setup.mockMouse.click(lines[row]!.indexOf("Cache miss"), row)
+    }
+    // The chat's transcript and, under it, its Requests tab showing what changed in the notice's request.
+    const opened = await setup.waitForFrame(
+      (frame) => frame.includes("Latest reply") && frame.includes("compared with req_prev"),
+      { maxPasses: 200 },
+    )
+    expect(opened).toContain("miss · prefix changed · system changed")
+    expect(opened).not.toContain("Other chat's reply")
+    expect(opened).not.toContain("Cache miss · 152K")
+    expect(
+      fake.calls.filter((call) => call.method === "POST" && call.path.startsWith("notices/")).map((call) => call.path),
+    ).toEqual(["notices/req_1/dismiss"])
+    // Leaving the chat still closes the composer: back on the first chat's tab, none is open.
+    setup.mockInput.pressKey("x", { ctrl: true })
+    setup.mockInput.pressKey("1")
+    const back = await waitForHighlightedFrame(setup, (frame) => frame.includes("Other chat's reply"), {
+      maxPasses: 200,
+    })
+    expect(back).not.toContain("Requests")
+    expect(back).not.toContain("compared with req_prev")
+  }
 })

@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
 import { expect, test } from "bun:test"
+import { createMemo, createSignal, onCleanup, Show } from "solid-js"
 import { ConfigProvider } from "../src/config"
 import { Keymap } from "../src/context/keymap"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
@@ -135,6 +136,59 @@ test("global commands stay reachable when the mode changes", async () => {
   try {
     exercise()
     expect(calls).toEqual(["global", "base", "global"])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("a command run by a key sequence that replaces a keyed screen mounts the next screen once and disposes the last", async () => {
+  // Found in the pilotty run of cpp-next (tui-1): <leader>o and <leader>1 moving to another chat mounted its session
+  // route twice and kept one of them alive. OpenTUI's keymap ran the command with the sequence still pending, so a
+  // layer leaving with the old screen checked the other layers' `enabled`, and one reading a memo of the old screen made
+  // Solid run the keyed <Show> again inside its own disposal.
+  const mounts: string[] = []
+  const cleanups: string[] = []
+  const [screen, setScreen] = createSignal("a")
+
+  function Screen(props: { id: string }) {
+    mounts.push(props.id)
+    onCleanup(() => cleanups.push(props.id))
+    const shown = createMemo(() => screen())
+    const label = createMemo(() => `${shown()}!`)
+    Keymap.createLayer(() => ({
+      enabled: () => label() !== "",
+      commands: [{ id: `screen.${props.id}.one`, run() {} }],
+    }))
+    Keymap.createLayer(() => ({ commands: [{ id: `screen.${props.id}.two`, run() {} }] }))
+    return <text>screen {props.id}</text>
+  }
+
+  function Harness() {
+    Keymap.createLayer(() => ({
+      mode: "global",
+      commands: [{ id: "screen.next", bind: "<leader>o", run: () => void setScreen("b") }],
+    }))
+    return (
+      <Show when={screen()} keyed>
+        {(id) => <Screen id={id} />}
+      </Show>
+    )
+  }
+
+  const app = await testRender(() => (
+    <ConfigProvider config={createTuiResolvedConfig()}>
+      <Keymap.Provider>
+        <Harness />
+      </Keymap.Provider>
+    </ConfigProvider>
+  ))
+  try {
+    expect(mounts).toEqual(["a"])
+    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("o")
+    await app.renderOnce()
+    expect(screen()).toBe("b")
+    expect({ mounts, cleanups }).toEqual({ mounts: ["a", "b"], cleanups: ["a"] })
   } finally {
     app.renderer.destroy()
   }

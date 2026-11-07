@@ -204,6 +204,14 @@ function use(): Keymap {
 function createLayer(input: () => KeymapLayer) {
   const value = useValue()
   const enabled = useInteractivity()
+  // A key sequence's command runs with the sequence over. OpenTUI's keymap clears it only after the command, and while
+  // one is pending each layer leaving (with a screen the command replaced, as a move to another chat does) checks the
+  // other layers' `enabled`: one reading a memo of the screen being disposed made Solid build the next screen again
+  // inside that disposal, and one of the two stayed alive.
+  const settled = <T,>(run: () => T) => {
+    value.keymap.clearPendingSequence()
+    return run()
+  }
   useBindings(() => {
     const layer = input()
     const { commands, bindings, mode, ...options } = layer
@@ -218,7 +226,7 @@ function createLayer(input: () => KeymapLayer) {
           ...definition,
           name: id,
           opencode: command,
-          run: (context: CommandContext<Renderable, KeyEvent>) => run(value.input(id), context.event),
+          run: (context: CommandContext<Renderable, KeyEvent>) => settled(() => run(value.input(id), context.event)),
           ...(description === undefined ? {} : { desc: description }),
           ...(group === undefined ? {} : { category: group }),
           ...(palette === undefined ? {} : { namespace: "palette" }),
@@ -230,7 +238,7 @@ function createLayer(input: () => KeymapLayer) {
           cmd: () => {
             if (command.enabled === false) return false
             if (typeof command.enabled === "function" && !command.enabled()) return false
-            return command.run()
+            return settled(() => command.run())
           },
           ...(command.title === undefined && command.description === undefined
             ? {}

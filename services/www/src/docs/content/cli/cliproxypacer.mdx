@@ -95,7 +95,8 @@ time      kind        model               account       read/write    verdict   
 What changed shows CPP's verdict and its cause, how many tokens were written to the cache again and what the miss cost,
 and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only had their
 cache marker moved. It scrolls with **↑/↓**, and the footer grows to at most half the window. When CPP no longer keeps
-the prompt, it says `prompt no longer kept`.
+the prompt, it says `prompt no longer kept`. A `search` row has none: a web tool call sends no prompt, so what changed
+says so and reads nothing, and **Enter** on it goes to the chat's first step after the call.
 
 ```text
 miss · tools changed · tools[0] changed

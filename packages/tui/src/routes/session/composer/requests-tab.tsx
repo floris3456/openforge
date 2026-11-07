@@ -1,4 +1,5 @@
 import type { PacerRequest } from "@opencode/client"
+import { promptless } from "@opencode/schema/pacer"
 import { TextAttributes } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { batch, createEffect, createMemo, For, Match, onCleanup, Show, Switch, untrack, useContext } from "solid-js"
@@ -11,6 +12,7 @@ import { useTheme } from "../../../context/theme"
 import {
   clockTime,
   promptChangeLines,
+  promptlessLines,
   requestHeader,
   requestLayout,
   requestRow,
@@ -191,7 +193,8 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     if (!request) return
     // Back from what changed is on the same row, even if newer requests came meanwhile.
     setView("selected", which(), request.id)
-    if (props.pacer.held(request.id) !== undefined) {
+    // A web tool call sent no prompt: what changed says so, and nothing is read.
+    if (promptless(request.id) || props.pacer.held(request.id) !== undefined) {
       setView({ detail: request.id, detailTop: 0, pending: undefined })
       return
     }
@@ -210,6 +213,9 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
 
   const change = () => (view.detail === undefined ? undefined : props.pacer.held(view.detail))
   const lines = createMemo(() => {
+    const detail = view.detail
+    if (detail !== undefined && promptless(detail))
+      return promptlessLines(items().find((request) => request.id === detail))
     const current = change()
     if (current === undefined) return undefined
     if (current === null)

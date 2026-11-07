@@ -472,12 +472,14 @@ export const layer = Layer.effect(
       yield* spend(context.session.id, answer.usage && SessionUsage.record(answer.usage, (wrote ?? context.model).cost))
       const text = PacerSummaries.summaryOf(answer.replacement)
       if (text === undefined) return yield* Effect.fail({ fallback: PacerSummaries.fallback("unreadable") })
+      // A cold ask is cold whatever the header says: openforge sends the pick, so CLIProxyPacer answers `warm` on it.
+      const cold = trigger.reason === "cold" || header?.cold
       return {
         text,
         ...(split.keepID ? { metadata: { keepID: split.keepID } } : {}),
         writer: {
           by: "cliproxypacer",
-          ...(header ? { cold: header.cold } : {}),
+          ...(cold !== undefined ? { cold } : {}),
           ...(header?.userMessages !== undefined ? { userMessages: header.userMessages } : {}),
         },
         model: ref,

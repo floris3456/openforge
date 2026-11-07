@@ -597,14 +597,22 @@ it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usa
     expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini", warm: false })
     expect(compactions()[0]?.body.model).toBe("kimi-e2e-mini")
     expect((yield* record(out.session.id)).model).toEqual(ref("kimi-e2e-mini"))
-    // A cold ask: cold.
+    // The move's record: as CLIProxyPacer's header says.
+    expect((yield* record(out.session.id)).writer).toEqual({ by: "cliproxypacer", cold: false })
+    // A cold ask: cold. Its record says so though CLIProxyPacer's header says `warm` (it wrote on the pick sent).
     reset()
     fake.header = "warm; model=kimi-e2e-mini; writer=server"
     const cold = yield* chat("cold-ask", claude)
     yield* compaction.compact({ reason: "cold", context: cold.context, models: [ref("kimi-e2e-mini")] })
     expect(plans[0]).toMatchObject({ model: "kimi-e2e-mini", messages: true, warm: false })
     expect(compactions()[0]?.body.model).toBe("kimi-e2e-mini")
-    expect((yield* record(cold.session.id)).writer).toEqual({ by: "cliproxypacer", cold: false })
+    expect((yield* record(cold.session.id)).writer).toEqual({ by: "cliproxypacer", cold: true })
+    // And without any header (lost behind keep-alive bytes).
+    reset()
+    fake.header = undefined
+    const bare = yield* chat("cold-ask-bare", claude)
+    yield* compaction.compact({ reason: "cold", context: bare.context, models: [ref("kimi-e2e-mini")] })
+    expect((yield* record(bare.session.id)).writer).toEqual({ by: "cliproxypacer", cold: true })
   }),
 )
 

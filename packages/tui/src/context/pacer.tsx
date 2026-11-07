@@ -4,6 +4,7 @@ import type {
   PacerPromptChange,
   PacerRequest,
   PacerRequests,
+  PacerSettings,
   PacerStatus,
 } from "@opencode/client"
 import { promptless } from "@opencode/schema/pacer"
@@ -475,11 +476,22 @@ function createPacer(input: { clock: Clock }) {
       void client.api.experimental.pacer.refresh().catch(() => undefined)
     },
     /** Sets the chat's switches; its answer is the view the toolbar shows at once. */
-    async update(sessionID: string, change: { warming?: boolean; compactBeforeCold?: boolean }) {
+    async update(
+      sessionID: string,
+      change: { warming?: boolean; compactBeforeCold?: boolean; compactColdFirst?: boolean },
+    ) {
       const view = await client.api.experimental.pacer.chat.update({ sessionID, ...change })
       if (store.chats[sessionID]) setView(view, store.epoch)
       return view
     },
+    /**
+     * CPP's settings for all chats, as they apply at the key level (spec cliproxypacer-cold-ask, section 2): read from
+     * CPP each time, as Settings opens; never held, so they show what CPP has.
+     */
+    settings: (): Promise<PacerSettings> => client.api.experimental.pacer.settings.get(),
+    /** Changes CPP's settings for all chats; the answer is them after the change. */
+    updateSettings: (change: Partial<PacerSettings>): Promise<PacerSettings> =>
+      client.api.experimental.pacer.settings.update(change),
     /** The session route of a shown chat: how to open its Requests tab. */
     attach(sessionID: string, handlers: { readonly open: () => void }) {
       sessions.set(sessionID, handlers)

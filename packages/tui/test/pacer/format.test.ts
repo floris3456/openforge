@@ -39,7 +39,7 @@ describe("the toolbar's cache item (section 4)", () => {
 
   test("warming off for the chat, the cache still warm", () => {
     const view = chat({
-      switches: { warming: false, compactBeforeCold: false },
+      switches: { warming: false, compactBeforeCold: false, compactColdFirst: false },
       pings: { active: false, left: 0, sent: 0, failed: false, stopped: "off" },
       coldAt: NOW + 3 * 60_000 + 12_000,
     })
@@ -64,13 +64,36 @@ describe("the toolbar's cache item (section 4)", () => {
 
   test("compact before cold is on and due", () => {
     const view = chat({
-      switches: { warming: true, compactBeforeCold: true },
+      switches: { warming: true, compactBeforeCold: true, compactColdFirst: false },
       compactAt: new Date(2026, 10, 6, 14, 32).getTime(),
       compactReason: "before-cold",
     })
     expect(text(view)).toEqual({ text: "compacts at 14:32", tone: "muted" })
     // On, but not due: the countdown.
-    expect(text(chat({ switches: { warming: true, compactBeforeCold: true } })).text).toBe("warm 23:41")
+    expect(text(chat({ switches: { warming: true, compactBeforeCold: true, compactColdFirst: false } })).text).toBe(
+      "warm 23:41",
+    )
+  })
+
+  // Spec cliproxypacer-cold-ask, section 3.
+  test("the cache went cold, the chat's compact cold chats first on and it at least as large as the threshold", () => {
+    const switches = { warming: true, compactBeforeCold: false, compactColdFirst: true }
+    const size = { tokens: 80_000, threshold: 70_000 }
+    expect(text(chat({ warm: false, switches, size }))).toEqual({
+      text: "cache cold · compacts first",
+      tone: "warning",
+    })
+    // As large as the threshold is enough; so is the countdown reaching its end before CPP says the cache is cold.
+    expect(text(chat({ warm: false, switches, size: { tokens: 70_000, threshold: 70_000 } })).text).toBe(
+      "cache cold · compacts first",
+    )
+    expect(text(chat({ switches, size }), chat().coldAt! + 1).text).toBe("cache cold · compacts first")
+    // Smaller than the threshold, no size, or the switch off: only cold.
+    expect(text(chat({ warm: false, switches, size: { tokens: 69_999, threshold: 70_000 } })).text).toBe("cache cold")
+    expect(text(chat({ warm: false, switches })).text).toBe("cache cold")
+    expect(text(chat({ warm: false, size })).text).toBe("cache cold")
+    // Still warm: the countdown, whatever the size.
+    expect(text(chat({ switches, size })).text).toBe("warm 23:41")
   })
 
   test("the account can't serve the next step, as a warning", () => {

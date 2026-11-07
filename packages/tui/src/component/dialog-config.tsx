@@ -1,5 +1,7 @@
-import { createMemo, createSignal } from "solid-js"
+import type { PacerSettings } from "@opencode/client"
+import { createEffect, createMemo, createSignal, on } from "solid-js"
 import { useConfig, useNewDesigns } from "../config"
+import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogSelect, DialogSelectChoice } from "../ui/dialog-select"
@@ -22,6 +24,12 @@ type Setting = {
   keywords?: readonly string[]
   /** Under the "new-designs" experiment, enter opens this picker instead of cycling. ←/→ still cycle. */
   open?: (dialog: DialogContext) => void
+  /**
+   * Kept by CLIProxyPacer for all your chats instead of in the TUI config (spec cliproxypacer-cold-ask, section 2):
+   * read from it when Settings opens, written to it, and shown only while one is set up and answering. `path` is then
+   * only the setting's ID.
+   */
+  pacer?: keyof PacerSettings
 }
 
 export const settings: Setting[] = [
@@ -371,6 +379,29 @@ export const settings: Setting[] = [
     keywords: ["selection", "clipboard"],
   },
   {
+    title: "Compact cold chats first",
+    category: "CLIProxyPacer",
+    path: ["cliproxypacer", "compact_cold_first"],
+    pacer: "compactColdFirst",
+    description:
+      "For all chats: whether a large chat whose cache went cold compacts on a cheap model before its next step",
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["cliproxypacer", "compaction", "summary", "cold cache", "cheap model"],
+  },
+  {
+    title: "Compact before cold",
+    category: "CLIProxyPacer",
+    path: ["cliproxypacer", "compact_before_cold"],
+    pacer: "compactBeforeCold",
+    description: "For all chats: whether an idle chat compacts on its own model before its cache goes cold",
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["cliproxypacer", "compaction", "summary", "warm cache", "idle"],
+  },
+  {
     title: "Developer tools",
     category: "Debug",
     path: ["debug", "devtools"],
@@ -392,6 +423,7 @@ export function DialogConfig(props: { current?: string }) {
   const dialog = useDialog()
   const toast = useToast()
   const themes = useThemes()
+  const pacer = usePacer()
   const current = Math.max(
     0,
     settings.findIndex((setting) => settingID(setting) === props.current),
@@ -399,7 +431,29 @@ export function DialogConfig(props: { current?: string }) {
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
 
+  // CLIProxyPacer's rows: read when Settings opens, and again when CLIProxyPacer answers again while it is open; shown
+  // while it is on and its read answered.
+  const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
+  createEffect(
+    on(
+      () => pacer?.state() === "on",
+      (answering) => {
+        setPacerValues(undefined)
+        if (!answering) return
+        pacer!.settings().then(
+          (values) => setPacerValues(values),
+          () => undefined,
+        )
+      },
+    ),
+  )
+  const shown = (setting: Setting) =>
+    setting.pacer === undefined || (pacer?.state() === "on" && pacerValues() !== undefined)
+  // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered.
+  const opening = () => (shown(settings[current]) ? current : undefined)
+
   const value = (setting: Setting) => {
+    if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     const current = setting.path.reduce<unknown>((result, key) => {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
@@ -429,6 +483,7 @@ export function DialogConfig(props: { current?: string }) {
       ),
       footerOverhang: newDesigns() ? 2 : undefined,
       detail: newDesigns() ? setting.description : undefined,
+      disabled: !shown(setting),
       value: index,
     })),
   )
@@ -436,6 +491,7 @@ export function DialogConfig(props: { current?: string }) {
   async function change(direction: number, index = selected()) {
     if (saving()) return
     const setting = settings[index]
+    if (!shown(setting)) return
     const current = value(setting)
     const choices = values(setting)
     const next = choices
@@ -443,6 +499,14 @@ export function DialogConfig(props: { current?: string }) {
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
     if (next === current) return
     setSaving(true)
+    if (setting.pacer) {
+      await pacer!
+        .updateSettings({ [setting.pacer]: next === true })
+        .then((values) => setPacerValues(values))
+        .catch(toast.error)
+        .finally(() => setSaving(false))
+      return
+    }
     await config
       .update((draft) => {
         const parent = setting.path.slice(0, -1).reduce<Record<string, unknown>>((result, key) => {
@@ -463,8 +527,8 @@ export function DialogConfig(props: { current?: string }) {
       options={options()}
       // Under new designs the opening setting is focused without the current-item marker; changing a value keeps the
       // selection where it is.
-      current={newDesigns() ? undefined : current}
-      focusTarget={newDesigns() ? current : undefined}
+      current={newDesigns() ? undefined : opening()}
+      focusTarget={newDesigns() ? opening() : undefined}
       preserveSelection={newDesigns()}
       filterThreshold={0.7}
       onMove={(option) => setSelected(option.value)}

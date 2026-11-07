@@ -2,6 +2,7 @@ import { createMemo } from "solid-js"
 import { DialogSelect, type DialogSelectRef } from "../ui/dialog-select"
 import { type DialogContext } from "../ui/dialog"
 import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "../context/keymap"
+import { usePacer } from "../context/pacer"
 import { DialogConfig, settingID, settings } from "./dialog-config"
 
 function isSuggestedPaletteCommand(command: KeymapCommand) {
@@ -12,6 +13,7 @@ function isSuggestedPaletteCommand(command: KeymapCommand) {
 }
 
 export function CommandPaletteDialog() {
+  const pacer = usePacer()
   const commands = Keymap.useCommands()
   const shortcuts = Keymap.useShortcuts()
   const options = createMemo(() =>
@@ -34,16 +36,19 @@ export function CommandPaletteDialog() {
       }
     }),
   )
-  const settingOptions = settings.map((setting) => ({
-    title: setting.title,
-    category: setting.category,
-    searchText: setting.keywords?.join(" "),
-    searchFooter: `Settings · ${setting.category}`,
-    value: `setting:${settingID(setting)}`,
-    onSelect: (dialog: DialogContext) => {
-      dialog.replace(() => <DialogConfig current={settingID(setting)} />)
-    },
-  }))
+  // CLIProxyPacer's settings show only while it answers (spec cliproxypacer-cold-ask, section 2).
+  const settingOptions = settings
+    .filter((setting) => setting.pacer === undefined || pacer?.state() === "on")
+    .map((setting) => ({
+      title: setting.title,
+      category: setting.category,
+      searchText: setting.keywords?.join(" "),
+      searchFooter: `Settings · ${setting.category}`,
+      value: `setting:${settingID(setting)}`,
+      onSelect: (dialog: DialogContext) => {
+        dialog.replace(() => <DialogConfig current={settingID(setting)} />)
+      },
+    }))
 
   let ref: DialogSelectRef<string>
   const list = () => {

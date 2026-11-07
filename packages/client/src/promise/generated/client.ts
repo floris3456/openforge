@@ -290,6 +290,9 @@ import type {
   ExperimentalPacerRefreshOutput,
   ExperimentalPacerPromptInput,
   ExperimentalPacerPromptOutput,
+  ExperimentalPacerSettingsGetOutput,
+  ExperimentalPacerSettingsUpdateInput,
+  ExperimentalPacerSettingsUpdateOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1830,7 +1833,11 @@ export function make(options: ClientOptions) {
               {
                 method: "PATCH",
                 path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}`,
-                body: { warming: input["warming"], compactBeforeCold: input["compactBeforeCold"] },
+                body: {
+                  warming: input["warming"],
+                  compactBeforeCold: input["compactBeforeCold"],
+                  compactColdFirst: input["compactColdFirst"],
+                },
                 successStatus: 200,
                 declaredStatuses: [400, 401, 503],
                 empty: false,
@@ -1872,6 +1879,34 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ).then((value) => value.data),
+        settings: {
+          get: (requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerSettingsGetOutput }>(
+              {
+                method: "GET",
+                path: `/api/experimental/pacer/settings`,
+                successStatus: 200,
+                declaredStatuses: [400, 401, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+          update: (input?: ExperimentalPacerSettingsUpdateInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerSettingsUpdateOutput }>(
+              {
+                method: "PATCH",
+                path: `/api/experimental/pacer/settings`,
+                body: {
+                  compactColdFirst: input?.["compactColdFirst"],
+                  compactBeforeCold: input?.["compactBeforeCold"],
+                },
+                successStatus: 200,
+                declaredStatuses: [400, 401, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+        },
       },
       shell: {
         watch: (

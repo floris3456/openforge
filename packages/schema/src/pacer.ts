@@ -154,7 +154,21 @@ export const Switches = Schema.Struct({
   warming: Schema.Boolean,
   /** CPP asks to compact the chat before its cache goes cold. */
   compactBeforeCold: Schema.Boolean,
+  /**
+   * CPP asks to compact the chat first, on a cheap model it picks, when its cache has gone cold and it is at least
+   * `Chat.size.threshold` large; then its next step goes out from the summary.
+   */
+  compactColdFirst: Schema.Boolean,
 }).annotate({ identifier: "Pacer.Switches" })
+
+/** How large the chat is, against the size from which CPP compacts a cold chat first. */
+export interface Size extends Schema.Schema.Type<typeof Size> {}
+export const Size = Schema.Struct({
+  /** Tokens of its prompt, by its newest answered step. */
+  tokens: NonNegativeInt,
+  /** CPP's `warming.fresh_tokens` for the chat: a cold chat this large or larger compacts first. */
+  threshold: NonNegativeInt,
+}).annotate({ identifier: "Pacer.Size" })
 
 /** One chat as CPP sees it. */
 export interface Chat extends Schema.Schema.Type<typeof Chat> {}
@@ -186,6 +200,8 @@ export const Chat = Schema.Struct({
   nextUse: NextUse.pipe(optional),
   forceUse: ForceUse.pipe(optional),
   switches: Switches,
+  /** Its size and CPP's threshold for it; absent until CPP knows its size (it has no answered step yet). */
+  size: Size.pipe(optional),
   /** When it was read. */
   asOf: Instant,
 }).annotate({ identifier: "Pacer.Chat" })
@@ -195,7 +211,27 @@ export interface ChatUpdate extends Schema.Schema.Type<typeof ChatUpdate> {}
 export const ChatUpdate = Schema.Struct({
   warming: Schema.Boolean.pipe(optional),
   compactBeforeCold: Schema.Boolean.pipe(optional),
+  compactColdFirst: Schema.Boolean.pipe(optional),
 }).annotate({ identifier: "Pacer.ChatUpdate" })
+
+/**
+ * CPP's compaction asks for all of the key's chats: its key level, as it applies to them (the key's own value, else
+ * the server's, else the default). A chat's own switch (`Switches`) wins over it.
+ */
+export interface Settings extends Schema.Schema.Type<typeof Settings> {}
+export const Settings = Schema.Struct({
+  /** Compact a cold, large chat first, on a cheap model CPP picks (`Switches.compactColdFirst`). */
+  compactColdFirst: Schema.Boolean,
+  /** Compact a chat before its cache goes cold (`Switches.compactBeforeCold`). */
+  compactBeforeCold: Schema.Boolean,
+}).annotate({ identifier: "Pacer.Settings" })
+
+/** A change to the compaction asks for all chats, at the key level; an absent ask stays as it is. */
+export interface SettingsUpdate extends Schema.Schema.Type<typeof SettingsUpdate> {}
+export const SettingsUpdate = Schema.Struct({
+  compactColdFirst: Schema.Boolean.pipe(optional),
+  compactBeforeCold: Schema.Boolean.pipe(optional),
+}).annotate({ identifier: "Pacer.SettingsUpdate" })
 
 /** What a request was. A subagent's step is a `step` whose request has `subagent` set. */
 export const Kind = Schema.Literals(["step", "ping", "title", "compaction", "other", "probe", "search"]).annotate({

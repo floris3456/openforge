@@ -68,6 +68,13 @@ export interface Interface {
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
   readonly update: (sessionID: SessionID, input: Pacer.ChatUpdate) => Effect.Effect<Pacer.Chat, Unavailable>
+  /** The compaction asks for all of the key's chats, as they apply at its level; always read from CPP. */
+  readonly settings: () => Effect.Effect<Pacer.Settings, Unavailable>
+  /**
+   * Sets the compaction asks for all of the key's chats at its level and answers them after the change. The views
+   * held may have changed with them: each is read again when next asked for. A change of nothing writes nothing.
+   */
+  readonly updateSettings: (input: Pacer.SettingsUpdate) => Effect.Effect<Pacer.Settings, Unavailable>
   /**
    * One page of the chat's requests with its subagents', newest first, always read from CPP: the TUI holds the first
    * page itself and reads it again on `pacer.requests.updated`.
@@ -1231,6 +1238,11 @@ export const layer = Layer.effect(
       return held ? Effect.succeed(held) : oneRow(id).pipe(Effect.orElseSucceed(() => undefined))
     }
 
+    const readSettings = get("/pacer/v1/settings", PacerWire.Settings).pipe(
+      Effect.map(PacerWire.settings),
+      Effect.mapError(unavailable),
+    )
+
     return Service.of({
       status: () =>
         Effect.sync(() => (on() && link.contact !== undefined ? { ...link.status, asOf: link.contact } : link.status)),
@@ -1258,7 +1270,10 @@ export const layer = Layer.effect(
               {
                 ...(input.warming !== undefined ? { "pings.enabled": input.warming } : {}),
                 ...(input.compactBeforeCold !== undefined
-                  ? { "warming.compact_before_cold": input.compactBeforeCold }
+                  ? { [PacerWire.settingNames.compactBeforeCold]: input.compactBeforeCold }
+                  : {}),
+                ...(input.compactColdFirst !== undefined
+                  ? { [PacerWire.settingNames.compactColdFirst]: input.compactColdFirst }
                   : {}),
               },
               PacerWire.View,
@@ -1266,6 +1281,26 @@ export const layer = Layer.effect(
           ).pipe(Effect.mapError(unavailable))
           yield* hold(chat, view)
           return chat.view ?? PacerWire.chat(view, sessionID, { ...(yield* context()), alias })
+        }),
+      settings: () => requireOn.pipe(Effect.andThen(readSettings)),
+      updateSettings: (input) =>
+        Effect.gen(function* () {
+          yield* requireOn
+          const change = {
+            ...(input.compactBeforeCold !== undefined
+              ? { [PacerWire.settingNames.compactBeforeCold]: input.compactBeforeCold }
+              : {}),
+            ...(input.compactColdFirst !== undefined
+              ? { [PacerWire.settingNames.compactColdFirst]: input.compactColdFirst }
+              : {}),
+          }
+          if (Object.keys(change).length === 0) return yield* readSettings
+          const listing = yield* send("patch", "/pacer/v1/settings", change, PacerWire.Settings).pipe(
+            Effect.mapError(unavailable),
+          )
+          // A chat without its own switch follows the key's; CPP's `settings` notice says so too, a moment later.
+          staleViews()
+          return PacerWire.settings(listing)
         }),
       requests: (sessionID, input) =>
         Effect.gen(function* () {

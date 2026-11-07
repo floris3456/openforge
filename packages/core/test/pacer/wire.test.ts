@@ -29,8 +29,14 @@ describe("PacerWire", () => {
         interval_ms: 240_000,
         stopped: null,
       },
-      effective: { pings_enabled: true, compact_before_cold: true },
-      warming: { compact_at: 9_800_000, compact_reason: "before-cold" },
+      effective: { pings_enabled: true, compact_before_cold: true, compact_cold_first: true },
+      warming: {
+        cold: false,
+        size_tokens: 82_000,
+        threshold: 70_000,
+        compact_at: 9_800_000,
+        compact_reason: "before-cold",
+      },
       next_use: { credential: "account-b", reason: "forced_move", window_values: [] },
       force_use: { credential: "account-b", when: "soon" },
       label: null,
@@ -51,9 +57,57 @@ describe("PacerWire", () => {
       compactReason: "before-cold",
       nextUse: { account: "alias of account-b", reason: "forced_move" },
       forceUse: { account: "alias of account-b", when: "soon" },
-      switches: { warming: true, compactBeforeCold: true },
+      switches: { warming: true, compactBeforeCold: true, compactColdFirst: true },
+      size: { tokens: 82_000, threshold: 70_000 },
       asOf: 1,
     })
+  })
+
+  test("tells the chat's size only while CPP knows it, and each switch only when CPP's value for the chat is on", () => {
+    const at = (fields: Record<string, unknown>) =>
+      PacerWire.chat(decodeView({ id: "uuid-a", ...fields }), sessionID, { offset: 0, now: 0, alias: (a) => a })
+    // CPP's size is null until the chat has an answered step; the threshold is always there.
+    expect(at({ warming: { cold: false, size_tokens: null, threshold: 70_000 } }).size).toBeUndefined()
+    expect(at({ warming: { cold: true, size_tokens: 1_000, threshold: 500 } }).size).toEqual({
+      tokens: 1_000,
+      threshold: 500,
+    })
+    expect(at({}).switches).toEqual({ warming: false, compactBeforeCold: false, compactColdFirst: false })
+    // A value CPP could not read as a flag is not on.
+    expect(at({ effective: { compact_cold_first: "true", compact_before_cold: null } }).switches).toEqual({
+      warming: false,
+      compactBeforeCold: false,
+      compactColdFirst: false,
+    })
+  })
+
+  test("reads the compaction asks for all chats from CPP's settings listing: what applies to the key", () => {
+    // `GET|PATCH /pacer/v1/settings` (cpa-pacer settings.rs, `settings_listing`): one row per setting the key may set.
+    const row = (name: string, server: unknown, key: unknown, value: unknown, source: string) => ({
+      name,
+      group: "warming",
+      type: "bool",
+      help: "synthetic",
+      server,
+      key,
+      value,
+      source,
+    })
+    const listing = Schema.decodeUnknownSync(PacerWire.Settings)([
+      row("pings.enabled", null, null, true, "default"),
+      row("warming.compact_before_cold", true, null, true, "server"),
+      row("warming.compact_cold_first", null, false, false, "key"),
+      { name: "a row this version does not understand" },
+      "not a row",
+    ])
+    expect(PacerWire.settings(listing)).toEqual({ compactColdFirst: false, compactBeforeCold: true })
+    expect(
+      PacerWire.settings(
+        Schema.decodeUnknownSync(PacerWire.Settings)([row("warming.compact_cold_first", false, true, true, "key")]),
+      ),
+    ).toEqual({ compactColdFirst: true, compactBeforeCold: false })
+    // A CPP that lists neither: both off, as their defaults.
+    expect(PacerWire.settings([])).toEqual({ compactColdFirst: false, compactBeforeCold: false })
   })
 
   test("counts down to warm_until when no pings are planned, and marks pings that ended on a failure", () => {

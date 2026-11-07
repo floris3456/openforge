@@ -51,8 +51,25 @@ it.live("answers as not set up without a connection to CPP", () =>
         "/api/experimental/pacer/chat/ses_pacer_test",
         { method: "PATCH", body: JSON.stringify({ warming: false }), headers: { "content-type": "application/json" } },
       ],
+      [
+        "/api/experimental/pacer/chat/ses_pacer_test",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ compactColdFirst: true }),
+          headers: { "content-type": "application/json" },
+        },
+      ],
       ["/api/experimental/pacer/chat/ses_pacer_test/requests?filter=misses", undefined],
       ["/api/experimental/pacer/prompt/req-1", undefined],
+      ["/api/experimental/pacer/settings", undefined],
+      [
+        "/api/experimental/pacer/settings",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ compactColdFirst: true, compactBeforeCold: false }),
+          headers: { "content-type": "application/json" },
+        },
+      ],
     ] as const) {
       const result = yield* call(route, init)
       expect(result.status).toBe(503)
@@ -88,6 +105,18 @@ it.live("rejects malformed pacer requests", () =>
       headers: { "content-type": "application/json" },
     })
     expect(update.status).toBe(400)
+    for (const [route, body] of [
+      ["/api/experimental/pacer/chat/ses_pacer_test", { compactColdFirst: "yes" }],
+      ["/api/experimental/pacer/settings", { compactColdFirst: 1 }],
+      ["/api/experimental/pacer/settings", { compactBeforeCold: "on" }],
+    ] as const) {
+      const malformed = yield* call(route, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+      })
+      expect(malformed.status).toBe(400)
+    }
   }),
 )
 

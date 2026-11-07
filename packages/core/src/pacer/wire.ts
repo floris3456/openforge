@@ -53,9 +53,18 @@ export const View = Schema.Struct({
     Schema.Struct({
       pings_enabled: maybe(Schema.Boolean),
       compact_before_cold: maybe(Schema.Unknown),
+      compact_cold_first: maybe(Schema.Unknown),
     }),
   ),
-  warming: maybe(Schema.Struct({ compact_at: maybe(Schema.Number), compact_reason: maybe(Schema.String) })),
+  /** `size_tokens`: its size by its newest answered request, null while unknown; `threshold`: `warming.fresh_tokens`. */
+  warming: maybe(
+    Schema.Struct({
+      size_tokens: maybe(Schema.Number),
+      threshold: maybe(Schema.Number),
+      compact_at: maybe(Schema.Number),
+      compact_reason: maybe(Schema.String),
+    }),
+  ),
   next_use: maybe(Schema.Struct({ credential: Schema.String, reason: maybe(Schema.String) })),
   force_use: maybe(Schema.Struct({ credential: Schema.String, when: maybe(Schema.String) })),
   label: maybe(Schema.Unknown),
@@ -186,6 +195,14 @@ export const Prompt = Schema.Struct({
 })
 export type Prompt = typeof Prompt.Type
 
+/**
+ * One row of `GET|PATCH /pacer/v1/settings` (cpa-pacer `settings.rs`, `settings_listing`): a setting the key may set,
+ * with `value` what applies to the key, its own else the server's else the default.
+ */
+const Setting = Schema.Struct({ name: Schema.String, value: Schema.optional(Schema.Unknown) })
+/** `GET|PATCH /pacer/v1/settings`: the key level's listing. */
+export const Settings = Schema.Array(Schema.Unknown)
+
 /** A change stream notice's `data`. */
 const Notice = Schema.Struct({
   sessions: maybe(Schema.Array(Schema.Struct({ session: Schema.String }))),
@@ -199,6 +216,7 @@ const decodeTree = Schema.decodeUnknownOption(Tree)
 const decodeLive = Schema.decodeUnknownOption(Live)
 const decodeRow = Schema.decodeUnknownOption(Row)
 const decodePromptRow = Schema.decodeUnknownOption(PromptRow)
+const decodeSetting = Schema.decodeUnknownOption(Setting)
 const decodeNotice = Schema.decodeUnknownOption(Schema.fromJsonString(Notice))
 
 export const each = <A>(
@@ -222,6 +240,21 @@ export function active(state: typeof State.Type) {
   )
   const live = Object.values(state.live ?? {}).flatMap((item) => Option.toArray(decodeLive(item)))
   return { numbers, live }
+}
+
+/** The key-level settings behind `Pacer.Settings`, by their names at CPP. */
+export const settingNames = {
+  compactColdFirst: "warming.compact_cold_first",
+  compactBeforeCold: "warming.compact_before_cold",
+} as const
+
+/** The compaction asks for all chats, as CPP's listing says they apply to the key; one it doesn't list is off. */
+export function settings(items: ReadonlyArray<unknown>): Pacer.Settings {
+  const values = new Map(each(items, decodeSetting).map((item) => [item.name, item.value]))
+  return {
+    compactColdFirst: values.get(settingNames.compactColdFirst) === true,
+    compactBeforeCold: values.get(settingNames.compactBeforeCold) === true,
+  }
 }
 
 /** What a notice names: the chats a `compact` notice asks to compact, or `many`. */
@@ -294,6 +327,8 @@ export function chat(
   const when = view.force_use?.when
   const warming = view.effective?.pings_enabled === true
   const state = live(view, context)
+  const size = view.warming?.size_tokens
+  const threshold = view.warming?.threshold
   return {
     sessionID,
     ...(view.model ? { model: view.model } : {}),
@@ -315,7 +350,11 @@ export function chat(
     switches: {
       warming,
       compactBeforeCold: view.effective?.compact_before_cold === true,
+      compactColdFirst: view.effective?.compact_cold_first === true,
     },
+    ...(typeof size === "number" && typeof threshold === "number"
+      ? { size: { tokens: count(size), threshold: count(threshold) } }
+      : {}),
     asOf: context.now,
   }
 }

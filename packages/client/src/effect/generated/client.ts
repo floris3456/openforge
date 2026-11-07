@@ -288,6 +288,9 @@ import type {
   ExperimentalPacerRefreshOutput,
   ExperimentalPacerPromptInput,
   ExperimentalPacerPromptOutput,
+  ExperimentalPacerSettingsGetOutput,
+  ExperimentalPacerSettingsUpdateInput,
+  ExperimentalPacerSettingsUpdateOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1816,7 +1819,11 @@ const EndpointExperimentalPacerChatUpdate =
     preserveEffect<ExperimentalPacerChatUpdateOutput>()(
       raw["pacer.chat.update"]({
         params: { sessionID: input["sessionID"] },
-        payload: { warming: input["warming"], compactBeforeCold: input["compactBeforeCold"] },
+        payload: {
+          warming: input["warming"],
+          compactBeforeCold: input["compactBeforeCold"],
+          compactColdFirst: input["compactColdFirst"],
+        },
       }).pipe(
         Effect.mapError(mapClientError),
         Effect.map((value) => value.data),
@@ -1842,6 +1849,25 @@ const EndpointExperimentalPacerPrompt =
   (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerPromptInput) =>
     preserveEffect<ExperimentalPacerPromptOutput>()(
       raw["pacer.prompt"]({ params: { requestID: input["requestID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalPacerSettingsGet = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerSettingsGetOutput>()(
+    raw["pacer.settings.get"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalPacerSettingsUpdate =
+  (raw: RawClient["server.experimental"]) => (input?: ExperimentalPacerSettingsUpdateInput) =>
+    preserveEffect<ExperimentalPacerSettingsUpdateOutput>()(
+      raw["pacer.settings.update"]({
+        payload: { compactColdFirst: input?.["compactColdFirst"], compactBeforeCold: input?.["compactBeforeCold"] },
+      }).pipe(
         Effect.mapError(mapClientError),
         Effect.map((value) => value.data),
       ),
@@ -1896,6 +1922,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     },
     refresh: EndpointExperimentalPacerRefresh(raw),
     prompt: EndpointExperimentalPacerPrompt(raw),
+    settings: { get: EndpointExperimentalPacerSettingsGet(raw), update: EndpointExperimentalPacerSettingsUpdate(raw) },
   },
 })
 

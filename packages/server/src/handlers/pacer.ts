@@ -40,5 +40,15 @@ export const makePacer = Effect.gen(function* () {
         Effect.map((data) => ({ data: data ?? null })),
         Effect.mapError(unavailable),
       ),
+    settings: () =>
+      pacer.settings().pipe(
+        Effect.map((data) => ({ data })),
+        Effect.mapError(unavailable),
+      ),
+    updateSettings: (input: Pacer.SettingsUpdate) =>
+      pacer.updateSettings(input).pipe(
+        Effect.map((data) => ({ data })),
+        Effect.mapError(unavailable),
+      ),
   }
 })

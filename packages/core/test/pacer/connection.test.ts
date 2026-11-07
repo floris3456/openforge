@@ -61,6 +61,9 @@ interface Cpp {
   meters: Json[]
   rows: Json[]
   readonly prompts: Map<string, Json>
+  /** Settings at the server's level and at the key's, by name; `GET|PATCH /pacer/v1/settings` list them. */
+  readonly server: Json
+  readonly key: Json
   /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
    * them until the first bytes. */
   quiet: boolean
@@ -162,6 +165,8 @@ const fakeCpp = (now: () => number) =>
             effective.pings_enabled = settings["pings.enabled"]
           if ("warming.compact_before_cold" in settings && settings["warming.compact_before_cold"] !== null)
             effective.compact_before_cold = settings["warming.compact_before_cold"]
+          if ("warming.compact_cold_first" in settings && settings["warming.compact_cold_first"] !== null)
+            effective.compact_cold_first = settings["warming.compact_cold_first"]
           // A write to the chat's scope stamps each setting it still holds (cpa-pacer settings.rs, `written_scope`).
           const holds = Object.values(settings).some((value) => value !== null)
           const next = { ...view, settings, effective, settings_at: holds ? time() : null }
@@ -171,6 +176,32 @@ const fakeCpp = (now: () => number) =>
         if (session) {
           const view = cpp.views.get(session)
           return view ? answer(view) : answer({ error: { type: "not_found", message: "no such session" } }, 404)
+        }
+        if (path === "/pacer/v1/settings") {
+          // A key's patch writes its own level, `null` removing one, and answers the listing after it (pacer_api
+          // views.rs, `patch`); each row says what applies to the key: its own, else the server's, else the default.
+          if (method === "PATCH")
+            for (const [name, value] of Object.entries(body as Json)) {
+              if (value === null) delete cpp.key[name]
+              else cpp.key[name] = value
+            }
+          return answer(
+            ["pings.enabled", "warming.compact_before_cold", "warming.compact_cold_first"].map((name) => {
+              const fallback = name === "pings.enabled" ? null : false
+              const key = cpp.key[name] ?? null
+              const server = cpp.server[name] ?? null
+              return {
+                name,
+                group: "warming",
+                type: "bool",
+                default: fallback,
+                server,
+                key,
+                value: key ?? server ?? fallback,
+                source: key !== null ? "key" : server !== null ? "server" : "default",
+              }
+            }),
+          )
         }
         if (path === "/pacer/v1/monitor/requests") return answer(requests(query))
         const prompt = path.match(/^\/pacer\/v1\/prompts\/([^/]+)$/)?.[1]
@@ -216,6 +247,8 @@ const fakeCpp = (now: () => number) =>
         meters: [],
         rows: [],
         prompts: new Map(),
+        server: {},
+        key: {},
         holds: new Set(),
         release: () => {
           cpp.holds.clear()
@@ -268,7 +301,7 @@ function chatView(uuid: string, now: number, fields: Json = {}): Json {
       stopped: null,
     },
     settings: { "pings.enabled": null, "pings.duration_minutes": null, "cache.class": null, model: null },
-    effective: { pings_enabled: true, compact_before_cold: false },
+    effective: { pings_enabled: true, compact_before_cold: false, compact_cold_first: false },
     warming: { cold: false, size_tokens: 1_000, threshold: 70_000, compact_at: null, compact_reason: null },
     next_use: { credential: "account-b", reason: "cold_move", window_values: [] },
     force_use: null,
@@ -1514,12 +1547,73 @@ describe("PacerConnection chats", () => {
       const h = yield* harness()
       yield* online(h)
       const id = yield* chat(h)
-      const updated = yield* h.connection.update(id, { warming: false, compactBeforeCold: true })
+      const updated = yield* h.connection.update(id, {
+        warming: false,
+        compactBeforeCold: true,
+        compactColdFirst: true,
+      })
       expect(seen(h, viewPath(id), "PATCH").map((item) => item.body)).toEqual([
-        { "pings.enabled": false, "warming.compact_before_cold": true },
+        { "pings.enabled": false, "warming.compact_before_cold": true, "warming.compact_cold_first": true },
       ])
-      expect(updated.switches).toEqual({ warming: false, compactBeforeCold: true })
+      expect(updated.switches).toEqual({ warming: false, compactBeforeCold: true, compactColdFirst: true })
+      expect(updated.size).toEqual({ tokens: 1_000, threshold: 70_000 })
       expect(h.published.filter((event) => event.type === "pacer.chat.updated")).toHaveLength(1)
+
+      // One switch writes only its own setting.
+      const off = yield* h.connection.update(id, { compactColdFirst: false })
+      expect(seen(h, viewPath(id), "PATCH")[1]?.body).toEqual({ "warming.compact_cold_first": false })
+      expect(off.switches).toEqual({ warming: false, compactBeforeCold: true, compactColdFirst: false })
+    }),
+  )
+
+  it.effect("reads and sets the compaction asks for all chats at the key level, as they apply to the key", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      // Not set up: CPP can't answer, as for a chat's switches (the routes' 503).
+      for (const call of [h.connection.settings(), h.connection.updateSettings({ compactColdFirst: true })])
+        expect((yield* Effect.flip(call)).state).toBe("unset")
+      expect(h.cpp.seen).toEqual([])
+
+      h.cpp.server["warming.compact_before_cold"] = true
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      yield* ask(h, id)
+      const reads = seen(h, viewPath(id)).length
+
+      // The server's value applies until the key has its own.
+      expect(yield* h.connection.settings()).toEqual({ compactColdFirst: false, compactBeforeCold: true })
+      expect(seen(h, "/pacer/v1/settings")).toHaveLength(1)
+      expect(yield* h.connection.updateSettings({ compactColdFirst: true })).toEqual({
+        compactColdFirst: true,
+        compactBeforeCold: true,
+      })
+      expect(yield* h.connection.updateSettings({ compactBeforeCold: false, compactColdFirst: false })).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: false,
+      })
+      expect(seen(h, "/pacer/v1/settings", "PATCH").map((item) => item.body)).toEqual([
+        { "warming.compact_cold_first": true },
+        { "warming.compact_before_cold": false, "warming.compact_cold_first": false },
+      ])
+      expect(h.cpp.key).toEqual({ "warming.compact_before_cold": false, "warming.compact_cold_first": false })
+      // A change of nothing writes nothing: it reads.
+      expect(yield* h.connection.updateSettings({})).toEqual({ compactColdFirst: false, compactBeforeCold: false })
+      expect(seen(h, "/pacer/v1/settings", "PATCH")).toHaveLength(2)
+      expect(seen(h, "/pacer/v1/settings")).toHaveLength(2)
+
+      // A chat without its own switch follows the key's: a view held from before is read again when asked for.
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(reads)
+      yield* ask(h, id)
+      expect(seen(h, viewPath(id))).toHaveLength(reads + 1)
+
+      // A refused change is CPP's answer, as for a chat's switches.
+      h.cpp.failure = { status: 400, type: "invalid_request" }
+      const refused = yield* h.connection.updateSettings({ compactColdFirst: true }).pipe(Effect.flip)
+      expect(refused.state).toBe("on")
+      h.cpp.failure = undefined
     }),
   )
 

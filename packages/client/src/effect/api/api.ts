@@ -2620,6 +2620,7 @@ export type ExperimentalPacerChatUpdateInput = {
   readonly sessionID: Session.ID
   readonly warming?: boolean | undefined
   readonly compactBeforeCold?: boolean | undefined
+  readonly compactColdFirst?: boolean | undefined
 }
 export type ExperimentalPacerChatUpdateOutput = Pacer.Chat
 export type ExperimentalPacerChatUpdateOperation<E = never> = (
@@ -2645,6 +2646,21 @@ export type ExperimentalPacerPromptOutput = Pacer.PromptChange | null
 export type ExperimentalPacerPromptOperation<E = never> = (
   input: ExperimentalPacerPromptInput,
 ) => Effect.Effect<ExperimentalPacerPromptOutput, E>
+
+export type ExperimentalPacerSettingsGetOutput = Pacer.Settings
+export type ExperimentalPacerSettingsGetOperation<E = never> = () => Effect.Effect<
+  ExperimentalPacerSettingsGetOutput,
+  E
+>
+
+export type ExperimentalPacerSettingsUpdateInput = {
+  readonly compactColdFirst?: boolean | undefined
+  readonly compactBeforeCold?: boolean | undefined
+}
+export type ExperimentalPacerSettingsUpdateOutput = Pacer.Settings
+export type ExperimentalPacerSettingsUpdateOperation<E = never> = (
+  input?: ExperimentalPacerSettingsUpdateInput,
+) => Effect.Effect<ExperimentalPacerSettingsUpdateOutput, E>
 
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
@@ -2695,6 +2711,10 @@ export interface ExperimentalApi<E = never> {
     }
     readonly refresh: ExperimentalPacerRefreshOperation<E>
     readonly prompt: ExperimentalPacerPromptOperation<E>
+    readonly settings: {
+      readonly get: ExperimentalPacerSettingsGetOperation<E>
+      readonly update: ExperimentalPacerSettingsUpdateOperation<E>
+    }
   }
 }
 

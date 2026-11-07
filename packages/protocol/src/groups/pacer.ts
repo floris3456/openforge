@@ -69,7 +69,7 @@ export const PacerEndpoints = [
     annotations(
       "chat.update",
       "Switch a chat's warming",
-      "Set the chat's cache warming or compact-before-cold switch on CPP, and return its view after the change. Unavailable unless the pacer is on.",
+      "Set the chat's cache warming, compact-before-cold or compact-cold-first switch on CLIProxyPacer (the chat's own level, which wins over the key's), and return its view after the change. Unavailable unless the pacer is on.",
     ),
   ),
   HttpApiEndpoint.get("pacer.chat.requests", "/api/experimental/pacer/chat/:sessionID/requests", {
@@ -102,6 +102,27 @@ export const PacerEndpoints = [
       "prompt",
       "Get what changed in a request's prompt",
       "What changed in the prompt of one request (by its CPP request ID) against the request CPP compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.settings.get", "/api/experimental/pacer/settings", {
+    success: Schema.Struct({ data: Pacer.Settings }),
+    error: ServiceUnavailableError,
+  }).annotateMerge(
+    annotations(
+      "settings.get",
+      "Get CLIProxyPacer's compaction asks for all chats",
+      "Whether CLIProxyPacer compacts cold chats first and compacts chats before they go cold, for all of the key's chats: its key-level settings as they apply (the key's own, else the server's, else the default). A chat's own switch wins over them. Read from CLIProxyPacer; unavailable unless the pacer is on.",
+    ),
+  ),
+  HttpApiEndpoint.patch("pacer.settings.update", "/api/experimental/pacer/settings", {
+    payload: Pacer.SettingsUpdate,
+    success: Schema.Struct({ data: Pacer.Settings }),
+    error: ServiceUnavailableError,
+  }).annotateMerge(
+    annotations(
+      "settings.update",
+      "Switch CLIProxyPacer's compaction asks for all chats",
+      "Set compact-cold-first or compact-before-cold at the key level on CLIProxyPacer, and return both as they apply after the change. Unavailable unless the pacer is on.",
     ),
   ),
 ] as const

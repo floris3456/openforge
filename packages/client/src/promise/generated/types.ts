@@ -324,7 +324,9 @@ export type PacerNextUse = { account: string; reason: string }
 
 export type PacerForceUse = { account: string; when: "now" | "soon" }
 
-export type PacerSwitches = { warming: boolean; compactBeforeCold: boolean }
+export type PacerSwitches = { warming: boolean; compactBeforeCold: boolean; compactColdFirst: boolean }
+
+export type PacerSize = { tokens: number; threshold: number }
 
 export type SessionStatus =
   | { type: "idle" }
@@ -383,6 +385,8 @@ export type PacerPromptItem = {
   change: "changed" | "new" | "marker"
   error: boolean
 }
+
+export type PacerSettings = { compactColdFirst: boolean; compactBeforeCold: boolean }
 
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
@@ -985,6 +989,7 @@ export type PacerChat = {
   nextUse?: PacerNextUse
   forceUse?: PacerForceUse
   switches: PacerSwitches
+  size?: PacerSize
   asOf: number
 }
 
@@ -4942,6 +4947,7 @@ export type ExperimentalPacerChatUpdateInput = {
   readonly sessionID: string
   readonly warming?: boolean | undefined
   readonly compactBeforeCold?: boolean | undefined
+  readonly compactColdFirst?: boolean | undefined
 }
 
 export type ExperimentalPacerChatUpdateOutput = { data: PacerChat }["data"]
@@ -4960,6 +4966,15 @@ export type ExperimentalPacerRefreshOutput = void
 export type ExperimentalPacerPromptInput = { readonly requestID: string }
 
 export type ExperimentalPacerPromptOutput = { data: PacerPromptChange | null }["data"]
+
+export type ExperimentalPacerSettingsGetOutput = { data: PacerSettings }["data"]
+
+export type ExperimentalPacerSettingsUpdateInput = {
+  readonly compactColdFirst?: boolean | undefined
+  readonly compactBeforeCold?: boolean | undefined
+}
+
+export type ExperimentalPacerSettingsUpdateOutput = { data: PacerSettings }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

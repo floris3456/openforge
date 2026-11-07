@@ -16,7 +16,8 @@ const chat: Pacer.Chat = {
   coldAt: 1_900_000,
   pings: { active: true, nextAt: 1_000_000, left: 3, sent: 1, intervalMs: 300_000, failed: false },
   nextUse: { account: "account-b", reason: "cold_move" },
-  switches: { warming: true, compactBeforeCold: false },
+  switches: { warming: true, compactBeforeCold: false, compactColdFirst: true },
+  size: { tokens: 82_000, threshold: 70_000 },
   asOf: 990_000,
 }
 
@@ -99,6 +100,20 @@ describe("pacer shapes", () => {
     expect(() => Schema.decodeUnknownSync(Pacer.Window)({ ...window, state: "stale" })).toThrow()
     expect(() => Schema.decodeUnknownSync(Pacer.Request)({ ...request, kind: 0 })).toThrow()
     expect(() => Schema.decodeUnknownSync(Pacer.Status)({ state: "off", since: 0, refused: false })).toThrow()
+    expect(() => Schema.decodeUnknownSync(Pacer.Chat)({ ...chat, size: { tokens: -1, threshold: 70_000 } })).toThrow()
+    expect(() => Schema.decodeUnknownSync(Pacer.Chat)({ ...chat, size: { tokens: 82_000 } })).toThrow()
+  })
+
+  test("the compaction asks for all chats, and a change to them, decode; an absent ask stays as it is", () => {
+    const settings: Pacer.Settings = { compactColdFirst: true, compactBeforeCold: false }
+    expect(Schema.decodeUnknownSync(Pacer.Settings)(Schema.encodeSync(Pacer.Settings)(settings))).toEqual(settings)
+    expect(() => Schema.decodeUnknownSync(Pacer.Settings)({ compactColdFirst: true })).toThrow()
+    expect(Schema.decodeUnknownSync(Pacer.SettingsUpdate)({ compactColdFirst: false })).toEqual({
+      compactColdFirst: false,
+    })
+    expect(Schema.decodeUnknownSync(Pacer.SettingsUpdate)({})).toEqual({})
+    expect(() => Schema.decodeUnknownSync(Pacer.SettingsUpdate)({ compactColdFirst: "on" })).toThrow()
+    expect(Schema.decodeUnknownSync(Pacer.ChatUpdate)({ compactColdFirst: true })).toEqual({ compactColdFirst: true })
   })
 
   test("events carry the shapes", () => {

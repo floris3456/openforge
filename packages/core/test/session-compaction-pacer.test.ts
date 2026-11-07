@@ -191,7 +191,7 @@ const pacerRef = (id: string) =>
   Model.Ref.make({ id: Model.ID.make(id), providerID: Provider.ID.make("cliproxypacer") })
 
 const plans: PacerSummaries.PlanInput[] = []
-const decision: { current: PacerSummaries.Decision } = { current: { by: "cliproxypacer" } }
+const decision: { current: PacerSummaries.Decision | undefined } = { current: { by: "cliproxypacer" } }
 
 const it = testEffect(
   AppNodeBuilder.build(
@@ -614,6 +614,29 @@ it.effect("a move and a cold ask: warmth from the ask, CLIProxyPacer's first usa
     yield* compaction.compact({ reason: "cold", context: bare.context, models: [ref("kimi-e2e-mini")] })
     expect((yield* record(bare.session.id)).writer).toEqual({ by: "cliproxypacer", cold: true })
   }),
+)
+
+it.effect(
+  "a chat on CLIProxyPacer without a pacer: openforge's own summary, naming no writer, as on any provider",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      decision.current = undefined
+      const { session, context } = yield* chat("no-pacer", kimi)
+      expect(
+        yield* (yield* SessionCompaction.Service).compact({
+          reason: "auto",
+          context,
+          estimate: { measured: 190_000, estimated: 0 },
+        }),
+      ).toEqual({ status: "completed" })
+      expect(plans).toHaveLength(1)
+      expect(compactions()).toEqual([])
+      expect(own().map((item) => item.path)).toEqual(["/v1/responses"])
+      const stored = yield* record(session.id)
+      expect(stored.summary).toBe(ownSummary)
+      expect(stored.writer).toBeUndefined()
+    }),
 )
 
 it.effect("a chat on another provider never asks CLIProxyPacer", () =>

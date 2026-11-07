@@ -14,6 +14,7 @@ import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 import { PacerSessionID } from "./session-id.js"
+import { PacerStatus } from "./status.js"
 import { PacerWire } from "./wire.js"
 
 // The service's one connection to CPP, which every TUI reads through the `pacer.*` routes of `server.experimental`.
@@ -249,6 +250,8 @@ export const layer = Layer.effect(
     const models = yield* PacerModels.Service
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
+    // Compaction reads the state there: it can't depend on this service.
+    const shared = yield* PacerStatus.Service
 
     const link: Link = {
       endpoint: undefined,
@@ -261,6 +264,7 @@ export const layer = Layer.effect(
       active: new Set(),
       newest: undefined,
     }
+    yield* shared.set(link.status)
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
@@ -305,6 +309,7 @@ export const layer = Layer.effect(
         ...(next.message ? { message: next.message } : {}),
         refused,
       }
+      yield* shared.set(link.status)
       yield* bus.publish(Pacer.Event.StatusChanged, { status: link.status })
     })
 
@@ -1394,7 +1399,7 @@ export const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, Session.node],
+  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, PacerStatus.node, Bus.node, Session.node],
 })
 
 /** At most `bytes` bytes of UTF-8, cut at a character. */

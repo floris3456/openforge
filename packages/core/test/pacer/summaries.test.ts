@@ -11,11 +11,13 @@ import {
 } from "@opencode/ai/effect"
 import { Context, Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
+import type { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerStatus } from "@opencode/core/pacer/status"
 import { PacerSummaries } from "@opencode/core/pacer/summaries"
 import { testEffect } from "../lib/effect"
 
@@ -235,6 +237,7 @@ const start = Effect.fnUntraced(function* () {
   const endpoint = PacerEndpoint.resolve({ baseURL: `${cpp.origin}/v1`, apiKey: "test-key" }, undefined)
   const context = yield* Layer.build(
     PacerSummaries.layer.pipe(
+      Layer.provideMerge(PacerStatus.layer),
       Layer.provide(PacerHttp.layer),
       Layer.provide(
         Layer.succeed(
@@ -258,7 +261,11 @@ const start = Effect.fnUntraced(function* () {
       Layer.provide(FetchHttpClient.layer),
     ),
   )
-  return { cpp, summaries: Context.get(context, PacerSummaries.Service) }
+  const status = Context.get(context, PacerStatus.Service)
+  /** The connection's state, as the connection would set it. */
+  const state = (next: Pacer.State) => status.set({ state: next, since: 0, refused: false })
+  yield* state("on")
+  return { cpp, summaries: Context.get(context, PacerSummaries.Service), state }
 })
 
 const sessionID = "ses_summaries_test_chat_000000000000000000000000000000000000000000000000000000000000000" as SessionID
@@ -390,11 +397,34 @@ describe("PacerSummaries.plan", () => {
     }),
   )
 
+  // Only while the connection is on (the lead's fix of 2026-11-07): a plain proxy answered every compaction's reads with
+  // 404 first, and the record said CLIProxyPacer couldn't.
+  it.live("asks CPP only while the connection is on: without a pacer no one is named, unreachable says so", () =>
+    Effect.gen(function* () {
+      const { cpp, summaries, state } = yield* start()
+      cpp.views.set(uuid, view(null))
+      for (const next of ["no-pacer", "unset"] as const) {
+        yield* state(next)
+        expect(yield* summaries.plan(plan({}))).toBeUndefined()
+      }
+      yield* state("unreachable")
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge", fallback: "unreachable" })
+      expect(cpp.seen).toEqual([])
+      yield* state("on")
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "cliproxypacer" })
+      expect(cpp.seen.map((item) => `${item.method} ${item.path}`)).toEqual([
+        `GET /pacer/v1/sessions/${uuid}`,
+        "GET /pacer/v1/settings",
+        `PATCH /pacer/v1/sessions/${uuid}`,
+      ])
+    }),
+  )
+
   it.live("CPP unreachable, or the writer not set: openforge writes, saying so", () =>
     Effect.gen(function* () {
       const { cpp, summaries } = yield* start()
       cpp.failing.set(`GET /pacer/v1/sessions/${uuid}`, 503)
-      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge", fallback: "it could not be reached" })
+      expect(yield* summaries.plan(plan({}))).toEqual({ by: "openforge", fallback: "unreachable" })
       cpp.failing.clear()
       cpp.views.set(uuid, view(null))
       cpp.failing.set(`PATCH /pacer/v1/sessions/${uuid}`, 400)

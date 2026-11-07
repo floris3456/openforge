@@ -413,8 +413,9 @@ export const layer = Layer.effect(
 
     /**
      * Who writes the summary of a chat on CLIProxyPacer (spec cliproxypacer-server-summaries, section 2); undefined for
-     * another provider's chat. `writing` holds the model that would write it: a pick of CLIProxyPacer's, else the
-     * chat's own, never the compaction agent's.
+     * another provider's chat, and for one on CLIProxyPacer while it has no pacer (`PacerSummaries.plan`): openforge
+     * writes it as for any provider, naming no writer. `writing` holds the model that would write it: a pick of
+     * CLIProxyPacer's, else the chat's own, never the compaction agent's.
      */
     const pacerWriter = (trigger: Trigger, writing: SessionContext.Loaded) => {
       const context = trigger.context

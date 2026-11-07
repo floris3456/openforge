@@ -17,6 +17,7 @@ import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerStatus } from "@opencode/core/pacer/status"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -397,6 +398,8 @@ interface Harness {
   /** Every `Session.get` since the harness started: the session store's reads. */
   readonly lookups: { count: number }
   readonly connect: (key?: string) => Effect.Effect<void>
+  /** The connection's state as compaction reads it (`PacerStatus`). */
+  readonly shared: PacerStatus.Interface
 }
 
 /** The connection over the real Bus and Session store, with CPP's endpoint and catalog in the test's hands. */
@@ -467,10 +470,12 @@ const harness = Effect.fnUntraced(function* () {
         return sessions.get(sessionID)
       }),
   })
+  const shared = Context.get(yield* Layer.build(PacerStatus.layer), PacerStatus.Service)
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.succeed(PacerStatus.Service, shared),
           PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints)),
           endpoints,
           Layer.succeed(
@@ -509,6 +514,7 @@ const harness = Effect.fnUntraced(function* () {
     lookups,
     connect: (key = "test-key") =>
       SubscriptionRef.set(endpoint, PacerEndpoint.resolve({ baseURL: `${cpp.origin}/v1`, apiKey: key }, undefined)),
+    shared,
   } satisfies Harness
 })
 
@@ -669,6 +675,31 @@ describe("PacerConnection states", () => {
         { status: { state: "no-pacer" } },
         { status: { state: "on" } },
       ])
+    }),
+  )
+
+  // Compaction asks CPP to write a summary only while the connection is on (spec cliproxypacer-server-summaries), and
+  // reads the state through `PacerStatus`: it can't depend on the connection.
+  it.effect("keeps compaction's copy of its state: unset, no pacer, on, unreachable", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const shared = () => Effect.runSync(h.shared.get())
+      yield* settle
+      expect(shared()).toEqual(status(h))
+      expect(shared().state).toBe("unset")
+      h.cpp.failure = "plain"
+      yield* h.connect()
+      yield* until("no pacer", () => shared().state === "no-pacer")
+      expect(shared()).toEqual(status(h))
+      h.cpp.failure = undefined
+      yield* SubscriptionRef.set(h.catalog, catalog(yield* Clock.currentTimeMillis))
+      yield* until("on", () => shared().state === "on")
+      expect(shared()).toEqual(status(h))
+      h.cpp.failure = { status: 401, type: "unauthorized" }
+      yield* h.connect("another-key")
+      yield* until("unreachable", () => shared().state === "unreachable")
+      expect(shared()).toEqual(status(h))
+      expect(shared().refused).toBe(true)
     }),
   )
 

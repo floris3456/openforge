@@ -10,12 +10,14 @@ import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 import { PacerSessionID } from "./session-id.js"
+import { PacerStatus } from "./status.js"
 import { PacerWire } from "./wire.js"
 
 // CLIProxyPacer writes the summaries (spec cliproxypacer-server-summaries): who writes the summary of a compaction of a
 // chat on CPP, and how CPP's answer reads. The compaction itself (`session/compaction.ts`) sends the request; this
-// reads the chat's view and the catalog, and sets the chat's own writer, beside it. Not the connection: compaction
-// cannot depend on the session store it imports.
+// reads the chat's view, the key level's settings and the catalog, and sets the chat's own writer, beside it. Not
+// through the connection, whose state it reads from `PacerStatus`: compaction cannot depend on the session store the
+// connection imports.
 
 /**
  * How long openforge waits for CPP's summary before it writes its own: CPP gives a summary 180 s, and 20 s to its first
@@ -245,17 +247,20 @@ export interface PlanInput {
 
 export interface Interface {
   /**
-   * Who writes the summary: reads the chat's view now (its own writer, its effective one, its warmth), the key level's
-   * listing ({@link writerFor}), and the catalog for the model's routes. When CPP is to write and the chat's effective
-   * writer isn't `server`, sets the chat's own `server` first (one `PATCH`): an unset writer answers Claude with a
-   * capsule only CPP opens. Never fails: openforge writes, saying why, when CPP can't be asked.
+   * Who writes the summary, asking CPP only while the connection is on (`PacerStatus`). Unreachable, openforge writes,
+   * saying so ({@link UNREACHABLE}); without a pacer, or not set up, undefined: openforge writes, naming no writer, as
+   * for a chat on any provider. On, it reads the chat's view now (its own writer, its effective one, its warmth), the
+   * key level's listing ({@link writerFor}), and the catalog for the model's routes. When CPP is to write and the
+   * chat's effective writer isn't `server`, sets the chat's own `server` first (one `PATCH`): an unset writer answers
+   * Claude with a capsule only CPP opens. Never fails: openforge writes, saying why, when CPP can't be asked.
    */
-  readonly plan: (input: PlanInput) => Effect.Effect<Decision>
+  readonly plan: (input: PlanInput) => Effect.Effect<Decision | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerSummaries") {}
 
-export const UNREACHABLE = "it could not be reached"
+/** Why CPP couldn't: the connection is unreachable, or a read before asking failed. */
+export const UNREACHABLE = "unreachable"
 export const UNSET = "the chat's writer could not be set"
 
 const decodeView = Schema.decodeUnknownOption(PacerWire.View)
@@ -271,6 +276,7 @@ export const layer = Layer.effect(
     const http = yield* PacerHttp.Service
     const endpoints = yield* PacerEndpoint.Service
     const models = yield* PacerModels.Service
+    const status = yield* PacerStatus.Service
 
     /** The chat's view, or undefined when CPP knows nothing of it. */
     const view = Effect.fnUntraced(function* (path: string, endpoint: PacerEndpoint.Endpoint) {
@@ -286,6 +292,9 @@ export const layer = Layer.effect(
     })
 
     const plan = Effect.fn("PacerSummaries.plan")(function* (input: PlanInput) {
+      const { state } = yield* status.get()
+      if (state === "unreachable") return { by: "openforge", fallback: UNREACHABLE } satisfies Decision
+      if (state !== "on") return undefined
       const endpoint = yield* endpoints.get()
       if (!endpoint) return { by: "openforge", fallback: UNREACHABLE } satisfies Decision
       const path = `/pacer/v1/sessions/${encodeURIComponent(PacerSessionID.make(input.sessionID))}`
@@ -336,5 +345,5 @@ export const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node],
+  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, PacerStatus.node],
 })

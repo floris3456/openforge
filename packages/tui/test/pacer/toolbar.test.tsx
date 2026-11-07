@@ -180,9 +180,15 @@ describe("the cache item", () => {
   // Spec cliproxypacer-cold-ask, section 3.
   test("cold, with compact cold chats first on and the chat at least as large as the threshold: cache cold · compacts first", async () => {
     const switches = { warming: true, compactBeforeCold: false, compactColdFirst: true }
+    const large = { tokens: 80_000, threshold: 70_000 }
     for (const [view, text] of [
-      [chat({ warm: false, switches, size: { tokens: 80_000, threshold: 70_000 } }), "cache cold · compacts first"],
-      [chat({ warm: false, switches, size: { tokens: 12_000, threshold: 70_000 } }), "cache cold"],
+      [chat({ warm: false, switches, size: large, coldAskAnnounced: true }), "cache cold · compacts first"],
+      [
+        chat({ warm: false, switches, size: { tokens: 12_000, threshold: 70_000 }, coldAskAnnounced: true }),
+        "cache cold",
+      ],
+      // Automatic compaction off: its step didn't announce the cold ask, so openforge won't act on it.
+      [chat({ warm: false, switches, size: large, coldAskAnnounced: false }), "cache cold"],
     ] as const) {
       await using setup = await toolbar({ view, width: 120 })
       await setup.app.waitForFrame((frame) => frame.includes("cache cold"))

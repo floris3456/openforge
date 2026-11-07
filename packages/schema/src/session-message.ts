@@ -270,7 +270,7 @@ export const CompactionRunning = Schema.Struct({
 export interface CompactionWriter extends Schema.Schema.Type<typeof CompactionWriter> {}
 export const CompactionWriter = Schema.Struct({
   by: Schema.Literals(["cliproxypacer", "openforge"]),
-  /** CLIProxyPacer wrote it for a cold chat (`X-Pacer-Compaction`). */
+  /** CLIProxyPacer wrote it for a cold chat (`X-Pacer-Compaction`, or openforge's own cold ask). */
   cold: Schema.Boolean.pipe(optional),
   /** How many of the user's own earlier messages CLIProxyPacer kept after it (`X-Pacer-Compaction`). */
   userMessages: NonNegativeInt.pipe(optional),

@@ -18,6 +18,7 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerStatus } from "@opencode/core/pacer/status"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -190,7 +191,8 @@ const fakeCpp = (now: () => number) =>
             }
           return answer(
             cpp.registry.map((name) => {
-              const fallback = name === "pings.enabled" ? null : false
+              // CPP's defaults: unset for the pings switch and the summaries' writer, else off.
+              const fallback = name === "pings.enabled" || name === "compaction.writer" ? null : false
               const key = cpp.key[name] ?? null
               const server = cpp.server[name] ?? null
               return {
@@ -399,6 +401,8 @@ interface Harness {
   /** Every `Session.get` since the harness started: the session store's reads. */
   readonly lookups: { count: number }
   readonly connect: (key?: string) => Effect.Effect<void>
+  /** The connection's state as compaction reads it (`PacerStatus`). */
+  readonly shared: PacerStatus.Interface
 }
 
 /** The connection over the real Bus and Session store, with CPP's endpoint and catalog in the test's hands. */
@@ -474,10 +478,12 @@ const harness = Effect.fnUntraced(function* () {
     Effect.provideService(Bus.Service, bus),
     Effect.provideService(Session.Service, sessions),
   )
+  const shared = Context.get(yield* Layer.build(PacerStatus.layer), PacerStatus.Service)
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.succeed(PacerStatus.Service, shared),
           PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints)),
           endpoints,
           Layer.succeed(
@@ -518,6 +524,7 @@ const harness = Effect.fnUntraced(function* () {
     lookups,
     connect: (key = "test-key") =>
       SubscriptionRef.set(endpoint, PacerEndpoint.resolve({ baseURL: `${cpp.origin}/v1`, apiKey: key }, undefined)),
+    shared,
   } satisfies Harness
 })
 
@@ -678,6 +685,31 @@ describe("PacerConnection states", () => {
         { status: { state: "no-pacer" } },
         { status: { state: "on" } },
       ])
+    }),
+  )
+
+  // Compaction asks CPP to write a summary only while the connection is on (spec cliproxypacer-server-summaries), and
+  // reads the state through `PacerStatus`: it can't depend on the connection.
+  it.effect("keeps compaction's copy of its state: unset, no pacer, on, unreachable", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const shared = () => Effect.runSync(h.shared.get())
+      yield* settle
+      expect(shared()).toEqual(status(h))
+      expect(shared().state).toBe("unset")
+      h.cpp.failure = "plain"
+      yield* h.connect()
+      yield* until("no pacer", () => shared().state === "no-pacer")
+      expect(shared()).toEqual(status(h))
+      h.cpp.failure = undefined
+      yield* SubscriptionRef.set(h.catalog, catalog(yield* Clock.currentTimeMillis))
+      yield* until("on", () => shared().state === "on")
+      expect(shared()).toEqual(status(h))
+      h.cpp.failure = { status: 401, type: "unauthorized" }
+      yield* h.connect("another-key")
+      yield* until("unreachable", () => shared().state === "unreachable")
+      expect(shared()).toEqual(status(h))
+      expect(shared().refused).toBe(true)
     }),
   )
 
@@ -1670,6 +1702,53 @@ describe("PacerConnection chats", () => {
       h.cpp.registry = ["pings.enabled", "warming.compact_before_cold"]
       yield* h.connection.updateSettings({ compactColdFirst: false })
       expect(patches().at(-1)).toEqual({ "warming.compact_cold_first": false })
+    }),
+  )
+
+  it.effect("reads and sets who writes the summaries and whether they keep the user's messages, at the key level", () =>
+    Effect.gen(function* () {
+      // Spec cliproxypacer-server-summaries, section 2: CPP's `compaction.writer` (`server`, `client`, unset) and
+      // `compaction.user_messages`, shown as they apply. An unset writer is CLIProxyPacer's: openforge sets each chat's
+      // own `server` before its first summary.
+      const h = yield* harness()
+      yield* online(h)
+      const patches = () => seen(h, "/pacer/v1/settings", "PATCH").map((item) => item.body)
+      // An older CPP lists neither: the service can't tell.
+      expect(yield* h.connection.settings()).toEqual({ compactColdFirst: false, compactBeforeCold: false })
+
+      h.cpp.registry = [...h.cpp.registry, "compaction.writer", "compaction.user_messages"]
+      expect(yield* h.connection.settings()).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: false,
+        summaryWriter: "cliproxypacer",
+        keepUserMessages: false,
+      })
+      expect(yield* h.connection.updateSettings({ summaryWriter: "openforge", keepUserMessages: true })).toEqual({
+        compactColdFirst: false,
+        compactBeforeCold: false,
+        summaryWriter: "openforge",
+        keepUserMessages: true,
+      })
+      expect(h.cpp.key).toEqual({ "compaction.writer": "client", "compaction.user_messages": true })
+      // Back to what applies without the key's own (task 1's rule): unset, which is CLIProxyPacer's, and off.
+      const back = yield* h.connection.updateSettings({ summaryWriter: "cliproxypacer", keepUserMessages: false })
+      expect(back).toMatchObject({ summaryWriter: "cliproxypacer", keepUserMessages: false })
+      expect(h.cpp.key).toEqual({})
+      // With the server's writer `client`, CLIProxyPacer's is the key's own `server`.
+      h.cpp.server["compaction.writer"] = "client"
+      expect((yield* h.connection.settings()).summaryWriter).toBe("openforge")
+      expect((yield* h.connection.updateSettings({ summaryWriter: "cliproxypacer" })).summaryWriter).toBe(
+        "cliproxypacer",
+      )
+      expect(h.cpp.key).toEqual({ "compaction.writer": "server" })
+      expect((yield* h.connection.updateSettings({ summaryWriter: "openforge" })).summaryWriter).toBe("openforge")
+      expect(h.cpp.key).toEqual({})
+      expect(patches()).toEqual([
+        { "compaction.writer": "client", "compaction.user_messages": true },
+        { "compaction.writer": null, "compaction.user_messages": null },
+        { "compaction.writer": "server" },
+        { "compaction.writer": null },
+      ])
     }),
   )
 

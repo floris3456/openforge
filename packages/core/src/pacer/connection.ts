@@ -15,6 +15,7 @@ import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 import { PacerNotices } from "./notices.js"
 import { PacerSessionID } from "./session-id.js"
+import { PacerStatus } from "./status.js"
 import { PacerWire } from "./wire.js"
 
 // The service's one connection to CPP, which every TUI reads through the `pacer.*` routes of `server.experimental`.
@@ -70,10 +71,13 @@ export interface Interface {
   readonly chat: (sessionID: SessionID) => Effect.Effect<Pacer.Chat | undefined>
   /** Sets the chat's switches on CPP and answers its view after the change. */
   readonly update: (sessionID: SessionID, input: Pacer.ChatUpdate) => Effect.Effect<Pacer.Chat, Unavailable>
-  /** The compaction asks for all of the key's chats, as they apply at its level; always read from CPP. */
+  /**
+   * The compaction settings for all of the key's chats (the asks, who writes the summaries, whether they keep the user's
+   * messages), as they apply at its level; always read from CPP.
+   */
   readonly settings: () => Effect.Effect<Pacer.Settings, Unavailable>
   /**
-   * Sets the compaction asks for all of the key's chats at its level and answers them after the change. A value equal
+   * Sets the compaction settings for all of the key's chats at its level and answers them after the change. A value equal
    * to what CPP applies without the key's own (the server's, else the default) clears the key's own instead of being
    * stored. The views held may have changed with them: each is read again when next asked for. A change of nothing
    * writes nothing.
@@ -249,6 +253,8 @@ export const layer = Layer.effect(
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
     const notices = yield* PacerNotices.Service
+    // Compaction reads the state there: it can't depend on this service.
+    const shared = yield* PacerStatus.Service
 
     const link: Link = {
       endpoint: undefined,
@@ -261,6 +267,7 @@ export const layer = Layer.effect(
       active: new Set(),
       newest: undefined,
     }
+    yield* shared.set(link.status)
     const chats = new Map<SessionID, Chat>()
     const byUuid = new Map<string, SessionID>()
     const prompts = new Map<string, Pacer.PromptChange>()
@@ -305,6 +312,7 @@ export const layer = Layer.effect(
         ...(next.message ? { message: next.message } : {}),
         refused,
       }
+      yield* shared.set(link.status)
       yield* bus.publish(Pacer.Event.StatusChanged, { status: link.status })
     })
 
@@ -1300,6 +1308,12 @@ export const layer = Layer.effect(
             ...(input.compactColdFirst !== undefined
               ? { [PacerWire.settingNames.compactColdFirst]: input.compactColdFirst }
               : {}),
+            ...(input.summaryWriter !== undefined
+              ? { [PacerWire.settingNames.summaryWriter]: PacerWire.writers[input.summaryWriter] }
+              : {}),
+            ...(input.keepUserMessages !== undefined
+              ? { [PacerWire.settingNames.keepUserMessages]: input.keepUserMessages }
+              : {}),
           }
           if (Object.keys(change).length === 0) return yield* readSettings
           // What CPP applies without the key's own decides whether a value is stored or the key's own cleared.
@@ -1390,7 +1404,15 @@ export const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, PacerNotices.node, Bus.node, Session.node],
+  deps: [
+    PacerEndpoint.node,
+    PacerHttp.node,
+    PacerModels.node,
+    PacerNotices.node,
+    PacerStatus.node,
+    Bus.node,
+    Session.node,
+  ],
 })
 
 /** At most `bytes` bytes of UTF-8, cut at a character. */

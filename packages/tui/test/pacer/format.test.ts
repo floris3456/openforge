@@ -81,25 +81,38 @@ describe("the toolbar's cache item (section 4)", () => {
     )
   })
 
-  // Spec cliproxypacer-cold-ask, section 3.
+  // Spec cliproxypacer-cold-ask, section 3; openforge acts on CPP's ask only with automatic compaction on, which its
+  // newest step announced (`coldAskAnnounced`, the lead's fix of 2026-11-07).
   test("the cache went cold, the chat's compact cold chats first on and it at least as large as the threshold", () => {
     const switches = { warming: true, compactBeforeCold: false, compactColdFirst: true }
     const size = { tokens: 80_000, threshold: 70_000 }
-    expect(text(chat({ warm: false, switches, size }))).toEqual({
+    const announced = { switches, coldAskAnnounced: true }
+    expect(text(chat({ warm: false, size, ...announced }))).toEqual({
       text: "cache cold · compacts first",
       tone: "warning",
     })
     // As large as the threshold is enough; so is the countdown reaching its end before CPP says the cache is cold.
-    expect(text(chat({ warm: false, switches, size: { tokens: 70_000, threshold: 70_000 } })).text).toBe(
+    expect(text(chat({ warm: false, size: { tokens: 70_000, threshold: 70_000 }, ...announced })).text).toBe(
       "cache cold · compacts first",
     )
-    expect(text(chat({ switches, size }), chat().coldAt! + 1).text).toBe("cache cold · compacts first")
+    expect(text(chat({ size, ...announced }), chat().coldAt! + 1).text).toBe("cache cold · compacts first")
     // Smaller than the threshold, no size, or the switch off: only cold.
-    expect(text(chat({ warm: false, switches, size: { tokens: 69_999, threshold: 70_000 } })).text).toBe("cache cold")
-    expect(text(chat({ warm: false, switches })).text).toBe("cache cold")
-    expect(text(chat({ warm: false, size })).text).toBe("cache cold")
+    expect(text(chat({ warm: false, size: { tokens: 69_999, threshold: 70_000 }, ...announced })).text).toBe(
+      "cache cold",
+    )
+    expect(text(chat({ warm: false, ...announced })).text).toBe("cache cold")
+    expect(text(chat({ warm: false, size, coldAskAnnounced: true })).text).toBe("cache cold")
     // Still warm: the countdown, whatever the size.
-    expect(text(chat({ switches, size })).text).toBe("warm 23:41")
+    expect(text(chat({ size, ...announced })).text).toBe("warm 23:41")
+  })
+
+  test("a cold chat compacts first only when its newest step announced the cold ask (automatic compaction on)", () => {
+    const switches = { warming: true, compactBeforeCold: false, compactColdFirst: true }
+    const size = { tokens: 80_000, threshold: 70_000 }
+    expect(text(chat({ warm: false, switches, size, coldAskAnnounced: false })).text).toBe("cache cold")
+    // CPP didn't say: nothing tells that openforge would act on it.
+    expect(text(chat({ warm: false, switches, size })).text).toBe("cache cold")
+    expect(text(chat({ warm: false, switches, size, coldAskAnnounced: true })).text).toBe("cache cold · compacts first")
   })
 
   test("the account can't serve the next step, as a warning", () => {

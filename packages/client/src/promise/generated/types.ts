@@ -1010,6 +1010,7 @@ export type PacerChat = {
   nextUse?: PacerNextUse
   forceUse?: PacerForceUse
   switches: PacerSwitches
+  coldAskAnnounced?: boolean
   size?: PacerSize
   asOf: number
 }
@@ -1705,6 +1706,7 @@ export type SessionCompactionEnded = {
     model?: ModelRef
     native?: SessionMessageNative1
     text: string
+    writer?: SessionMessageCompactionWriter
     cost?: MoneyUSD
     tokens?: TokenUsageInfo
   }

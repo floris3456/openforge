@@ -200,6 +200,12 @@ export const Chat = Schema.Struct({
   nextUse: NextUse.pipe(optional),
   forceUse: ForceUse.pipe(optional),
   switches: Switches,
+  /**
+   * The chat's newest step told CPP it compacts a cold chat first when asked (its `X-Pacer-Compact` carried `cold`,
+   * which openforge sends only with automatic compaction on): `compactColdFirst` then takes effect for it. Absent while
+   * CPP doesn't say.
+   */
+  coldAskAnnounced: Schema.Boolean.pipe(optional),
   /** Its size and CPP's threshold for it; absent until CPP knows its size (it has no answered step yet). */
   size: Size.pipe(optional),
   /** When it was read. */

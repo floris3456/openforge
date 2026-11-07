@@ -615,6 +615,7 @@ export namespace Compaction {
       model: SessionMessage.CompactionCompleted.fields.model,
       native: SessionMessage.CompactionCompleted.fields.native,
       text: Schema.String,
+      writer: SessionMessage.CompactionCompleted.fields.writer,
       // Repeats the internal `session.usage.recorded` figures: that event never reaches clients, and it
       // stays the accounting source for session totals and stats.
       cost: SessionMessage.CompactionCompleted.fields.cost,

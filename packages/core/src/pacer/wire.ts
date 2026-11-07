@@ -54,6 +54,8 @@ export const View = Schema.Struct({
       pings_enabled: maybe(Schema.Boolean),
       compact_before_cold: maybe(Schema.Unknown),
       compact_cold_first: maybe(Schema.Unknown),
+      /** `compaction.writer` as it applies to the chat: `server`, `client`, or null while unset. */
+      compaction_writer: maybe(Schema.Unknown),
     }),
   ),
   /** `size_tokens`: its size by its newest answered request, null while unknown; `threshold`: `warming.fresh_tokens`. */
@@ -65,6 +67,11 @@ export const View = Schema.Struct({
       compact_reason: maybe(Schema.String),
     }),
   ),
+  /**
+   * Whether CPP's asks take effect for the chat (`feature`): `available` while its newest request since CPP started
+   * carried the ask's `X-Pacer-Compact` token.
+   */
+  features: maybe(Schema.Struct({ compact_cold_first: maybe(Schema.Struct({ available: maybe(Schema.Unknown) })) })),
   next_use: maybe(Schema.Struct({ credential: Schema.String, reason: maybe(Schema.String) })),
   force_use: maybe(Schema.Struct({ credential: Schema.String, when: maybe(Schema.String) })),
   label: maybe(Schema.Unknown),
@@ -252,29 +259,52 @@ export function active(state: typeof State.Type) {
 export const settingNames = {
   compactColdFirst: "warming.compact_cold_first",
   compactBeforeCold: "warming.compact_before_cold",
+  summaryWriter: "compaction.writer",
+  keepUserMessages: "compaction.user_messages",
 } as const
 
-/** The compaction asks for all chats, as CPP's listing says they apply to the key; one it doesn't list is off. */
+/** `Pacer.SummaryWriter` as CPP's `compaction.writer` says it. */
+export const writers = { cliproxypacer: "server", openforge: "client" } as const satisfies Record<
+  Pacer.SummaryWriter,
+  string
+>
+
+/**
+ * What openforge reads an unset setting as: an unset `compaction.writer` is CLIProxyPacer's, since openforge sets each
+ * chat's own `server` before its first summary there (spec cliproxypacer-server-summaries, section 2).
+ */
+const unset: Readonly<Record<string, unknown>> = { [settingNames.summaryWriter]: writers.cliproxypacer }
+
+/**
+ * The compaction settings for all chats, as CPP's listing says they apply to the key; an ask it doesn't list is off,
+ * and the summaries' two are absent when it lists neither.
+ */
 export function settings(items: ReadonlyArray<unknown>): Pacer.Settings {
   const values = new Map(each(items, decodeSetting).map((item) => [item.name, item.value]))
   return {
     compactColdFirst: values.get(settingNames.compactColdFirst) === true,
     compactBeforeCold: values.get(settingNames.compactBeforeCold) === true,
+    ...(values.has(settingNames.summaryWriter)
+      ? { summaryWriter: values.get(settingNames.summaryWriter) === writers.openforge ? "openforge" : "cliproxypacer" }
+      : {}),
+    ...(values.has(settingNames.keepUserMessages)
+      ? { keepUserMessages: values.get(settingNames.keepUserMessages) === true }
+      : {}),
   }
 }
 
 /**
  * The key level's write for `change` (values by CPP's names), given CPP's listing: `null`, which clears the key's own,
- * where a value is what CPP applies without it (the server's, else the default), so that a server default the owner
- * sets later reaches the key's chats (spec cliproxypacer-cold-ask, the decision of 2026-11-07); else the value itself,
- * also for a setting CPP doesn't list.
+ * where a value is what CPP applies without it (the server's, else the default, an unset one as openforge reads it),
+ * so that a server default the owner sets later reaches the key's chats (spec cliproxypacer-cold-ask, the decision of
+ * 2026-11-07); else the value itself, also for a setting CPP doesn't list.
  */
 export function keyChange(items: ReadonlyArray<unknown>, change: Readonly<Record<string, unknown>>) {
   const rows = new Map(each(items, decodeSetting).map((item) => [item.name, item]))
   return Object.fromEntries(
     Object.entries(change).map(([name, value]) => {
       const row = rows.get(name)
-      return [name, row !== undefined && (row.server ?? row.default) === value ? null : value]
+      return [name, row !== undefined && (row.server ?? row.default ?? unset[name]) === value ? null : value]
     }),
   )
 }
@@ -351,6 +381,7 @@ export function chat(
   const state = live(view, context)
   const size = view.warming?.size_tokens
   const threshold = view.warming?.threshold
+  const announced = view.features?.compact_cold_first?.available
   return {
     sessionID,
     ...(view.model ? { model: view.model } : {}),
@@ -374,6 +405,7 @@ export function chat(
       compactBeforeCold: view.effective?.compact_before_cold === true,
       compactColdFirst: view.effective?.compact_cold_first === true,
     },
+    ...(typeof announced === "boolean" ? { coldAskAnnounced: announced } : {}),
     ...(typeof size === "number" && typeof threshold === "number"
       ? { size: { tokens: count(size), threshold: count(threshold) } }
       : {}),

@@ -26,6 +26,7 @@ import { Database } from "../database/database.js"
 import { llmClient } from "../effect/app-node-platform.js"
 import { Instructions } from "../instructions/index.js"
 import { Model } from "../model.js"
+import { PacerSummaries } from "../pacer/summaries.js"
 import { State } from "../state.js"
 import { Token } from "../util/token.js"
 import type { SessionContext } from "./context.js"
@@ -77,9 +78,10 @@ export type Trigger =
    * `models` are its picks to write it, first choice first; the first one the chat can use writes it, else the chat's
    * own model. `cold`: the provider asked to compact the chat first because its prompt cache went cold and it is
    * large (CLIProxyPacer's 409 `cold`); only one of its picks writes it, so when the chat can use none it is skipped:
-   * compacting on the chat's own, dearer model is what the ask is meant to avoid. Either is always a summary written
-   * here, never a provider's native compaction, and a summary held from the background only when the model picked
-   * wrote it. Skipped before the chat's first finished step, when there is nothing to summarize but the prompt.
+   * compacting on the chat's own, dearer model is what the ask is meant to avoid. Either is always a summary, written
+   * by CLIProxyPacer or here, never a provider's native compaction, and a summary held from the background only when
+   * the model picked wrote it. Skipped before the chat's first finished step, when there is nothing to summarize but
+   * the prompt.
    */
   | {
       readonly reason: "move" | "cold"
@@ -120,6 +122,9 @@ type Result = {
   readonly text: string
   readonly native?: SessionMessage.Native
   readonly metadata?: Record<string, unknown>
+  /** Who wrote `text`, for a chat on CLIProxyPacer; `model`, when set, is the model that wrote it. */
+  readonly writer?: SessionMessage.CompactionWriter
+  readonly model?: SessionContext.Loaded["model"]["ref"]
 }
 
 type Failure = {
@@ -285,6 +290,7 @@ export const layer = Layer.effect(
     const models = yield* SessionRunnerModel.Service
     const db = (yield* Database.Service).db
     const requests = yield* SessionModelRequest.Service
+    const summaries = yield* PacerSummaries.Service
 
     const scope = yield* Scope.Scope
     const precomputed = new Map<SessionContext.Loaded["session"]["id"], Precomputed>()
@@ -354,6 +360,10 @@ export const layer = Layer.effect(
       const model = yield* selectModel(context, settings.buffer, native, picks)
       // A cold ask is answered only on one of its picks; without one, a summary held from the background stays held.
       if (trigger.reason === "cold" && !model.picked) return { status: "skipped" }
+      // A chat on CLIProxyPacer: CLIProxyPacer writes the summary on a pick, else on the chat's own model, unless
+      // openforge is to write it (spec cliproxypacer-server-summaries).
+      const writing = picks ? model.context : context
+      const pacer = yield* pacerWriter(trigger, writing)
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
       // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
@@ -369,7 +379,10 @@ export const layer = Layer.effect(
         yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: context.session.id, reason: "auto" })
       // A compaction whose item names the models to write it (CLIProxyPacer's compact notice, a move, a cold ask) takes
       // a summary held from the background only when the model it picked wrote it, not the compaction agent's.
-      const usable = held && (picks === undefined || sameRef(held.writer, model.context.model.ref)) ? held : undefined
+      const usable =
+        pacer?.by !== "cliproxypacer" && held && (picks === undefined || sameRef(held.writer, model.context.model.ref))
+          ? held
+          : undefined
       if (held && !usable) yield* Fiber.interrupt(held.fiber)
       const swapped = usable ? yield* usePrecomputed(selected, usable, budget, settings) : undefined
       const compaction = swapped
@@ -377,12 +390,101 @@ export const layer = Layer.effect(
         : native
           ? compactNatively(selected, budget, settings.keep)
           : summarize(selected, budget, settings.keep)
-      return yield* compaction.pipe(
+      // CLIProxyPacer writes it, else openforge as above, the record saying who and why.
+      const by = (writer: SessionMessage.CompactionWriter) =>
+        compaction.pipe(Effect.map((result): Result => ({ ...result, writer })))
+      const written =
+        pacer?.by === "cliproxypacer"
+          ? writeOnPacer({ ...trigger, context: writing }, budget, settings.keep).pipe(
+              Effect.catch((failure) =>
+                "fallback" in failure ? by({ by: "openforge", fallback: failure.fallback }) : Effect.fail(failure),
+              ),
+            )
+          : pacer
+            ? by({ by: "openforge", ...(pacer.fallback ? { fallback: pacer.fallback } : {}) })
+            : compaction
+      return yield* written.pipe(
         Effect.matchEffect({
           onSuccess: (result) => publish(selected, result),
           onFailure: (failure) => publish(selected, failure),
         }),
       )
+    })
+
+    /**
+     * Who writes the summary of a chat on CLIProxyPacer (spec cliproxypacer-server-summaries, section 2); undefined for
+     * another provider's chat, and for one on CLIProxyPacer while it has no pacer (`PacerSummaries.plan`): openforge
+     * writes it as for any provider, naming no writer. `writing` holds the model that would write it: a pick of
+     * CLIProxyPacer's, else the chat's own, never the compaction agent's.
+     */
+    const pacerWriter = (trigger: Trigger, writing: SessionContext.Loaded) => {
+      const context = trigger.context
+      if (context.model.ref.providerID !== PacerSummaries.provider) return Effect.succeed(undefined)
+      const picks = "models" in trigger ? trigger.models : undefined
+      return summaries.plan({
+        sessionID: context.session.id,
+        ...(context.session.parentID ? { parentID: context.session.parentID } : {}),
+        model: writing.model.ref.id,
+        messages: PacerSummaries.messages(context.model.model),
+        warm: PacerSummaries.warmth(
+          { reason: trigger.reason, ...(picks ? { models: picks.map((pick) => pick.id) } : {}) },
+          context.model.ref.id,
+        ),
+      })
+    }
+
+    /**
+     * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
+     * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
+     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
+     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
+     * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
+     * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
+     * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
+     */
+    const writeOnPacer = Effect.fnUntraced(function* (
+      trigger: Trigger,
+      budget: number,
+      keep: number,
+    ): Effect.fn.Return<Result, Failure | { readonly fallback: string }> {
+      const context = trigger.context
+      const split = splitConversation(context.messages, keep)
+      if (split === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
+      const prepared = yield* prepare(context, context.messages, budget)
+      // A compaction hook that supplies the summary itself writes it, as for any chat.
+      if (prepared.event.result)
+        return { ...(yield* fromHook(context, prepared.event.result)), writer: { by: "openforge" } } satisfies Result
+      const seen: { header?: string } = {}
+      const http = PacerSummaries.capture(prepared.options.http, (value) => (seen.header = value))
+      const answer = yield* llm
+        .compact(PacerSummaries.responses(withoutTail(prepared.request, split.keepID)), { mechanism: "endpoint", http })
+        .pipe(
+          Effect.timeoutOrElse({
+            duration: PacerSummaries.WAIT,
+            orElse: () => Effect.fail<PacerSummaries.Failure>("timeout"),
+          }),
+          Effect.mapError((failure) => ({ fallback: PacerSummaries.fallback(failure) })),
+        )
+      const header = PacerSummaries.header(seen.header)
+      const ref = header?.model
+        ? Model.Ref.make({ id: Model.ID.make(header.model), providerID: context.model.ref.providerID })
+        : context.model.ref
+      const wrote = sameRef(ref, context.model.ref) ? context.model : yield* resolveModel(context, ref)
+      yield* spend(context.session.id, answer.usage && SessionUsage.record(answer.usage, (wrote ?? context.model).cost))
+      const text = PacerSummaries.summaryOf(answer.replacement)
+      if (text === undefined) return yield* Effect.fail({ fallback: PacerSummaries.fallback("unreadable") })
+      // A cold ask is cold whatever the header says: openforge sends the pick, so CLIProxyPacer answers `warm` on it.
+      const cold = trigger.reason === "cold" || header?.cold
+      return {
+        text,
+        ...(split.keepID ? { metadata: { keepID: split.keepID } } : {}),
+        writer: {
+          by: "cliproxypacer",
+          ...(cold !== undefined ? { cold } : {}),
+          ...(header?.userMessages !== undefined ? { userMessages: header.userMessages } : {}),
+        },
+        model: ref,
+      }
     })
 
     /**
@@ -969,9 +1071,10 @@ export const layer = Layer.effect(
         {
           sessionID,
           reason,
-          model: context.model.ref,
+          model: outcome.model ?? context.model.ref,
           native: outcome.native,
           text: outcome.text,
+          ...(outcome.writer ? { writer: outcome.writer } : {}),
           ...usage,
         },
         { metadata: outcome.metadata },
@@ -1001,7 +1104,16 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
+  deps: [
+    Agent.node,
+    Bus.node,
+    Database.node,
+    llmClient,
+    Model.node,
+    SessionModelRequest.node,
+    SessionRunnerModel.node,
+    PacerSummaries.node,
+  ],
 })
 
 /**

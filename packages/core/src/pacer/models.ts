@@ -64,6 +64,12 @@ export interface Model {
   readonly reasoning?: Reasoning
   /** Undefined when CPP has no price for it; `/pacer/v1/models` prices only the models used in the last 30 days. */
   readonly price?: Price
+  /**
+   * Per route, by the provider of the accounts it stands for: whether CPP writes a summary of the model itself for a
+   * chat whose `compaction.writer` is `server` ({@link routeWrites}). Undefined while no route says (a plain proxy, or
+   * a CPP before `remote_compaction`).
+   */
+  readonly summaries?: ReadonlyArray<{ readonly provider: string; readonly writes: boolean }>
 }
 
 /** CPP's models as last read. */
@@ -109,6 +115,8 @@ const Thinking = Schema.Struct({
 })
 const Route = Schema.Struct({
   provider: Schema.String,
+  /** How `/v1/responses/compact` is served for the key: `native`, `forwarded`, `emulated` or `unsupported`. */
+  remote_compaction: maybe(Schema.String),
   context_length: maybe(Schema.Number),
   max_output: maybe(Schema.Number),
   input: maybe(Schema.Array(Schema.String)),
@@ -321,6 +329,9 @@ function model(
   const context = facts.context ?? positive(listed.context_length)
   const maxOutput = facts.maxOutput ?? positive(setting?.max_output) ?? positive(listed.max_completion_tokens)
   const price = prices && lookup(prices, lower, pinned, routes[0]?.provider.toLowerCase())
+  const summaries = routes.some((route) => typeof route.remote_compaction === "string")
+    ? routes.map((route) => ({ provider: route.provider, writes: routeWrites(route) }))
+    : undefined
   return {
     id,
     ...(text(listed.owned_by) ? { ownedBy: text(listed.owned_by) } : {}),
@@ -331,7 +342,53 @@ function model(
     ...(facts.output ? { output: facts.output } : {}),
     ...(facts.reasoning ? { reasoning: facts.reasoning } : {}),
     ...(price ? { price } : {}),
+    ...(summaries ? { summaries } : {}),
   }
+}
+
+/**
+ * Providers on whose logins CPP refuses a remote compaction today (`unsupported`) yet writes the summary itself with
+ * `compaction.writer = server` (`cpa_exec::capability::server_writes`, head/2026-10-28): Codex on chatgpt.com, Gemini,
+ * Vertex, AI Studio, Kimi and Meta. Claude and Antigravity always emulate, so only a key's `client` makes them
+ * `unsupported`, and `server` writes there too. A routed provider's `unsupported` (CommandCode outside its provider
+ * API, a model without `/responses`) and Devin's stay unwritten.
+ */
+const writtenWhenUnsupported = new Set([
+  "codex",
+  "gemini",
+  "gemini-interactions",
+  "vertex",
+  "aistudio",
+  "kimi",
+  "kimi-ai",
+  "kimi.ai",
+  "kimi.com",
+  "meta",
+  "claude",
+  "antigravity",
+])
+
+/**
+ * Whether CPP writes a summary of a route's model itself for a chat whose `compaction.writer` is `server`, from the
+ * route's `remote_compaction` as capabilities give it for the key (`compaction_plan::remote_compaction`): `emulated`
+ * (CPP writes, or would with the key's writer unset); `unsupported` on {@link writtenWhenUnsupported}; never
+ * `forwarded` or `native`, which go to the upstream's own compaction, nor a route that doesn't say.
+ */
+function routeWrites(route: Route) {
+  const kind = route.remote_compaction
+  return kind === "emulated" || (kind === "unsupported" && writtenWhenUnsupported.has(route.provider.toLowerCase()))
+}
+
+/**
+ * Whether CPP writes `model`'s summaries for a chat whose `compaction.writer` is `server`: on the routes of `provider`,
+ * the chat's account's, when it has any, else on every route, since CPP may pick any of them. False while nothing is
+ * known.
+ */
+export function writes(model: Pick<Model, "summaries"> | undefined, provider?: string) {
+  const routes = model?.summaries ?? []
+  const own = provider ? routes.filter((route) => route.provider.toLowerCase() === provider.toLowerCase()) : []
+  const chosen = own.length > 0 ? own : routes
+  return chosen.length > 0 && chosen.every((route) => route.writes)
 }
 
 function merge(routes: ReadonlyArray<Route>) {

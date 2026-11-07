@@ -261,6 +261,83 @@ describe("PacerModels", () => {
     }),
   )
 
+  it.live("says per route whether CLIProxyPacer writes a model's summaries itself, as its server_writes decides", () =>
+    Effect.gen(function* () {
+      // `remote_compaction` as capabilities give it for the key (`compaction_plan::remote_compaction`): `emulated`
+      // where CPP writes with `compaction.writer = server` (or would, with the key's writer unset); `unsupported` on a
+      // login CPP refuses today but writes for with `server` (`cpa_exec::capability::server_writes`: Codex on
+      // chatgpt.com, Gemini, Vertex, AI Studio, Kimi, Meta; Claude and Antigravity, whose `unsupported` only a key's
+      // `client` gives); `forwarded` and `native` go to the upstream's own compaction.
+      const route = (provider: string, remote_compaction?: string | null) => ({
+        provider,
+        ...(remote_compaction !== undefined ? { remote_compaction } : {}),
+      })
+      const server = yield* serve({
+        ...cpp(),
+        "/v1/models": () =>
+          Response.json({
+            object: "list",
+            data: ["claude-w", "kimi-w", "gpt-w", "codex/gpt-w", "other-w", "plain-w"].map((id) => ({ id })),
+          }),
+        "/pacer/v1/capabilities": () =>
+          Response.json({
+            ...capabilities,
+            models: [
+              { id: "claude-w", routes: [route("claude", "emulated"), route("antigravity", "unsupported")] },
+              { id: "kimi-w", routes: [route("kimi", "unsupported")] },
+              { id: "gpt-w", routes: [route("codex", "unsupported"), route("opencode-go", "forwarded")] },
+              {
+                id: "other-w",
+                routes: [route("devin", "unsupported"), route("openai-compatibility", "native"), route("plug", null)],
+              },
+              { id: "plain-w", routes: [route("plug")] },
+            ],
+          }),
+      })
+      const { models } = yield* start(endpoint(server.origin))
+      const catalog = yield* until(models, loaded)
+      const summaries = Object.fromEntries((catalog?.models ?? []).map((model) => [model.id, model.summaries]))
+      expect(summaries).toEqual({
+        "claude-w": [
+          { provider: "claude", writes: true },
+          { provider: "antigravity", writes: true },
+        ],
+        "kimi-w": [{ provider: "kimi", writes: true }],
+        "gpt-w": [
+          { provider: "codex", writes: true },
+          { provider: "opencode-go", writes: false },
+        ],
+        // The provider the ID names: its routes only.
+        "codex/gpt-w": [{ provider: "codex", writes: true }],
+        "other-w": [
+          { provider: "devin", writes: false },
+          { provider: "openai-compatibility", writes: false },
+          { provider: "plug", writes: false },
+        ],
+        // No route says: nothing is known.
+        "plain-w": undefined,
+      })
+
+      // A chat on one provider's account is written where that provider's routes write; with none of its own, or not
+      // known, every route must write, since CPP may pick any of them.
+      const writes = (id: string, provider?: string) =>
+        PacerModels.writes(
+          catalog?.models.find((model) => model.id === id),
+          provider,
+        )
+      expect(writes("claude-w")).toBe(true)
+      expect(writes("gpt-w", "codex")).toBe(true)
+      expect(writes("gpt-w", "Codex")).toBe(true)
+      expect(writes("gpt-w", "opencode-go")).toBe(false)
+      expect(writes("gpt-w")).toBe(false)
+      expect(writes("gpt-w", "claude")).toBe(false)
+      expect(writes("kimi-w", "claude")).toBe(true)
+      expect(writes("other-w")).toBe(false)
+      expect(writes("plain-w")).toBe(false)
+      expect(writes("missing-w")).toBe(false)
+    }),
+  )
+
   it.live("lists a plain proxy's models without facts, prices or pacer", () =>
     Effect.gen(function* () {
       const answers: Array<() => Response> = [

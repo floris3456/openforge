@@ -2047,7 +2047,7 @@ describe("PacerConnection reads", () => {
         row(3, {
           session_ext: uuid,
           cache_verdict: "miss",
-          cache_cause: "system changed",
+          cache_cause: "prefix-changed",
           cache_base: 1,
           miss_cost: 2_000,
         }),
@@ -2073,7 +2073,7 @@ describe("PacerConnection reads", () => {
         model: "model-a",
         account: "account-a",
         kind: "step",
-        cause: "system changed",
+        cause: "prefix-changed",
       })
       expect(page.items[0].tokens).toEqual({ input: 10, output: 5, reasoning: 0, cacheRead: 100, cacheWrite: 20 })
       const misses = yield* h.connection.requests(parent, { filter: "misses" })
@@ -2224,7 +2224,7 @@ describe("PacerConnection reads", () => {
       const parent = yield* chat(h)
       const uuid = PacerSessionID.make(parent)
       h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
-      const miss = { session_ext: uuid, cache_verdict: "miss", cache_cause: "system changed" }
+      const miss = { session_ext: uuid, cache_verdict: "miss", cache_cause: "prefix-changed" }
       h.cpp.rows = [
         row(1, { session_ext: uuid }),
         // Another chat's request, so on none of this chat's pages.
@@ -2407,7 +2407,7 @@ describe("PacerConnection cache notices", () => {
             session_ext: PacerSessionID.make(child),
             subagent: true,
             cache_verdict: "miss",
-            cache_cause: "prefix",
+            cache_cause: "prefix-changed",
             changed_part: "system",
             cache_shortfall: 152_000,
           }),
@@ -2415,7 +2415,7 @@ describe("PacerConnection cache notices", () => {
             session_ext: PacerSessionID.make(parent),
             kind: 3,
             cache_verdict: "partial",
-            cache_cause: "ttl",
+            cache_cause: "provider",
             cache_shortfall: 18_000,
           }),
         ]
@@ -2441,7 +2441,7 @@ describe("PacerConnection cache notices", () => {
             model: "model-a",
             verdict: "partial",
             tokens: 18_000,
-            cause: "ttl",
+            cause: "provider",
             at: 0,
           },
           {
@@ -2451,7 +2451,7 @@ describe("PacerConnection cache notices", () => {
             model: "model-a",
             verdict: "miss",
             tokens: 152_000,
-            cause: "prefix · system",
+            cause: "prefix-changed · system",
             at: 0,
           },
         ])

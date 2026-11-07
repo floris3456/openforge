@@ -133,7 +133,7 @@ function row(id: number, uuid: string | null, fields: Partial<PacerWire.Row> = {
     cache_read: 0,
     cache_write_5m: 1_000,
     cache_verdict: "miss",
-    cache_cause: "prefix",
+    cache_cause: "prefix-changed",
     cache_shortfall: 1_000,
     miss_cost: null,
     changed_part: null,
@@ -271,7 +271,7 @@ describe("PacerNotices", () => {
         yield* h.read([
           row(1, PacerSessionID.make(leaf), {
             subagent: true,
-            cache_cause: "prefix",
+            cache_cause: "prefix-changed",
             changed_part: "tools",
             cache_shortfall: 152_000,
             miss_cost: 7_065_600,
@@ -323,7 +323,7 @@ describe("PacerNotices", () => {
             model: "model-a",
             verdict: "miss",
             tokens: 152_000,
-            cause: "prefix · tools",
+            cause: "prefix-changed · tools",
             missCost: Money.USD.make(0.0070656),
             at: 1_000_001,
           },

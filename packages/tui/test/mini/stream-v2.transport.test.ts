@@ -2939,8 +2939,9 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
-  // CLIProxyPacer's web tools (spec cliproxypacer-step-2, section 4): CPP names the service only in its answer.
-  test("writes CPP's search line once the call ends, with the service CPP's answer names", async () => {
+  // CLIProxyPacer's web tools (spec cliproxypacer-step-2, section 4): CPP names the service only in its answer, which can
+  // come after 50 s, so the line doesn't wait for it, unlike upstream's websearch above, which names its own at once.
+  test("writes CPP's research line as the call starts, without the service CPP names only in its answer", async () => {
     const events = feed()
     events.push(connected())
     const client = sdk({ streams: [events] })
@@ -2962,7 +2963,9 @@ describe("V2 mini transport", () => {
       data: { ...call, input: { question: "Who ships Rust 1.95?" }, executed: true },
     })
     await Bun.sleep(0)
-    expect(ui.commits.filter((item) => item.part?.id === "call_web")).toEqual([])
+    const started = ui.commits.filter((item) => item.part?.id === "call_web")
+    expect(started.map((item) => item.phase)).toEqual(["start"])
+    expect(entryBody(started[0]!)).toEqual({ type: "text", content: '◈ Web Research "Who ships Rust 1.95?"' })
 
     events.push({
       id: "evt_web_success",
@@ -2973,8 +2976,9 @@ describe("V2 mini transport", () => {
     })
     await Bun.sleep(0)
     const commits = ui.commits.filter((item) => item.part?.id === "call_web")
+    // The answer writes nothing more: the line stays as it started.
     expect(commits.map((item) => item.phase)).toEqual(["start", "final"])
-    expect(entryBody(commits[0]!)).toEqual({ type: "text", content: '◈ Web Research via Exa "Who ships Rust 1.95?"' })
+    expect(entryBody(commits[0]!)).toEqual({ type: "text", content: '◈ Web Research "Who ships Rust 1.95?"' })
     expect(entryBody(commits[1]!)).toEqual({ type: "none" })
     await transport.close()
   })

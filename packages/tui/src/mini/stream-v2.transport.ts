@@ -20,7 +20,6 @@ import { messagePrompt } from "./session.shared"
 import { createSubagentTracker, toolCommit, toolFinalPhase } from "./stream-v2.subagent"
 import { normalizeTool, toolOutputText } from "./tool"
 import { toolDisplayContent } from "../util/tool-display"
-import { webTool } from "../pacer/web-tools"
 import type {
   FooterApi,
   FooterPatch,
@@ -744,10 +743,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     const delta = current && prefix ? output.slice(current.output.length) : output
     if (part.state.status === "running") {
       const started = current?.started === true
-      // A search's line waits for its service's name: CPP's tools have it only once the call ends.
-      const ready =
-        (part.name !== "websearch" && webTool(part.name)?.kind !== "search") ||
-        typeof part.state.metadata.provider === "string"
+      const ready = part.name !== "websearch" || typeof part.state.metadata.provider === "string"
       if (render && !started && ready)
         write([toolCommit(part, messageID, "start", undefined, input.location?.directory, version)], {
           phase: "running",

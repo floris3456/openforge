@@ -1,16 +1,18 @@
 ---
 title: "CLIProxyPacer"
-description: "What the TUI shows for a chat on CLIProxyPacer: the cache timer, the account, the chat's requests, and two switches."
+description: "What the TUI shows for CLIProxyPacer: the cache timer, the account, the chat's requests, cache notices, its settings, switches and summaries."
 ---
 
 A chat on the [CLIProxyPacer provider](/providers#cliproxypacer) gets four extras in the TUI: a cache item in the
-toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and two switches. Without CPP set up,
-none of the extras shows.
+toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and three switches. Every TUI also
+shows [cache notices](#cache-notices), whatever chat it shows, and **Settings** gets a [CLIProxyPacer](#settings)
+section. Without CLIProxyPacer set up, none of these shows.
 
-- The **Requests** tab shows for a chat that used CLIProxyPacer (CPP): its model is one of CPP's, or one of its steps
-  went through CPP.
-- The cache item, the **Account** section and the switches show only while the chat's model is one of CPP's: the model
-  selected for it, else the one its last reply came from. A chat moved to another provider keeps its **Requests** tab.
+- The **Requests** tab shows for a chat that used CLIProxyPacer: its model is one of CLIProxyPacer's, or one of its
+  steps went through CLIProxyPacer.
+- The cache item, the **Account** section and the switches show only while the chat's model is one of CLIProxyPacer's:
+  the model selected for it, else the one its last reply came from. A chat moved to another provider keeps its
+  **Requests** tab.
 
 ```text
 warm 23:41
@@ -21,28 +23,30 @@ The keys are listed on [Keybinds](/cli/keybinds#cliproxypacer).
 ## Toolbar
 
 The toolbar under the prompt shows one cache item after the context and cost. It counts down to when the chat's prompt
-cache goes cold if nothing more is sent, including the pings CPP still plans.
+cache goes cold if nothing more is sent, including the pings CLIProxyPacer still plans.
 
-| It shows                                         | When                                                                                                 |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `warm 23:41`                                     | the cache is warm and CPP pings it                                                                   |
-| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                 |
-| `cache cold`                                     | the cache went cold, shown as a warning                                                              |
-| `keep-alive stopped · warm 2:10`                 | CPP's pings stopped on a failure, shown as a warning                                                 |
-| `compacts at 14:32`                              | compact before cold is on, and CPP has set the time it asks for it                                   |
-| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning                                     |
-| `warm`                                           | the cache is warm and CPP gives no time                                                              |
-| nothing                                          | the proxy has no pacer, CPP knows nothing of the chat yet, or the chat's model is another provider's |
+| It shows                                         | When                                                                                                                                                    |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `warm 23:41`                                     | the cache is warm and CLIProxyPacer pings it                                                                                                            |
+| `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                                                                    |
+| `cache cold`                                     | the cache went cold, shown as a warning                                                                                                                 |
+| `cache cold · compacts first`                    | the cache went cold, [compact cold chats first](/providers#compaction-asks) is on for the chat, and the chat is large enough for it, shown as a warning |
+| `keep-alive stopped · warm 2:10`                 | CLIProxyPacer's pings stopped on a failure, shown as a warning                                                                                          |
+| `compacts at 14:32`                              | compact before cold is on, and CLIProxyPacer has set the time it asks for it                                                                            |
+| `account used up · next step moves to <account>` | the chat's account can't serve its next step, shown as a warning                                                                                        |
+| `warm`                                           | the cache is warm and CLIProxyPacer gives no time                                                                                                       |
+| nothing                                          | the proxy has no pacer, CLIProxyPacer knows nothing of the chat yet, or the chat's model is another provider's                                          |
 
-- While CPP is unreachable the item keeps its last text, greyed, with the time it is from: `warm 12:05 · as of 14:02`.
-  It stops counting until CPP answers again.
+- While CLIProxyPacer is unreachable the item keeps its last text, greyed, with the time it is from:
+  `warm 12:05 · as of 14:02`. It stops counting until CLIProxyPacer answers again.
 - In a narrow window the shortcuts go first, then the context and cost; the cache item goes last.
 - Click it to open the footer at the **Requests** tab.
 
 ## Sidebar
 
-The **Account** section, above the sidebar's other sections, shows the account CPP serves the chat from, or the one that
-served it last while the chat is idle. The sidebar's **Context** section is gone; the toolbar shows the same.
+The **Account** section, above the sidebar's other sections, shows the account CLIProxyPacer serves the chat from, or
+the one that served it last while the chat is idle. The sidebar's **Context** section is gone; the toolbar shows the
+same.
 
 ```text
 Account
@@ -52,18 +56,19 @@ claude-max-2
 next: claude-max-1, once its cache is cold
 ```
 
-- Each line under the account is one of its usage windows. `~` marks a reset CPP estimates, `· stale` a reading CPP no
-  longer counts on (older than an hour), `not started` a window nothing has used since it last reset, and
-  `reset, awaiting a reading` one whose reset has passed with no reading since.
+- Each line under the account is one of its usage windows. `~` marks a reset CLIProxyPacer estimates, `· stale` a
+  reading CLIProxyPacer no longer counts on (older than an hour), `not started` a window nothing has used since it last
+  reset, and `reset, awaiting a reading` one whose reset has passed with no reading since.
 - `next:` says where the chat goes once its cache is cold, and why.
-- `forced move to <account> now` (a warning) or `… soon` says CPP must move the chat.
-- While CPP is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it says
-  `no pacer`.
+- `forced move to <account> now` (a warning) or `… soon` says CLIProxyPacer must move the chat.
+- While CLIProxyPacer is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it
+  says `no pacer`.
 
 ## Requests tab
 
-The **Requests** tab lists the chat's requests at CPP, with its subagents', newest at the top. Press **↓** from the
-prompt to open the footer, then **←/→** to reach the tab after **Terminals**, or click the toolbar's cache item.
+The **Requests** tab lists the chat's requests at CLIProxyPacer, with its subagents', newest at the top. Press **↓**
+from the prompt to open the footer, then **←/→** to reach the tab after **Terminals**, or click the toolbar's cache
+item. Opening a [cache notice](#cache-notices) opens it too.
 
 ```text
 time      kind        model               account       read/write    verdict                             cost
@@ -72,11 +77,11 @@ time      kind        model               account       read/write    verdict   
 14:00:02  title       claude-haiku-5-5    claude-max-2  0/0                                            $0.0004
 ```
 
-- **kind** is `step`, the agent of a subagent's step, `ping`, `title`, `compaction` or `search`, a call of one of CPP's
-  [web tools](#web-tools): its model is the tool, its account the service's key.
+- **kind** is `step`, the agent of a subagent's step, `ping`, `title`, `compaction` (a summary) or `search`, a call of
+  one of CLIProxyPacer's [web tools](#web-tools): its model is the tool, its account the service's key.
 - **read/write** are the tokens read from and written to the prompt cache.
-- **verdict** is CPP's cache verdict. A miss shows its cause and the part of the prompt that changed, as a warning; a
-  failed or refused request shows as an error.
+- **verdict** is CLIProxyPacer's cache verdict. A miss shows its cause and the part of the prompt that changed, as a
+  warning; a failed or refused request shows as an error.
 - The columns are as wide as their values need, so a value is cut only when the line has no room left. They keep their
   widths while the tab stays open; a longer value that arrives meanwhile is cut until you open the tab again or resize
   the window.
@@ -92,11 +97,12 @@ time      kind        model               account       read/write    verdict   
 | **Enter**                       | Moves the chat to where the request ended: the end of that step's reply. A subagent's request opens the subagent's chat there; a ping or a title goes to the reply before it. |
 | **Ctrl+Enter** or **Alt+Enter** | Shows what changed in the request's prompt, in place of the list. The same key or **Esc** goes back to the same row.                                                          |
 
-What changed shows CPP's verdict and its cause, how many tokens were written to the cache again and what the miss cost,
-and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only had their
-cache marker moved. It scrolls with **↑/↓**, and the footer grows to at most half the window. When CPP no longer keeps
-the prompt, it says `prompt no longer kept`. A `search` row has none: a web tool call sends no prompt, so what changed
-says so and reads nothing, and **Enter** on it goes to the chat's first step after the call.
+What changed shows CLIProxyPacer's verdict and its cause, how many tokens were written to the cache again and what the
+miss cost, and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only
+had their cache marker moved. It scrolls with **↑/↓**, and the footer grows to at most half the window. When
+CLIProxyPacer no longer keeps the prompt, it says `prompt no longer kept`. A `search` row has none: a web tool call
+sends no prompt, so what changed says so and reads nothing, and **Enter** on it goes to the chat's first step after the
+call.
 
 ```text
 miss · tools changed · tools[0] changed
@@ -111,41 +117,161 @@ Ctrl+Enter can arrive as a plain Enter, which moves the chat to the request inst
 Terminal it needs **Use Option as Meta key** in the profile's keyboard settings.
 
 The tab says why it is empty: `No requests yet`, `No cache misses yet`, `CPP unreachable · as of 14:02` above the last
-rows, greyed, or `This proxy has no pacer, so it keeps no request records`. It is hidden when CPP isn't set up or the
-chat never used it.
+rows, greyed, or `This proxy has no pacer, so it keeps no request records`. It is hidden when CLIProxyPacer isn't set
+up or the chat never used it.
+
+## Cache notices
+
+When a step or a summary of one of your chats misses CLIProxyPacer's prompt cache, or reuses only part of it, a card
+shows in the top-right corner of every open TUI, whatever chat it shows. It says what was lost, in which chat, and why.
+
+```text
+Cache miss · 152K tokens not reused        3 min ago ×
+Fix the login flow · build · claude-sonnet-5-5
+tools changed · tools[0]
+```
+
+- The first line says `Cache miss` with a red edge or `Partial cache reuse` with a yellow one, the tokens not reused
+  when CLIProxyPacer counts them, the card's age (`just now`, `3 min ago`) and `×`.
+- The second names the chat, its agent and its model; a subagent's card names the subagent's chat.
+- The third is the cause, as the **Requests** tab says it, or `unknown cause` when CLIProxyPacer gives none.
+- At most 4 cards show, fewer in a short terminal, then `+2 more cache notices`. While a dialog is open they wait
+  behind it.
+
+| To                 | Do                                                                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Open a card        | Click it, or press `<leader>o` for the newest. The TUI goes to the chat that sent the request, opens its **Requests** tab on that request and shows what changed in it. |
+| Dismiss a card     | Click its `×`. An opened card is dismissed too.                                                                                                                         |
+| Dismiss every card | **Dismiss cache notices** in the command palette (**Ctrl+P**). It has no key until you bind `pacer.notices.dismiss`.                                                    |
+
+What raises a card, and its limits:
+
+- Only steps and summaries raise one, a subagent's included: pings, titles and web tool calls don't.
+- Only this service's chats: another client's requests on the same key raise none.
+- The background service keeps the cards in memory, the newest 50 of the last 2 hours. A restart of the service starts
+  with none, and requests CLIProxyPacer received before it started raise none.
+- The cards stay while CLIProxyPacer is unreachable. Requests read after it answers again still raise their cards, if
+  they are within the card's lifetime.
+- There is no sound and no system notification.
+
+Each TUI shows the cards its own settings let through. They are rows of [Settings](#settings) and keys of `cli.json`
+([`cliproxypacer.notices`](/cli/config#cliproxypacer)):
+
+| Row                            | Choices                                | Default                  |
+| ------------------------------ | -------------------------------------- | ------------------------ |
+| Cache notices                  | on, off                                | on                       |
+| Cache notices from             | all chats, this chat and its subagents | all chats                |
+| Cache notice lifetime          | 15, 30, 60, 120 minutes                | 15 minutes               |
+| Cache notice minimum           | any loss, 1K, 10K, 50K, 100K tokens    | any loss                 |
+| Cache notices for              | misses and partial reuse, misses only  | misses and partial reuse |
+| Opened cache notice disappears | in every TUI, only in this TUI         | in every TUI             |
+
+- With **Cache notices** off, the TUI reads and shows none.
+- **This chat and its subagents** shows the cards of the chat you look at, the chat it belongs to and their subagents.
+  The home screen then shows none.
+- A card leaves at its lifetime: with 15 minutes, its last age is `14 min ago`.
+- A card without a token count shows only with **any loss**.
+- **Only in this TUI** keeps the dismissal in the TUI's own storage for a day. Every TUI on the same computer shares
+  that storage; a TUI elsewhere keeps showing the card.
+
+## Settings
+
+Press **Ctrl+P**, then select **Open settings**. While CLIProxyPacer answers, **Settings** has a **CLIProxyPacer**
+section with ten rows. Change a row with **Enter** or **←/→**.
+
+```text
+CLIProxyPacer
+Cache notices                   on
+Cache notices from              all chats
+Cache notice lifetime           15 minutes
+Cache notice minimum            any loss
+Cache notices for               misses and partial reuse
+Opened cache notice disappears  in every TUI
+Compact cold chats first        off
+Compact before cold             off
+Summaries written by            CLIProxyPacer
+Keep my messages in summaries   off
+```
+
+- The first six are this TUI's own, for its [cache notices](#cache-notices), saved in `cli.json`.
+- The last four are CLIProxyPacer's settings for every chat on your client key, kept by CLIProxyPacer: see
+  [Compaction asks](/providers#compaction-asks) and [Summaries](/providers#summaries).
+
+| Row                           | Choices                  | Default at CLIProxyPacer                            |
+| ----------------------------- | ------------------------ | --------------------------------------------------- |
+| Compact cold chats first      | on, off                  | off, unless your CLIProxyPacer's server turns it on |
+| Compact before cold           | on, off                  | off, unless your CLIProxyPacer's server turns it on |
+| Summaries written by          | CLIProxyPacer, openforge | CLIProxyPacer                                       |
+| Keep my messages in summaries | on, off                  | off                                                 |
+
+- The section shows only while CLIProxyPacer answers. It hides while CLIProxyPacer isn't set up, is unreachable, or is a
+  proxy without the pacer; change the six notice rows in `cli.json` then.
+- CLIProxyPacer's four rows are read from it when Settings opens, and show what applies to your chats: your key's own
+  value, else the server's, else CLIProxyPacer's default. The two summaries rows show only when CLIProxyPacer lists
+  those settings, which an older CLIProxyPacer doesn't.
+- Switching one of them to the value CLIProxyPacer applies without yours removes yours, so that a value set later for
+  the whole server reaches your chats.
+- A chat's own switch, `<leader>f` or `<leader>j`, wins over its row.
+- A change CLIProxyPacer refuses or can't take shows its error as a toast.
 
 ## Switches
 
-Two switches change how CPP treats the chat. The leader is **Ctrl+X** unless you changed it, so `<leader>k` is
-**Ctrl+X**, then **K**. Each is also in the command palette (**Ctrl+P**), under CLIProxyPacer.
+Three switches change how CLIProxyPacer treats the chat. The leader is **Ctrl+X** unless you changed it, so
+`<leader>k` is **Ctrl+X**, then **K**. Each is also in the command palette (**Ctrl+P**), under CLIProxyPacer.
 
-| Key         | Palette                           | Switches                                                                    |
-| ----------- | --------------------------------- | --------------------------------------------------------------------------- |
-| `<leader>k` | Cache warming for this chat       | CPP's pings for the chat, which keep its prompt cache warm while you pause. |
-| `<leader>j` | Compact before cold for this chat | Whether CPP asks to compact the idle chat before its cache goes cold.       |
+| Key         | Palette                                | Switches                                                                                        |
+| ----------- | -------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `<leader>k` | Cache warming for this chat            | CLIProxyPacer's pings for the chat, which keep its prompt cache warm while you pause.           |
+| `<leader>j` | Compact before cold for this chat      | Whether CLIProxyPacer asks to compact the idle chat before its cache goes cold.                 |
+| `<leader>f` | Compact cold chats first for this chat | Whether CLIProxyPacer asks to compact the chat, once its cache went cold, before its next step. |
 
 ```text
-Cache warming off for this chat
+Compact cold chats first on for this chat
 ```
 
 - A toast says the new state, and the toolbar shows it at once.
-- A switch changed elsewhere, such as on CPP's own page, shows the next time the TUI shows the chat.
-- Before the chat's first reply, CPP knows nothing of it yet: switch it after that reply.
+- A chat's switch wins over the row for all chats in [Settings](#settings).
+- A switch changed elsewhere, such as on CLIProxyPacer's own page, shows the next time the TUI shows the chat.
+- Before the chat's first reply, CLIProxyPacer knows nothing of it yet: switch it after that reply.
 - On a proxy without the pacer, or for a chat whose model is another provider's, neither the keys nor the palette
   entries exist.
-- When CPP asks to compact, openforge compacts the chat with its own model on CPP, the one whose prompt cache is warm,
-  never a compaction model set elsewhere. It leaves the chat alone while a step runs, a prompt is queued or a revert is
-  staged, and when its model is no longer on CPP.
+
+What the two compaction asks do, and their limits, is on [Compaction asks](/providers#compaction-asks).
 
 **Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
-asks CPP to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't count.
+asks CLIProxyPacer to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't
+count.
+
+## Summaries
+
+A compaction of a chat on CLIProxyPacer names who wrote its summary on its divider in the chat:
+
+```text
+Compaction · by CLIProxyPacer on gemini-3.8-flash-high · cold · 12 of your messages kept · 20,182 in · 214 out
+```
+
+- `on <model>` is the model that wrote it.
+- `cold` says CLIProxyPacer wrote it on its cheaper model because the chat was cold.
+- `12 of your messages kept` shows with **Keep my messages in summaries** on: your earlier messages CLIProxyPacer kept
+  word for word after the summary.
+- Then come the tokens of the summary request. Each part shows only when it is known.
+- In a narrow window the tokens go first, then the messages kept, the model, and `cold`.
+
+When openforge wrote the summary, the divider says so, and why when CLIProxyPacer was meant to:
+
+```text
+Compaction · by openforge · CLIProxyPacer couldn't: it answered 501 · 48,210 in · 1,904 out
+```
+
+Who writes a summary, and when openforge does, is on [Summaries](/providers#summaries).
 
 ## Web tools
 
-When CPP has web tools, every chat gets them, also a chat on another provider's model: `web_search`, `web_research`,
-`web_extract` and `web_crawl` (see [Web tools](/providers#web-tools)). They show in the chat as tool calls.
+When CLIProxyPacer has web tools, every chat gets them, also a chat on another provider's model: `web_search`,
+`web_research`, `web_extract` and `web_crawl` (see [Web tools](/providers#web-tools)). They show in the chat as tool
+calls.
 
 - A call asks first, as the built-in web search and `webfetch` do (see [Approvals](/permissions#approvals)).
-- A call CPP can't serve shows as a failed tool call, with CPP's reason, which the model reads too.
+- A call CLIProxyPacer can't serve shows as a failed tool call, with CLIProxyPacer's reason, which the model reads too.
 - A research or a crawl that outlasts one call shows the job's ID; the model's next call of the tool, with that ID, gets
   the result.

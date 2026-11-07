@@ -114,6 +114,7 @@ import { SessionTerminalsProvider } from "./context/session-terminals"
 import { ClientMcp } from "./context/client-mcp"
 import { PanelProvider, usePanel } from "./context/panel"
 import { PacerProvider } from "./context/pacer"
+import { PacerNotices } from "./pacer/notices"
 import { SessionFrame } from "./component/session-frame"
 import { createTuiClipboard } from "./clipboard"
 
@@ -1503,6 +1504,7 @@ function App() {
               </Switch>
             </box>
             <Slot path="app" />
+            <PacerNotices />
           </Show>
         </box>
         <Show when={verticalTabsVisible()}>

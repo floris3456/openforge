@@ -117,6 +117,33 @@ export const Info = Schema.Struct({
       }),
     }),
   ).annotate({ description: "System notification and sound settings" }),
+  cliproxypacer: Schema.optional(
+    Schema.Struct({
+      notices: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Show a card in the corner for each cache miss or partial reuse on CLIProxyPacer",
+          }),
+          from: Schema.optional(Schema.Literals(["all", "chat"])).annotate({
+            description: "Cache notices of all chats, or of the shown chat and its subagents only",
+          }),
+          lifetime: Schema.optional(Schema.Literals([15, 30, 60, 120])).annotate({
+            description: "Minutes a cache notice stays after its request",
+          }),
+          minimum: Schema.optional(Schema.Literals([0, 1000, 10000, 50000, 100000])).annotate({
+            description: "The fewest tokens not reused that raise a cache notice; 0 for any loss",
+          }),
+          kinds: Schema.optional(Schema.Literals(["all", "misses"])).annotate({
+            description: "Cache notices for misses and partial reuse, or for misses only",
+          }),
+          dismiss: Schema.optional(Schema.Literals(["every-tui", "this-tui"])).annotate({
+            description:
+              "Whether an opened or dismissed cache notice disappears from every TUI, or only from this one, which keeps it dismissed for a day",
+          }),
+        }),
+      ).annotate({ description: "Cache notices" }),
+    }),
+  ).annotate({ description: "CLIProxyPacer settings of this TUI" }),
   diffs: Schema.optional(
     Schema.Struct({
       source: Schema.optional(DiffSource).annotate({

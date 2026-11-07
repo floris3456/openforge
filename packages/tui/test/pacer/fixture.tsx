@@ -3,6 +3,7 @@ import type {
   OpenCodeEvent,
   PacerAccounts,
   PacerChat,
+  PacerNotice,
   PacerPromptChange,
   PacerRequest,
   PacerStatus,
@@ -15,7 +16,7 @@ import { TextAttributes } from "@opentui/core"
 import { ManualClock } from "@opentui/core/testing"
 import { testRender } from "@opentui/solid"
 import { onMount, type JSX } from "solid-js"
-import { ConfigProvider } from "../../src/config"
+import { ConfigProvider, useConfig, type Config } from "../../src/config"
 import type { TuiKeybind } from "../../src/config/keybind"
 import { ClientProvider } from "../../src/context/client"
 import { DataProvider, useData } from "../../src/context/data"
@@ -27,7 +28,7 @@ import { TuiAppProvider } from "../../src/context/runtime"
 import { StorageProvider } from "../../src/context/storage"
 import { ThemeProvider, useTheme } from "../../src/context/theme"
 import { PromptFooter } from "../../src/feature-plugins/prompt/footer"
-import { DialogProvider } from "../../src/ui/dialog"
+import { DialogProvider, useDialog } from "../../src/ui/dialog"
 import { ToastProvider } from "../../src/ui/toast"
 import { tmpdir } from "../fixture/fixture"
 import { createApi, createEventStream, createFetch, directory, json } from "../fixture/tui-client"
@@ -160,6 +161,24 @@ export function miss(index: number, extra: Partial<PacerRequest> = {}) {
   })
 }
 
+/** The cache notice of request `index` (one second older per index, as `request`): a miss of `CHAT` by default. */
+export function notice(index: number, extra: Partial<PacerNotice> = {}): PacerNotice {
+  return {
+    requestID: `req_${index}`,
+    sessionID: CHAT,
+    rootID: CHAT,
+    title: "Fix the flaky test",
+    agent: "build",
+    model: "claude-opus-4-5",
+    verdict: "miss",
+    tokens: 152_340,
+    cause: "prefix changed · system",
+    missCost: 0.41 as PacerNotice["missCost"],
+    at: NOW - index * 1000,
+    ...extra,
+  } as PacerNotice
+}
+
 export function promptChange(of: PacerRequest, extra: Partial<PacerPromptChange> = {}): PacerPromptChange {
   return {
     request: of,
@@ -225,6 +244,8 @@ export function pacerFake(input: { delay?: number } = {}) {
     /** Each chat's requests, newest first. */
     requests: {} as Record<string, PacerRequest[]>,
     prompts: {} as Record<string, PacerPromptChange | null>,
+    /** The cache notices the service holds, newest first; a dismissal drops one. */
+    notices: [] as PacerNotice[],
     /** Requests, prompts and updates answer 503, as when the pacer is not on. */
     unavailable: false,
     calls: [] as Call[],
@@ -283,12 +304,21 @@ export function pacerFake(input: { delay?: number } = {}) {
       if (fake.unavailable) return refuse()
       return json({ data: fake.prompts[decodeURIComponent(parts[1]!)] ?? null })
     }
+    if (call.path === "notices" && call.method === "GET") return json({ data: fake.notices })
+    if (parts[0] === "notices" && parts[2] === "dismiss" && call.method === "POST") {
+      const requestID = decodeURIComponent(parts[1]!)
+      fake.notices = fake.notices.filter((notice) => notice.requestID !== requestID)
+      return json({ data: true })
+    }
     throw new Error(`unexpected pacer call: ${call.method} ${call.path}`)
   }
   return fake
 }
 
 export type PacerFake = ReturnType<typeof pacerFake>
+
+/** The TUI's config as an update writes it. */
+type ConfigDraft = { -readonly [Key in keyof Config.Info]: Config.Info[Key] }
 
 export function sessionInfo(id: string, providerID: string, parentID?: string, cost = 0) {
   return {
@@ -348,8 +378,20 @@ export async function renderPacer(input: {
   keybinds?: Partial<TuiKeybind.Keybinds>
   /** `"default"`: the store's own clock, as the app has it. */
   clock?: ManualClock | "default"
+  /** The TUI's config, which Settings change in memory, as a config file would be. */
+  config?: Omit<Config.Info, "keybinds">
 }) {
   const state = await tmpdir()
+  let tui: Config.Info = structuredClone({ ...input.config, keybinds: input.keybinds ?? {} })
+  const service = {
+    get: async () => tui,
+    update: async (mutate: (draft: ConfigDraft) => void) => {
+      const next = structuredClone(tui)
+      mutate(next)
+      tui = next
+      return next
+    },
+  }
   const events = createEventStream()
   const clock = input.clock === "default" ? undefined : (input.clock ?? new ManualClock())
   if (!input.clock) clock!.setTime(NOW)
@@ -381,6 +423,8 @@ export async function renderPacer(input: {
   let route!: ReturnType<typeof useRoute>
   let theme!: ReturnType<typeof useTheme>
   let dispatch!: (command: string) => void
+  let config!: ReturnType<typeof useConfig>
+  let dialog!: ReturnType<typeof useDialog>
 
   function Probe() {
     const data = useData()
@@ -388,6 +432,8 @@ export async function renderPacer(input: {
     route = useRoute()
     theme = useTheme()
     dispatch = Keymap.use().dispatch
+    config = useConfig()
+    dialog = useDialog()
     onMount(() => {
       void Promise.all(
         Object.keys(sessions).map((id) => Promise.all([data.session.sync(id), data.session.message.sync(id)])),
@@ -401,7 +447,10 @@ export async function renderPacer(input: {
       <TestTuiContexts directory={directory} paths={{ state: state.path }}>
         <TuiAppProvider value={{ name: "test", version: "test", channel: "test" }}>
           <StorageProvider>
-            <ConfigProvider config={createTuiResolvedConfig({ keybinds: input.keybinds ?? {} })}>
+            <ConfigProvider
+              config={createTuiResolvedConfig({ ...input.config, keybinds: input.keybinds ?? {} })}
+              service={service}
+            >
               <Keymap.Provider>
                 <ToastProvider>
                   <RouteProvider initialRoute={{ type: "session", sessionID: input.route ?? CHAT }}>
@@ -451,6 +500,16 @@ export async function renderPacer(input: {
       return theme
     },
     dispatch: (command: string) => dispatch(command),
+    /** The dialogs, to open one over the screen. */
+    get dialog() {
+      return dialog
+    },
+    /** The TUI's config as last written. */
+    config: () => tui,
+    /** Changes the TUI's config, as a Settings row does. */
+    configure: (mutate: (draft: ConfigDraft) => void) => config.update(mutate),
+    /** Where this TUI keeps its storage. */
+    state: state.path,
     emit(event: { type: string; data: unknown }) {
       events.emit({ id: `evt_${Math.random()}`, created: NOW, ...event } as unknown as OpenCodeEvent)
     },

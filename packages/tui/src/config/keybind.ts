@@ -263,6 +263,8 @@ export const Definitions = {
   "composer.request.detail": keybind("ctrl+return,alt+return", "Show what changed in the request's prompt"),
   "pacer.warming.toggle": keybind("<leader>k", "Switch cache warming for this chat"),
   "pacer.compact_before_cold.toggle": keybind("<leader>j", "Switch compact before cold for this chat"),
+  "pacer.notice.open": keybind("<leader>o", "Open the newest cache notice"),
+  "pacer.notices.dismiss": keybind("none", "Dismiss cache notices"),
 
   "dialog.select.prev": keybind("up,ctrl+p", "Move to previous dialog item"),
   "dialog.select.next": keybind("down,ctrl+n", "Move to next dialog item"),

@@ -190,26 +190,43 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
       return
     }
     const request = selected()
-    if (!request) return
+    if (request) openDetail(request.id)
+  }
+  const openDetail = (requestID: string) => {
     // Back from what changed is on the same row, even if newer requests came meanwhile.
-    setView("selected", which(), request.id)
+    setView("selected", which(), requestID)
     // A web tool call sent no prompt: what changed says so, and nothing is read.
-    if (promptless(request.id) || props.pacer.held(request.id) !== undefined) {
-      setView({ detail: request.id, detailTop: 0, pending: undefined })
+    if (promptless(requestID) || props.pacer.held(requestID) !== undefined) {
+      setView({ detail: requestID, detailTop: 0, pending: undefined })
       return
     }
-    setView("pending", request.id)
-    props.pacer.prompt(request.id).then(
+    setView("pending", requestID)
+    props.pacer.prompt(requestID).then(
       () => {
-        if (view.pending === request.id) setView({ detail: request.id, detailTop: 0, pending: undefined })
+        if (view.pending === requestID) setView({ detail: requestID, detailTop: 0, pending: undefined })
       },
       (error: unknown) => {
-        if (view.pending !== request.id) return
+        if (view.pending !== requestID) return
         setView("pending", undefined)
         toast.show({ variant: "error", message: `What changed couldn't be read: ${errorMessage(error)}` })
       },
     )
   }
+
+  // A cache notice opened for this chat (the store's `reveal`): the tab comes forward, on the request's row, showing
+  // what changed in it.
+  createEffect(() => {
+    const pending = props.pacer.reveal()
+    if (pending?.sessionID !== props.sessionID || !visible()) return
+    if (!active()) {
+      composer.select("requests")
+      return
+    }
+    untrack(() => {
+      props.pacer.clearReveal()
+      openDetail(pending.requestID)
+    })
+  })
 
   const change = () => (view.detail === undefined ? undefined : props.pacer.held(view.detail))
   const lines = createMemo(() => {

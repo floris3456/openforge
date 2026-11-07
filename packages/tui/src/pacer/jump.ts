@@ -33,8 +33,9 @@ export function requestTarget(
 }
 
 /**
- * The session route's part: how to open its Requests tab (the toolbar's cache item), and the move a row's Enter asked
- * for once the chat's messages are there. Older messages are loaded until they reach back to the request.
+ * The session route's part: how to open its Requests tab (the toolbar's cache item, a cache notice opened for the
+ * chat), and the move a row's Enter asked for once the chat's messages are there. Older messages are loaded until they
+ * reach back to the request.
  */
 export function usePacerSession(input: {
   sessionID: string
@@ -49,6 +50,14 @@ export function usePacerSession(input: {
   const data = useData()
   if (!pacer) return
   onCleanup(pacer.attach(input.sessionID, { open: input.open }))
+  // A cache notice opened for this chat opens its Requests tab, which moves to the request; one the tab didn't reach
+  // before the chat was left is dropped, so coming back later doesn't open it.
+  createEffect(() => {
+    if (pacer.reveal()?.sessionID === input.sessionID) untrack(input.open)
+  })
+  onCleanup(() => {
+    if (pacer.reveal()?.sessionID === input.sessionID) pacer.clearReveal()
+  })
   createEffect(() => {
     const pending = pacer.jump()
     if (!pending || pending.sessionID !== input.sessionID || !input.ready()) return

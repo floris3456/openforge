@@ -14,6 +14,7 @@ import {
   chat,
   miss,
   NOW,
+  OTHER,
   pacerFake,
   promptChange,
   renderPacer,
@@ -104,6 +105,8 @@ async function requestsTab(
         parentID: CHAT,
         messages: [step("msg_sub", { created: NOW - 5_000, proxyRequestID: "req_sub" })],
       },
+      // A chat on another provider: it has no Requests tab.
+      [OTHER]: { providerID: "anthropic" },
     },
     content: () => {
       const route = useRoute()
@@ -563,6 +566,70 @@ describe("what changed", () => {
   })
 })
 
+// Spec cliproxypacer-cache-notices, section 3: a cache notice opens its chat's Requests tab on its request, showing
+// what changed, from outside the tab.
+describe("a request asked for from outside the tab", () => {
+  const requests = [request(0), request(1), request(2), miss(3), request(4), request(5), request(6), request(7)]
+
+  test("the closed composer opens at the tab, on the request's row, with what changed within 100 ms", async () => {
+    await using setup = await requestsTab({ requests, prompts: { req_3: promptChange(miss(3)) } })
+    await until(() => setup.pacer.held("req_3") !== undefined, 5_000, "what changed read ahead")
+    await setup.frame(closed)
+    using recorder = recordFrames(setup.app)
+    const start = performance.now()
+    setup.pacer.showRequest({ sessionID: CHAT, requestID: "req_3" })
+    const detail = await setup.frame((frame) => frame.includes("compared with req_prev"))
+    const drawn = recorder.frames.find((frame) => frame.text.includes("compared with req_prev"))!
+    console.log(`A request asked for: what changed on screen ${(drawn.at - start).toFixed(1)} ms after`)
+    expect(drawn.at - start).toBeLessThan(100)
+    expect(detail).toContain("miss · prefix changed · system changed")
+    expect(setup.fake.since(start)).toEqual([])
+    expect(setup.pacer.reveal()).toBeUndefined()
+    // Back, the cursor is on its row, not on the newest.
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(selectedTime(setup)).toBe(time(3))
+    finished(recorder, [closed, (frame) => frame.includes("compared with req_prev"), list(range(0, 6))])
+  })
+
+  test("the composer open at another tab comes to Requests; what changed not held is read", async () => {
+    await using setup = await requestsTab({ requests, delay: 0, prompts: { req_6: promptChange(request(6)) } })
+    setup.pacer.openRequests(CHAT)
+    await setup.frame((frame) => rowsOf(frame).length > 0)
+    // ← to Subagents; the composer's own choice of tab stays Requests.
+    setup.app.mockInput.pressArrow("left")
+    await setup.frame((frame) => rowsOf(frame).length === 0 && !frame.includes("warm 23:41"))
+    setup.pacer.showRequest({ sessionID: CHAT, requestID: "req_6" })
+    await setup.frame((frame) => frame.includes("compared with req_prev") && frame.includes("hit"))
+    setup.app.mockInput.pressEscape()
+    await setup.frame(() => selectedTime(setup) === time(6))
+  })
+
+  test("a request of a chat not shown waits for it; one whose chat is left before its tab showed is dropped", async () => {
+    await using setup = await requestsTab({ requests, delay: 0, prompts: { req_3: promptChange(miss(3)) } })
+    await setup.frame(closed)
+    setup.fake.prompts.req_sub = promptChange(miss(9, { id: "req_sub", sessionID: SUBAGENT }))
+    setup.pacer.showRequest({ sessionID: SUBAGENT, requestID: "req_sub" })
+    await Bun.sleep(30)
+    expect(rowsOf(setup.app.captureCharFrame())).toEqual([])
+    expect(setup.pacer.reveal()).toEqual({ sessionID: SUBAGENT, requestID: "req_sub" })
+    // Shown, its tab opens on it.
+    setup.route.navigate({ type: "session", sessionID: SUBAGENT })
+    await setup.frame(
+      (frame) => frame.includes("transcript of ses_subagent") && frame.includes("compared with req_prev"),
+    )
+    // Asked for in the chat shown while its tab can't show there (the chat isn't on CPP), then left: dropped.
+    setup.route.navigate({ type: "session", sessionID: CHAT })
+    await setup.frame((frame) => frame.includes("transcript of ses_chat"))
+    setup.pacer.showRequest({ sessionID: OTHER, requestID: "req_other" })
+    setup.route.navigate({ type: "session", sessionID: OTHER })
+    await setup.frame((frame) => frame.includes("transcript of ses_other"))
+    setup.route.navigate({ type: "session", sessionID: CHAT })
+    await setup.frame((frame) => frame.includes("transcript of ses_chat"))
+    expect(setup.pacer.reveal()).toBeUndefined()
+  })
+})
+
 describe("CPP going away and coming back", () => {
   test("the same rows, greyed, as of 14:02; back, the rows read again replace them in one frame", async () => {
     await using setup = await requestsTab()
@@ -631,7 +698,9 @@ describe("empty and hidden", () => {
       await setup.app.renderOnce()
       expect(setup.app.captureCharFrame()).not.toContain("Requests")
       expect(setup.app.captureCharFrame()).not.toContain("warm")
-      expect(setup.fake.calls.filter((call) => call.path !== "status" && call.path !== "accounts")).toEqual([])
+      // The accounts and the cache notices (spec cliproxypacer-cache-notices) are the service's, not the chat's: they
+      // are read once CPP is set up, whatever chat shows.
+      expect(setup.fake.calls.filter((call) => !["status", "accounts", "notices"].includes(call.path))).toEqual([])
       if (input.state === "unset") expect(setup.fake.calls.map((call) => call.path)).toEqual(["status"])
       expect(setup.pacer.ticking()).toBe(false)
       expect(setup.clock.pendingTimerCount).toBe(0)

@@ -1,6 +1,7 @@
 import type {
   PacerAccounts,
   PacerChat,
+  PacerNotice,
   PacerPromptChange,
   PacerRequest,
   PacerRequests,
@@ -22,6 +23,7 @@ import {
   type ParentProps,
 } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
+import { useConfig } from "../config"
 import { PacerSwitches } from "../pacer/switches"
 import { useClient } from "./client"
 import { useData } from "./data"
@@ -31,10 +33,11 @@ import { useRoute } from "./route"
 // The TUI's one store of what CLIProxyPacer (CPP) says, read through the service's `pacer.*` routes and kept current
 // by its `pacer.*` events (spec cliproxypacer-step-1, sections 4, 5 and 7). It costs nothing without CPP: until the
 // status says CPP is set up and the shown chat is on it, nothing is read, ticked or drawn, and an event for another
-// chat costs one comparison. Instant screens come from holding data before it is asked for: the shown chat's view
-// and the first page of its requests for both filters are read when the chat is shown, never when a key opens a
-// screen, and what changed is read ahead for each first page's newest row (where the Requests tab opens) and for
-// every miss held.
+// chat costs one comparison. What is the service's, not a chat's, is read once CPP is set up, whatever chat shows: the
+// accounts, and the cache notices of every chat (spec cliproxypacer-cache-notices). Instant screens come from holding
+// data before it is asked for: the shown chat's view and the first page of its requests for both filters are read when
+// the chat is shown, never when a key opens a screen, and what changed is read ahead for each first page's newest row
+// (where the Requests tab opens) and for every miss held.
 
 /** The provider CPP's models are under (part 1, `PacerEndpoint.id`). */
 export const PACER_PROVIDER = "cliproxypacer"
@@ -47,6 +50,8 @@ const HELD_CHATS = 8
 const HELD_PROMPTS = 200
 /** What-changed reads ahead at once; a first page's newest row and one asked for now may run beside them. */
 const PROMPT_READS = 3
+/** Cache notices held, newest first: as many as the service holds. */
+const HELD_NOTICES = 50
 
 /** A value as read, with the connection's epoch it was read in: one read before CPP came back is stale. */
 export interface Held<Value> {
@@ -75,8 +80,15 @@ export interface PacerJump {
   readonly request: PacerRequest
 }
 
+export interface PacerReveal {
+  /** The chat whose Requests tab opens: the one that sent the request. */
+  readonly sessionID: string
+  readonly requestID: string
+}
+
 function createPacer(input: { clock: Clock }) {
   const client = useClient()
+  const config = useConfig()
   const data = useData()
   const event = useEvent()
   const route = useRoute()
@@ -88,7 +100,9 @@ function createPacer(input: { clock: Clock }) {
     accounts?: Held<PacerAccounts>
     chats: Record<string, ChatHeld>
     prompts: Record<string, PacerPromptChange | null>
-  }>({ epoch: 0, chats: {}, prompts: {} })
+    /** The cache notices of every chat of the service not dismissed in every TUI, newest first. */
+    notices: PacerNotice[]
+  }>({ epoch: 0, chats: {}, prompts: {}, notices: [] })
 
   const state = () => store.status?.state ?? "unset"
   const shown = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
@@ -143,7 +157,7 @@ function createPacer(input: { clock: Clock }) {
     batch(() => {
       touch()
       if (next.state === "unset") {
-        setStore({ status: next, accounts: undefined })
+        setStore({ status: next, accounts: undefined, notices: [] })
         setStore("chats", reconcile({}))
         setStore("prompts", reconcile({}))
         held.splice(0)
@@ -194,6 +208,41 @@ function createPacer(input: { clock: Clock }) {
         () => undefined,
       )
     }),
+  )
+
+  // The cache notices (spec cliproxypacer-cache-notices, sections 2 and 3): the service holds them for every chat;
+  // this TUI reads them once CPP is set up and again after each reconnect, and keeps current with
+  // `pacer.notice.added` and `pacer.notice.dismissed`. Nothing is read or held while this TUI's Cache notices are off.
+  const noticesOn = () => state() !== "unset" && (config.data.cliproxypacer?.notices?.enabled ?? true)
+  createEffect(
+    on([noticesOn, resync], ([on]) => {
+      if (!on) {
+        setStore("notices", [])
+        return
+      }
+      void client.api.experimental.pacer.notices.list().then(
+        (notices) => {
+          if (noticesOn()) setStore("notices", reconcile(notices, { key: "requestID" }))
+        },
+        () => undefined,
+      )
+    }),
+  )
+  onCleanup(
+    event.on("pacer.notice.added", (event) => {
+      if (!noticesOn()) return
+      const notice = event.data.notice
+      setStore("notices", (notices) =>
+        [notice, ...notices.filter((held) => held.requestID !== notice.requestID)]
+          .toSorted((a, b) => b.at - a.at)
+          .slice(0, HELD_NOTICES),
+      )
+    }),
+  )
+  onCleanup(
+    event.on("pacer.notice.dismissed", (event) =>
+      setStore("notices", (notices) => notices.filter((notice) => notice.requestID !== event.data.requestID)),
+    ),
   )
 
   // The shown chat's view and first pages: when it is shown, when CPP comes back, after a reconnect.
@@ -428,6 +477,7 @@ function createPacer(input: { clock: Clock }) {
 
   const sessions = new Map<string, { readonly open: () => void }>()
   const [jump, setJump] = createSignal<PacerJump>()
+  const [reveal, setReveal] = createSignal<PacerReveal>()
 
   return {
     status: () => store.status,
@@ -492,6 +542,25 @@ function createPacer(input: { clock: Clock }) {
     jump,
     requestJump: (next: PacerJump) => setJump(next),
     clearJump: () => setJump(undefined),
+    /**
+     * Opens a chat's Requests tab on a request and shows what changed in it (a cache notice opened): the chat's session
+     * route opens the tab once it shows the chat, and the tab moves to the request. What changed is read at once,
+     * beside the move to the chat.
+     */
+    showRequest(next: PacerReveal) {
+      setReveal(next)
+      void prompt(next.requestID).catch(() => undefined)
+    },
+    /** The request a Requests tab is to open on, until that chat's tab has. */
+    reveal,
+    clearReveal: () => setReveal(undefined),
+    /** The cache notices not dismissed in every TUI, newest first; none while this TUI's Cache notices are off. */
+    notices: () => store.notices,
+    /** Dismisses a cache notice in every TUI: this one drops it at once, the service tells the others. */
+    dismissNotice(requestID: string) {
+      setStore("notices", (notices) => notices.filter((notice) => notice.requestID !== requestID))
+      return client.api.experimental.pacer.notices.dismiss({ requestID })
+    },
   }
 }
 

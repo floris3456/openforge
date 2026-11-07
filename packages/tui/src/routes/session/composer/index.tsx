@@ -65,6 +65,9 @@ export function Composer(props: ComposerProps) {
     active(id: string) {
       return props.open && store.active === id
     },
+    select(id: string) {
+      setStore("active", id)
+    },
     close,
   }
 

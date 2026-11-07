@@ -7,6 +7,12 @@ import {
   cacheText,
   forceUseLine,
   formatRemaining,
+  formatTokens,
+  noticeAge,
+  noticesMore,
+  noticesShown,
+  noticeSubject,
+  noticeTitle,
   remainingHours,
   formatReset,
   nextUseLine,
@@ -20,7 +26,7 @@ import {
 } from "../../src/pacer/format"
 import { requestTarget } from "../../src/pacer/jump"
 import { listTop } from "../../src/routes/session/composer/requests-tab"
-import { chat, miss, NOW, promptChange, request, step, webCall } from "./fixture"
+import { chat, miss, notice, NOW, promptChange, request, step, webCall } from "./fixture"
 
 // Written from spec cliproxypacer-step-1: section 4's table, section 5's texts and section 7's rows, Enter and
 // what changed.
@@ -469,5 +475,55 @@ describe("holding rows", () => {
     expect(listTop(0, 6, 6, 10)).toBe(1)
     expect(listTop(4, 2, 6, 10)).toBe(2)
     expect(listTop(9, 9, 6, 10)).toBe(4)
+  })
+})
+
+describe("a cache notice's card (spec cliproxypacer-cache-notices, section 3)", () => {
+  test("a miss and a partial reuse, with the tokens not reused", () => {
+    expect(noticeTitle(notice(0))).toBe("Cache miss · 152K tokens not reused")
+    expect(noticeTitle(notice(0, { verdict: "partial", tokens: 18_000 }))).toBe(
+      "Partial cache reuse · 18K tokens not reused",
+    )
+  })
+
+  test("a row without its count shows none", () => {
+    expect(noticeTitle(notice(0, { tokens: undefined }))).toBe("Cache miss")
+    expect(noticeTitle(notice(0, { verdict: "partial", tokens: undefined }))).toBe("Partial cache reuse")
+  })
+
+  test("tokens as the card counts them", () => {
+    expect([0, 999, 1_000, 1_500, 18_449, 98_100, 152_340, 999_499, 999_500, 1_240_000].map(formatTokens)).toEqual([
+      "0",
+      "999",
+      "1K",
+      "1.5K",
+      "18.4K",
+      "98.1K",
+      "152K",
+      "999K",
+      "1M",
+      "1.2M",
+    ])
+  })
+
+  test("its age: just now, then whole minutes", () => {
+    expect(noticeAge(NOW, NOW)).toBe("just now")
+    expect(noticeAge(NOW - 59_999, NOW)).toBe("just now")
+    expect(noticeAge(NOW - 60_000, NOW)).toBe("1 min ago")
+    expect(noticeAge(NOW - 3 * 60_000 - 30_000, NOW)).toBe("3 min ago")
+    // A request stamped a little ahead of this machine's clock is just now, not a negative age.
+    expect(noticeAge(NOW + 5_000, NOW)).toBe("just now")
+  })
+
+  test("the chat's title, agent and model; its ID without a title", () => {
+    expect(noticeSubject(notice(0))).toBe("Fix the flaky test · build · claude-opus-4-5")
+    expect(noticeSubject(notice(0, { title: undefined, agent: undefined }))).toBe("ses_chat · claude-opus-4-5")
+  })
+
+  test("at most 4 cards, fewer in a short terminal, then the count of the others", () => {
+    expect([40, 24, 20, 19, 16, 15, 12, 8, 3].map(noticesShown)).toEqual([4, 4, 3, 2, 2, 1, 1, 1, 1])
+    expect(noticesMore(6, 4)).toBe("+2 more cache notices")
+    expect(noticesMore(4, 4)).toBeUndefined()
+    expect(noticesMore(1, 4)).toBeUndefined()
   })
 })

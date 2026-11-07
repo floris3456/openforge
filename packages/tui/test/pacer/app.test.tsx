@@ -3,7 +3,19 @@ import type { SessionMessageInfo } from "@opencode/client"
 import { createAppFixture } from "../fixture/app"
 import { waitForHighlightedFrame } from "../fixture/frame"
 import { json } from "../fixture/tui-client"
-import { CHAT, chat, accounts, NOW, pacerFake, request, sessionInfo, status } from "./fixture"
+import {
+  CHAT,
+  chat,
+  accounts,
+  miss,
+  notice,
+  NOW,
+  pacerFake,
+  promptChange,
+  request,
+  sessionInfo,
+  status,
+} from "./fixture"
 
 // The fixture's chats and accounts are as of NOW, and the whole app's countdowns run on the wall clock (WallClock):
 // it stands at NOW, or the chat's 5 minutes of warmth would have run out since 2026-11-06 14:07.
@@ -160,4 +172,40 @@ test("the model picker has CPP's models read again each time it opens, without w
       await setup.waitForFrame((frame) => !frame.includes("Select model"), { maxPasses: 100 })
     }
   }
+})
+
+test("a cache notice shows in the corner over the chat, waits behind a dialog, and opens its request's what changed", async () => {
+  const { setup, fake } = await app({ state: "on", providerID: "cliproxypacer" })
+  await using _ = setup
+  fake.prompts.req_1 = promptChange(miss(1, { id: "req_1" }))
+  await waitForHighlightedFrame(setup, (frame) => frame.includes("Latest reply"), { maxPasses: 200 })
+  setup.events.emit({
+    id: "evt_notice",
+    created: NOW,
+    type: "pacer.notice.added",
+    data: { notice: notice(1, { requestID: "req_1", at: NOW - 50_000 }) },
+  } as unknown as Parameters<typeof setup.events.emit>[0])
+  const frame = await setup.waitForFrame((frame) => frame.includes("Cache miss · 152K tokens not reused"), {
+    maxPasses: 100,
+  })
+  const row = frame.split("\n").find((line) => line.includes("Cache miss"))!
+  // The top-right corner: its right edge two columns from the terminal's.
+  expect(row.lastIndexOf("┃")).toBe(160 - 3)
+  // A dialog over it: the key opens nothing beneath.
+  setup.mockInput.pressKey("F8")
+  await setup.waitForFrame((frame) => frame.includes("Select model"), { maxPasses: 100 })
+  setup.mockInput.pressKey("x", { ctrl: true })
+  setup.mockInput.pressKey("o")
+  await Bun.sleep(50)
+  expect(fake.calls.filter((call) => call.method === "POST" && call.path.startsWith("notices/"))).toEqual([])
+  setup.mockInput.pressEscape()
+  await setup.waitForFrame((frame) => !frame.includes("Select model"), { maxPasses: 100 })
+  setup.mockInput.pressKey("x", { ctrl: true })
+  setup.mockInput.pressKey("o")
+  const opened = await setup.waitForFrame((frame) => frame.includes("compared with req_prev"), { maxPasses: 100 })
+  expect(opened).toContain("miss · prefix changed · system changed")
+  expect(opened).not.toContain("Cache miss · 152K")
+  expect(
+    fake.calls.filter((call) => call.method === "POST" && call.path.startsWith("notices/")).map((call) => call.path),
+  ).toEqual(["notices/req_1/dismiss"])
 })

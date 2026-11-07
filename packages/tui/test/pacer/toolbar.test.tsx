@@ -142,7 +142,7 @@ describe("the cache item", () => {
     const rows: [ReturnType<typeof chat>, string, "muted" | "warning"][] = [
       [
         chat({
-          switches: { warming: false, compactBeforeCold: false },
+          switches: { warming: false, compactBeforeCold: false, compactColdFirst: false },
           pings: { active: false, left: 0, sent: 0, failed: false },
           coldAt: NOW + 192_000,
         }),
@@ -160,7 +160,7 @@ describe("the cache item", () => {
       ],
       [
         chat({
-          switches: { warming: true, compactBeforeCold: true },
+          switches: { warming: true, compactBeforeCold: true, compactColdFirst: false },
           compactAt: new Date(2026, 10, 6, 14, 32).getTime(),
           compactReason: "before-cold",
         }),
@@ -174,6 +174,20 @@ describe("the cache item", () => {
       await setup.app.waitForFrame((frame) => frame.includes(text))
       const color = tone === "warning" ? setup.theme.text.feedback.warning.base : setup.theme.text.muted
       expect(colorOf(setup.app, text)).toEqual(color.toInts())
+    }
+  })
+
+  // Spec cliproxypacer-cold-ask, section 3.
+  test("cold, with compact cold chats first on and the chat at least as large as the threshold: cache cold · compacts first", async () => {
+    const switches = { warming: true, compactBeforeCold: false, compactColdFirst: true }
+    for (const [view, text] of [
+      [chat({ warm: false, switches, size: { tokens: 80_000, threshold: 70_000 } }), "cache cold · compacts first"],
+      [chat({ warm: false, switches, size: { tokens: 12_000, threshold: 70_000 } }), "cache cold"],
+    ] as const) {
+      await using setup = await toolbar({ view, width: 120 })
+      await setup.app.waitForFrame((frame) => frame.includes("cache cold"))
+      expect(line(setup)).toMatch(new RegExp(`~/project +${text} {2}ctrl\\+p commands`))
+      expect(colorOf(setup.app, text)).toEqual(setup.theme.text.feedback.warning.base.toInts())
     }
   })
 

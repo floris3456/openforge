@@ -5,6 +5,7 @@ import type {
   PacerChat,
   PacerPromptChange,
   PacerRequest,
+  PacerSettings,
   PacerStatus,
   SessionMessageInfo,
 } from "@opencode/client"
@@ -59,7 +60,7 @@ export function chat(extra: Partial<PacerChat> = {}): PacerChat {
     warmUntil: NOW + 5 * 60_000,
     coldAt: NOW + 23 * 60_000 + 41_000,
     pings: { active: true, left: 4, sent: 1, intervalMs: 270_000, failed: false },
-    switches: { warming: true, compactBeforeCold: false },
+    switches: { warming: true, compactBeforeCold: false, compactColdFirst: false },
     asOf: NOW,
     ...extra,
   }
@@ -225,7 +226,9 @@ export function pacerFake(input: { delay?: number } = {}) {
     /** Each chat's requests, newest first. */
     requests: {} as Record<string, PacerRequest[]>,
     prompts: {} as Record<string, PacerPromptChange | null>,
-    /** Requests, prompts and updates answer 503, as when the pacer is not on. */
+    /** CLIProxyPacer's settings for all chats, as they apply at the key level (spec cliproxypacer-cold-ask, section 2). */
+    settings: { compactColdFirst: false, compactBeforeCold: false } as PacerSettings,
+    /** Requests, prompts, settings and updates answer 503, as when the pacer is not on. */
     unavailable: false,
     calls: [] as Call[],
     /** Calls to the pacer routes made after `since` (a `performance.now()`). */
@@ -264,10 +267,15 @@ export function pacerFake(input: { delay?: number } = {}) {
     if (parts[0] === "chat" && parts.length === 2 && call.method === "PATCH") {
       if (fake.unavailable) return refuse()
       const current = fake.chats[parts[1]!] ?? chat({ sessionID: parts[1]! })
-      const change = call.body as { warming?: boolean; compactBeforeCold?: boolean }
+      const change = call.body as { warming?: boolean; compactBeforeCold?: boolean; compactColdFirst?: boolean }
       const next = { ...current, switches: { ...current.switches, ...change } }
       fake.chats[parts[1]!] = next
       return json({ data: next })
+    }
+    if (call.path === "settings") {
+      if (fake.unavailable) return refuse()
+      if (call.method === "PATCH") fake.settings = { ...fake.settings, ...(call.body as Partial<PacerSettings>) }
+      return json({ data: fake.settings })
     }
     if (parts[0] === "chat" && parts[2] === "requests") {
       if (fake.unavailable) return refuse()
@@ -346,6 +354,8 @@ export async function renderPacer(input: {
   width?: number
   height?: number
   keybinds?: Partial<TuiKeybind.Keybinds>
+  /** The "new-designs" experiment on. */
+  newDesigns?: boolean
   /** `"default"`: the store's own clock, as the app has it. */
   clock?: ManualClock | "default"
 }) {
@@ -401,7 +411,12 @@ export async function renderPacer(input: {
       <TestTuiContexts directory={directory} paths={{ state: state.path }}>
         <TuiAppProvider value={{ name: "test", version: "test", channel: "test" }}>
           <StorageProvider>
-            <ConfigProvider config={createTuiResolvedConfig({ keybinds: input.keybinds ?? {} })}>
+            <ConfigProvider
+              config={createTuiResolvedConfig({
+                keybinds: input.keybinds ?? {},
+                ...(input.newDesigns ? { experimental: { "new-designs": true } } : {}),
+              })}
+            >
               <Keymap.Provider>
                 <ToastProvider>
                   <RouteProvider initialRoute={{ type: "session", sessionID: input.route ?? CHAT }}>

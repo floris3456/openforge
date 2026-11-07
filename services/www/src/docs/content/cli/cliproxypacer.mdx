@@ -71,10 +71,10 @@ from the prompt to open the footer, then **←/→** to reach the tab after **Te
 item. Opening a [cache notice](#cache-notices) opens it too.
 
 ```text
-time      kind        model               account       read/write    verdict                             cost
-14:02:13  step        claude-sonnet-5-5   claude-max-2  48.2K/1.0K    hit                              $0.0312
-14:01:40  explore     claude-haiku-5-5    claude-max-2  0/12.5K       miss · tools changed · tools[0]  $0.0451
-14:00:02  title       claude-haiku-5-5    claude-max-2  0/0                                            $0.0004
+time      kind        model               account       read/write    verdict                              cost
+14:02:13  step        claude-sonnet-5-5   claude-max-2  48.2K/1.0K    hit                               $0.0312
+14:01:40  explore     claude-haiku-5-5    claude-max-2  0/12.5K       miss · prefix-changed · tools[0]  $0.0451
+14:00:02  title       claude-haiku-5-5    claude-max-2  0/0                                             $0.0004
 ```
 
 - **kind** is `step`, the agent of a subagent's step, `ping`, `title`, `compaction` (a summary) or `search`, a call of
@@ -105,7 +105,7 @@ sends no prompt, so what changed says so and reads nothing, and **Enter** on it 
 call.
 
 ```text
-miss · tools changed · tools[0] changed
+miss · prefix-changed · tools[0] changed
 12.5K tokens written again · the miss cost $0.0389
 compared with 1793911200-claude-max-2-7f3a of 14:00:02
 changed  tool       tools[0]  1.2K chars  read: Read a file from the local filesystem
@@ -122,13 +122,14 @@ up or the chat never used it.
 
 ## Cache notices
 
-When a step or a summary of one of your chats misses CLIProxyPacer's prompt cache, or reuses only part of it, a card
-shows in the top-right corner of every open TUI, whatever chat it shows. It says what was lost, in which chat, and why.
+When a step or a summary of one of your chats misses CLIProxyPacer's prompt cache, or reuses only part of it, for a
+reason you wouldn't expect, a card shows in the top-right corner of every open TUI, whatever chat it shows. It says what
+was lost, in which chat, and why.
 
 ```text
 Cache miss · 152K tokens not reused        3 min ago ×
 Fix the login flow · build · claude-sonnet-5-5
-tools changed · tools[0]
+prefix-changed · tools[0]
 ```
 
 - The first line says `Cache miss` with a red edge or `Partial cache reuse` with a yellow one, the tokens not reused
@@ -147,6 +148,10 @@ tools changed · tools[0]
 What raises a card, and its limits:
 
 - Only steps and summaries raise one, a subagent's included: pings, titles and web tool calls don't.
+- The losses you can expect raise none: the cache went cold (CLIProxyPacer's cause `expired`; the toolbar says
+  `cache cold` then), or a summary replaced the prompt (`compaction`), as in the first step after a compaction. The
+  **Requests** tab still lists them, with their cause, such as `miss · expired`. Every other cause raises a card, and
+  so does a miss or partial reuse without one.
 - Only this service's chats: another client's requests on the same key raise none.
 - The background service keeps the cards in memory, the newest 50 of the last 2 hours. A restart of the service starts
   with none, and requests CLIProxyPacer received before it started raise none.

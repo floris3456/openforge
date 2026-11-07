@@ -14,7 +14,7 @@ export const PacerNoticeEndpoints = [
     annotations(
       "notices.list",
       "List cache notices",
-      "Every cache miss or partial reuse of a step or a compaction of this service's chats on CLIProxyPacer, a subagent's included, that nobody dismissed: newest first, at most 50, none older than 2 hours. Held in memory, so a restart of the service starts with none. Never waits on CLIProxyPacer; `pacer.notice.added` tells each new one.",
+      "Every cache miss or partial reuse of a step or a compaction of this service's chats on CLIProxyPacer, a subagent's included, but for the expected losses (CLIProxyPacer's causes `expired` and `compaction`), that nobody dismissed: newest first, at most 50, none older than 2 hours. Held in memory, so a restart of the service starts with none. Never waits on CLIProxyPacer; `pacer.notice.added` tells each new one.",
     ),
   ),
   HttpApiEndpoint.post("pacer.notices.dismiss", "/api/experimental/pacer/notices/:requestID/dismiss", {

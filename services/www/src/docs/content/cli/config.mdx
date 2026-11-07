@@ -289,7 +289,7 @@ CLIProxyPacer. Each TUI shows the cards its own settings let through:
 
 | Setting                          | Values                                     | Description                                                                                                                            |
 | -------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `cliproxypacer.notices.enabled`  | boolean                                    | Shows a card for each cache miss or partial reuse. On by default.                                                                      |
+| `cliproxypacer.notices.enabled`  | boolean                                    | Shows a card for a cache miss or partial reuse; an expired cache or a compaction shows none. On by default.                            |
 | `cliproxypacer.notices.from`     | `all` or `chat`                            | Shows the cards of all chats, or of the shown chat and its subagents only. `all` by default.                                           |
 | `cliproxypacer.notices.lifetime` | `15`, `30`, `60`, or `120`                 | Sets the minutes a card stays after its request. `15` by default.                                                                      |
 | `cliproxypacer.notices.minimum`  | `0`, `1000`, `10000`, `50000`, or `100000` | Sets the fewest tokens not reused that show a card; `0`, the default, shows any loss.                                                  |

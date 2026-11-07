@@ -364,7 +364,7 @@ export const settings: Setting[] = [
     title: "Cache notices",
     category: "CLIProxyPacer",
     path: ["cliproxypacer", "notices", "enabled"],
-    description: "Whether each cache miss or partial reuse shows a card in the corner",
+    description: "Whether a cache miss or partial reuse shows a card; none for an expired cache or a compaction",
     default: true,
     values: [false, true],
     labels: ["off", "on"],

@@ -9,11 +9,12 @@ import { Session } from "../session.js"
 import { PacerWire } from "./wire.js"
 
 // The service's cache notices (spec cliproxypacer-cache-notices, sections 1 and 2): each miss or partial reuse of CPP's
-// prompt cache by a step or a compaction of one of this service's chats, a subagent's included. They come from the
-// request rows the connection reads on CPP's `request` notices (`PacerConnection`), so nothing more is read from CPP,
-// and are held in memory for every TUI: a restart of the service starts with none. Each TUI shows those its own
-// settings let through, and dismisses them here, so that a dismissal reaches every TUI. Nothing runs on a timer: what
-// grew too old goes when rows come in or the list is read.
+// prompt cache by a step or a compaction of one of this service's chats, a subagent's included, but for the losses
+// that are expected (an expired cache, a prompt replaced by a summary). They come from the request rows the connection
+// reads on CPP's `request` notices (`PacerConnection`), so nothing more is read from CPP, and are held in memory for
+// every TUI: a restart of the service starts with none. Each TUI shows those its own settings let through, and
+// dismisses them here, so that a dismissal reaches every TUI. Nothing runs on a timer: what grew too old goes when rows
+// come in or the list is read.
 
 /** Notices held at most, the dismissed ones included; the oldest go first. */
 export const HELD = 50
@@ -23,6 +24,12 @@ export const LIFETIME_MS = 2 * 3_600_000
 export const WAITING = 50
 /** Chats above a subagent's looked up at most, for its top chat. */
 const DEPTH = 8
+/**
+ * CLIProxyPacer's causes of the losses that are expected, which raise no notice: the cache ran out (the toolbar said
+ * `cache cold`), or a summary replaced the prompt. Every other cause raises one, and so does none. CLIProxyPacer gives
+ * these two when it judges the request and doesn't refine them later, as it may an `unknown` one.
+ */
+export const EXPECTED: ReadonlySet<string> = new Set(["expired", "compaction"])
 
 export interface Interface {
   /** The notices held and not dismissed, newest first. */
@@ -36,7 +43,7 @@ export interface Interface {
    * Looks at request rows the connection read. Each miss or partial reuse of a step or a compaction becomes a notice,
    * told as `pacer.notice.added`, when `chat` names the chat by CPP's UUID; one of a chat it doesn't name waits until
    * {@link Interface.named} names it. Rows CPP received before this service started, or longer ago than `LIFETIME_MS`,
-   * raise none.
+   * raise none, and neither do the losses that are expected ({@link EXPECTED}).
    */
   readonly read: (
     rows: ReadonlyArray<PacerWire.Row>,
@@ -145,6 +152,7 @@ export const make = Effect.gen(function* () {
           const request = PacerWire.request(row, {}, context)
           if (request.kind !== "step" && request.kind !== "compaction") continue
           if (request.verdict !== "miss" && request.verdict !== "partial") continue
+          if (request.cause !== undefined && EXPECTED.has(request.cause)) continue
           const sessionID = chat(uuid)
           if (sessionID) {
             found.push({ request, sessionID })

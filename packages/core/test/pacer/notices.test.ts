@@ -195,6 +195,69 @@ describe("PacerNotices", () => {
   )
 
   it.effect(
+    "raises none for the losses that are expected, CLIProxyPacer's causes expired and compaction, and one for every other cause or none",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const parent = yield* h.chat()
+        const child = yield* h.chat({ parentID: parent })
+        const chat = PacerSessionID.make(parent)
+        const subagent = PacerSessionID.make(child)
+        // The chat not held yet: its expected losses don't wait either.
+        const early = yield* h.chat({}, false)
+        const waiting = PacerSessionID.make(early)
+        yield* h.read([
+          // The cache ran out, or a summary replaced the prompt: of a step, a summary, a subagent's step, as a miss or a
+          // partial reuse.
+          row(1, chat, { cache_cause: "expired", cache_shortfall: 40_000 }),
+          row(2, chat, { cache_cause: "compaction", cache_shortfall: 40_000 }),
+          row(3, chat, { cache_verdict: "partial", cache_cause: "compaction" }),
+          row(4, chat, { kind: KINDS.compaction, cache_cause: "expired" }),
+          row(5, subagent, { subagent: true, cache_cause: "expired" }),
+          row(6, waiting, { cache_cause: "compaction" }),
+          // Every other cause of CLIProxyPacer's (crates/cpa-pacer/src/cache.rs, Verdict), and none.
+          row(7, chat, { cache_cause: "prefix-changed", changed_part: "tools[0]" }),
+          row(8, chat, { cache_cause: "account-changed" }),
+          row(9, chat, { cache_cause: "model-changed" }),
+          row(10, chat, { cache_cause: "lifetime-changed", changed_part: "system" }),
+          row(11, chat, { cache_cause: "server-layout", changed_part: "messages[2]" }),
+          row(12, chat, { cache_cause: "provider" }),
+          row(13, chat, { cache_cause: "unknown" }),
+          row(14, chat, { cache_cause: null }),
+          row(15, subagent, { subagent: true, cache_verdict: "partial", cache_cause: "account-changed" }),
+          row(16, waiting, { cache_cause: "prefix-changed", changed_part: "system" }),
+        ])
+        yield* h.notices.named(waiting, early)
+        yield* settle
+
+        expect((yield* h.list()).map((notice) => [notice.requestID, notice.cause])).toEqual([
+          ["req-16", "prefix-changed · system"],
+          ["req-15", "account-changed"],
+          ["req-14", "unknown cause"],
+          ["req-13", "unknown"],
+          ["req-12", "provider"],
+          ["req-11", "server-layout · messages[2]"],
+          ["req-10", "lifetime-changed · system"],
+          ["req-9", "model-changed"],
+          ["req-8", "account-changed"],
+          ["req-7", "prefix-changed · tools[0]"],
+        ])
+        expect(h.added()).toEqual([
+          "req-7",
+          "req-8",
+          "req-9",
+          "req-10",
+          "req-11",
+          "req-12",
+          "req-13",
+          "req-14",
+          "req-15",
+          "req-16",
+        ])
+      }),
+  )
+
+  it.effect(
     "shapes a notice: the tokens written again, the cause as the Requests tab says it, the chat's title and agent, its top chat",
     () =>
       Effect.gen(function* () {

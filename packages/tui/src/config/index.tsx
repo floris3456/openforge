@@ -122,7 +122,8 @@ export const Info = Schema.Struct({
       notices: Schema.optional(
         Schema.Struct({
           enabled: Schema.optional(Schema.Boolean).annotate({
-            description: "Show a card in the corner for each cache miss or partial reuse on CLIProxyPacer",
+            description:
+              "Show a card in the corner for a cache miss or partial reuse on CLIProxyPacer; none for an expired cache or a compaction",
           }),
           from: Schema.optional(Schema.Literals(["all", "chat"])).annotate({
             description: "Cache notices of all chats, or of the shown chat and its subagents only",

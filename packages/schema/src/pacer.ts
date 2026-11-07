@@ -404,8 +404,9 @@ export const PromptChange = Schema.Struct({
 
 /**
  * A cache notice (spec cliproxypacer-cache-notices): a step or a compaction of one of this service's chats, a
- * subagent's included, that CPP's verdict calls a miss or a partial reuse. The service holds them for every TUI, and
- * each TUI shows those its own settings let through.
+ * subagent's included, that CPP's verdict calls a miss or a partial reuse, but for the expected losses (CPP's causes
+ * `expired` and `compaction`). The service holds them for every TUI, and each TUI shows those its own settings let
+ * through.
  */
 export interface Notice extends Schema.Schema.Type<typeof Notice> {}
 export const Notice = Schema.Struct({

@@ -449,8 +449,9 @@ export function DialogConfig(props: { current?: string }) {
   )
   const shown = (setting: Setting) =>
     setting.pacer === undefined || (pacer?.state() === "on" && pacerValues() !== undefined)
-  // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered.
-  const opening = () => (shown(settings[current]) ? current : undefined)
+  // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
+  // new values don't move the selection back to it.
+  const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
 
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default

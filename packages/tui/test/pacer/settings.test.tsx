@@ -86,6 +86,20 @@ test("Enter flips a row on CLIProxyPacer, and the row shows its answer", async (
   expect(setup.app.captureCharFrame()).toMatch(row("Compact cold chats first", "off"))
 })
 
+test("a write keeps the selection where the keys moved it, not at the row Settings opened at", async () => {
+  await using setup = await settings()
+  setup.open("cliproxypacer.compact_cold_first")
+  await setup.frame((frame) => row("Compact cold chats first", "on").test(frame))
+  setup.app.mockInput.pressArrow("down")
+  setup.app.mockInput.pressEnter()
+  await setup.frame((frame) => row("Compact before cold", "on").test(frame))
+  // From Compact before cold, the row above is Compact cold chats first.
+  setup.app.mockInput.pressArrow("up")
+  setup.app.mockInput.pressEnter()
+  await setup.frame(() => setup.writes().length === 2)
+  expect(setup.writes()).toEqual([{ compactBeforeCold: true }, { compactColdFirst: false }])
+})
+
 test("under the new designs too: opened at a row, Enter flips it, and the row says what it does", async () => {
   await using setup = await settings({ newDesigns: true })
   setup.open("cliproxypacer.compact_before_cold")

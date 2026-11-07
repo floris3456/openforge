@@ -17,6 +17,7 @@ import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionCompaction } from "@opencode/core/session/compaction"
+import type { SessionContext } from "@opencode/core/session/context"
 import { SessionHistory } from "@opencode/core/session/history"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
@@ -29,7 +30,7 @@ import { Model } from "@opencode/schema/model"
 import { Money } from "@opencode/schema/money"
 import { Provider } from "@opencode/schema/provider"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { DateTime, Effect, Fiber, Layer, Schema } from "effect"
+import { DateTime, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { testEffect } from "./lib/effect"
@@ -54,9 +55,24 @@ const fake = {
   /** How CLIProxyPacer answers `/v1/responses/compact`. */
   compact: "readable" as "readable" | "capsule" | "501" | "500" | "hang",
   header: "warm; model=kimi-e2e; writer=server" as string | undefined,
+  /**
+   * `compaction.user_messages` on: the readable answer lists the user messages of the history it was sent after the
+   * summary, numbered, as CLIProxyPacer does (`compaction_users.rs`).
+   */
+  users: false,
   /** Resolves when a `/responses/compact` request arrives. */
   arrived: Promise.withResolvers<void>(),
 }
+
+/** The user messages' texts in a Responses body's input. */
+const userTexts = (body: Record<string, unknown>) =>
+  (Array.isArray(body.input) ? (body.input as Array<Record<string, unknown>>) : [])
+    .filter((item) => item.role === "user")
+    .map((item) =>
+      (Array.isArray(item.content) ? (item.content as Array<{ text?: unknown }>) : [])
+        .flatMap((part) => (typeof part.text === "string" ? [part.text] : []))
+        .join(""),
+    )
 
 const sse = (events: ReadonlyArray<readonly [string, unknown]>) =>
   new Response(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""), {
@@ -69,12 +85,8 @@ const server = Bun.serve({
   fetch: async (request) => {
     const url = new URL(request.url)
     const text = await request.text()
-    fake.seen.push({
-      method: request.method,
-      path: url.pathname,
-      headers: Object.fromEntries(request.headers),
-      body: text ? (JSON.parse(text) as Record<string, unknown>) : {},
-    })
+    const body = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+    fake.seen.push({ method: request.method, path: url.pathname, headers: Object.fromEntries(request.headers), body })
     if (url.pathname === "/v1/responses/compact") {
       fake.arrived.resolve()
       if (fake.compact === "hang") return new Promise<Response>(() => {})
@@ -92,12 +104,17 @@ const server = Bun.serve({
         )
       if (fake.compact === "500") return Response.json({ error: { message: "synthetic" } }, { status: 500 })
       const checkpoint = { type: "compaction", id: "cmp_cpa_compact_1", encrypted_content: "cpa-ag-compact-v1:stub" }
+      const users = fake.users
+        ? `\n\n<earlier-user-messages>\n${userTexts(body)
+            .map((text, index) => `<message n="${index + 1}">${text}</message>`)
+            .join("\n")}\n</earlier-user-messages>`
+        : ""
       const readable = {
         type: "message",
         role: "user",
         id: "msg_cpa_compact_1",
         status: "completed",
-        content: [{ type: "input_text", text: `Context summary from previous turns:\n${cppSummary}` }],
+        content: [{ type: "input_text", text: `Context summary from previous turns:\n${cppSummary}${users}` }],
       }
       return Response.json(
         {
@@ -186,6 +203,7 @@ const it = testEffect(
       SessionCompaction.node,
       SessionModelRequest.node,
       PluginHooks.node,
+      llmClient,
     ]),
     [
       Bus.node.replace(Bus.configured({ persist: true })),
@@ -228,6 +246,7 @@ const reset = (next: PacerSummaries.Decision = { by: "cliproxypacer" }) => {
   fake.seen.length = 0
   fake.compact = "readable"
   fake.header = "warm; model=kimi-e2e; writer=server"
+  fake.users = false
   fake.arrived = Promise.withResolvers<void>()
   plans.length = 0
   decision.current = next
@@ -279,8 +298,8 @@ const assistant = (text: string, model: SessionRunnerModel.Resolved) =>
     time: { created: 0, completed: 1 },
   })
 
-/** A chat of two exchanges on `model`, stored as its history. */
-const chat = Effect.fnUntraced(function* (name: string, model: SessionRunnerModel.Resolved) {
+/** A chat of two exchanges on `model`, and `newest` (a prompt not answered yet) when given, stored as its history. */
+const chat = Effect.fnUntraced(function* (name: string, model: SessionRunnerModel.Resolved, newest?: string) {
   const id = Session.ID.make(`ses_pacer_summary_${name}`)
   const parentID = Session.ID.make(`ses_pacer_summary_${name}_parent`)
   const session = yield* insertSession(id, parentID)
@@ -289,6 +308,7 @@ const chat = Effect.fnUntraced(function* (name: string, model: SessionRunnerMode
     assistant("Here is a five-step plan.", model),
     user("Now list three risks."),
     assistant("Missed styles, contrast, preference behaviour.", model),
+    ...(newest === undefined ? [] : [user(newest)]),
   ]
   const db = (yield* Database.Service).db
   yield* db
@@ -350,19 +370,15 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
       "x-pacer-kind": "compaction",
     })
     expect(sent?.headers).not.toHaveProperty("x-pacer-compact")
+    // The history before the newest exchange, which openforge keeps itself.
     expect(sent?.body).toMatchObject({
       model: "kimi-e2e",
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
-        { type: "message", role: "user", content: [{ type: "input_text", text: "Now list three risks." }] },
-        {
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: "Missed styles, contrast, preference behaviour." }],
-        },
       ],
     })
+    expect(sent?.body.input).toHaveLength(2)
     expect(String(sent?.body.instructions)).toContain("Session instructions")
     expect(sent?.body).not.toHaveProperty("stream")
 
@@ -381,6 +397,75 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
     expect(next).toContain(cppSummary)
     expect(next).not.toContain("Context summary from previous turns")
   }),
+)
+
+/** The body of the step `context` would send with `messages`, through the runner's request path and client. */
+const stepBody = Effect.fnUntraced(function* (
+  context: SessionContext.Loaded,
+  messages: ReadonlyArray<SessionMessage.Info>,
+) {
+  const transcript = SessionModelRequest.baseTranscript({
+    agent: context.agent.info,
+    model: context.model,
+    tools: context.tools,
+    initial: context.initial,
+    messages,
+  })
+  const step = yield* (yield* SessionModelRequest.Service).primary({
+    session: context.session,
+    agent: context.agent.id,
+    model: context.model,
+    tools: context.tools,
+    system: transcript.system,
+    messages: transcript.messages,
+  })
+  const before = fake.seen.length
+  yield* (yield* LLMClient.Service).stream(step.request, step.options).pipe(Stream.runDrain)
+  const sent = fake.seen.slice(before).filter((item) => item.path === "/v1/responses")
+  expect(sent).toHaveLength(1)
+  return sent[0]!.body
+})
+
+const occurrences = (body: Record<string, unknown>, text: string) =>
+  JSON.stringify(body).split(JSON.stringify(text).slice(1, -1)).length - 1
+
+it.effect(
+  "CLIProxyPacer gets the history before openforge's kept part, the step's own first items; the next step carries the newest message once",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      fake.users = true
+      fake.header = "warm; model=kimi-e2e; writer=server; user_messages=2"
+      const newest = "Write the toggle's tests."
+      const { session, messages, context } = yield* chat("prefix", kimi, newest)
+      const step = yield* stepBody(context, messages)
+      expect(step.input).toHaveLength(5)
+      fake.seen.length = 0
+
+      const compaction = yield* SessionCompaction.Service
+      expect(
+        yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
+      ).toEqual({ status: "completed" })
+      const sent = compactions()[0]!.body
+      // The same leading bytes as the step: its model, instructions, tools and cache key, then its first items up to
+      // the part openforge keeps (the newest prompt), which is not in it.
+      for (const name of ["model", "instructions", "tools", "prompt_cache_key"])
+        expect(JSON.stringify(sent[name])).toBe(JSON.stringify(step[name]))
+      expect(JSON.stringify(sent.input)).toBe(JSON.stringify((step.input as unknown[]).slice(0, 4)))
+      expect(occurrences(sent, newest)).toBe(0)
+
+      // CLIProxyPacer's list of the user's messages holds the history's two; openforge keeps the newest beside it.
+      const stored = yield* record(session.id)
+      expect(stored.metadata?.keepID).toBe(messages[4]!.id)
+      expect(stored.summary).toContain('<message n="2">Now list three risks.</message>')
+      expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false, userMessages: 2 })
+
+      // The next step, as sent: the summary with the list, and the newest message exactly once.
+      const next = yield* stepBody(context, yield* (yield* SessionStore.Service).context(session.id))
+      expect(occurrences(next, cppSummary)).toBe(1)
+      expect(occurrences(next, "<earlier-user-messages>")).toBe(1)
+      expect(occurrences(next, newest)).toBe(1)
+    }),
 )
 
 it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as Responses, at the same address", () =>
@@ -402,14 +487,9 @@ it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
-        { type: "message", role: "user", content: [{ type: "input_text", text: "Now list three risks." }] },
-        {
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: "Missed styles, contrast, preference behaviour." }],
-        },
       ],
     })
+    expect(sent?.body.input).toHaveLength(2)
     // Written on CLIProxyPacer's cheaper model for the cold chat, as its header says.
     const stored = yield* record(session.id)
     expect(stored.writer).toEqual({ by: "cliproxypacer", cold: true })

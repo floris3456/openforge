@@ -32,8 +32,9 @@ export function messages(model: LanguageModel) {
 }
 
 /**
- * The request a chat's next step would send, made a `/responses/compact` request to CPP (spec section 3, "The body"):
- * a Responses chat keeps its own route and model, so the body is the step's bytes as far as `/compact` takes them
+ * The request a chat's next step would send, up to the recent part openforge keeps (`session/compaction.ts`), made a
+ * `/responses/compact` request to CPP (spec section 3, "The body"): a Responses chat keeps its own route and model, so
+ * the body is the start of the step's bytes as far as `/compact` takes them
  * (`OpenAICompatibleResponses.compact`); a Messages chat's is rendered by the Responses protocol at the same address
  * with the same key. Its Claude thinking, signed for Anthropic, is left out: Responses can't carry it.
  */

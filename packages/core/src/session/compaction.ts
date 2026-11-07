@@ -434,11 +434,12 @@ export const layer = Layer.effect(
 
     /**
      * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
-     * with the request the chat's next step would send on `trigger.context`'s model, with a summary's headers
-     * (`X-Pacer-Session`, its parent, `X-Pacer-Kind: compaction`), in the Responses format
-     * (`PacerSummaries.responses`). The answer's summary is kept as openforge's own, the recent messages kept by `keep`
-     * beside it; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request, no readable
-     * summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
+     * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
+     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
+     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
+     * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
+     * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
+     * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
      */
     const writeOnPacer = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -455,7 +456,7 @@ export const layer = Layer.effect(
       const seen: { header?: string } = {}
       const http = PacerSummaries.capture(prepared.options.http, (value) => (seen.header = value))
       const answer = yield* llm
-        .compact(PacerSummaries.responses(prepared.request), { mechanism: "endpoint", http })
+        .compact(PacerSummaries.responses(withoutTail(prepared.request, split.keepID)), { mechanism: "endpoint", http })
         .pipe(
           Effect.timeoutOrElse({
             duration: PacerSummaries.WAIT,

@@ -615,6 +615,141 @@ it.effect("a Messages chat's summary request carries its step's four system bloc
   }),
 )
 
+/**
+ * The conversation in a body, item by item, as CLIProxyPacer renders a Responses body back into Messages
+ * (`claude_responses.rs`): a reasoning item is the thinking block `{thinking: summary text, signature: encrypted
+ * content}`, or a redacted one for `claude-redacted-thinking:<data>`. A Messages body's blocks read the same way.
+ */
+const REDACTED = "claude-redacted-thinking:"
+const conversation = (body: Record<string, unknown>) =>
+  "messages" in body
+    ? (body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>).flatMap((message) =>
+        message.content.map((block) => {
+          if (block.type === "thinking") return `thinking ${JSON.stringify([block.thinking, block.signature])}`
+          if (block.type === "redacted_thinking") return `thinking ${JSON.stringify(["", `${REDACTED}${block.data}`])}`
+          if (block.type === "tool_use") return `tool_use ${block.id}`
+          if (block.type === "tool_result") return `tool_result ${block.tool_use_id}`
+          return `${message.role} ${block.text}`
+        }),
+      )
+    : (body.input as Array<Record<string, unknown>>).flatMap((item) => {
+        if (item.type === "reasoning") {
+          const text = (item.summary as Array<{ text: string }>).map((part) => part.text).join("")
+          return [`thinking ${JSON.stringify([text, item.encrypted_content])}`]
+        }
+        if (item.type === "function_call") return [`tool_use ${item.call_id}`]
+        if (item.type === "function_call_output") return [`tool_result ${item.call_id}`]
+        if (item.role === "system") return []
+        return (item.content as Array<{ text: string }>).map((part) => `${item.role} ${part.text}`)
+      })
+
+// The step's thinking blocks go to CLIProxyPacer as reasoning items in the same places, with the same text and
+// signatures, so the summary's prefix is the step's (`run/evidence/cpp-summaries/live-warm-claude-2/`: without them,
+// the read stopped at the first assistant message with thinking).
+it.effect(
+  "a Messages chat's summary request carries exactly its step's thinking blocks, in place, as reasoning items",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      const key = claude.model.route.providerMetadataKey ?? claude.model.provider
+      const signed = (text: string, signature: string) => ({
+        type: "reasoning" as const,
+        text,
+        providerMetadata: { [key]: { signature } },
+      })
+      const request = ai.request({
+        model: claude.model,
+        system: "You are an agent.",
+        messages: [
+          Message.user("Plan a dark mode."),
+          Message.assistant([
+            signed("I should read the styles first.", "sig-1"),
+            { type: "tool-call", id: "toolu_1", name: "read", input: { path: "styles.css" } },
+          ]),
+          Message.make({
+            role: "tool",
+            content: [{ type: "tool-result", id: "toolu_1", name: "read", result: { type: "text", value: "body {}" } }],
+          }),
+          Message.assistant([
+            // Safety-filtered thinking: no text, its data alone.
+            { type: "reasoning", text: "", providerMetadata: { [key]: { redactedData: "opaque-1" } } },
+            signed("The styles use one variable.", "sig-2"),
+            { type: "text", text: "Here is the plan." },
+          ]),
+          Message.user("Now list three risks."),
+          Message.assistant([
+            // Another model's readable reasoning, without a signature: the step leaves it out.
+            { type: "reasoning", text: "Thinking on another model." },
+            signed("Contrast first.", "sig-3"),
+            signed("Then preferences.", "sig-4"),
+            { type: "text", text: "Missed styles, contrast, preference behaviour." },
+          ]),
+        ],
+      })
+      const llm = yield* LLMClient.Service
+      yield* llm.stream(request).pipe(Stream.runDrain)
+      const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+      yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+      const sent = compactions()[0]!.body
+
+      // Item by item the same conversation, the thinking blocks included, byte for byte.
+      expect(conversation(sent)).toEqual(conversation(step))
+      expect(conversation(step).filter((item) => item.startsWith("thinking"))).toEqual([
+        `thinking ${JSON.stringify(["I should read the styles first.", "sig-1"])}`,
+        `thinking ${JSON.stringify(["", `${REDACTED}opaque-1`])}`,
+        `thinking ${JSON.stringify(["The styles use one variable.", "sig-2"])}`,
+        `thinking ${JSON.stringify(["Contrast first.", "sig-3"])}`,
+        `thinking ${JSON.stringify(["Then preferences.", "sig-4"])}`,
+      ])
+      expect(JSON.stringify(sent)).not.toContain("Thinking on another model.")
+      // The reasoning items as sent; a redacted one has no summary.
+      expect((sent.input as Array<Record<string, unknown>>).filter((item) => item.type === "reasoning")).toEqual([
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "I should read the styles first." }],
+          encrypted_content: "sig-1",
+        },
+        { type: "reasoning", summary: [], encrypted_content: `${REDACTED}opaque-1` },
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "The styles use one variable." }],
+          encrypted_content: "sig-2",
+        },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "Contrast first." }], encrypted_content: "sig-3" },
+        {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Then preferences." }],
+          encrypted_content: "sig-4",
+        },
+      ])
+    }),
+)
+
+it.effect("a Messages chat whose reasoning came from another model: its summary request carries none", () =>
+  Effect.gen(function* () {
+    reset()
+    const request = ai.request({
+      model: claude.model,
+      system: "You are an agent.",
+      messages: [
+        Message.user("Plan a dark mode."),
+        Message.assistant([
+          { type: "reasoning", text: "Readable reasoning of another model." },
+          { type: "text", text: "Here is the plan." },
+        ]),
+      ],
+    })
+    const llm = yield* LLMClient.Service
+    yield* llm.stream(request).pipe(Stream.runDrain)
+    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+    const sent = compactions()[0]!.body
+    expect(JSON.stringify(step)).not.toContain("Readable reasoning of another model.")
+    expect((sent.input as Array<{ type: string }>).some((item) => item.type === "reasoning")).toBe(false)
+    expect(conversation(sent)).toEqual(conversation(step))
+  }),
+)
+
 planned.live(
   "a warm Claude chat: CLIProxyPacer writes its summary, its own writer set to server first; none of openforge's own",
   () =>

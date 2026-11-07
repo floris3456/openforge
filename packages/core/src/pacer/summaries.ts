@@ -1,7 +1,7 @@
 export * as PacerSummaries from "./summaries.js"
 
-import { ai, AIError, LanguageModel, LLMRequest, type Message } from "@opencode/ai/effect"
-import { OpenAICompatibleResponses } from "@opencode/ai/protocols"
+import { ai, AIError, type ContentPart, LanguageModel, LLMRequest, Message } from "@opencode/ai/effect"
+import { AnthropicMessages, OpenAICompatibleResponses } from "@opencode/ai/protocols"
 import type { HttpMiddleware } from "@opencode/ai/route"
 import type { SessionID } from "@opencode/schema/session-id"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -33,9 +33,9 @@ export const provider: string = PacerEndpoint.id
  * `/responses/compact` request to CPP (spec section 3, "The body"): a Responses chat keeps its own route and model, so
  * the body is the start of the step's bytes as far as `/compact` takes them
  * (`OpenAICompatibleResponses.compact`); a Messages chat's is rendered by the Responses protocol at the same address
- * with the same key, its system parts as a first `system` item with a part each, which CPP renders back into the step's
- * system blocks (`OpenAICompatibleResponses.compactSystemParts`). Its Claude thinking, signed for Anthropic, is left
- * out: Responses can't carry it.
+ * with the same key, in the form CPP renders back into the step's own blocks: its system parts as a first `system` item
+ * with a part each (`OpenAICompatibleResponses.compactSystemParts`), and its thinking blocks, signed or redacted, as
+ * reasoning items in their places ({@link thinking}).
  */
 export function responses(request: LLMRequest) {
   const route = request.model.route
@@ -53,9 +53,44 @@ export function responses(request: LLMRequest) {
             compact: { endpoint: OpenAICompatibleResponses.compactSystemParts },
           })
           .model({ id: request.model.id })
-  const next = LLMRequest.update(request, { model })
+  const key = model.route.providerMetadataKey ?? model.provider
+  const messages =
+    route.protocol === AnthropicMessages.protocol.id
+      ? request.messages.map((message) => thinking(message, request, key))
+      : request.messages
+  const next = LLMRequest.update(request, { model, messages })
   if (!ai.canCompact(next)) throw new Error("A route with a compact endpoint can compact")
   return next
+}
+
+/** What CPP reads as a redacted thinking block's data in a reasoning item's encrypted content (`claude_responses.rs`). */
+const REDACTED = "claude-redacted-thinking:"
+
+/**
+ * A Messages chat's message with its thinking as the step sends it, for the Responses rendering under `key`: each
+ * reasoning part becomes the block the step lowers it to (`AnthropicMessages.thinkingBlock`, the step's own rule, so
+ * the same parts, text and signatures), as the reasoning item CPP turns back into that block
+ * (`reasoning_to_thinking`): the text as its summary, the signature, or a redacted block's data after
+ * {@link REDACTED}, as its encrypted content. A part the step leaves out is left out.
+ */
+function thinking(message: Message, request: LLMRequest, key: string) {
+  if (message.role !== "assistant" || !message.content.some((part) => part.type === "reasoning")) return message
+  return new Message({
+    ...message,
+    content: message.content.flatMap((part): ContentPart[] => {
+      if (part.type !== "reasoning") return [part]
+      const block = AnthropicMessages.thinkingBlock(part, request)
+      if (block === undefined) return []
+      const encrypted = block.type === "thinking" ? block.signature : `${REDACTED}${block.data}`
+      return [
+        {
+          type: "reasoning",
+          text: block.type === "thinking" ? block.thinking : "",
+          providerMetadata: { [key]: { reasoningEncryptedContent: encrypted } },
+        },
+      ]
+    }),
+  })
 }
 
 /** What CPP's readable answer opens its summary with (`compaction_write.rs`, `SUMMARY_PREFIX`). */

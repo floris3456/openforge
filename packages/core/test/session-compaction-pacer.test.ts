@@ -1,5 +1,5 @@
 import { afterAll, expect } from "bun:test"
-import { LLMClient, type LanguageModel } from "@opencode/ai/effect"
+import { ai, CacheHint, LLMClient, type LanguageModel, Message } from "@opencode/ai/effect"
 import { AnthropicCompatible, OpenAICompatibleResponses } from "@opencode/ai/providers"
 import { Auth, RequestExecutor } from "@opencode/ai/route"
 import { Agent } from "@opencode/core/agent"
@@ -459,10 +459,14 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
   }),
 )
 
-/** The body of the step `context` would send with `messages`, through the runner's request path and client. */
+/**
+ * The body of the step `context` would send with `messages`, through the runner's request path and client, to `path`
+ * (a Claude model's step goes to `/v1/messages`).
+ */
 const stepBody = Effect.fnUntraced(function* (
   context: SessionContext.Loaded,
   messages: ReadonlyArray<SessionMessage.Info>,
+  path = "/v1/responses",
 ) {
   const transcript = SessionModelRequest.baseTranscript({
     agent: context.agent.info,
@@ -481,9 +485,16 @@ const stepBody = Effect.fnUntraced(function* (
   })
   const before = fake.seen.length
   yield* (yield* LLMClient.Service).stream(step.request, step.options).pipe(Stream.runDrain)
-  const sent = fake.seen.slice(before).filter((item) => item.path === "/v1/responses")
+  const sent = fake.seen.slice(before).filter((item) => item.path === path)
   expect(sent).toHaveLength(1)
   return sent[0]!.body
+})
+
+/** A Messages step's system blocks as the `system` input item CLIProxyPacer turns back into the same blocks. */
+const systemItem = (step: Record<string, unknown>) => ({
+  type: "message",
+  role: "system",
+  content: (step.system as Array<{ text: string }>).map((block) => ({ type: "input_text", text: block.text })),
 })
 
 const occurrences = (body: Record<string, unknown>, text: string) =>
@@ -532,7 +543,9 @@ it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as
   Effect.gen(function* () {
     reset()
     fake.header = "cold; model=kimi-e2e-mini; writer=server"
-    const { session, context } = yield* chat("messages", claude)
+    const { session, messages, context } = yield* chat("messages", claude)
+    const step = yield* stepBody(context, messages, "/v1/messages")
+    fake.seen.length = 0
     const compaction = yield* SessionCompaction.Service
     expect(
       yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
@@ -542,18 +555,63 @@ it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as
     expect(own()).toEqual([])
     expect(sent?.headers.authorization).toBe(`Bearer ${key}`)
     expect(sent?.headers["x-pacer-kind"]).toBe("compaction")
+    // The step's system blocks first, each its own part, as CLIProxyPacer renders them back; nothing joined into
+    // `instructions`.
+    expect(sent?.body).not.toHaveProperty("instructions")
     expect(sent?.body).toMatchObject({
       model: "claude-e2e",
       input: [
+        systemItem(step),
         { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
       ],
     })
-    expect(sent?.body.input).toHaveLength(2)
+    expect(sent?.body.input).toHaveLength(3)
     // Written on CLIProxyPacer's cheaper model for the cold chat, as its header says.
     const stored = yield* record(session.id)
     expect(stored.writer).toEqual({ by: "cliproxypacer", cold: true })
     expect(stored.model).toEqual(pacerRef("kimi-e2e-mini"))
+  }),
+)
+
+// CLIProxyPacer renders a Messages chat's summary request back into Messages (`claude_responses.rs`): `instructions`
+// becomes one system block, and each text part of a `system` input item one more, in order. Joined into `instructions`,
+// four system blocks came back as one (on a Claude login, CLIProxyPacer's first user message then differed from the
+// step's at the first join: `run/evidence/cpp-summaries/live-warm-claude/`).
+it.effect("a Messages chat's summary request carries its step's four system blocks as one system item, in order", () =>
+  Effect.gen(function* () {
+    reset()
+    const hint = new CacheHint({ type: "ephemeral" })
+    const system = [
+      { type: "text" as const, text: "You are an agent.\nFollow the user's lead.\n", cache: hint },
+      { type: "text" as const, text: "# Your Model\n- claude-e2e" },
+      { type: "text" as const, text: "# Code Mode\n\nCall tools as code." },
+      { type: "text" as const, text: "A worktree hint.", cache: hint },
+    ]
+    const request = ai.request({
+      model: claude.model,
+      system,
+      messages: [Message.user("Plan a dark mode."), Message.assistant("Here is a five-step plan.")],
+    })
+    const llm = yield* LLMClient.Service
+    yield* llm.stream(request).pipe(Stream.runDrain)
+    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
+    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
+    const sent = compactions()[0]!.body
+
+    expect((step.system as Array<{ text: string }>).map((block) => block.text)).toEqual(system.map((part) => part.text))
+    expect(sent).not.toHaveProperty("instructions")
+    // The cache hints have no Responses form: the parts carry the text alone.
+    expect(sent.input).toEqual([
+      systemItem(step),
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Here is a five-step plan." }],
+      },
+    ])
   }),
 )
 
@@ -595,7 +653,13 @@ planned.live(
       const [sent] = compactions()
       expect(sent?.headers).toMatchObject({ "x-pacer-session": uuid, "x-pacer-kind": "compaction" })
       expect(sent?.body.model).toBe("claude-e2e")
-      expect(sent?.body.input).toHaveLength(2)
+      // The step's system parts as the first item, then the history before the kept exchange.
+      expect(sent?.body).not.toHaveProperty("instructions")
+      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual([
+        "system",
+        "user",
+        "assistant",
+      ])
 
       const stored = yield* record(session.id)
       expect(stored.summary).toBe(cppSummary)

@@ -33,21 +33,24 @@ export const provider: string = PacerEndpoint.id
  * `/responses/compact` request to CPP (spec section 3, "The body"): a Responses chat keeps its own route and model, so
  * the body is the start of the step's bytes as far as `/compact` takes them
  * (`OpenAICompatibleResponses.compact`); a Messages chat's is rendered by the Responses protocol at the same address
- * with the same key. Its Claude thinking, signed for Anthropic, is left out: Responses can't carry it.
+ * with the same key, its system parts as a first `system` item with a part each, which CPP renders back into the step's
+ * system blocks (`OpenAICompatibleResponses.compactSystemParts`). Its Claude thinking, signed for Anthropic, is left
+ * out: Responses can't carry it.
  */
 export function responses(request: LLMRequest) {
   const route = request.model.route
-  const compact = { endpoint: OpenAICompatibleResponses.compact }
   const model =
     route.protocol === OpenAICompatibleResponses.route.protocol
-      ? LanguageModel.update(request.model, { route: route.with({ compact }) })
+      ? LanguageModel.update(request.model, {
+          route: route.with({ compact: { endpoint: OpenAICompatibleResponses.compact } }),
+        })
       : OpenAICompatibleResponses.route
           .with({
             provider: route.provider ?? request.model.provider,
             providerMetadataKey: OpenAICompatibleResponses.route.providerMetadataKey,
             endpoint: { baseURL: route.endpoint.baseURL },
             auth: route.auth,
-            compact,
+            compact: { endpoint: OpenAICompatibleResponses.compactSystemParts },
           })
           .model({ id: request.model.id })
   const next = LLMRequest.update(request, { model })

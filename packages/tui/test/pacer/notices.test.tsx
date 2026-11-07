@@ -396,7 +396,9 @@ describe("open and dismiss (section 3)", () => {
 
 describe("settings (section 4)", () => {
   test("six rows under CLIProxyPacer, with OpenCodePlus's choices and defaults", () => {
-    const rows = settings.filter((setting) => setting.category === "CLIProxyPacer")
+    // The cold ask's rows share the heading (settings.test.tsx).
+    const rows = settings.filter((setting) => setting.path[0] === "cliproxypacer" && setting.path[1] === "notices")
+    expect(rows.every((setting) => setting.category === "CLIProxyPacer")).toBe(true)
     const shown = (setting: (typeof rows)[number], value: unknown) =>
       setting.labels?.[setting.values!.indexOf(value)] ?? String(value)
     expect(

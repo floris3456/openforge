@@ -98,6 +98,34 @@ test("under the new designs too: opened at a row, Enter flips it, and the row sa
   await setup.frame((frame) => row("Compact before cold", "on").test(frame))
 })
 
+test("one CLIProxyPacer heading over the cache notices' six rows and these two, all shown only while it answers", async () => {
+  await using setup = await settings()
+  setup.open()
+  const lines = (await setup.frame((frame) => frame.includes("Compact cold chats first")))
+    .split("\n")
+    .map((line) => line.trim())
+  expect(lines.filter((line) => line === "CLIProxyPacer")).toHaveLength(1)
+  const heading = lines.indexOf("CLIProxyPacer")
+  // The heading's rows, up to the blank line before the next heading, by title.
+  expect(lines.slice(heading + 1, lines.indexOf("", heading)).map((line) => line.replace(/\s{2,}.*$/, ""))).toEqual([
+    "Cache notices",
+    "Cache notices from",
+    "Cache notice lifetime",
+    "Cache notice minimum",
+    "Cache notices for",
+    "Opened cache notice disappears",
+    "Compact cold chats first",
+    "Compact before cold",
+  ])
+
+  // The cache notices' rows are this TUI's own, but tune only what CLIProxyPacer sends: they go with it.
+  await using away = await settings({ state: "unreachable" })
+  away.open()
+  const frame = await away.frame((frame) => frame.includes("Developer tools"))
+  expect(frame).not.toContain("Cache notice")
+  expect(frame).not.toContain("CLIProxyPacer")
+})
+
 test("no rows without a CLIProxyPacer that answers: none set up, a plain proxy, unreachable, or its settings refused", async () => {
   for (const state of ["unset", "no-pacer", "unreachable"] as const) {
     await using setup = await settings({ state })

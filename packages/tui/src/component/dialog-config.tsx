@@ -508,8 +508,11 @@ export function DialogConfig(props: { current?: string }) {
       },
     ),
   )
+  // Settings › CLIProxyPacer shows only while CLIProxyPacer answers, as its other screens do: its own settings are read
+  // from it, and the cache notices' rows tune what only it sends.
   const shown = (setting: Setting) =>
-    setting.pacer === undefined || (pacer?.state() === "on" && pacerValues() !== undefined)
+    setting.category !== "CLIProxyPacer" ||
+    (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues() !== undefined))
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered.
   const opening = () => (shown(settings[current]) ? current : undefined)
 

@@ -1866,7 +1866,12 @@ const EndpointExperimentalPacerSettingsUpdate =
   (raw: RawClient["server.experimental"]) => (input?: ExperimentalPacerSettingsUpdateInput) =>
     preserveEffect<ExperimentalPacerSettingsUpdateOutput>()(
       raw["pacer.settings.update"]({
-        payload: { compactColdFirst: input?.["compactColdFirst"], compactBeforeCold: input?.["compactBeforeCold"] },
+        payload: {
+          compactColdFirst: input?.["compactColdFirst"],
+          compactBeforeCold: input?.["compactBeforeCold"],
+          summaryWriter: input?.["summaryWriter"],
+          keepUserMessages: input?.["keepUserMessages"],
+        },
       }).pipe(
         Effect.mapError(mapClientError),
         Effect.map((value) => value.data),

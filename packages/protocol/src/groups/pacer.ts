@@ -111,7 +111,7 @@ export const PacerEndpoints = [
     annotations(
       "settings.get",
       "Get CLIProxyPacer's compaction asks for all chats",
-      "Whether CLIProxyPacer compacts cold chats first and compacts chats before they go cold, for all of the key's chats: its key-level settings as they apply (the key's own, else the server's, else the default). A chat's own switch wins over them. Read from CLIProxyPacer; unavailable unless the pacer is on.",
+      "Whether CLIProxyPacer compacts cold chats first and compacts chats before they go cold, who writes the summaries and whether they keep the user's earlier messages, for all of the key's chats: its key-level settings as they apply (the key's own, else the server's, else the default). A chat's own switch wins over them. The summaries' two are absent while the service can't tell. Read from CLIProxyPacer; unavailable unless the pacer is on.",
     ),
   ),
   HttpApiEndpoint.patch("pacer.settings.update", "/api/experimental/pacer/settings", {
@@ -122,7 +122,7 @@ export const PacerEndpoints = [
     annotations(
       "settings.update",
       "Switch CLIProxyPacer's compaction asks for all chats",
-      "Set compact-cold-first or compact-before-cold at the key level on CLIProxyPacer, and return both as they apply after the change. Unavailable unless the pacer is on.",
+      "Set compact-cold-first, compact-before-cold, who writes the summaries or whether they keep the user's earlier messages at the key level on CLIProxyPacer, and return them as they apply after the change. Unavailable unless the pacer is on.",
     ),
   ),
 ] as const

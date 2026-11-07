@@ -214,6 +214,12 @@ export const ChatUpdate = Schema.Struct({
   compactColdFirst: Schema.Boolean.pipe(optional),
 }).annotate({ identifier: "Pacer.ChatUpdate" })
 
+/** Who writes a chat's summaries when it compacts: CLIProxyPacer, or openforge itself. */
+export const SummaryWriter = Schema.Literals(["cliproxypacer", "openforge"]).annotate({
+  identifier: "Pacer.SummaryWriter",
+})
+export type SummaryWriter = typeof SummaryWriter.Type
+
 /**
  * CPP's compaction asks for all of the key's chats: its key level, as it applies to them (the key's own value, else
  * the server's, else the default). A chat's own switch (`Switches`) wins over it.
@@ -224,6 +230,16 @@ export const Settings = Schema.Struct({
   compactColdFirst: Schema.Boolean,
   /** Compact a chat before its cache goes cold (`Switches.compactBeforeCold`). */
   compactBeforeCold: Schema.Boolean,
+  /**
+   * Who writes the chats' summaries: CLIProxyPacer (its `compaction.writer` `server`, or unset) or openforge
+   * (`client`). Absent while the service can't tell.
+   */
+  summaryWriter: SummaryWriter.pipe(optional),
+  /**
+   * CLIProxyPacer keeps the user's own earlier messages after its summaries (`compaction.user_messages`). Absent while
+   * the service can't tell.
+   */
+  keepUserMessages: Schema.Boolean.pipe(optional),
 }).annotate({ identifier: "Pacer.Settings" })
 
 /** A change to the compaction asks for all chats, at the key level; an absent ask stays as it is. */
@@ -231,6 +247,8 @@ export interface SettingsUpdate extends Schema.Schema.Type<typeof SettingsUpdate
 export const SettingsUpdate = Schema.Struct({
   compactColdFirst: Schema.Boolean.pipe(optional),
   compactBeforeCold: Schema.Boolean.pipe(optional),
+  summaryWriter: SummaryWriter.pipe(optional),
+  keepUserMessages: Schema.Boolean.pipe(optional),
 }).annotate({ identifier: "Pacer.SettingsUpdate" })
 
 /** What a request was. A subagent's step is a `step` whose request has `subagent` set. */

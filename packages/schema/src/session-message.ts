@@ -7,7 +7,7 @@ import { Location } from "./location.js"
 import { Model } from "./model.js"
 import { Project } from "./project.js"
 import { Attachment, Prompt } from "./prompt.js"
-import { DateTimeUtcFromMillis, PositiveInt, RelativePath, statics } from "./schema.js"
+import { DateTimeUtcFromMillis, NonNegativeInt, PositiveInt, RelativePath, statics } from "./schema.js"
 import { ascending } from "./identifier.js"
 import { Shell as ShellSchema } from "./shell.js"
 import { FinishReason } from "./llm.js"
@@ -266,6 +266,18 @@ export const CompactionRunning = Schema.Struct({
   summary: Schema.String,
 }).annotate({ identifier: "Session.Message.Compaction.Running" })
 
+/** Who wrote the summary of a chat on CLIProxyPacer: CLIProxyPacer (`POST /v1/responses/compact`), or openforge. */
+export interface CompactionWriter extends Schema.Schema.Type<typeof CompactionWriter> {}
+export const CompactionWriter = Schema.Struct({
+  by: Schema.Literals(["cliproxypacer", "openforge"]),
+  /** CLIProxyPacer wrote it for a cold chat (`X-Pacer-Compaction`). */
+  cold: Schema.Boolean.pipe(optional),
+  /** How many of the user's own earlier messages CLIProxyPacer kept after it (`X-Pacer-Compaction`). */
+  userMessages: NonNegativeInt.pipe(optional),
+  /** Why CLIProxyPacer couldn't write it, when openforge wrote it instead. */
+  fallback: Schema.String.pipe(optional),
+}).annotate({ identifier: "Session.Message.Compaction.Writer" })
+
 export interface CompactionCompleted extends Schema.Schema.Type<typeof CompactionCompleted> {}
 export const CompactionCompleted = Schema.Struct({
   ...CompactionBase,
@@ -275,6 +287,8 @@ export const CompactionCompleted = Schema.Struct({
   /** A provider compaction stores its replacement window in `native.messages`, replayed instead of `summary`. */
   native: Native.pipe(optional),
   summary: Schema.String,
+  /** Who wrote `summary`, for a chat on CLIProxyPacer; `model` is then the model that wrote it. */
+  writer: CompactionWriter.pipe(optional),
   ...CompactionUsage,
 }).annotate({ identifier: "Session.Message.Compaction.Completed" })
 

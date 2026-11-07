@@ -151,8 +151,7 @@ export const ROUTE = "it writes no summaries on this model's route"
 /**
  * Who writes, in this order: the writer ({@link writerFor}: `client` is openforge, `server` or unset CPP); then only
  * where CPP writes for the model's route with `server`. Whether the chat is warm, and in which format its steps go to
- * CPP, don't matter: a Claude chat's summary reads its cache too (CPP's `2e83d820`,
- * `run/evidence/cpp-summaries/measure-2/`).
+ * CPP, don't matter.
  */
 export function decide(input: {
   /** Who writes by the settings ({@link writerFor}); undefined while unset. */

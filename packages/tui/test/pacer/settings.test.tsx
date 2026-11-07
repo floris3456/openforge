@@ -285,3 +285,49 @@ test("a failed write of who writes the summaries toasts the error, and the row k
   expect(setup.writes()).toEqual([{ summaryWriter: "openforge" }])
   expect(setup.app.captureCharFrame()).toMatch(row("Summaries written by", "CLIProxyPacer"))
 })
+
+test("the command palette lists a CLIProxyPacer row only when Settings would show it, and opens Settings at it", async () => {
+  // Found in the pilotty run of cpp-next (tui-1): the palette listed "Summaries written by" while the service's answer
+  // lacked it, and Enter opened Settings at its top.
+  const search = async (
+    setup: Awaited<ReturnType<typeof settings>>,
+    text: string,
+    until: (frame: string) => boolean,
+  ) => {
+    setup.palette()
+    await setup.frame((frame) => frame.includes("Commands"))
+    // The filter takes the keys once it has the focus.
+    await Bun.sleep(50)
+    await setup.app.mockInput.typeText(text)
+    await setup.frame(until)
+    await setup.settle()
+    await setup.app.renderOnce()
+    return setup.app.captureCharFrame()
+  }
+  const listed = (frame: string, title: string) =>
+    frame.split("\n").some((line) => line.includes(title) && line.includes("Settings · CLIProxyPacer"))
+  {
+    // On, the answer without the summaries' two: the cold ask's rows (listed once it answered), not those two.
+    await using setup = await settings({ values: { compactColdFirst: false, compactBeforeCold: false } })
+    const frame = await search(setup, "summary", (frame) => listed(frame, "Compact before cold"))
+    expect(listed(frame, "Compact cold chats first")).toBe(true)
+    expect(listed(frame, "Summaries written by")).toBe(false)
+    expect(listed(frame, "Keep my messages in summaries")).toBe(false)
+  }
+  {
+    // Not set up: none of Settings › CLIProxyPacer, the cache notices' rows included.
+    await using setup = await settings({ state: "unset" })
+    const frame = await search(setup, "cache notice", (frame) => frame.includes("cache notice"))
+    expect(listed(frame, "Cache notice")).toBe(false)
+    expect(frame).not.toContain("Settings · CLIProxyPacer")
+  }
+  {
+    // On, with the summaries' two in the answer: listed, and Enter opens Settings at the row.
+    await using setup = await settings({ values: summaries })
+    const frame = await search(setup, "Summaries written", (frame) => listed(frame, "Summaries written by"))
+    expect(listed(frame, "Summaries written by")).toBe(true)
+    setup.app.mockInput.pressEnter()
+    const opened = await setup.frame((frame) => row("Summaries written by", "CLIProxyPacer").test(frame))
+    expect(opened).toMatch(/● Summaries written by/)
+  }
+})

@@ -501,22 +501,14 @@ export function settingID(setting: Setting) {
   return setting.path.join(".")
 }
 
-export function DialogConfig(props: { current?: string }) {
-  const config = useConfig()
-  const newDesigns = useNewDesigns()
-  const dialog = useDialog()
-  const toast = useToast()
-  const themes = useThemes()
+/**
+ * Which Settings rows show, one rule for Settings and the command palette: the palette lists a row only where Settings
+ * would show it. Each reads CLIProxyPacer's own settings when it opens, and again when CLIProxyPacer answers again
+ * while it is open.
+ */
+export function useShownSettings() {
   const pacer = usePacer()
-  const current = Math.max(
-    0,
-    settings.findIndex((setting) => settingID(setting) === props.current),
-  )
-  const [selected, setSelected] = createSignal(current)
-  const [saving, setSaving] = createSignal(false)
-
-  // CLIProxyPacer's rows: read when Settings opens, and again when CLIProxyPacer answers again while it is open; each
-  // shown while it is on and its read answered with the row's value.
+  // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
     on(
@@ -536,6 +528,23 @@ export function DialogConfig(props: { current?: string }) {
   const shown = (setting: Setting) =>
     setting.category !== "CLIProxyPacer" ||
     (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
+  return { shown, pacerValues, setPacerValues }
+}
+
+export function DialogConfig(props: { current?: string }) {
+  const config = useConfig()
+  const newDesigns = useNewDesigns()
+  const dialog = useDialog()
+  const toast = useToast()
+  const themes = useThemes()
+  const pacer = usePacer()
+  const current = Math.max(
+    0,
+    settings.findIndex((setting) => settingID(setting) === props.current),
+  )
+  const [selected, setSelected] = createSignal(current)
+  const [saving, setSaving] = createSignal(false)
+  const { shown, pacerValues, setPacerValues } = useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))

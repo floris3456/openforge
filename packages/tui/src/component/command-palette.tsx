@@ -2,8 +2,7 @@ import { createMemo } from "solid-js"
 import { DialogSelect, type DialogSelectRef } from "../ui/dialog-select"
 import { type DialogContext } from "../ui/dialog"
 import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "../context/keymap"
-import { usePacer } from "../context/pacer"
-import { DialogConfig, settingID, settings } from "./dialog-config"
+import { DialogConfig, settingID, settings, useShownSettings } from "./dialog-config"
 
 function isSuggestedPaletteCommand(command: KeymapCommand) {
   const suggested = command.suggested
@@ -13,7 +12,6 @@ function isSuggestedPaletteCommand(command: KeymapCommand) {
 }
 
 export function CommandPaletteDialog() {
-  const pacer = usePacer()
   const commands = Keymap.useCommands()
   const shortcuts = Keymap.useShortcuts()
   const options = createMemo(() =>
@@ -36,10 +34,11 @@ export function CommandPaletteDialog() {
       }
     }),
   )
-  // CLIProxyPacer's settings show only while it answers (spec cliproxypacer-cold-ask, section 2).
-  const settingOptions = settings
-    .filter((setting) => setting.pacer === undefined || pacer?.state() === "on")
-    .map((setting) => ({
+  // A setting only where Settings shows it, which opens there: Settings › CLIProxyPacer only while CLIProxyPacer
+  // answers, and each of its own settings once its read answered with it (spec cliproxypacer-cold-ask, section 2).
+  const rows = useShownSettings()
+  const settingOptions = createMemo(() =>
+    settings.filter(rows.shown).map((setting) => ({
       title: setting.title,
       category: setting.category,
       searchText: setting.keywords?.join(" "),
@@ -48,11 +47,12 @@ export function CommandPaletteDialog() {
       onSelect: (dialog: DialogContext) => {
         dialog.replace(() => <DialogConfig current={settingID(setting)} />)
       },
-    }))
+    })),
+  )
 
   let ref: DialogSelectRef<string>
   const list = () => {
-    if (ref?.filter) return [...options(), ...settingOptions]
+    if (ref?.filter) return [...options(), ...settingOptions()]
     return [
       ...options()
         .filter((option) => option.suggested)

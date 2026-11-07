@@ -895,10 +895,14 @@ describe("PacerConnection states", () => {
       yield* settle
       expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
       expect(h.cpp.streams()).toBe(1)
-      // Silent 60 s: the connection hangs up, and connects again after its wait.
+      // Silent 60 s: the connection hangs up, and reads the state again a second later to connect again.
       yield* TestClock.adjust("1 second")
       yield* until("the silent stream closed", () => h.cpp.streams() === 0)
+      const closed = yield* Clock.currentTimeMillis
       yield* ahead("a second stream", () => seen(h, "/pacer/v1/stream").length === 2)
+      const again = seen(h, "/pacer/v1/state")[1].at - closed
+      expect(again).toBeGreaterThanOrEqual(1_000)
+      expect(again).toBeLessThan(1_300)
     }),
   )
 

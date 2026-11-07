@@ -73,8 +73,9 @@ test("exposes every standard HTTP API group", () => {
   ])
   expect(Object.keys(client.experimental.service)).toEqual(["status", "pause", "resume"])
   expect(Object.keys(client.experimental.attention)).toEqual(["occurrence", "follow", "test"])
-  expect(Object.keys(client.experimental.pacer)).toEqual(["status", "accounts", "chat", "refresh", "prompt"])
+  expect(Object.keys(client.experimental.pacer)).toEqual(["status", "accounts", "chat", "refresh", "prompt", "notices"])
   expect(Object.keys(client.experimental.pacer.chat)).toEqual(["get", "update", "requests"])
+  expect(Object.keys(client.experimental.pacer.notices)).toEqual(["list", "dismiss"])
   expect(Object.keys(client.experimental.session)).toEqual([
     "stats",
     "import",

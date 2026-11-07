@@ -22,6 +22,7 @@ import { makeArtifact } from "./artifact"
 import { makeAttention } from "./attention"
 import { makeMediaGet } from "./media"
 import { makePacer } from "./pacer"
+import { makePacerNotices } from "./pacer-notices"
 import { type Outbound, runPtySocket } from "./pty-socket"
 import { makeSchedule } from "./schedule"
 import { makeService } from "./service"
@@ -37,6 +38,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const service = yield* makeService
     const attention = yield* makeAttention
     const pacer = yield* makePacer
+    const notices = yield* makePacerNotices
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -59,6 +61,8 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("attention.occurrence", (ctx) => attention.occurrence(ctx.payload))
       .handle("attention.test", (ctx) => attention.test(ctx.payload.kind))
       .handleRaw("attention.follow", (ctx) => attention.follow(ctx.query.desktop === true))
+      .handle("pacer.notices.list", () => notices.list)
+      .handle("pacer.notices.dismiss", (ctx) => notices.dismiss(ctx.params.requestID))
       .handle("pacer.status", () => pacer.status)
       .handle("pacer.accounts", () => pacer.accounts)
       .handle("pacer.chat.get", (ctx) => pacer.chat(ctx.params.sessionID))

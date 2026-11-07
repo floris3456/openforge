@@ -10693,6 +10693,8 @@
                     "pacer.accounts.updated",
                     "pacer.chat.updated",
                     "pacer.requests.updated",
+                    "pacer.notice.added",
+                    "pacer.notice.dismissed",
                     "session.status",
                     "session.idle",
                     "tui.prompt.append",
@@ -10810,6 +10812,8 @@
                           "pacer.accounts.updated",
                           "pacer.chat.updated",
                           "pacer.requests.updated",
+                          "pacer.notice.added",
+                          "pacer.notice.dismissed",
                           "session.status",
                           "session.idle",
                           "tui.prompt.append",
@@ -14908,6 +14912,117 @@
         },
         "description": "What changed in the prompt of one request (by its CPP request ID) against the request CPP compared it with. The service keeps the last 50 it read; others are read from CPP, unavailable unless the pacer is on. Null when CPP has no such request, and at once, reading nothing, for a request that goes by its row (`row:` and CPP's row number, as a web tool call does): it sent no prompt. Experimental: may change without compatibility guarantees.",
         "summary": "Get what changed in a request's prompt"
+      }
+    },
+    "/api/experimental/pacer/notices": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.notices.list",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Pacer.Notice"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Every cache miss or partial reuse of a step or a compaction of this service's chats on CLIProxyPacer, a subagent's included, that nobody dismissed: newest first, at most 50, none older than 2 hours. Held in memory, so a restart of the service starts with none. Never waits on CLIProxyPacer; `pacer.notice.added` tells each new one. Experimental: may change without compatibility guarantees.",
+        "summary": "List cache notices"
+      }
+    },
+    "/api/experimental/pacer/notices/{requestID}/dismiss": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.notices.dismiss",
+        "parameters": [
+          {
+            "name": "requestID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "boolean",
+                      "enum": [true]
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Dismiss the cache notice of one request (by its request ID) in every TUI: `pacer.notice.dismissed` tells them. Answers true, also for a request with no notice held. Experimental: may change without compatibility guarantees.",
+        "summary": "Dismiss a cache notice"
       }
     },
     "/api/shell": {
@@ -22368,6 +22483,50 @@
           }
         },
         "required": ["account", "reason"],
+        "additionalProperties": false
+      },
+      "Pacer.Notice": {
+        "type": "object",
+        "properties": {
+          "requestID": {
+            "type": "string"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "rootID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "title": {
+            "type": "string"
+          },
+          "agent": {
+            "$ref": "#/components/schemas/Agent.ID"
+          },
+          "model": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": ["miss", "partial"]
+          },
+          "tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "cause": {
+            "type": "string"
+          },
+          "missCost": {
+            "$ref": "#/components/schemas/Money.USD"
+          },
+          "at": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["requestID", "sessionID", "rootID", "model", "verdict", "cause", "at"],
         "additionalProperties": false
       },
       "Pacer.Pings": {

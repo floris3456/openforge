@@ -275,6 +275,13 @@ export const Request = Schema.Struct({
   missCost: Money.USD.pipe(optional),
 }).annotate({ identifier: "Pacer.Request" })
 
+/**
+ * Why a request missed the cache, as the Requests tab says it after the verdict: CPP's cause and the first part of the
+ * prompt that changed, each when CPP gave it; empty when it gave neither.
+ */
+export const causeText = (request: Pick<Request, "cause" | "changedPart">) =>
+  [request.cause, request.changedPart].filter((part) => part !== undefined && part !== "").join(" · ")
+
 /** Which of a chat's requests to list: all, or only misses (`miss` and `partial`). */
 export const Filter = Schema.Literals(["all", "misses"]).annotate({ identifier: "Pacer.Filter" })
 export type Filter = typeof Filter.Type
@@ -335,6 +342,36 @@ export const PromptChange = Schema.Struct({
   asOf: Instant,
 }).annotate({ identifier: "Pacer.PromptChange" })
 
+/**
+ * A cache notice (spec cliproxypacer-cache-notices): a step or a compaction of one of this service's chats, a
+ * subagent's included, that CPP's verdict calls a miss or a partial reuse. The service holds them for every TUI, and
+ * each TUI shows those its own settings let through.
+ */
+export interface Notice extends Schema.Schema.Type<typeof Notice> {}
+export const Notice = Schema.Struct({
+  /** The request's `Request.id`, by which the Requests tab and what changed find it. */
+  requestID: Schema.String,
+  /** The chat that sent it: the subagent's own for a subagent's request. */
+  sessionID: SessionID,
+  /** Its top chat: the chat itself, or the chat above a subagent's. */
+  rootID: SessionID,
+  /** The chat's title; absent while it has none. */
+  title: Schema.String.pipe(optional),
+  /** The chat's agent; absent when none is set for it. */
+  agent: Agent.ID.pipe(optional),
+  /** The model the chat asked for, as `Request.model`. */
+  model: Schema.String,
+  verdict: Schema.Literals(["miss", "partial"]),
+  /** The tokens not reused (`Request.rewritten`); absent when CPP didn't count them. */
+  tokens: NonNegativeInt.pipe(optional),
+  /** Why, as the Requests tab says it ({@link causeText}); `unknown cause` when CPP gave no cause. */
+  cause: Schema.String,
+  /** What the miss cost beyond a hit (`Request.missCost`). */
+  missCost: Money.USD.pipe(optional),
+  /** When CPP received it, as `Request.at`. */
+  at: Instant,
+}).annotate({ identifier: "Pacer.Notice" })
+
 /** The connection's state changed. */
 const StatusChanged = ephemeral({ type: "pacer.status", schema: { status: Status } })
 /** The accounts were read again and changed. */
@@ -358,10 +395,17 @@ const RequestsUpdated = ephemeral({
   schema: { sessionID: SessionID.pipe(optional) },
 })
 
+/** A new cache notice, once per request; `GET /api/experimental/pacer/notices` lists those held. */
+const NoticeAdded = ephemeral({ type: "pacer.notice.added", schema: { notice: Notice } })
+/** A cache notice was dismissed, from any TUI: every TUI drops it. */
+const NoticeDismissed = ephemeral({ type: "pacer.notice.dismissed", schema: { requestID: Schema.String } })
+
 export const Event = {
   StatusChanged,
   AccountsUpdated,
   ChatUpdated,
   RequestsUpdated,
-  Definitions: inventory(StatusChanged, AccountsUpdated, ChatUpdated, RequestsUpdated),
+  NoticeAdded,
+  NoticeDismissed,
+  Definitions: inventory(StatusChanged, AccountsUpdated, ChatUpdated, RequestsUpdated, NoticeAdded, NoticeDismissed),
 }

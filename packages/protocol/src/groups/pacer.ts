@@ -5,7 +5,7 @@ import { HttpApiEndpoint, HttpApiSchema, OpenApi } from "effect/http-api"
 import { ServiceUnavailableError } from "../errors.js"
 
 const EXPERIMENTAL = "Experimental: may change without compatibility guarantees."
-const annotations = (identifier: string, summary: string, description: string) =>
+export const annotations = (identifier: string, summary: string, description: string) =>
   OpenApi.annotations({
     identifier: `experimental.pacer.${identifier}`,
     summary,

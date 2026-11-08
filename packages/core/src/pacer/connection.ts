@@ -1051,6 +1051,8 @@ export const layer = Layer.effect(
           if (!cpp) return
           chat.on = true
           chat.missing = false
+          // A view without an account is out of date once a step went out: CPP routes it to one.
+          if (chat.view && chat.view.account === undefined) chat.stale = true
           chat.stopped.clear()
           if (chat.info === undefined) mark(chat)
           return

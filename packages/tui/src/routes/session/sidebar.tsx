@@ -1,4 +1,6 @@
 import { useData } from "../../context/data"
+import { useLocal } from "../../context/local"
+import { PACER_PROVIDER } from "../../context/pacer"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useConfig } from "../../config"
@@ -13,10 +15,18 @@ import { PacerUsage } from "../../pacer/usage"
 
 export function Sidebar(props: { sessionID: string }) {
   const data = useData()
+  const local = useLocal()
   const theme = useTheme()
   const config = useConfig().data
   const session = createMemo(() => data.session.get(props.sessionID))
   const scrollAcceleration = createMemo(() => getScrollAcceleration(config))
+  // The model picked for the chat now, as the prompt shows it: the Usage section follows it before it is sent. The
+  // chat's own while the prompt has none (its agents not loaded yet).
+  const pacerModel = () => {
+    const picked = local.model.current()
+    const model = picked ? { providerID: picked.providerID, id: picked.modelID } : session()?.model
+    return model?.providerID === PACER_PROVIDER ? model.id : undefined
+  }
 
   return (
     <Show when={session()}>
@@ -68,7 +78,7 @@ export function Sidebar(props: { sessionID: string }) {
           }}
         >
           <box flexShrink={0} gap={1} paddingRight={1}>
-            <PacerUsage sessionID={props.sessionID} />
+            <PacerUsage sessionID={props.sessionID} model={pacerModel()} />
             <Slot path="sidebar.content" input={{ sessionID: props.sessionID }} />
           </box>
         </scrollbox>

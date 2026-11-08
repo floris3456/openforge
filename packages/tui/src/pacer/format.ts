@@ -160,10 +160,13 @@ export function chatAccount(accounts: readonly PacerAccount[], chat: PacerChat |
 }
 
 /**
- * The accounts whose meters the sidebar shows for a chat on CPP's model `model` (spec cliproxypacer-usage-meters,
- * section 1), by provider, then alias: every account of the provider of the account serving the chat, while its view
- * is of that model (as named, or pinned as `<provider>/<model>`) and that account has meters; else of the providers
- * whose logins serve the model.
+ * What the sidebar's Usage section shows for a chat on CPP's model `model`, the one picked for it now (spec
+ * cliproxypacer-usage-meters, section 1): the accounts, by provider, then alias, and the chat's view when it is of that
+ * model (as named, or pinned as `<provider>/<model>`), whose next and forced moves tag them.
+ *
+ * The accounts are every account of the provider of the account serving the chat, while the view is of the model and
+ * that provider serves it, plus those of the providers its moves go to; else of the providers whose logins serve the
+ * model. CPP keeps a chat's account until a step of the new model is routed, and an API key has no meters.
  */
 export function usageAccounts(input: {
   readonly accounts: readonly PacerAccount[]
@@ -172,17 +175,32 @@ export function usageAccounts(input: {
   readonly models: PacerModels | undefined
 }) {
   const model = input.model.toLowerCase()
-  const serving = chatAccount(input.accounts, input.chat)
-  const named = input.chat?.model && [input.chat.model, `${serving?.provider}/${input.chat.model}`]
-  const providers = new Set(
-    (serving && named && named.some((name) => name.toLowerCase() === model)
-      ? [serving.provider]
-      : (input.models?.items.find((item) => item.id.toLowerCase() === model)?.providers ?? [])
-    ).map((provider) => provider.toLowerCase()),
+  const chat = input.chat
+  const serving = chatAccount(input.accounts, chat)
+  const servedBy = (input.models?.items.find((item) => item.id.toLowerCase() === model)?.providers ?? []).map((item) =>
+    item.toLowerCase(),
   )
-  return input.accounts
-    .filter((account) => providers.has(account.provider.toLowerCase()))
-    .toSorted((a, b) => a.provider.localeCompare(b.provider) || a.alias.localeCompare(b.alias))
+  const provider = (serving?.provider ?? chat?.provider)?.toLowerCase()
+  const forModel =
+    chat?.model !== undefined && [chat.model, `${provider}/${chat.model}`].some((name) => name.toLowerCase() === model)
+  const own = serving?.provider.toLowerCase()
+  const current = forModel && own !== undefined && (servedBy.length === 0 || servedBy.includes(own))
+  const moves = forModel ? [chat?.nextUse?.account, chat?.forceUse?.account] : []
+  const providers = new Set([
+    ...(current ? [own] : servedBy),
+    ...input.accounts.filter((item) => moves.includes(item.alias)).map((item) => item.provider.toLowerCase()),
+  ])
+  return {
+    accounts: input.accounts
+      .filter((account) => providers.has(account.provider.toLowerCase()))
+      .toSorted((a, b) => a.provider.localeCompare(b.provider) || a.alias.localeCompare(b.alias)),
+    chat: forModel ? chat : undefined,
+  }
+}
+
+/** The provider after an account's alias when several show; not when the alias already starts with it. */
+export function usageProvider(account: PacerAccount) {
+  return account.alias.toLowerCase().startsWith(account.provider.toLowerCase()) ? undefined : account.provider
 }
 
 /** A tag on an account's head, in OpenCodePlus's words and colors. */

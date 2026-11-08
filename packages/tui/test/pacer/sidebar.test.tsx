@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
+import { createSignal } from "solid-js"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import type { PacerAccounts, PacerModels } from "@opencode/client"
@@ -20,7 +21,12 @@ async function sidebar(input: {
   accounts?: PacerAccounts | null
   models?: PacerModels | null
   providerID?: string
+  /** CPP's model picked for the chat in the prompt; null for another provider's. */
+  model?: string | null
 }) {
+  const [model, setModel] = createSignal<string | undefined>(
+    input.model === null ? undefined : (input.model ?? "claude-opus-4-5"),
+  )
   const fake = pacerFake()
   fake.status = status(input.state ?? "on")
   if (input.view !== null) fake.chats[CHAT] = input.view ?? chat()
@@ -33,11 +39,11 @@ async function sidebar(input: {
     sessions: { [CHAT]: { providerID: input.providerID ?? "cliproxypacer" } },
     content: () => (
       <box width={37}>
-        <PacerUsage sessionID={CHAT} />
+        <PacerUsage sessionID={CHAT} model={model()} />
       </box>
     ),
   })
-  return { ...setup, fake }
+  return { ...setup, fake, setModel }
 }
 
 const lines = (frame: string) =>
@@ -147,9 +153,10 @@ describe("the Usage section", () => {
     expect(lines(frame)).toEqual(["Usage", "max-1", "No quota reading yet.", "max-2", FIVE, SEVEN])
   })
 
-  test("a model several providers serve: each account names its provider", async () => {
+  test("a model several providers serve: each account names its provider, unless its alias does", async () => {
     const mixed = accounts()
     mixed.items.push({ alias: "plus-1", provider: "codex", windows: [] })
+    mixed.items.push({ alias: "codex 376e36", provider: "codex", windows: [] })
     await using setup = await sidebar({
       view: null,
       accounts: mixed,
@@ -163,10 +170,95 @@ describe("the Usage section", () => {
       "max-2 · claude",
       FIVE,
       SEVEN,
+      "codex 376e36",
+      "No quota reading yet.",
       "plus-1 · codex",
       "No quota reading yet.",
     ])
     expect(colorOf(setup.app, " · codex")).toEqual(setup.theme.text.muted.toInts())
+  })
+
+  // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-1, issue 2): the section followed the chat's saved
+  // model, so a model picked in the prompt showed only once sent.
+  test("follows the model picked for the chat before it is sent, in one frame", async () => {
+    const codex = accounts()
+    codex.items.push({ alias: "plus-1", provider: "codex", windows: [] })
+    await using setup = await sidebar({
+      accounts: codex,
+      models: { items: [...MODELS.items, { id: "gpt-6-luna", providers: ["codex"] }] },
+    })
+    await setup.frame((frame) => frame.includes("max-2 · LAST USED"))
+    await setup.settle()
+    using recorder = recordFrames(setup.app)
+    setup.setModel("gpt-6-luna")
+    await setup.frame((frame) => frame.includes("plus-1"))
+    expect(lines(setup.app.captureCharFrame())).toEqual(["Usage", "plus-1", "No quota reading yet."])
+    // Another provider's model: the section goes.
+    setup.setModel(undefined)
+    await setup.frame((frame) => lines(frame).length === 0)
+    setup.setModel("claude-opus-4-5")
+    await setup.frame((frame) => frame.includes("max-2 · LAST USED"))
+    await setup.app.renderOnce()
+    expect(recorder.missed).toBe(0)
+    const states = [
+      (frame: string) => frame.includes("max-2 · LAST USED") && frame.includes(SEVEN) && !frame.includes("plus-1"),
+      (frame: string) => frame.includes("plus-1") && !frame.includes("max-"),
+      (frame: string) => lines(frame).length === 0,
+    ]
+    expect(
+      recorder.frames.filter((frame) => !states.some((state) => state(frame.text))).map((frame) => frame.text),
+    ).toEqual([])
+  })
+
+  // Issue 1 of the same run: switched without a step, CPP's view names the new model and keeps the old account.
+  test("switched to a model the chat's account doesn't serve: the new model's accounts", async () => {
+    const codex = accounts()
+    codex.items.push({ id: "login-plus", alias: "plus-1", provider: "codex", windows: [] })
+    await using setup = await sidebar({
+      view: chat({ model: "claude-opus-4-5", provider: "codex", account: "plus-1", accountID: "login-plus" }),
+      accounts: codex,
+    })
+    const frame = await setup.frame((frame) => frame.includes("7d"))
+    expect(lines(frame)).toEqual(["Usage", "max-1", "No quota reading yet.", "max-2", FIVE, SEVEN])
+  })
+
+  // Issue 3 of the same run: the account of a chat's first step was known only once the step ended.
+  test("IN USE on the chat's first step, read once CLIProxyPacer has routed it", async () => {
+    await using setup = await sidebar({ view: null })
+    await setup.frame((frame) => frame.includes(SEVEN))
+    await setup.settle()
+    const reads = () => setup.fake.calls.filter((call) => call.path === `chat/${CHAT}`).length
+    const before = reads()
+    setup.fake.chats[CHAT] = chat()
+    setup.emit({
+      type: "session.execution.started",
+      durable: { aggregateID: CHAT, seq: 0, version: 1 },
+      data: { sessionID: CHAT },
+    })
+    const started = (proxyRequestID?: string) =>
+      setup.emit({
+        type: "session.step.started",
+        durable: { aggregateID: CHAT, seq: 1, version: 1 },
+        data: {
+          sessionID: CHAT,
+          assistantMessageID: "msg_first",
+          agent: "build",
+          model: { providerID: "cliproxypacer", id: "claude-opus-4-5" },
+          started: NOW,
+          ...(proxyRequestID ? { proxyRequestID } : {}),
+        },
+      })
+    // Before CPP's answer named the request, CPP may not have routed it: nothing is read.
+    started()
+    await setup.settle()
+    expect(reads()).toBe(before)
+    started("req_first")
+    await setup.frame((frame) => frame.includes("max-2 · IN USE"))
+    expect(reads()).toBe(before + 1)
+    // Once an account is held, a step start reads nothing; the step's end does, as before.
+    started("req_second")
+    await setup.settle()
+    expect(reads()).toBe(before + 1)
   })
 
   test("IN USE while the chat's step runs on its account", async () => {
@@ -250,8 +342,8 @@ describe("the Usage section", () => {
     expect(lines(frame)).toEqual(["Usage", "no pacer"])
   })
 
-  test("hidden for a chat on another provider, and when no CPP is set up", async () => {
-    for (const input of [{ providerID: "anthropic" }, { state: "unset" as const }]) {
+  test("hidden while another provider's model is picked for the chat, and when no CPP is set up", async () => {
+    for (const input of [{ providerID: "anthropic", model: null }, { state: "unset" as const }]) {
       await using setup = await sidebar(input)
       await setup.settle()
       expect(lines(setup.app.captureCharFrame())).toEqual([])
@@ -341,8 +433,9 @@ test("back on a chat, 20 accounts of 4 windows are on screen in full within 100 
   )
 })
 
-/** The section of the chat the route shows, as the sidebar mounts it. */
+/** The section of the chat the route shows, with the model picked for it, as the sidebar mounts it: CPP's for CHAT. */
 function Shown() {
   const route = useRoute()
-  return <PacerUsage sessionID={route.data.type === "session" ? route.data.sessionID : CHAT} />
+  const sessionID = () => (route.data.type === "session" ? route.data.sessionID : CHAT)
+  return <PacerUsage sessionID={sessionID()} model={sessionID() === CHAT ? "claude-opus-4-5" : undefined} />
 }

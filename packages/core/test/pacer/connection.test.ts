@@ -1511,6 +1511,42 @@ describe("PacerConnection chats", () => {
     }),
   )
 
+  // Spec cliproxypacer-usage-meters, section 5: a TUI showing the chat asks for its view as its first step starts, so
+  // the Usage section marks the account in use.
+  it.effect("reads a held view without an account again once a step of the chat starts, not one with an account", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const started = h.bus.publish(SessionEvent.Step.Started, {
+        sessionID: id,
+        assistantMessageID: SessionMessage.ID.create(),
+        agent: Agent.ID.make("build"),
+        model: cppModel,
+        started: 0,
+      })
+      // CPP knows the chat, not yet routed to an account.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { account: null }))
+      expect((yield* ask(h, id))?.account).toBeUndefined()
+      yield* until("the view held", () => toldChat(h, id) !== undefined)
+      expect(yield* h.connection.chat(id)).toMatchObject({ sessionID: id })
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(1)
+      // The step went out: CPP routed it. Asked as it starts, the view is read again.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      yield* started
+      yield* ask(h, id)
+      expect(seen(h, viewPath(id))).toHaveLength(2)
+      expect((yield* h.connection.chat(id))?.account).toBe("auth-a")
+      // With an account held, a step's start makes it no older: asking reads nothing.
+      yield* started
+      yield* h.connection.chat(id)
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(2)
+    }),
+  )
+
   it.effect("keeps a view stale when the chat's step ends while its read is under way", () =>
     Effect.gen(function* () {
       const h = yield* harness()

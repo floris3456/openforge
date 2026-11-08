@@ -10,9 +10,9 @@ section. Without CLIProxyPacer set up, none of these shows.
 
 - The **Requests** tab shows for a chat that used CLIProxyPacer: its model is one of CLIProxyPacer's, or one of its
   steps went through CLIProxyPacer.
-- The cache item, the **Usage** section and the switches show only while the chat's model is one of CLIProxyPacer's:
-  the model selected for it, else the one its last reply came from. A chat moved to another provider keeps its
-  **Requests** tab.
+- The cache item and the switches show only while the chat's model is one of CLIProxyPacer's: the model selected for
+  it, else the one its last reply came from. The **Usage** section shows while the model picked in the prompt is one of
+  CLIProxyPacer's. A chat moved to another provider keeps its **Requests** tab.
 
 ```text
 warm 23:41
@@ -61,18 +61,21 @@ claude-pro-1
 7d ░░░░░░░░░░░░░░░░░░░░   0%  8h 33m
 ```
 
-- Before CLIProxyPacer has served the chat its model (a new chat, or one just switched to another model), it shows the
-  accounts of every provider whose logins serve that model, each named with its provider when there are several. API
-  keys have no meters, so their accounts don't show.
-- `IN USE` marks the account serving the chat while its step runs, `LAST USED` the one that served it last, `NEXT USE`
-  where the chat goes once its cache is cold, and `FORCE USE` (a warning) where CLIProxyPacer must move it.
+- It follows the model picked in the prompt, before you send. Until CLIProxyPacer has served the chat that model (a
+  new chat, or one just switched to another model), it shows the accounts of every provider whose logins serve the
+  model, each named with its provider when there are several. API keys have no meters, so their accounts don't show.
+- When the chat's next account is another provider's, that provider's accounts show too.
+- `IN USE` marks the account serving the chat while its step runs (from its first step on), `LAST USED` the one that
+  served it last, `NEXT USE` where the chat goes once its cache is cold, and `FORCE USE` (a warning) where
+  CLIProxyPacer must move it.
 - A bar is green above 20% left, yellow at 20% or less and red at 10% or less. The percent is rounded down.
 - After the percent comes the time to the window's reset; `~` marks a reset CLIProxyPacer estimates. `reset` says the
   reset has passed with no reading since, `dormant` that nothing has used the window since it last reset, and `STALE`
   that CLIProxyPacer no longer counts on the reading (older than an hour). Those bars are grey.
 - While CLIProxyPacer is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it
   says `no pacer`.
-- It reads nothing of its own: the meters come with CLIProxyPacer's change stream, as they are read.
+- It polls nothing: the meters come with CLIProxyPacer's change stream, as they are read. A chat's view is read once
+  more on its first step, to mark the account in use.
 
 ## Requests tab
 

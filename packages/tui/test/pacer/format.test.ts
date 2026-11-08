@@ -25,6 +25,7 @@ import {
   usageLabelWidth,
   usageLine,
   usageMeter,
+  usageProvider,
   usageTags,
 } from "../../src/pacer/format"
 import { requestTarget } from "../../src/pacer/jump"
@@ -176,7 +177,7 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
     ],
   }
   const aliases = (input: Partial<Parameters<typeof usageAccounts>[0]>) =>
-    usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: undefined, models, ...input }).map(
+    usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: undefined, models, ...input }).accounts.map(
       (item) => item.alias,
     )
   const line = (extra: Partial<PacerWindow>, now = NOW, width = 37) =>
@@ -209,6 +210,48 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
     test("served from an account without meters (an API key): the providers whose logins serve the model", () => {
       const keyed = chat({ model: "claude-opus-5-5", provider: "commandcode", account: "cc-key", accountID: "key-1" })
       expect(aliases({ chat: keyed })).toEqual(["claude a", "claude b"])
+    })
+
+    // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-1, issue 1): CPP takes the new model into the
+    // chat's view at once and keeps its account until a step of it is routed.
+    test("switched to a model the serving account's provider doesn't serve: the model's providers", () => {
+      const switched = chat({
+        model: "claude-opus-5-5",
+        provider: "codex",
+        account: "codex a",
+        accountID: "id-codex a",
+      })
+      expect(aliases({ chat: switched })).toEqual(["claude a", "claude b"])
+      // One CPP says nothing of: the view stands.
+      expect(aliases({ chat: switched, models: { items: [] } })).toEqual(["codex a"])
+    })
+
+    // Issue 4 of the same run: the chat's next account was another provider's, and nothing showed it.
+    test("where the chat moves, also on another provider", () => {
+      const served = {
+        model: "gpt-6-luna",
+        provider: "codex",
+        account: "codex a",
+        accountID: "id-codex a",
+      }
+      const next = chat({ ...served, nextUse: { account: "commandcode a", reason: "cold_move" } })
+      expect(aliases({ model: "gpt-6-luna", chat: next })).toEqual(["codex a", "commandcode a"])
+      const forced = chat({ ...served, forceUse: { account: "claude a", when: "now" } })
+      // Every account of the provider it moves to.
+      expect(aliases({ model: "gpt-6-luna", chat: forced })).toEqual(["claude a", "claude b", "codex a"])
+      // A view of another model: its moves are that model's, so they neither add accounts nor tag them.
+      const other = usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: next, models })
+      expect(other.accounts.map((item) => item.alias)).toEqual(["claude a", "claude b"])
+      expect(other.chat).toBeUndefined()
+      expect(usageAccounts({ accounts: all, model: "gpt-6-luna", chat: next, models }).chat).toBe(next)
+    })
+
+    test("the provider after the alias only when the alias doesn't start with it", () => {
+      expect(usageProvider(account("max-1", "claude"))).toBe("claude")
+      // CPP's alias of an account without a label, and one named after its provider.
+      expect(usageProvider(account("claude 193e40", "claude"))).toBeUndefined()
+      expect(usageProvider(account("opencode-go-apikey", "opencode-go"))).toBeUndefined()
+      expect(usageProvider(account("Codex main", "codex"))).toBeUndefined()
     })
 
     test("two logins of one address: the serving one by its ID", () => {

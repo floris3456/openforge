@@ -11,6 +11,7 @@ import {
   usageLabelWidth,
   usageLine,
   usageMeter,
+  usageProvider,
   usageTags,
   type UsageMeter,
   type UsageTag,
@@ -19,31 +20,42 @@ import {
 
 // The sidebar's Usage section (spec cliproxypacer-usage-meters), where Context was: OpenCodePlus's usage meters for
 // every account of the provider serving the chat's model, each window a bar colored by what is left, with the account
-// serving the chat and the one it moves to tagged. Greyed with "as of" while CPP is unreachable, "no pacer" on a plain
-// proxy, hidden for chats on other providers (also once a chat moves to one) and when no CPP is set up.
+// serving the chat and the one it moves to tagged. It follows the model picked for the chat now, as the prompt shows
+// it. Greyed with "as of" while CPP is unreachable, "no pacer" on a plain proxy, hidden while the model picked is
+// another provider's and when no CPP is set up.
 
-export function PacerUsage(props: { sessionID: string }) {
+/** `model`: the ID of CPP's model picked for the chat now; undefined while it is another provider's. */
+export function PacerUsage(props: { sessionID: string; model: string | undefined }) {
   const pacer = usePacer()
-  return <Show when={pacer}>{(pacer) => <UsageSection pacer={pacer()} sessionID={props.sessionID} />}</Show>
+  return (
+    <Show when={pacer}>
+      {(pacer) => <UsageSection pacer={pacer()} sessionID={props.sessionID} model={props.model} />}
+    </Show>
+  )
 }
 
 /** The sidebar's room for a line, until the section has measured its own. */
 const SIDEBAR_WIDTH = 37
 
-function UsageSection(props: { pacer: Pacer; sessionID: string }) {
+function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | undefined }) {
   const theme = useTheme()
   const data = useData()
   const [width, setWidth] = createSignal(SIDEBAR_WIDTH)
-  const active = () => props.pacer.current(props.sessionID)
+  const active = () => props.model !== undefined && props.pacer.shows(props.sessionID)
   const noPacer = () => props.pacer.state() === "no-pacer"
   const view = () => (active() && !noPacer() ? props.pacer.view(props.sessionID) : undefined)
   const items = () => props.pacer.accounts()?.value.items ?? []
   const serving = createMemo(() => chatAccount(items(), view()?.value))
-  const shown = createMemo(() => {
-    const model = props.pacer.model(props.sessionID)
-    if (!active() || noPacer() || model === undefined) return []
-    return usageAccounts({ accounts: items(), model, chat: view()?.value, models: props.pacer.models()?.value })
+  const usage = createMemo(() => {
+    if (!active() || noPacer() || props.model === undefined) return { accounts: [], chat: undefined }
+    return usageAccounts({
+      accounts: items(),
+      model: props.model,
+      chat: view()?.value,
+      models: props.pacer.models()?.value,
+    })
   })
+  const shown = () => usage().accounts
   const providers = createMemo(() => new Set(shown().map((account) => account.provider.toLowerCase())).size > 1)
   // Frozen at the first frame it is stale, as the toolbar's item is.
   const asOf = createMemo<number | undefined>((previous) => {
@@ -78,7 +90,7 @@ function UsageSection(props: { pacer: Pacer; sessionID: string }) {
             {(account) => (
               <AccountMeters
                 account={account()}
-                tags={usageTags({ account: account(), serving: serving(), chat: view()?.value, running: running() })}
+                tags={usageTags({ account: account(), serving: serving(), chat: usage().chat, running: running() })}
                 provider={providers()}
                 width={width()}
                 at={at()}
@@ -133,8 +145,8 @@ function AccountMeters(props: {
           flexShrink={1}
         >
           <b>{props.account.alias}</b>
-          <Show when={props.provider}>
-            <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}> · {props.account.provider}</span>
+          <Show when={props.provider && usageProvider(props.account)}>
+            {(provider) => <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}> · {provider()}</span>}
           </Show>
         </text>
         <Index each={props.tags}>

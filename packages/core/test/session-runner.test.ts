@@ -19,7 +19,7 @@ import {
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { AnthropicMessages, OpenAIResponses } from "@opencode/ai/protocols"
 import { TestLLM, compileRequest } from "@opencode/ai/testing"
-import { RequestExecutor, classifyProviderFailure } from "@opencode/ai/route"
+import { RequestExecutor, applyCachePolicy, classifyProviderFailure } from "@opencode/ai/route"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Database } from "@opencode/core/database/database"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -2853,7 +2853,8 @@ describe("SessionRunnerLLM", () => {
 
         const normal = s.requests[1]
         const compact = s.requests[2]
-        expect(compact.messages.slice(0, normal.messages.length)).toEqual([...normal.messages])
+        // With the step's conversation breakpoint where its policy puts it, on its last message.
+        expect(compact.messages.slice(0, normal.messages.length)).toEqual([...applyCachePolicy(normal).messages])
         expect(compact.messages.at(-1)).toMatchObject({
           role: "user",
           content: [{ type: "text", text: SessionCompaction.buildPrompt(false) }],
@@ -2880,9 +2881,9 @@ describe("SessionRunnerLLM", () => {
         // The summary call's provider metadata is never replayed, so it is not stored.
         expect(stored).not.toHaveProperty("native")
 
-        // Compare wire content without the cache breakpoints that move to the new final message.
-        const before = yield* compileRequest(LLMRequest.update(normal, { cache: "none" }))
-        const after = yield* compileRequest(LLMRequest.update(compact, { cache: "none" }))
+        // Compare wire content, cache breakpoints included: the step's stay where they were.
+        const before = yield* compileRequest(normal)
+        const after = yield* compileRequest(compact)
         const key = route === OpenAIResponses.route ? "input" : "messages"
         const input = Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))
         const prefix = input(before.body[key])

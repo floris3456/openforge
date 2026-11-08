@@ -1,7 +1,7 @@
 export * as PacerSummaries from "./summaries.js"
 
-import { ai, AIError, type ContentPart, LanguageModel, LLMRequest, Message } from "@opencode/ai/effect"
-import { AnthropicMessages, OpenAICompatibleResponses } from "@opencode/ai/protocols"
+import { ai, AIError, LanguageModel, LLMRequest, type Message } from "@opencode/ai/effect"
+import { OpenAICompatibleResponses } from "@opencode/ai/protocols"
 import type { HttpMiddleware } from "@opencode/ai/route"
 import type { SessionID } from "@opencode/schema/session-id"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
@@ -29,68 +29,26 @@ export const WAIT = "4 minutes"
 export const provider: string = PacerEndpoint.id
 
 /**
- * The request a chat's next step would send, up to the recent part openforge keeps (`session/compaction.ts`), made a
- * `/responses/compact` request to CPP (spec section 3, "The body"): a Responses chat keeps its own route and model, so
- * the body is the start of the step's bytes as far as `/compact` takes them
- * (`OpenAICompatibleResponses.compact`); a Messages chat's is rendered by the Responses protocol at the same address
- * with the same key, in the form CPP renders back into the step's own blocks: its system parts as a first `system` item
- * with a part each (`OpenAICompatibleResponses.compactSystemParts`), and its thinking blocks, signed or redacted, as
- * reasoning items in their places ({@link thinking}).
+ * The request a Responses chat's next step would send, up to the recent part openforge keeps (`session/compaction.ts`),
+ * made a `/responses/compact` request to CPP (spec section 3, "The body"): the chat's own route and model, so the body
+ * is the start of the step's bytes as far as `/compact` takes them (`OpenAICompatibleResponses.compact`). Only for a
+ * Responses route: a chat whose steps go in another format gets openforge's own summary ({@link Interface.plan}).
  */
 export function responses(request: LLMRequest) {
   const route = request.model.route
-  const model =
-    route.protocol === OpenAICompatibleResponses.route.protocol
-      ? LanguageModel.update(request.model, {
-          route: route.with({ compact: { endpoint: OpenAICompatibleResponses.compact } }),
-        })
-      : OpenAICompatibleResponses.route
-          .with({
-            provider: route.provider ?? request.model.provider,
-            providerMetadataKey: OpenAICompatibleResponses.route.providerMetadataKey,
-            endpoint: { baseURL: route.endpoint.baseURL },
-            auth: route.auth,
-            compact: { endpoint: OpenAICompatibleResponses.compactSystemParts },
-          })
-          .model({ id: request.model.id })
-  const key = model.route.providerMetadataKey ?? model.provider
-  const messages =
-    route.protocol === AnthropicMessages.protocol.id
-      ? request.messages.map((message) => thinking(message, request, key))
-      : request.messages
-  const next = LLMRequest.update(request, { model, messages })
+  if (!speaksResponses(route.protocol)) throw new Error("Only a Responses chat's summary goes to /responses/compact")
+  const next = LLMRequest.update(request, {
+    model: LanguageModel.update(request.model, {
+      route: route.with({ compact: { endpoint: OpenAICompatibleResponses.compact } }),
+    }),
+  })
   if (!ai.canCompact(next)) throw new Error("A route with a compact endpoint can compact")
   return next
 }
 
-/** What CPP reads as a redacted thinking block's data in a reasoning item's encrypted content (`claude_responses.rs`). */
-const REDACTED = "claude-redacted-thinking:"
-
-/**
- * A Messages chat's message with its thinking as the step sends it, for the Responses rendering under `key`: each
- * reasoning part becomes the block the step lowers it to (`AnthropicMessages.thinkingBlock`, the step's own rule, so
- * the same parts, text and signatures), as the reasoning item CPP turns back into that block
- * (`reasoning_to_thinking`): the text as its summary, the signature, or a redacted block's data after
- * {@link REDACTED}, as its encrypted content. A part the step leaves out is left out.
- */
-function thinking(message: Message, request: LLMRequest, key: string) {
-  if (message.role !== "assistant" || !message.content.some((part) => part.type === "reasoning")) return message
-  return new Message({
-    ...message,
-    content: message.content.flatMap((part): ContentPart[] => {
-      if (part.type !== "reasoning") return [part]
-      const block = AnthropicMessages.thinkingBlock(part, request)
-      if (block === undefined) return []
-      const encrypted = block.type === "thinking" ? block.signature : `${REDACTED}${block.data}`
-      return [
-        {
-          type: "reasoning",
-          text: block.type === "thinking" ? block.thinking : "",
-          providerMetadata: { [key]: { reasoningEncryptedContent: encrypted } },
-        },
-      ]
-    }),
-  })
+/** Whether a route of this protocol sends its steps to CPP as Responses, the one format CPP writes summaries from. */
+function speaksResponses(protocol: string) {
+  return protocol === OpenAICompatibleResponses.route.protocol
 }
 
 /** What CPP's readable answer opens its summary with (`compaction_write.rs`, `SUMMARY_PREFIX`). */
@@ -138,7 +96,7 @@ export function header(value: string | undefined): Header | undefined {
 /**
  * The summary in CPP's readable answer to `/responses/compact` (`compaction.writer = server`): the text of its user
  * message after {@link PREFIX}, the earlier user messages it kept included. Undefined without one: an opaque capsule
- * alone, as CPP answers Claude while the writer is unset, is no summary openforge can keep.
+ * alone, as CPP may answer while the writer is unset, is no summary openforge can keep.
  */
 export function summaryOf(replacement: ReadonlyArray<Message>): string | undefined {
   for (const message of replacement) {
@@ -187,9 +145,9 @@ export type Decision = { readonly by: "cliproxypacer" } | { readonly by: "openfo
 export const ROUTE = "it writes no summaries on this model's route"
 
 /**
- * Who writes, in this order: the writer ({@link writerFor}: `client` is openforge, `server` or unset CPP); then only
- * where CPP writes for the model's route with `server`. Whether the chat is warm, and in which format its steps go to
- * CPP, don't matter.
+ * Who writes a Responses chat's summary, in this order: the writer ({@link writerFor}: `client` is openforge, `server`
+ * or unset CPP); then only where CPP writes for the model's route with `server`. Whether the chat is warm doesn't
+ * matter. A chat whose steps go in another format never gets here: openforge writes it ({@link Interface.plan}).
  */
 export function decide(input: {
   /** Who writes by the settings ({@link writerFor}); undefined while unset. */
@@ -224,16 +182,22 @@ export interface PlanInput {
   readonly parentID?: SessionID
   /** CPP's ID of the model that would write it: one of CPP's picks, else the chat's own. */
   readonly model: string
+  /** The protocol of that model's route (`route.protocol`): the format its steps go to CPP in. */
+  readonly protocol: string
 }
 
 export interface Interface {
   /**
    * Who writes the summary, asking CPP only while the connection is on (`PacerStatus`). Unreachable, openforge writes,
    * saying so ({@link UNREACHABLE}); without a pacer, or not set up, undefined: openforge writes, naming no writer, as
-   * for a chat on any provider. On, it reads the chat's view now (its own writer, its effective one, its provider), the
-   * key level's listing ({@link writerFor}), and the catalog for the model's routes. When CPP is to write and the
-   * chat's effective writer isn't `server`, sets the chat's own `server` first (one `PATCH`): an unset writer answers
-   * Claude with a capsule only CPP opens. Never fails: openforge writes, saying why, when CPP can't be asked.
+   * for a chat on any provider. On, the summary takes the format of the writing model's steps: for a model whose
+   * steps don't go as Responses (Claude's go as Anthropic Messages), openforge writes it as an ordinary request of the
+   * chat, whatever `compaction.writer` says, and nothing is read or set (CPP writes summaries only from a Responses
+   * body, and its guide never tells an Anthropic Messages client `server`). For a Responses model it reads the chat's
+   * view now (its own writer, its effective one, its provider), the key level's listing ({@link writerFor}), and the
+   * catalog for the model's routes. When CPP is to write and the chat's effective writer isn't `server`, sets the
+   * chat's own `server` first (one `PATCH`): an unset writer can answer with a capsule only CPP opens. Never fails:
+   * openforge writes, saying why, when CPP can't be asked.
    */
   readonly plan: (input: PlanInput) => Effect.Effect<Decision | undefined>
 }
@@ -277,6 +241,7 @@ export const layer = Layer.effect(
       if (state !== "on") return undefined
       const endpoint = yield* endpoints.get()
       if (!endpoint) return { by: "openforge", fallback: UNREACHABLE } satisfies Decision
+      if (!speaksResponses(input.protocol)) return { by: "openforge" } satisfies Decision
       const path = `/pacer/v1/sessions/${encodeURIComponent(PacerSessionID.make(input.sessionID))}`
       const read = yield* Effect.result(
         Effect.gen(function* () {

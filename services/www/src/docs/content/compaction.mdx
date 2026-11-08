@@ -198,7 +198,7 @@ Compaction · by CLIProxyPacer on gemini-3.8-flash-high · cold · 20,182 in · 
 
 | Topic | Behavior |
 | --- | --- |
-| Writer | CLIProxyPacer writes the summary by default, and it is kept like any other summary. `agents.compaction.model` does not apply then. See [Summaries](/providers#summaries). |
+| Writer | CLIProxyPacer writes the summary by default, and it is kept like any other summary. `agents.compaction.model` does not apply then. A summary written on a Claude model is openforge's, in the chat's own format. See [Summaries](/providers#summaries). |
 | Asks | CLIProxyPacer can ask to compact a cold, large session before its next step, or an idle one before its cache goes cold, when its settings for them are on. The first needs `auto` on. See [Compaction asks](/providers#compaction-asks). |
 | Moves | CLIProxyPacer asks for a summary before it moves a session to another account, while `auto` is on. |
 

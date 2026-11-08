@@ -15,7 +15,7 @@ import {
   UnknownProviderError,
   type Usage,
 } from "@opencode/ai/effect"
-import type { StreamOptions } from "@opencode/ai/route"
+import { applyCachePolicy, type StreamOptions } from "@opencode/ai/route"
 import type { SessionCompactionResult } from "@opencode/plugin/effect/session"
 import type { SessionError } from "@opencode/schema/session-error"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -415,7 +415,8 @@ export const layer = Layer.effect(
      * Who writes the summary of a chat on CLIProxyPacer (spec cliproxypacer-server-summaries, section 2); undefined for
      * another provider's chat, and for one on CLIProxyPacer while it has no pacer (`PacerSummaries.plan`): openforge
      * writes it as for any provider, naming no writer. `writing` holds the model that would write it: a pick of
-     * CLIProxyPacer's, else the chat's own, never the compaction agent's.
+     * CLIProxyPacer's, else the chat's own, never the compaction agent's; its route's format decides whether
+     * CLIProxyPacer can write it at all.
      */
     const pacerWriter = (trigger: Trigger, writing: SessionContext.Loaded) => {
       const context = trigger.context
@@ -424,14 +425,15 @@ export const layer = Layer.effect(
         sessionID: context.session.id,
         ...(context.session.parentID ? { parentID: context.session.parentID } : {}),
         model: writing.model.ref.id,
+        protocol: writing.model.model.route.protocol,
       })
     }
 
     /**
-     * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
-     * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
-     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
-     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
+     * CLIProxyPacer writes the summary of a Responses chat (spec cliproxypacer-server-summaries, section 3):
+     * `POST /v1/responses/compact` with the request the chat's next step would send on `trigger.context`'s model, up to
+     * the recent messages kept by `keep` (a prefix of the step's, so its cache still reads), with a summary's headers
+     * (`X-Pacer-Session`, its parent, `X-Pacer-Kind: compaction`), as `PacerSummaries.responses`. The answer's summary is
      * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
      * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
      * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
@@ -621,19 +623,26 @@ export const layer = Layer.effect(
       const prompt = buildPrompt(previous !== undefined, previous?.summary.includes(LEGACY_HEADING) ?? false)
       const headings = SUMMARY_TEMPLATE.split("\n").filter((line) => line.startsWith("##"))
       const filled = (text: string) => text.split("\n").some((line) => headings.includes(line.trim()))
-      const prepared = yield* prepare(context, messages, budget)
       // Size the unchanged request with the number that decided to compact: the last response's count plus an
       // estimate of what came after it. Characters overstate a conversation whose old reasoning the provider drops.
       // A hook can still make this request larger than that count; the provider then rejects it and it is resent as
       // text. An overflow already proved the count low, so it keeps the character estimate.
       const measured = trigger.reason === "overflow" ? undefined : measuredPrompt({ ...context, messages })
+      // A conversation under the budget goes out unchanged, so its output limit leaves the room it leaves, as the
+      // step's did: a lower one would shrink Anthropic's manual thinking budget, which is fitted under it, and a
+      // changed budget misses the steps' cached messages.
+      const prepared = yield* prepare(context, messages, measured ? Math.min(budget, total(measured)) : budget)
+      // The reply to the last step that ran on this conversation, unless a background summary leaves it out.
+      const last = context.messages.findLast((message) => message.type === "assistant")?.id
 
       // Hooks saw the request without the summary prompt, so it is appended here. A reply that ignores the
       // template gets one reminder before it counts as a failure.
       const send = (request: LLMRequest, size?: Estimate) =>
         Effect.gen(function* () {
           const prompted = fitOutput(
-            LLMRequest.update(request, { messages: [...request.messages, Message.user(prompt)] }),
+            LLMRequest.update(request, {
+              messages: [...stepBreakpoint(request, last).messages, Message.user(prompt)],
+            }),
             context.model.limit,
             size && { ...size, estimated: size.estimated + Token.estimate(prompt) },
           )
@@ -980,10 +989,10 @@ export const layer = Layer.effect(
     /**
      * The conversation as the runner would send it, after request hooks.
      *
-     * The output limit leaves room for `budget`, the most `deliver` sends. The request prepared here can be larger
-     * when the conversation overshot the threshold, and is only shrunk to fit after hooks have seen it, so sizing the
-     * output to it would leave next to no room. A prompt the estimate undersells is rejected and shrunk like any
-     * other.
+     * The output limit leaves room for `budget`, the most `deliver` sends (a summary's own, smaller conversation
+     * passes its size instead). The request prepared here can be larger when the conversation overshot the threshold,
+     * and is only shrunk to fit after hooks have seen it, so sizing the output to it would leave next to no room. A
+     * prompt the estimate undersells is rejected and shrunk like any other.
      */
     const prepare = (
       context: SessionContext.Loaded,
@@ -1165,6 +1174,20 @@ const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) =
   const index = from === undefined ? -1 : request.messages.findIndex((message) => message.id === from)
   if (index < 0) return request
   return LLMRequest.update(request, { messages: request.messages.slice(0, index) })
+}
+
+/**
+ * The request with its conversation cache breakpoint where the step that `reply` answered placed it: on that step's
+ * last message, not moved onto what follows (the reply, the summary prompt), which gets one only from a breakpoint the
+ * step left unused. The summary's bytes are then the step's up to there, markers included, and it reads exactly what
+ * the step cached, however many blocks the reply adds. Unchanged when `reply` is not in it, as in a background summary
+ * or the history before the kept tail, and on routes that place no breakpoints.
+ */
+const stepBreakpoint = (request: LLMRequest, reply: SessionMessage.ID | undefined) => {
+  const end = reply === undefined ? -1 : request.messages.findIndex((message) => message.id === reply)
+  if (end <= 0) return request
+  const step = applyCachePolicy(LLMRequest.update(request, { messages: request.messages.slice(0, end) }))
+  return LLMRequest.update(request, { messages: [...step.messages, ...request.messages.slice(end)] })
 }
 
 const recentStart = (

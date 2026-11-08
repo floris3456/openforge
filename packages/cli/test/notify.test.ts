@@ -271,6 +271,28 @@ describe("player", () => {
     expect(logged).toEqual(["Sound done did not play: no sound device could be opened"])
   })
 
+  // Found 2026-11-08 in the owner's devbox-theorysnap container: opening the audio with no sound server or card printed
+  // 35 lines of libasound's errors to the terminal before it failed.
+  test("a machine without a sound device says so, and never opens the audio", async () => {
+    const speaker = Speaker.openTui({ available: () => false })
+    const reads: string[] = []
+    const play = Speaker.player({
+      speaker,
+      volume: 0.4,
+      builtin: (name) => {
+        reads.push(name)
+        return path.join(import.meta.dir, "notify.test.ts")
+      },
+      custom: () => Promise.reject(new Error("unused")),
+    })
+    await expect(play({ name: "done" })).rejects.toThrow(
+      "this machine has no sound device (no PulseAudio server or ALSA card)",
+    )
+    // Not even the sound's file was asked for, so nothing was read or decoded either.
+    expect(reads).toEqual([])
+    speaker.dispose()
+  })
+
   test("a custom file that can't be had plays the built-in sound", async () => {
     const played: string[] = []
     const play = Speaker.player({

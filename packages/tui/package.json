@@ -13,6 +13,7 @@
   "exports": {
     ".": "./src/index.tsx",
     "./attention": "./src/attention.ts",
+    "./sound-output": "./src/sound-output.ts",
     "./config": "./src/config/index.tsx",
     "./config/keybind": "./src/config/keybind.ts",
     "./config/v1": "./src/config/v1/index.tsx",

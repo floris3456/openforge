@@ -2,6 +2,7 @@ export * as Speaker from "./speaker"
 
 import { Audio, type AudioSound } from "@opentui/core"
 import type { Attention } from "@opencode/schema/attention"
+import { SoundOutput } from "@opencode/tui/sound-output"
 import { errorMessage } from "../util/error"
 
 // How `openforge notify` plays a sound: OpenTUI's audio, as the TUI plays its own, with no external player.
@@ -12,7 +13,13 @@ export interface Speaker {
   dispose(): void
 }
 
-export function openTui(): Speaker {
+/**
+ * `available`: whether this machine has anywhere to play a sound. Without one the audio is never opened: on Linux it
+ * would print libasound's errors to the terminal.
+ */
+export function openTui(
+  input: { readonly available: () => boolean } = { available: () => SoundOutput.available() },
+): Speaker {
   const state = { audio: undefined as Audio | undefined, error: "" }
   const sounds = new Map<string, AudioSound>()
   const audio = () => {
@@ -28,6 +35,7 @@ export function openTui(): Speaker {
   const why = (fallback: string) => (state.error === "" ? fallback : state.error)
   return {
     async play(key, bytes, volume) {
+      if (!input.available()) throw new Error("this machine has no sound device (no PulseAudio server or ALSA card)")
       const current = audio()
       const known = sounds.get(key)
       const sound = known ?? current.loadSound(await bytes())

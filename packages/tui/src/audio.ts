@@ -1,11 +1,17 @@
 import { Audio, type AudioErrorContext, type AudioPlayOptions, type AudioSound } from "@opentui/core"
 import { readFile } from "node:fs/promises"
+import { SoundOutput } from "./sound-output"
 
 let audio: Audio | null | undefined
 const sounds = new Map<string, Promise<AudioSound | null>>()
 
 function getAudio() {
   if (audio !== undefined) return audio
+  // openforge: with no sound server or card here, opening the audio prints libasound's errors over the screen.
+  if (!SoundOutput.available()) {
+    audio = null
+    return null
+  }
   try {
     const next = Audio.create({ autoStart: false })
     next.on("error", (error: Error, context: AudioErrorContext) => {

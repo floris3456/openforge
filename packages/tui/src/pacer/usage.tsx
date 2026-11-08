@@ -1,28 +1,16 @@
-import type { PacerAccount } from "@opencode/client"
 import { TextAttributes, type BoxRenderable } from "@opentui/core"
 import { createMemo, createSignal, Index, Show } from "solid-js"
 import { useData } from "../context/data"
 import { usePacer, type Pacer } from "../context/pacer"
 import { useTheme } from "../context/theme"
-import {
-  chatAccount,
-  clockTime,
-  usageAccounts,
-  usageLabelWidth,
-  usageLine,
-  usageMeter,
-  usageProvider,
-  usageTags,
-  type UsageMeter,
-  type UsageTag,
-  type UsageTone,
-} from "./format"
+import { chatAccount, clockTime, usageAccounts, usageLines, type UsageInk, type UsageSpan } from "./format"
 
-// The sidebar's Usage section (spec cliproxypacer-usage-meters), where Context was: OpenCodePlus's usage meters for
-// every account of the provider serving the chat's model, each window a bar colored by what is left, with the account
-// serving the chat and the one it moves to tagged. It follows the model picked for the chat now, as the prompt shows
-// it. Greyed with "as of" while CPP is unreachable, "no pacer" on a plain proxy, hidden while the model picked is
-// another provider's and when no CPP is set up.
+// The sidebar's Usage section (spec cliproxypacer-usage-meters), where Context was: for the model picked for the chat
+// now, as the prompt shows it, the accounts of the provider serving it that serve it, one group per plan with the
+// windows' labels over their columns, one row per account without its name, each window that limits the model a bar
+// colored by what is left; the chat's account and where it moves marked, with a legend. Greyed with "as of" while CPP
+// is unreachable, "no pacer" on a plain proxy, hidden while the model picked is another provider's and when no CPP is
+// set up.
 
 /** `model`: the ID of CPP's model picked for the chat now; undefined while it is another provider's. */
 export function PacerUsage(props: { sessionID: string; model: string | undefined }) {
@@ -56,7 +44,6 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
     })
   })
   const shown = () => usage().accounts
-  const providers = createMemo(() => new Set(shown().map((account) => account.provider.toLowerCase())).size > 1)
   // Frozen at the first frame it is stale, as the toolbar's item is.
   const asOf = createMemo<number | undefined>((previous) => {
     if (shown().length === 0) return undefined
@@ -65,7 +52,6 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
       return undefined
     return previous ?? props.pacer.status()?.asOf ?? props.pacer.accounts()?.value.asOf
   })
-  const at = () => asOf() ?? props.pacer.now()
   props.pacer.countdown(
     () =>
       asOf() === undefined &&
@@ -74,6 +60,32 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
       ),
   )
   const running = () => data.session.status(props.sessionID) === "running"
+  // The clock ticks every second, the text changes once a minute: a line whose text and colors stand keeps its object,
+  // so it isn't drawn again.
+  const lines = createMemo<UsageSpan[][]>(
+    (previous) =>
+      usageLines({
+        accounts: shown(),
+        model: props.model ?? "",
+        serving: serving(),
+        chat: usage().chat,
+        running: running(),
+        width: width(),
+        now: asOf() ?? props.pacer.now(),
+      }).map((line, index) => {
+        const old = previous[index]
+        return old !== undefined && sameLine(old, line) ? old : line
+      }),
+    [],
+  )
+  const greyed = () => asOf() !== undefined
+  // Greyed as the toolbar's item is: faint, dimmed.
+  const color = (ink: UsageInk) => {
+    if (greyed()) return theme.text.faint
+    if (ink === "base") return theme.text.base
+    if (ink === "muted") return theme.text.muted
+    return theme.text.feedback[ink].base
+  }
 
   return (
     <Show when={active() && (noPacer() || shown().length > 0)}>
@@ -86,16 +98,17 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
           <b>Usage</b>
         </text>
         <Show when={!noPacer()} fallback={<text fg={theme.text.muted}>no pacer</text>}>
-          <Index each={shown()}>
-            {(account) => (
-              <AccountMeters
-                account={account()}
-                tags={usageTags({ account: account(), serving: serving(), chat: usage().chat, running: running() })}
-                provider={providers()}
-                width={width()}
-                at={at()}
-                greyed={asOf() !== undefined}
-              />
+          <Index each={lines()}>
+            {(line) => (
+              <text wrapMode="none">
+                <Index each={line()}>
+                  {(span) => (
+                    <span style={{ fg: color(span().ink), dim: greyed(), bold: span().bold === true }}>
+                      {span().text}
+                    </span>
+                  )}
+                </Index>
+              </text>
             )}
           </Index>
           <Show when={asOf()}>
@@ -111,78 +124,9 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
   )
 }
 
-function AccountMeters(props: {
-  account: PacerAccount
-  tags: UsageTag[]
-  provider: boolean
-  width: number
-  at: number
-  greyed: boolean
-}) {
-  const theme = useTheme()
-  const labelWidth = () => usageLabelWidth(props.account.windows)
-  // Greyed as the toolbar's item is: faint, dimmed.
-  const fg = <Color,>(color: Color) => (props.greyed ? theme.text.faint : color)
-  const tagColor = (tone: UsageTag["tone"]) => fg(theme.text.feedback[tone].base)
-  const barColor = (tone: UsageTone) =>
-    fg(
-      tone === "critical"
-        ? theme.text.feedback.error.base
-        : tone === "low"
-          ? theme.text.feedback.warning.base
-          : tone === "normal"
-            ? theme.text.feedback.success.base
-            : theme.text.muted,
-    )
+function sameLine(a: readonly UsageSpan[], b: readonly UsageSpan[]) {
   return (
-    <box flexShrink={0}>
-      <box flexDirection="row">
-        <text
-          fg={fg(theme.text.base)}
-          attributes={props.greyed ? TextAttributes.DIM : 0}
-          wrapMode="none"
-          truncate
-          flexShrink={1}
-        >
-          <b>{props.account.alias}</b>
-          <Show when={props.provider && usageProvider(props.account)}>
-            {(provider) => <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}> · {provider()}</span>}
-          </Show>
-        </text>
-        <Index each={props.tags}>
-          {(tag) => (
-            <text flexShrink={0} fg={tagColor(tag().tone)} attributes={props.greyed ? TextAttributes.DIM : 0}>
-              {` · ${tag().text}`}
-            </text>
-          )}
-        </Index>
-      </box>
-      <Show
-        when={props.account.windows.length > 0}
-        fallback={
-          <text fg={fg(theme.text.muted)} attributes={props.greyed ? TextAttributes.DIM : 0}>
-            No quota reading yet.
-          </text>
-        }
-      >
-        <Index each={props.account.windows}>
-          {(window) => {
-            // Its text changes once a minute, though the clock it reads ticks every second.
-            const meter = createMemo(() => usageMeter(window(), labelWidth(), props.width, props.at), undefined, {
-              equals: (a: UsageMeter, b: UsageMeter) => a.tone === b.tone && usageLine(a) === usageLine(b),
-            })
-            return (
-              <text wrapMode="none">
-                <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}>{meter().label} </span>
-                <span style={{ fg: barColor(meter().tone), dim: props.greyed }}>{meter().filled}</span>
-                <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}>{meter().empty}</span>
-                <span style={{ fg: fg(theme.text.base), dim: props.greyed }}> {meter().percent}</span>
-                <span style={{ fg: fg(theme.text.muted), dim: props.greyed }}> {meter().tail}</span>
-              </text>
-            )
-          }}
-        </Index>
-      </Show>
-    </box>
+    a.length === b.length &&
+    a.every((span, index) => span.text === b[index]!.text && span.ink === b[index]!.ink && span.bold === b[index]!.bold)
   )
 }

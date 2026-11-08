@@ -1,6 +1,7 @@
 import type {
   PacerAccounts,
   PacerChat,
+  PacerModels,
   PacerNotice,
   PacerPromptChange,
   PacerRequest,
@@ -35,7 +36,8 @@ import { useRoute } from "./route"
 // by its `pacer.*` events (spec cliproxypacer-step-1, sections 4, 5 and 7). It costs nothing without CPP: until the
 // status says CPP is set up and the shown chat is on it, nothing is read, ticked or drawn, and an event for another
 // chat costs one comparison. What is the service's, not a chat's, is read once CPP is set up, whatever chat shows: the
-// accounts, and the cache notices of every chat (spec cliproxypacer-cache-notices). Instant screens come from holding
+// accounts, the providers serving each model (spec cliproxypacer-usage-meters), and the cache notices of every chat
+// (spec cliproxypacer-cache-notices). Instant screens come from holding
 // data before it is asked for: the shown chat's view and the first page of its requests for both filters are read when
 // the chat is shown, never when a key opens a screen, and what changed is read ahead for each first page's newest row
 // (where the Requests tab opens) and for every miss held.
@@ -99,6 +101,7 @@ function createPacer(input: { clock: Clock }) {
     /** Counts the times the connection came back on; values read before the last one are stale until read again. */
     epoch: number
     accounts?: Held<PacerAccounts>
+    models?: Held<PacerModels>
     chats: Record<string, ChatHeld>
     prompts: Record<string, PacerPromptChange | null>
     /** The cache notices of every chat of the service not dismissed in every TUI, newest first. */
@@ -118,14 +121,15 @@ function createPacer(input: { clock: Clock }) {
     const sessionID = shown()
     return sessionID !== undefined && state() !== "unset" && onCPP(sessionID)
   })
-  // Its model now is one of CPP's: the one selected for it, else its last answer's (a chat on the default model
-  // selects none). One moved to another provider keeps its requests, not CPP's cache, account or switches.
-  const nowOnCPP = (sessionID: string) => {
+  // Its model now: the one selected for it, else its last answer's (a chat on the default model selects none). One
+  // moved to another provider keeps its requests, not CPP's cache, account or switches.
+  const modelNow = (sessionID: string) => {
     const selected = data.session.get(sessionID)?.model
-    if (selected) return selected.providerID === PACER_PROVIDER
+    if (selected) return selected
     const last = data.session.message.list(sessionID).findLast((message) => message.type === "assistant")
-    return last?.type === "assistant" && last.model.providerID === PACER_PROVIDER
+    return last?.type === "assistant" ? last.model : undefined
   }
+  const nowOnCPP = (sessionID: string) => modelNow(sessionID)?.providerID === PACER_PROVIDER
   const shownNowOnCPP = createMemo(() => shownOnCPP() && nowOnCPP(shown()!))
 
   // One countdown clock for every screen, running only while a countdown is on screen. It ticks on the clock's whole
@@ -158,7 +162,7 @@ function createPacer(input: { clock: Clock }) {
     batch(() => {
       touch()
       if (next.state === "unset") {
-        setStore({ status: next, accounts: undefined, notices: [] })
+        setStore({ status: next, accounts: undefined, models: undefined, notices: [] })
         setStore("chats", reconcile({}))
         setStore("prompts", reconcile({}))
         held.splice(0)
@@ -193,7 +197,7 @@ function createPacer(input: { clock: Clock }) {
     ),
   )
 
-  // The accounts, once CPP is set up, and again each time it comes back.
+  // The accounts and the providers serving each model, once CPP is set up, and again each time it comes back.
   createEffect(
     on([() => store.epoch, () => state() !== "unset", resync], ([, set]) => {
       if (!set) return
@@ -205,6 +209,12 @@ function createPacer(input: { clock: Clock }) {
             touch()
             setStore("accounts", { value: accounts, epoch })
           })
+        },
+        () => undefined,
+      )
+      void client.api.experimental.pacer.models().then(
+        (models) => {
+          if (models !== null && state() !== "unset") setStore("models", { value: models, epoch })
         },
         () => undefined,
       )
@@ -350,6 +360,11 @@ function createPacer(input: { clock: Clock }) {
     }),
   )
   onCleanup(
+    event.on("pacer.models.updated", (event) => {
+      if (state() !== "unset") setStore("models", { value: event.data.models, epoch: store.epoch })
+    }),
+  )
+  onCleanup(
     event.on("pacer.chat.updated", (event) => {
       if (!store.chats[event.data.chat.sessionID]) return
       setView(event.data.chat, store.epoch)
@@ -492,12 +507,19 @@ function createPacer(input: { clock: Clock }) {
     /** The chat is shown, CPP is set up and the chat used it: its requests show (the Requests tab). */
     active: (sessionID: string | undefined) => sessionID !== undefined && sessionID === shown() && shownOnCPP(),
     /**
-     * {@link active}, and the chat's model is still one of CPP's: the toolbar's cache item, the Account section and the
+     * {@link active}, and the chat's model is still one of CPP's: the toolbar's cache item, the Usage section and the
      * switches draw.
      */
     current: (sessionID: string | undefined) => sessionID !== undefined && sessionID === shown() && shownNowOnCPP(),
+    /** The ID of the chat's model now (selected, else its last answer's), when it is one of CPP's. */
+    model: (sessionID: string) => {
+      const model = modelNow(sessionID)
+      return model?.providerID === PACER_PROVIDER ? model.id : undefined
+    },
     view: (sessionID: string) => store.chats[sessionID]?.view,
     accounts: () => store.accounts,
+    /** The providers whose accounts serve each of CPP's models. */
+    models: () => store.models,
     page: (sessionID: string, filter: PacerFilter) => store.chats[sessionID]?.pages[filter],
     failed: (sessionID: string) => store.chats[sessionID]?.failed,
     loadingMore: (sessionID: string, filter: PacerFilter) => store.chats[sessionID]?.more[filter] ?? false,

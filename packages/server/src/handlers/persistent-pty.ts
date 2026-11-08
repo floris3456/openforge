@@ -65,6 +65,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("pacer.notices.dismiss", (ctx) => notices.dismiss(ctx.params.requestID))
       .handle("pacer.status", () => pacer.status)
       .handle("pacer.accounts", () => pacer.accounts)
+      .handle("pacer.models", () => pacer.models)
       .handle("pacer.chat.get", (ctx) => pacer.chat(ctx.params.sessionID))
       .handle("pacer.chat.update", (ctx) => pacer.update(ctx.params.sessionID, ctx.payload))
       .handle("pacer.chat.requests", (ctx) => pacer.requests(ctx.params.sessionID, ctx.query))

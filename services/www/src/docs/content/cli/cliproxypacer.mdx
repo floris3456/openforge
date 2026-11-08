@@ -1,16 +1,16 @@
 ---
 title: "CLIProxyPacer"
-description: "What the TUI shows for CLIProxyPacer: the cache timer, the account, the chat's requests, cache notices, its settings, switches and summaries."
+description: "What the TUI shows for CLIProxyPacer: the cache timer, the usage meters, the chat's requests, cache notices, its settings, switches and summaries."
 ---
 
 A chat on the [CLIProxyPacer provider](/providers#cliproxypacer) gets four extras in the TUI: a cache item in the
-toolbar, an **Account** section in the sidebar, a **Requests** tab in the footer, and three switches. Every TUI also
+toolbar, a **Usage** section in the sidebar, a **Requests** tab in the footer, and three switches. Every TUI also
 shows [cache notices](#cache-notices), whatever chat it shows, and **Settings** gets a [CLIProxyPacer](#settings)
 section. Without CLIProxyPacer set up, none of these shows.
 
 - The **Requests** tab shows for a chat that used CLIProxyPacer: its model is one of CLIProxyPacer's, or one of its
   steps went through CLIProxyPacer.
-- The cache item, the **Account** section and the switches show only while the chat's model is one of CLIProxyPacer's:
+- The cache item, the **Usage** section and the switches show only while the chat's model is one of CLIProxyPacer's:
   the model selected for it, else the one its last reply came from. A chat moved to another provider keeps its
   **Requests** tab.
 
@@ -44,25 +44,35 @@ cache goes cold if nothing more is sent, including the pings CLIProxyPacer still
 
 ## Sidebar
 
-The **Account** section, above the sidebar's other sections, shows the account CLIProxyPacer serves the chat from, or
-the one that served it last while the chat is idle. The sidebar's **Context** section is gone; the toolbar shows the
-same.
+The **Usage** section, above the sidebar's other sections, shows the usage meters of every account of the provider
+CLIProxyPacer serves the chat from: each of the account's windows as a bar of what is left. The sidebar's **Context**
+section is gone; the toolbar shows the same.
 
 ```text
-Account
-claude-max-2
-5h  62% left · resets 1:20
-7d  88% left · resets ~3d 4h
-next: claude-max-1, once its cache is cold
+Usage
+claude-max-1 · NEXT USE
+5h ████████████████████  99%  4h 53m
+7d ██████████████████░░  91%   6d 9h
+claude-max-2 · IN USE
+5h ████████████░░░░░░░░  62%  1h 20m
+7d ███████████████░░░░░  76%  ~3d 4h
+claude-pro-1
+5h ████████████████████ 100% dormant
+7d ░░░░░░░░░░░░░░░░░░░░   0%  8h 33m
 ```
 
-- Each line under the account is one of its usage windows. `~` marks a reset CLIProxyPacer estimates, `· stale` a
-  reading CLIProxyPacer no longer counts on (older than an hour), `not started` a window nothing has used since it last
-  reset, and `reset, awaiting a reading` one whose reset has passed with no reading since.
-- `next:` says where the chat goes once its cache is cold, and why.
-- `forced move to <account> now` (a warning) or `… soon` says CLIProxyPacer must move the chat.
+- Before CLIProxyPacer has served the chat its model (a new chat, or one just switched to another model), it shows the
+  accounts of every provider whose logins serve that model, each named with its provider when there are several. API
+  keys have no meters, so their accounts don't show.
+- `IN USE` marks the account serving the chat while its step runs, `LAST USED` the one that served it last, `NEXT USE`
+  where the chat goes once its cache is cold, and `FORCE USE` (a warning) where CLIProxyPacer must move it.
+- A bar is green above 20% left, yellow at 20% or less and red at 10% or less. The percent is rounded down.
+- After the percent comes the time to the window's reset; `~` marks a reset CLIProxyPacer estimates. `reset` says the
+  reset has passed with no reading since, `dormant` that nothing has used the window since it last reset, and `STALE`
+  that CLIProxyPacer no longer counts on the reading (older than an hour). Those bars are grey.
 - While CLIProxyPacer is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it
   says `no pacer`.
+- It reads nothing of its own: the meters come with CLIProxyPacer's change stream, as they are read.
 
 ## Requests tab
 

@@ -9,7 +9,7 @@ import "../../component/title-shimmer"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { SESSION_SIDEBAR_WIDTH } from "../../ui/layout"
-import { PacerAccount } from "../../pacer/account"
+import { PacerUsage } from "../../pacer/usage"
 
 export function Sidebar(props: { sessionID: string }) {
   const data = useData()
@@ -68,7 +68,7 @@ export function Sidebar(props: { sessionID: string }) {
           }}
         >
           <box flexShrink={0} gap={1} paddingRight={1}>
-            <PacerAccount sessionID={props.sessionID} />
+            <PacerUsage sessionID={props.sessionID} />
             <Slot path="sidebar.content" input={{ sessionID: props.sessionID }} />
           </box>
         </scrollbox>

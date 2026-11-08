@@ -2138,6 +2138,7 @@ export type EventSubscribeInput = {
         | "artifact.updated"
         | "pacer.status"
         | "pacer.accounts.updated"
+        | "pacer.models.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"
         | "pacer.notice.added"
@@ -2613,6 +2614,9 @@ export type ExperimentalPacerStatusOperation<E = never> = () => Effect.Effect<Ex
 export type ExperimentalPacerAccountsOutput = Pacer.Accounts | null
 export type ExperimentalPacerAccountsOperation<E = never> = () => Effect.Effect<ExperimentalPacerAccountsOutput, E>
 
+export type ExperimentalPacerModelsOutput = Pacer.Models | null
+export type ExperimentalPacerModelsOperation<E = never> = () => Effect.Effect<ExperimentalPacerModelsOutput, E>
+
 export type ExperimentalPacerChatGetInput = { readonly sessionID: Session.ID }
 export type ExperimentalPacerChatGetOutput = Pacer.Chat | null
 export type ExperimentalPacerChatGetOperation<E = never> = (
@@ -2721,6 +2725,7 @@ export interface ExperimentalApi<E = never> {
   readonly pacer: {
     readonly status: ExperimentalPacerStatusOperation<E>
     readonly accounts: ExperimentalPacerAccountsOperation<E>
+    readonly models: ExperimentalPacerModelsOperation<E>
     readonly chat: {
       readonly get: ExperimentalPacerChatGetOperation<E>
       readonly update: ExperimentalPacerChatUpdateOperation<E>

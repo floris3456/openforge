@@ -317,6 +317,8 @@ export type PacerState = "unset" | "unreachable" | "no-pacer" | "on"
 
 export type PacerWindowState = "current" | "estimated" | "partial" | "unknown" | "dormant" | "awaiting-confirmation"
 
+export type PacerModel = { id: string; providers: Array<string> }
+
 export type PacerPings = {
   active: boolean
   nextAt?: number
@@ -994,6 +996,8 @@ export type PacerWindow = {
   stale: boolean
   staleAt?: number
 }
+
+export type PacerModels = { items: Array<PacerModel> }
 
 export type PacerChat = {
   sessionID: SessionID
@@ -2417,6 +2421,15 @@ export type PacerStatus2 = {
 
 export type PacerAccount = { id?: string; alias: string; provider: string; plan?: string; windows: Array<PacerWindow> }
 
+export type PacerModelsUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.models.updated"
+  location?: LocationRef
+  data: { models: PacerModels }
+}
+
 export type PacerChatUpdated = {
   id: EventID
   created: number
@@ -3169,6 +3182,7 @@ export type V2Event =
   | ArtifactUpdated
   | PacerStatus2
   | PacerAccountsUpdated
+  | PacerModelsUpdated
   | PacerChatUpdated
   | PacerRequestsUpdated
   | PacerNoticeAdded
@@ -4670,6 +4684,7 @@ export type EventSubscribeInput = {
         | "artifact.updated"
         | "pacer.status"
         | "pacer.accounts.updated"
+        | "pacer.models.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"
         | "pacer.notice.added"
@@ -4991,6 +5006,8 @@ export type ExperimentalAttentionTestOutput = { data: AttentionPlayers }["data"]
 export type ExperimentalPacerStatusOutput = { data: PacerStatus }["data"]
 
 export type ExperimentalPacerAccountsOutput = { data: PacerAccounts | null }["data"]
+
+export type ExperimentalPacerModelsOutput = { data: PacerModels | null }["data"]
 
 export type ExperimentalPacerChatGetInput = { readonly sessionID: string }
 

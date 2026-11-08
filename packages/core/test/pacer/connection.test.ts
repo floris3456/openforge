@@ -457,6 +457,7 @@ const harness = Effect.fnUntraced(function* () {
     .subscribe([
       Pacer.Event.StatusChanged,
       Pacer.Event.AccountsUpdated,
+      Pacer.Event.ModelsUpdated,
       Pacer.Event.ChatUpdated,
       Pacer.Event.RequestsUpdated,
     ])
@@ -2045,6 +2046,49 @@ describe("PacerConnection chats", () => {
 })
 
 describe("PacerConnection reads", () => {
+  it.effect(
+    "holds the providers serving each model, and tells each change of them (spec cliproxypacer-usage-meters)",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const told = () =>
+          h.published.filter((event) => event.type === "pacer.models.updated").map((event) => event.data)
+        // The catalog as the connection starts: CPP's, with no models yet.
+        yield* until("the first models told", () => told().length === 1)
+        expect(yield* h.connection.models()).toEqual({ items: [] })
+        const model = (id: string, providers?: string[]): PacerModels.Model => ({
+          id,
+          ...(providers ? { providers } : {}),
+        })
+        yield* SubscriptionRef.set(h.catalog, {
+          ...catalog(1),
+          models: [model("claude-opus-5-5", ["claude"]), model("gpt-6-luna", ["codex", "commandcode"]), model("plain")],
+        })
+        yield* until("the models told", () => told().length === 2)
+        const served = {
+          items: [
+            { id: "claude-opus-5-5", providers: ["claude"] },
+            { id: "gpt-6-luna", providers: ["codex", "commandcode"] },
+            { id: "plain", providers: [] },
+          ],
+        }
+        expect(told()[1]).toEqual({ models: served })
+        expect(yield* h.connection.models()).toEqual(served)
+        // A catalog read again with the same providers, prices moved: nothing told.
+        yield* SubscriptionRef.set(h.catalog, {
+          ...catalog(2),
+          models: [model("claude-opus-5-5", ["claude"]), model("gpt-6-luna", ["codex", "commandcode"]), model("plain")],
+        })
+        yield* settle
+        expect(told()).toHaveLength(2)
+        // Without the pacer: none held, nothing told.
+        yield* SubscriptionRef.set(h.catalog, catalog(3, false))
+        yield* settle
+        expect(yield* h.connection.models()).toBeUndefined()
+        expect(told()).toHaveLength(2)
+      }),
+  )
+
   it.effect("lists a chat's requests with its subagents', and keeps the last 50 what-changed answers", () =>
     Effect.gen(function* () {
       const h = yield* harness()

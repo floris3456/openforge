@@ -24,7 +24,7 @@ beforeEach(() => setSystemTime(NOW))
 afterEach(() => setSystemTime())
 
 // The whole TUI with CLIProxyPacer's screens mounted where they show: the toolbar's cache item in the prompt's
-// footer, the Account section where Context was, the Requests tab in the composer, and Enter moving the transcript.
+// footer, the Usage section where Context was, the Requests tab in the composer, and Enter moving the transcript.
 
 function messages(providerID: string): SessionMessageInfo[] {
   const step = (id: string, created: number, text: string, proxyRequestID: string) =>
@@ -96,7 +96,7 @@ async function app(input: { state: Parameters<typeof status>[0]; providerID: str
   return { setup, fake }
 }
 
-test("on CPP: the cache item in the toolbar, Account where Context was, and the Requests tab moving the chat", async () => {
+test("on CPP: the cache item in the toolbar, Usage where Context was, and the Requests tab moving the chat", async () => {
   const { setup, fake } = await app({ state: "on", providerID: "cliproxypacer" })
   await using _ = setup
   await waitForHighlightedFrame(setup, (frame) => frame.includes("Latest reply") && frame.includes("max-2"), {
@@ -105,8 +105,8 @@ test("on CPP: the cache item in the toolbar, Account where Context was, and the 
   const frame = await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame), {
     maxPasses: 200,
   })
-  expect(frame).toContain("Account")
-  expect(frame).toContain("5h  62% left")
+  expect(frame).toMatch(/^\s*Usage\s*$/m)
+  expect(frame).toContain("5h ████████████░░░░░░░░  62%")
   expect(frame).not.toMatch(/^\s*Context\s*$/m)
   expect(frame).not.toContain("spent")
   // A click on the cache item opens the footer at the Requests tab; Enter on the long step's row moves the
@@ -126,7 +126,7 @@ test("on CPP: the cache item in the toolbar, Account where Context was, and the 
   expect(moved).not.toContain("Long reply start")
 })
 
-test("moved to another provider: the cache item and Account go, the Requests tab stays", async () => {
+test("moved to another provider: the cache item and Usage go, the Requests tab stays", async () => {
   const { setup } = await app({ state: "on", providerID: "cliproxypacer" })
   await using _ = setup
   await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame) && frame.includes("max-2"), {
@@ -142,14 +142,14 @@ test("moved to another provider: the cache item and Account go, the Requests tab
   const frame = await waitForHighlightedFrame(setup, (frame) => frame.includes("$1.23") && !frame.includes("warm"), {
     maxPasses: 200,
   })
-  expect(frame).not.toContain("Account")
+  expect(frame).not.toMatch(/^\s*Usage\s*$/m)
   expect(frame).not.toContain("max-2")
   // Its requests went through CPP: they still show.
   setup.mockInput.pressArrow("down")
   await setup.waitForFrame((frame) => frame.includes("Subagents") && frame.includes("Requests"), { maxPasses: 100 })
 })
 
-test("without CPP: no cache item, no Account, no Requests tab, and no Context either", async () => {
+test("without CPP: no cache item, no Usage, no Requests tab, and no Context either", async () => {
   const { setup, fake } = await app({ state: "unset", providerID: "anthropic" })
   await using _ = setup
   const frame = await waitForHighlightedFrame(
@@ -160,7 +160,7 @@ test("without CPP: no cache item, no Account, no Requests tab, and no Context ei
     },
   )
   expect(frame).not.toContain("warm")
-  expect(frame).not.toContain("Account")
+  expect(frame).not.toMatch(/^\s*Usage\s*$/m)
   expect(frame).not.toMatch(/^\s*Context\s*$/m)
   setup.mockInput.pressArrow("down")
   await setup.waitForFrame((frame) => frame.includes("Subagents"), { maxPasses: 100 })

@@ -50,6 +50,15 @@ export const PacerEndpoints = [
       "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CLIProxyPacer.",
     ),
   ),
+  HttpApiEndpoint.get("pacer.models", "/api/experimental/pacer/models", {
+    success: Schema.Struct({ data: Schema.NullOr(Pacer.Models) }),
+  }).annotateMerge(
+    annotations(
+      "models",
+      "List the providers serving CLIProxyPacer models",
+      "Each of CLIProxyPacer's models with the providers whose logins (not API keys) serve it, from its capabilities as last read; null while none with the pacer were read. `pacer.models.updated` follows each change. Never waits on CLIProxyPacer.",
+    ),
+  ),
   HttpApiEndpoint.get("pacer.chat.get", "/api/experimental/pacer/chat/:sessionID", {
     params: ChatParams,
     success: Schema.Struct({ data: Schema.NullOr(Pacer.Chat) }),

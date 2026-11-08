@@ -1,7 +1,7 @@
 import type {
+  PacerAccount,
   PacerChat,
-  PacerForceUse,
-  PacerNextUse,
+  PacerModels,
   PacerPromptChange,
   PacerPromptItem,
   PacerRequest,
@@ -12,8 +12,9 @@ import { Pacer } from "@opencode/schema/pacer"
 import { Locale } from "../util/locale"
 import { stringWidth } from "../util/string-width"
 
-// The words and numbers CLIProxyPacer's screens print (spec cliproxypacer-step-1, sections 4, 5 and 7), as pure
-// functions of openforge's own shapes and the time, so every row of the spec is one unit test.
+// The words and numbers CLIProxyPacer's screens print (spec cliproxypacer-step-1, sections 4 and 7, and the usage
+// meters of spec cliproxypacer-usage-meters), as pure functions of openforge's own shapes and the time, so every row of
+// the specs is one unit test.
 
 /**
  * 1:05:09, 23:41, 0:07: what is left of a countdown, rounded up to the second. With `hours`, always hours, minutes and
@@ -31,13 +32,6 @@ export function formatRemaining(ms: number, hours = false) {
 /** Whether what is left, rounded up to the second as it shows, is an hour or more. */
 export function remainingHours(ms: number) {
   return Math.ceil(ms / 1000) >= 3600
-}
-
-/** When a window resets: 1:20 (hours and minutes) within a day, else 3d 4h. */
-export function formatReset(ms: number) {
-  const minutes = Math.max(0, Math.ceil(ms / 60_000))
-  if (minutes >= 24 * 60) return `${Math.floor(minutes / (24 * 60))}d ${Math.floor((minutes % (24 * 60)) / 60)}h`
-  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`
 }
 
 /** 14:02 on this machine's clock. */
@@ -155,41 +149,141 @@ export function windowStale(window: PacerWindow, now: number) {
 }
 
 /**
- * `5h  62% left · resets 1:20`, marked when CPP calls it estimated or stale (section 5): `resets ~3d 4h` when the
- * reset is CPP's estimate, `· stale` when the reading can't be trusted. Short enough for the sidebar's 37 columns.
+ * The account serving the chat, or the one that served it last. By its ID: CPP names two logins of one address alike,
+ * each with its own readings. By alias only from a service that sends no ID.
  */
-export function windowLine(window: PacerWindow, now: number) {
-  const left = window.left === undefined ? undefined : `${Math.round(window.left)}% left`
-  const state = (() => {
-    if (window.state === "dormant") return "not started"
-    if (window.state === "awaiting-confirmation") return "reset, awaiting a reading"
-    if (window.state === "unknown" && left === undefined) return "unknown"
-    return undefined
-  })()
-  const reset =
-    window.resetsAt !== undefined && window.state !== "dormant" && window.state !== "awaiting-confirmation"
-      ? `resets ${window.state === "estimated" ? "~" : ""}${formatReset(window.resetsAt - now)}`
-      : undefined
-  const parts = [left, state, reset, windowStale(window, now) ? "stale" : undefined].filter(
-    (part): part is string => part !== undefined,
+export function chatAccount(accounts: readonly PacerAccount[], chat: PacerChat | undefined) {
+  if (chat?.account === undefined) return undefined
+  if (chat.accountID !== undefined && accounts.some((item) => item.id !== undefined))
+    return accounts.find((item) => item.id === chat.accountID)
+  return accounts.find((item) => item.alias === chat.account)
+}
+
+/**
+ * The accounts whose meters the sidebar shows for a chat on CPP's model `model` (spec cliproxypacer-usage-meters,
+ * section 1), by provider, then alias: every account of the provider of the account serving the chat, while its view
+ * is of that model (as named, or pinned as `<provider>/<model>`) and that account has meters; else of the providers
+ * whose logins serve the model.
+ */
+export function usageAccounts(input: {
+  readonly accounts: readonly PacerAccount[]
+  readonly model: string
+  readonly chat: PacerChat | undefined
+  readonly models: PacerModels | undefined
+}) {
+  const model = input.model.toLowerCase()
+  const serving = chatAccount(input.accounts, input.chat)
+  const named = input.chat?.model && [input.chat.model, `${serving?.provider}/${input.chat.model}`]
+  const providers = new Set(
+    (serving && named && named.some((name) => name.toLowerCase() === model)
+      ? [serving.provider]
+      : (input.models?.items.find((item) => item.id.toLowerCase() === model)?.providers ?? [])
+    ).map((provider) => provider.toLowerCase()),
   )
-  return `${window.label}  ${parts.length ? parts.join(" · ") : "unknown"}`
+  return input.accounts
+    .filter((account) => providers.has(account.provider.toLowerCase()))
+    .toSorted((a, b) => a.provider.localeCompare(b.provider) || a.alias.localeCompare(b.alias))
 }
 
-/** Where the chat goes once its cache is cold, and why. */
-export function nextUseLine(next: PacerNextUse) {
-  const why =
-    next.reason === "cold_move"
-      ? "once its cache is cold"
-      : next.reason === "forced_move"
-        ? "its account can't keep it"
-        : next.reason.replaceAll("_", " ")
-  return `next: ${next.account}, ${why}`
+/** A tag on an account's head, in OpenCodePlus's words and colors. */
+export interface UsageTag {
+  readonly text: "IN USE" | "LAST USED" | "NEXT USE" | "FORCE USE"
+  readonly tone: "success" | "info" | "warning"
 }
 
-/** A forced move, now or soon. */
-export function forceUseLine(force: PacerForceUse) {
-  return `forced move to ${force.account} ${force.when}`
+/**
+ * The tags on an account's head (section 2): `IN USE` while the chat's step runs on it, else `LAST USED` for the
+ * account that served it last; `FORCE USE` where a forced move sends the chat, else `NEXT USE` where it goes once its
+ * cache is cold. CPP names those two by alias.
+ */
+export function usageTags(input: {
+  readonly account: PacerAccount
+  readonly serving: PacerAccount | undefined
+  readonly chat: PacerChat | undefined
+  readonly running: boolean
+}): UsageTag[] {
+  const account = input.account
+  const serving = input.serving
+  const own =
+    serving !== undefined && (serving.id !== undefined ? serving.id === account.id : serving.alias === account.alias)
+  const identity: UsageTag[] = own
+    ? [input.running ? { text: "IN USE", tone: "success" } : { text: "LAST USED", tone: "info" }]
+    : []
+  if (input.chat?.forceUse?.account === account.alias) return [...identity, { text: "FORCE USE", tone: "warning" }]
+  if (input.chat?.nextUse?.account === account.alias) return [...identity, { text: "NEXT USE", tone: "info" }]
+  return identity
+}
+
+/** How a meter's bar is colored: by what is left while the reading is current, else muted. */
+export type UsageTone = "normal" | "low" | "critical" | "muted"
+
+/** One meter of an account (section 3): its parts in order, each padded to its column, one space apart. */
+export interface UsageMeter {
+  readonly label: string
+  readonly filled: string
+  readonly empty: string
+  readonly percent: string
+  readonly tail: string
+  readonly tone: UsageTone
+}
+
+/** The label column of an account's meters: its longest label, from 2 to 18 cells. */
+export function usageLabelWidth(windows: readonly PacerWindow[]) {
+  return Math.min(18, Math.max(2, ...windows.map((window) => stringWidth(window.label))))
+}
+
+/**
+ * A meter `width` cells wide, less one, at `now`, as OpenCodePlus draws it: the label; a bar of `█` and `░` taking what
+ * is left, at least 4 cells; the percent left, rounded down (`<1%` for a sliver); then, in 7 cells, the time to the
+ * reset (`~` in front of CPP's estimate), or `reset`, `dormant`, `STALE`, or `unknown` with a bar of `·` when the
+ * balance is unknown.
+ */
+export function usageMeter(window: PacerWindow, labelWidth: number, width: number, now: number): UsageMeter {
+  const cells = Math.max(4, width - labelWidth - 15)
+  const left = window.left === undefined ? undefined : Math.max(0, Math.min(100, window.left))
+  const filled = left === undefined ? 0 : Math.min(cells, Math.round((left / 100) * cells))
+  const state = (() => {
+    if (window.state === "dormant") return { tail: "dormant", current: false }
+    if (window.state === "awaiting-confirmation" || (window.resetsAt !== undefined && window.resetsAt <= now))
+      return { tail: "reset", current: false }
+    if (left === undefined) return { tail: "unknown", current: false }
+    if (windowStale(window, now)) return { tail: "STALE", current: false }
+    if (window.resetsAt === undefined) return { tail: "", current: true }
+    return {
+      tail: `${window.state === "estimated" ? "~" : ""}${usageCountdown(window.resetsAt - now)}`,
+      current: true,
+    }
+  })()
+  const tone = ((): UsageTone => {
+    if (!state.current || left === undefined) return "muted"
+    if (left <= 10) return "critical"
+    if (left <= 20) return "low"
+    return "normal"
+  })()
+  return {
+    label: pad(Locale.truncateWidth(window.label, labelWidth), labelWidth),
+    filled: left === undefined ? "·".repeat(cells) : "█".repeat(filled),
+    empty: left === undefined ? "" : "░".repeat(cells - filled),
+    percent: padStart(left === undefined ? "" : left > 0 && left < 1 ? "<1%" : `${Math.floor(left)}%`, 4),
+    tail: padStart(state.tail, 7),
+    tone,
+  }
+}
+
+/** A meter as one line. */
+export function usageLine(meter: UsageMeter) {
+  return `${meter.label} ${meter.filled}${meter.empty} ${meter.percent} ${meter.tail}`
+}
+
+/** The time to a reset, with two units so it never reads as a window's length: `6d 23h`, `5h 0m`, `59m`, `<1m`. */
+export function usageCountdown(ms: number) {
+  if (ms < 60_000) return "<1m"
+  const minutes = Math.ceil(ms / 60_000)
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+  if (days) return `${days}d ${hours}h`
+  if (hours) return `${hours}h ${minutes % 60}m`
+  return `${minutes}m`
 }
 
 /** What a request was: the subagent's agent for a subagent's step. */

@@ -517,6 +517,10 @@ export const layer = Layer.effect(
         chat.marks = marks
         chat.stale = true
       }
+      // The list has no next use or forced move: those held were for the model and account the view named. Another
+      // model or account drops them, and the view is read again when asked.
+      const moved = (item.model && item.model !== chat.raw.model) || (item.account && item.account !== chat.raw.account)
+      if (moved) chat.stale = true
       chat.raw = {
         ...chat.raw,
         warm: item.warm,
@@ -524,6 +528,7 @@ export const layer = Layer.effect(
         pings: item.pings,
         ...(item.account ? { account: item.account } : {}),
         ...(item.model ? { model: item.model } : {}),
+        ...(moved ? { next_use: null, force_use: null } : {}),
       }
       yield* setView(chat)
     })

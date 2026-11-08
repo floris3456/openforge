@@ -1061,6 +1061,68 @@ describe("PacerConnection notices", () => {
     }),
   )
 
+  // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-2): a chat switched to another model without a step
+  // kept its old model's next use, and the Usage section showed that provider's accounts as where it moves.
+  it.effect("drops a merged view's next use and forced move when the list names another model or account", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const moves = {
+        next_use: { credential: "auth-b", reason: "cold_move" },
+        force_use: { credential: "auth-c", when: "soon" },
+      }
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), moves))
+      yield* step(h, id)
+      yield* ask(h, id)
+      expect(toldChat(h, id)).toMatchObject({
+        model: "model-a",
+        nextUse: { account: "auth-b" },
+        forceUse: { when: "soon" },
+      })
+      const listed = (fields: Record<string, unknown>) => {
+        h.cpp.listed = [
+          {
+            id: uuid,
+            session_id: 7,
+            warm: true,
+            warm_until: h.cpp.time() + 300_000,
+            pings: chatView(uuid, h.cpp.time()).pings,
+            ...fields,
+          },
+        ]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 1 })
+      }
+      // The same model and account: the moves stand, and nothing is read.
+      listed({ model: "model-a", account: "auth-a", warm_until: h.cpp.time() + 360_000 })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      expect(yield* h.connection.chat(id)).toMatchObject({ nextUse: { account: "auth-b" }, forceUse: { when: "soon" } })
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(1)
+      // Another model: they were the old model's; the view is read again when asked.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { model: "model-c" }))
+      listed({ model: "model-c" })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      const switched = toldChat(h, id)
+      expect(switched?.model).toBe("model-c")
+      expect(switched?.nextUse).toBeUndefined()
+      expect(switched?.forceUse).toBeUndefined()
+      yield* ask(h, id)
+      expect(seen(h, viewPath(id))).toHaveLength(2)
+      // Another account, the same for it.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { model: "model-c", ...moves }))
+      yield* step(h, id)
+      yield* ask(h, id)
+      expect(toldChat(h, id)?.nextUse).toBeDefined()
+      listed({ model: "model-c", account: "auth-d" })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      expect(toldChat(h, id)?.nextUse).toBeUndefined()
+      expect(toldChat(h, id)?.forceUse).toBeUndefined()
+    }),
+  )
+
   it.effect(
     "marks a listed chat's view stale when its requests moved, read once when asked however often listed, never for an older list",
     () =>

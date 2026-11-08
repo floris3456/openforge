@@ -474,10 +474,12 @@ export interface Sender {
 }
 
 /**
- * A row's request ID: CPP's (`ext`), else its row's ({@link Pacer.rowRequestID}). CPP records a web tool call without
- * one (spec cliproxypacer-step-2), so all such rows of a chat went by the same empty ID.
+ * A row's request ID: CPP's (`ext`), else its row's ({@link Pacer.rowRequestID}). A web tool call goes by its row
+ * whatever its ID (spec cliproxypacer-step-2): CPP records a short call without one, so all such rows of a chat went by
+ * the same empty ID, and a call it ran as a job with the job's ID, which names no prompt.
  */
-export const requestID = (row: Pick<Row, "id" | "ext">) => row.ext || Pacer.rowRequestID(row.id)
+export const requestID = (row: Pick<Row, "id" | "ext" | "kind">) =>
+  row.ext && kinds[row.kind ?? -1] !== "search" ? row.ext : Pacer.rowRequestID(row.id)
 
 /** A request row in openforge's shape. */
 export function request(row: Row, sender: Sender, context: Context): Pacer.Request {

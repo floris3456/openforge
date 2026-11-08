@@ -252,15 +252,38 @@ const PLAN_NOISE = new Set(["default", "individual", "tier", "g1"])
  * `claude` + `default_claude_max_20x` → `Claude Max 20x`.
  */
 export function usageGroupName(provider: string, plan: string | undefined) {
+  const name = groupName(provider, plan)
+  return name.plan ? `${name.provider} ${name.plan}` : name.provider
+}
+
+/**
+ * A group's name at most `width` cells: whole when it fits; else the provider's name is cut and the plan kept, the part
+ * that tells two groups of one provider apart (`Comm… Goat`); the plan alone, cut, when not even `C…` fits beside it.
+ */
+function fitGroupName(provider: string, plan: string | undefined, width: number) {
+  const name = groupName(provider, plan)
+  const whole = name.plan ? `${name.provider} ${name.plan}` : name.provider
+  if (stringWidth(whole) <= width || !name.plan) return Locale.truncateWidth(whole, width)
+  const room = width - stringWidth(name.plan) - 1
+  if (room < 2) return Locale.truncateWidth(name.plan, width)
+  return `${Locale.truncateWidth(name.provider, room)} ${name.plan}`
+}
+
+function groupName(provider: string, plan: string | undefined) {
   const name = PROVIDERS[provider.toLowerCase()] ?? provider
-  if (!plan) return name
+  if (!plan) return { provider: name }
   const words = plan
     .split(/[_\-\s]+/)
     .filter(
       (word) => word !== "" && !PLAN_NOISE.has(word.toLowerCase()) && word.toLowerCase() !== provider.toLowerCase(),
     )
-  if (words.length === 0) return `${name} ${plan}`
-  return `${name} ${words.map((word) => (/^\d/.test(word) ? word.toLowerCase() : word[0]!.toUpperCase() + word.slice(1).toLowerCase())).join(" ")}`
+  if (words.length === 0) return { provider: name, plan }
+  return {
+    provider: name,
+    plan: words
+      .map((word) => (/^\d/.test(word) ? word.toLowerCase() : word[0]!.toUpperCase() + word.slice(1).toLowerCase()))
+      .join(" "),
+  }
 }
 
 /** A window's length in its largest whole unit: 18000 s → `5h`, 604800 s → `7d`, 2592000 s → `30d`. */
@@ -386,13 +409,13 @@ export function usageLines(input: {
       const chunks = Array.from({ length: Math.ceil(columns.length / cells.perLine) }, (_, index) =>
         columns.slice(index * cells.perLine, (index + 1) * cells.perLine),
       )
-      const name = usageGroupName(group[0]!.provider, group[0]!.plan)
+      const name = (width: number) => fitGroupName(group[0]!.provider, group[0]!.plan, width)
       const header =
         chunks.length === 0
-          ? [[{ text: Locale.truncateWidth(name, input.width), ink: "base", bold: true } satisfies UsageSpan]]
+          ? [[{ text: name(input.width), ink: "base", bold: true } satisfies UsageSpan]]
           : chunks.map((chunk, index) =>
               headerLine(
-                index === 0 ? name : "",
+                index === 0 ? name : () => "",
                 chunk.map((column) => columnLabel(column, shared, cells.width)),
                 cells.width,
               ),
@@ -441,10 +464,10 @@ function columnLabel(window: PacerWindow, shared: string | undefined, width: num
 }
 
 /** A group's header line: its name in bold, cut with `…` to end a cell before the first label, each label at its cell's end. */
-function headerLine(name: string, labels: readonly string[], cell: number): UsageSpan[] {
+function headerLine(name: (width: number) => string, labels: readonly string[], cell: number): UsageSpan[] {
   const ends = labels.map((_, index) => MARK + (index + 1) * cell + index * CELL_GAP)
   const starts = labels.map((label, index) => ends[index]! - stringWidth(label))
-  const title = Locale.truncateWidth(name, Math.max(0, starts[0]! - 1))
+  const title = name(Math.max(0, starts[0]! - 1))
   const spans: UsageSpan[] = [{ text: title, ink: "base", bold: true }]
   labels.reduce((cursor, label, index) => {
     spans.push({ text: " ".repeat(Math.max(0, starts[index]! - cursor)), ink: "muted" }, { text: label, ink: "muted" })
@@ -478,11 +501,15 @@ function cellSpans(window: PacerWindow | undefined, cell: ReturnType<typeof cell
   })()
   const filled = left === undefined ? 0 : Math.min(cell.bar, Math.round((left / 100) * cell.bar))
   const percent = left === undefined ? "" : left > 0 && left < 1 ? "<1%" : `${Math.floor(left)}%`
+  // A cell without room for the percent shows it in the time's place while no reset is known, so it still says something.
+  const tail = time === "" && !cell.percent ? percent : time
   const spans: UsageSpan[] = [
     left === undefined ? { text: "·".repeat(cell.bar), ink: "muted" } : { text: "█".repeat(filled), ink },
     { text: left === undefined ? "" : "░".repeat(cell.bar - filled), ink: "muted" },
-    ...(cell.percent ? [{ text: ` ${padStart(percent, CELL_PERCENT)}`, ink: current ? "base" : "muted" } as const] : []),
-    { text: ` ${padStart(time, CELL_TIME)}`, ink: "muted" },
+    ...(cell.percent
+      ? [{ text: ` ${padStart(percent, CELL_PERCENT)}`, ink: current ? "base" : "muted" } as const]
+      : []),
+    { text: ` ${padStart(tail, CELL_TIME)}`, ink: tail === time ? "muted" : current ? "base" : "muted" },
   ]
   return spans.filter((span) => span.text !== "")
 }

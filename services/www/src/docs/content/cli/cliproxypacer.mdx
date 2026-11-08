@@ -66,7 +66,7 @@ Claude Pro       5h                7d
 - Each window is a bar of what is left, the percent left (rounded down) and the time to its reset: `46m`, `1h`, `2d`
   (hours and days rounded down); `~` marks a reset CLIProxyPacer estimates. A window nothing has used since its reset
   shows its length (`5h`), `now` says the reset has passed with no reading since. With three windows the percent goes
-  to make room; the bar still shows it.
+  to make room (the bar still shows it), except where no reset is known, where it takes the time's place.
 - A bar is green above 20% left, yellow at 20% or less and red at 10% or less; grey while the reading isn't current
   (unused since its reset, past its reset, or older than an hour, when CLIProxyPacer stops counting on it).
 - `●` marks the account serving the chat: green while its step runs (from its first step on), blue for the one that

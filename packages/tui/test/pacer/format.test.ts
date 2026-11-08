@@ -444,7 +444,8 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
 
     test("a scope over its length, unless every column shares it; cut to fit, never the length", () => {
       const opus = max("max-2", [window({}), window(SEVEN), window({ ...SEVEN, label: "7d opus", scope: "opus" })])
-      expect(texts(lines({ accounts: [opus] }))[0]).toBe("Claude Max 20x".slice(0, 9) + "… 5h          7d     opus 7d")
+      // Three columns leave the name 10 cells: the provider's name is cut, not the plan.
+      expect(texts(lines({ accounts: [opus] }))[0]).toBe("C… Max 20x 5h          7d     opus 7d")
       // An Antigravity account for a Claude model: its claude_gpt pair, without the scope.
       const antigravity = account("ag", "antigravity", {
         plan: "g1-pro-tier",
@@ -467,7 +468,9 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
       expect(texts(lines({ accounts: [named] }))[0]).toBe("Claude     5h          7d model:c… 7d")
     })
 
-    test("three windows: the percent goes, the bar keeps 6; the name cut before the first label", () => {
+    // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-3): `Command C…` (the Goat plan) above the plan-less
+    // `Command Code`, and Command Code rows of bars only, their windows having no reset.
+    test("three windows: the percent goes, the bar keeps 6; the name keeps its plan, cut before the first label", () => {
       const thirty = { label: "30d", seconds: 2_592_000 }
       const goat = account("cc", "commandcode", {
         plan: "individual-goat",
@@ -477,10 +480,34 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
           window({ ...thirty, left: 0, resetsAt: NOW + 20 * 86_400_000 }),
         ],
       })
-      expect(texts(lines({ accounts: [goat], model: "gpt-6-luna" }))).toEqual([
-        "Command C… 5h          7d         30d",
+      const plain = account("cc-key", "commandcode", {
+        windows: [window({}), window({ ...SEVEN, state: "partial", left: 40, resetsAt: undefined }), window(thirty)],
+      })
+      const out = lines({ accounts: [goat, plain], model: "gpt-6-luna" })
+      expect(texts(out)).toEqual([
+        "Comm… Goat 5h          7d         30d",
         "  ████░░   1h ███░░░   3d ░░░░░░  20d",
+        "Command C… 5h          7d         30d",
+        // No reset known: the percent in the time's place.
+        "  ████░░   1h ██░░░░  40% ████░░   1h",
       ])
+      expect(out[3]!.find((span) => span.text.trim() === "40%")?.ink).toBe("base")
+      // With room for the percent, the time's place stays empty.
+      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).toContain("40%")
+      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).not.toContain("40%  40%")
+    })
+
+    test("a name that fits stays whole; without a plan, it is cut at its end", () => {
+      expect(
+        texts(
+          lines({
+            accounts: [
+              account("og", "opencode-go", { windows: [window({}), window(SEVEN), window({ seconds: 2_592_000 })] }),
+            ],
+            model: "gpt-6-luna",
+          }),
+        )[0],
+      ).toBe("OpenCode … 5h          7d         30d")
     })
 
     test("more windows than four: the rest on a second line, under the first, the labels too", () => {

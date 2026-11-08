@@ -57,7 +57,7 @@ export function Logo() {
         </For>
       ) : dimensions().width < 48 ? (
         <>
-          <For each={logo.left.slice(1)}>
+          <For each={logo.left}>
             {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}
           </For>
           <For each={logo.right}>

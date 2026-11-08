@@ -1231,14 +1231,16 @@ export const layer = Layer.effect(
       for (const row of items) {
         heldRows.delete(row.id)
         heldRows.set(row.id, row)
-        // A row without a request ID has no prompt to read: nothing looks it up by one.
-        if (row.ext) heldIDs.set(row.ext, row.id)
+        // A row that goes by its own (a web tool call) has no prompt to read: nothing looks it up by an ID.
+        const requestID = PacerWire.requestID(row)
+        if (!Pacer.promptless(requestID)) heldIDs.set(requestID, row.id)
       }
       for (const [id, row] of heldRows) {
         if (heldRows.size <= ROWS) break
         heldRows.delete(id)
         heldAt.delete(id)
-        if (row.ext && heldIDs.get(row.ext) === id) heldIDs.delete(row.ext)
+        const requestID = PacerWire.requestID(row)
+        if (heldIDs.get(requestID) === id) heldIDs.delete(requestID)
       }
     }
 

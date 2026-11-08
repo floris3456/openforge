@@ -297,7 +297,7 @@ export const Tokens = Schema.Struct({
 }).annotate({ identifier: "Pacer.Tokens" })
 
 /**
- * The `id` of a request CPP recorded without a request ID, as it does a call of its web tools (spec
+ * The `id` of a call of CPP's web tools, and of any request CPP recorded without a request ID (spec
  * cliproxypacer-step-2): `row:` and CPP's number for its row, distinct and stable across reads. CPP's request IDs are
  * UUIDs, so the two never meet.
  */
@@ -310,8 +310,8 @@ export const promptless = (requestID: string) => requestID.startsWith("row:")
 export interface Request extends Schema.Schema.Type<typeof Request> {}
 export const Request = Schema.Struct({
   /**
-   * CPP's request ID: the `proxyRequestID` of the assistant message whose step sent it. A request without one, such as
-   * a web tool call, goes by its row ({@link rowRequestID}) and has no prompt.
+   * CPP's request ID: the `proxyRequestID` of the assistant message whose step sent it. A web tool call (with no ID,
+   * or a job's ID) and any request without one go by their row ({@link rowRequestID}) and have no prompt.
    */
   id: Schema.String,
   /**

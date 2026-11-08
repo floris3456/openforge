@@ -43,6 +43,7 @@ it.live("answers as not set up without a connection to CPP", () =>
     expect(typeof status.body.data.since).toBe("number")
 
     expect(yield* call("/api/experimental/pacer/accounts")).toEqual({ status: 200, body: { data: null } })
+    expect(yield* call("/api/experimental/pacer/models")).toEqual({ status: 200, body: { data: null } })
     expect(yield* call("/api/experimental/pacer/chat/ses_pacer_test")).toEqual({ status: 200, body: { data: null } })
     expect(yield* call("/api/experimental/pacer/refresh", { method: "POST" })).toEqual({ status: 204, body: undefined })
 

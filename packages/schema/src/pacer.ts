@@ -105,6 +105,24 @@ export const Accounts = Schema.Struct({
   asOf: Instant,
 }).annotate({ identifier: "Pacer.Accounts" })
 
+/** One of CPP's models, by the providers whose accounts serve it. */
+export interface Model extends Schema.Schema.Type<typeof Model> {}
+export const Model = Schema.Struct({
+  /** CPP's model ID, the ID of the CLIProxyPacer provider's model. */
+  id: Schema.String,
+  /**
+   * The providers whose logins serve it, as `Account.provider` names them, from CPP's capabilities: routes of an API
+   * key are left out, since an API key has no meters. Empty when CPP doesn't say.
+   */
+  providers: Schema.Array(Schema.String),
+}).annotate({ identifier: "Pacer.Model" })
+
+/** CPP's models, by the providers whose accounts serve them, as last read. */
+export interface Models extends Schema.Schema.Type<typeof Models> {}
+export const Models = Schema.Struct({
+  items: Schema.Array(Model),
+}).annotate({ identifier: "Pacer.Models" })
+
 /** The pings CPP sends to keep a chat's prompt cache warm while nothing else is sent. */
 export interface Pings extends Schema.Schema.Type<typeof Pings> {}
 export const Pings = Schema.Struct({
@@ -437,6 +455,8 @@ export const Notice = Schema.Struct({
 const StatusChanged = ephemeral({ type: "pacer.status", schema: { status: Status } })
 /** The accounts were read again and changed. */
 const AccountsUpdated = ephemeral({ type: "pacer.accounts.updated", schema: { accounts: Accounts } })
+/** CPP's models were read again and the providers serving them changed. */
+const ModelsUpdated = ephemeral({ type: "pacer.models.updated", schema: { models: Models } })
 /**
  * A chat's view changed (apart from `asOf`), with the new one: when a read of the view answered it, or a write of its
  * switches or of its pings' duration; when CPP's state or chat list (read at each connect, on `resync` and `session`
@@ -464,9 +484,18 @@ const NoticeDismissed = ephemeral({ type: "pacer.notice.dismissed", schema: { re
 export const Event = {
   StatusChanged,
   AccountsUpdated,
+  ModelsUpdated,
   ChatUpdated,
   RequestsUpdated,
   NoticeAdded,
   NoticeDismissed,
-  Definitions: inventory(StatusChanged, AccountsUpdated, ChatUpdated, RequestsUpdated, NoticeAdded, NoticeDismissed),
+  Definitions: inventory(
+    StatusChanged,
+    AccountsUpdated,
+    ModelsUpdated,
+    ChatUpdated,
+    RequestsUpdated,
+    NoticeAdded,
+    NoticeDismissed,
+  ),
 }

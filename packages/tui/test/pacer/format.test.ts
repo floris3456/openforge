@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import type { PacerRequest, PacerWindow } from "@opencode/client"
+import type { PacerAccount, PacerRequest, PacerWindow } from "@opencode/client"
 import { promptless } from "@opencode/schema/pacer"
 import { mergeFirst } from "../../src/context/pacer"
 import {
   cacheLabel,
   cacheText,
-  forceUseLine,
+  chatAccount,
   formatRemaining,
   formatTokens,
   noticeAge,
@@ -14,22 +14,26 @@ import {
   noticeSubject,
   noticeTitle,
   remainingHours,
-  formatReset,
-  nextUseLine,
   promptChangeLines,
   promptlessLines,
   requestHeader,
   requestLayout,
   requestRow,
   requestTone,
-  windowLine,
+  usageAccounts,
+  usageCountdown,
+  usageLabelWidth,
+  usageLine,
+  usageMeter,
+  usageProvider,
+  usageTags,
 } from "../../src/pacer/format"
 import { requestTarget } from "../../src/pacer/jump"
 import { listTop } from "../../src/routes/session/composer/requests-tab"
 import { chat, miss, notice, NOW, promptChange, request, step, webCall } from "./fixture"
 
-// Written from spec cliproxypacer-step-1: section 4's table, section 5's texts and section 7's rows, Enter and
-// what changed.
+// Written from spec cliproxypacer-step-1: section 4's table and section 7's rows, Enter and what changed; and from
+// spec cliproxypacer-usage-meters, which replaced step 1's section 5.
 
 describe("the toolbar's cache item (section 4)", () => {
   const text = (view: Parameters<typeof cacheLabel>[0], now = NOW) => {
@@ -140,7 +144,7 @@ describe("the toolbar's cache item (section 4)", () => {
   })
 })
 
-describe("the sidebar's Account section (section 5)", () => {
+describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
   const window = (extra: Partial<PacerWindow>): PacerWindow => ({
     label: "5h",
     scope: "all",
@@ -151,42 +155,213 @@ describe("the sidebar's Account section (section 5)", () => {
     stale: false,
     ...extra,
   })
-
-  test("each window, with what is left and when it resets", () => {
-    expect(windowLine(window({}), NOW)).toBe("5h  62% left · resets 1:20")
-    expect(windowLine(window({ label: "7d opus", left: 80.4, resetsAt: NOW + 76 * 3_600_000 }), NOW)).toBe(
-      "7d opus  80% left · resets 3d 4h",
+  const account = (alias: string, provider: string, extra: Partial<PacerAccount> = {}): PacerAccount => ({
+    id: `id-${alias}`,
+    alias,
+    provider,
+    windows: [window({})],
+    ...extra,
+  })
+  // As the owner's CLIProxyPacer listed them on 2026-11-08: logins of claude, codex and commandcode, and the providers
+  // whose logins serve each model (API keys left out by the service).
+  const all = [
+    account("claude b", "claude"),
+    account("commandcode a", "commandcode"),
+    account("claude a", "claude"),
+    account("codex a", "codex"),
+  ]
+  const models = {
+    items: [
+      { id: "claude-opus-5-5", providers: ["claude"] },
+      { id: "gpt-6-luna", providers: ["codex", "commandcode"] },
+    ],
+  }
+  const aliases = (input: Partial<Parameters<typeof usageAccounts>[0]>) =>
+    usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: undefined, models, ...input }).accounts.map(
+      (item) => item.alias,
     )
+  const line = (extra: Partial<PacerWindow>, now = NOW, width = 37) =>
+    usageLine(usageMeter(window(extra), 2, width, now))
+
+  describe("which accounts (section 1)", () => {
+    test("served: every account of the serving account's provider, by alias", () => {
+      const served = chat({ model: "gpt-6-luna", provider: "codex", account: "codex a", accountID: "id-codex a" })
+      expect(aliases({ model: "gpt-6-luna", chat: served })).toEqual(["codex a"])
+      const claude = chat({ model: "claude-opus-5-5", account: "claude b", accountID: "id-claude b" })
+      expect(aliases({ chat: claude })).toEqual(["claude a", "claude b"])
+    })
+
+    test("a new chat, or one switched to another model: the providers whose logins serve the model", () => {
+      expect(aliases({ model: "gpt-6-luna" })).toEqual(["codex a", "commandcode a"])
+      // The view is of the model the chat had before.
+      const before = chat({ model: "claude-opus-5-5", account: "claude b", accountID: "id-claude b" })
+      expect(aliases({ model: "gpt-6-luna", chat: before })).toEqual(["codex a", "commandcode a"])
+      // A model CPP doesn't list, or no models read yet: none.
+      expect(aliases({ model: "unknown-model" })).toEqual([])
+      expect(aliases({ models: undefined })).toEqual([])
+    })
+
+    test("a pinned model, as <provider>/<model>, is its view's model on that provider", () => {
+      const served = chat({ model: "gpt-6-luna", account: "codex a", accountID: "id-codex a" })
+      expect(aliases({ model: "codex/gpt-6-luna", chat: served })).toEqual(["codex a"])
+      expect(aliases({ model: "CODEX/GPT-6-Luna", chat: served })).toEqual(["codex a"])
+    })
+
+    test("served from an account without meters (an API key): the providers whose logins serve the model", () => {
+      const keyed = chat({ model: "claude-opus-5-5", provider: "commandcode", account: "cc-key", accountID: "key-1" })
+      expect(aliases({ chat: keyed })).toEqual(["claude a", "claude b"])
+    })
+
+    // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-1, issue 1): CPP takes the new model into the
+    // chat's view at once and keeps its account until a step of it is routed.
+    test("switched to a model the serving account's provider doesn't serve: the model's providers", () => {
+      const switched = chat({
+        model: "claude-opus-5-5",
+        provider: "codex",
+        account: "codex a",
+        accountID: "id-codex a",
+      })
+      expect(aliases({ chat: switched })).toEqual(["claude a", "claude b"])
+      // One CPP says nothing of: the view stands.
+      expect(aliases({ chat: switched, models: { items: [] } })).toEqual(["codex a"])
+    })
+
+    // Issue 4 of the same run: the chat's next account was another provider's, and nothing showed it.
+    test("where the chat moves, also on another provider", () => {
+      const served = {
+        model: "gpt-6-luna",
+        provider: "codex",
+        account: "codex a",
+        accountID: "id-codex a",
+      }
+      const next = chat({ ...served, nextUse: { account: "commandcode a", reason: "cold_move" } })
+      expect(aliases({ model: "gpt-6-luna", chat: next })).toEqual(["codex a", "commandcode a"])
+      const forced = chat({ ...served, forceUse: { account: "claude a", when: "now" } })
+      // Every account of the provider it moves to.
+      expect(aliases({ model: "gpt-6-luna", chat: forced })).toEqual(["claude a", "claude b", "codex a"])
+      // A view of another model: its moves are that model's, so they neither add accounts nor tag them.
+      const other = usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: next, models })
+      expect(other.accounts.map((item) => item.alias)).toEqual(["claude a", "claude b"])
+      expect(other.chat).toBeUndefined()
+      expect(usageAccounts({ accounts: all, model: "gpt-6-luna", chat: next, models }).chat).toBe(next)
+    })
+
+    test("the provider after the alias only when the alias doesn't start with it", () => {
+      expect(usageProvider(account("max-1", "claude"))).toBe("claude")
+      // CPP's alias of an account without a label, and one named after its provider.
+      expect(usageProvider(account("claude 193e40", "claude"))).toBeUndefined()
+      expect(usageProvider(account("opencode-go-apikey", "opencode-go"))).toBeUndefined()
+      expect(usageProvider(account("Codex main", "codex"))).toBeUndefined()
+    })
+
+    test("two logins of one address: the serving one by its ID", () => {
+      const twins = [account("max", "claude", { id: "old" }), account("max", "claude", { id: "new" })]
+      expect(chatAccount(twins, chat({ account: "max", accountID: "new" }))?.id).toBe("new")
+      // From a service that sends no ID, by alias.
+      expect(chatAccount([{ ...twins[0]!, id: undefined }], chat({ account: "max" }))?.alias).toBe("max")
+      expect(chatAccount(twins, undefined)).toBeUndefined()
+    })
   })
 
-  test("marked when CPP calls it estimated or stale", () => {
-    expect(windowLine(window({ state: "estimated" }), NOW)).toBe("5h  62% left · resets ~1:20")
-    expect(windowLine(window({ state: "estimated", stale: true }), NOW)).toBe("5h  62% left · resets ~1:20 · stale")
-    expect(windowLine(window({ stale: true }), NOW)).toBe("5h  62% left · resets 1:20 · stale")
-    // A reading turns stale an hour after it was read, without anything new being sent.
-    expect(windowLine(window({ staleAt: NOW + 1000 }), NOW)).toBe("5h  62% left · resets 1:20")
-    expect(windowLine(window({ staleAt: NOW + 1000 }), NOW + 1000)).toBe("5h  62% left · resets 1:20 · stale")
+  describe("the tags (section 2)", () => {
+    const tags = (input: Partial<Parameters<typeof usageTags>[0]>) =>
+      usageTags({ account: all[0]!, serving: undefined, chat: undefined, running: false, ...input }).map(
+        (tag) => `${tag.text}:${tag.tone}`,
+      )
+
+    test("IN USE while the chat's step runs on it, else LAST USED", () => {
+      expect(tags({ serving: all[0], running: true })).toEqual(["IN USE:success"])
+      expect(tags({ serving: all[0] })).toEqual(["LAST USED:info"])
+      expect(tags({ serving: all[2], running: true })).toEqual([])
+    })
+
+    test("NEXT USE where the chat goes once its cache is cold, FORCE USE where a forced move sends it", () => {
+      const next = chat({ nextUse: { account: "claude b", reason: "cold_move" } })
+      expect(tags({ chat: next })).toEqual(["NEXT USE:info"])
+      const forced = chat({
+        forceUse: { account: "claude b", when: "now" },
+        nextUse: { account: "claude b", reason: "x" },
+      })
+      expect(tags({ chat: forced })).toEqual(["FORCE USE:warning"])
+      // On the chat's own account too: it stays there once cold.
+      expect(tags({ chat: next, serving: all[0] })).toEqual(["LAST USED:info", "NEXT USE:info"])
+      expect(tags({ chat: chat({ nextUse: { account: "claude a", reason: "cold_move" } }) })).toEqual([])
+    })
   })
 
-  test("windows CPP knows less of", () => {
-    expect(windowLine(window({ state: "dormant", left: 100 }), NOW)).toBe("5h  100% left · not started")
-    expect(windowLine(window({ state: "unknown", left: undefined, resetsAt: undefined, stale: true }), NOW)).toBe(
-      "5h  unknown · stale",
-    )
-    expect(windowLine(window({ state: "awaiting-confirmation", stale: true }), NOW)).toBe(
-      "5h  62% left · reset, awaiting a reading · stale",
-    )
-    expect(formatReset(30_000)).toBe("0:01")
-  })
+  describe("a meter (section 3)", () => {
+    test("the label, a bar as wide as the rest allows, the percent left and the time to the reset", () => {
+      expect(line({})).toBe("5h ████████████░░░░░░░░  62%  1h 20m")
+      expect(line({}).length).toBe(36)
+      expect(line({ left: 100, resetsAt: NOW + 4 * 3_600_000 + 49 * 60_000 })).toBe(
+        "5h ████████████████████ 100%  4h 49m",
+      )
+      expect(line({ left: 0, resetsAt: NOW + (6 * 24 + 23) * 3_600_000 })).toBe("5h ░░░░░░░░░░░░░░░░░░░░   0%  6d 23h")
+      // The bar keeps at least 4 cells.
+      expect(usageLine(usageMeter(window({}), 18, 20, NOW))).toBe("5h                 ██░░  62%  1h 20m")
+    })
 
-  test("where the chat goes next once its cache is cold, and why", () => {
-    expect(nextUseLine({ account: "max-1", reason: "cold_move" })).toBe("next: max-1, once its cache is cold")
-    expect(nextUseLine({ account: "max-1", reason: "forced_move" })).toBe("next: max-1, its account can't keep it")
-  })
+    test("the label column is the card's longest label, from 2 to 18 cells", () => {
+      expect(usageLabelWidth([window({ label: "5h" })])).toBe(2)
+      expect(usageLabelWidth([window({ label: "5h" }), window({ label: "7d claude_gpt" })])).toBe(13)
+      expect(usageLabelWidth([window({ label: "7d a-very-long-scope-name" })])).toBe(18)
+      expect(usageLabelWidth([])).toBe(2)
+      expect(usageLine(usageMeter(window({ label: "7d claude_gpt" }), 13, 37, NOW))).toBe(
+        "7d claude_gpt ██████░░░  62%  1h 20m",
+      )
+    })
 
-  test("a forced move, now or soon", () => {
-    expect(forceUseLine({ account: "max-1", when: "now" })).toBe("forced move to max-1 now")
-    expect(forceUseLine({ account: "max-1", when: "soon" })).toBe("forced move to max-1 soon")
+    test("the percent left rounded down, a sliver as <1%", () => {
+      expect(usageMeter(window({ left: 99.9 }), 2, 37, NOW).percent).toBe(" 99%")
+      expect(usageMeter(window({ left: 0.4 }), 2, 37, NOW).percent).toBe(" <1%")
+      expect(usageMeter(window({ left: 0 }), 2, 37, NOW).percent).toBe("  0%")
+    })
+
+    test("the time to the reset: two units, minutes rounded up, ~ for CPP's estimate", () => {
+      expect(usageCountdown(59 * 60_000)).toBe("59m")
+      expect(usageCountdown(59 * 60_000 + 1)).toBe("1h 0m")
+      expect(usageCountdown(5 * 3_600_000)).toBe("5h 0m")
+      expect(usageCountdown(59_999)).toBe("<1m")
+      expect(usageCountdown(24 * 3_600_000)).toBe("1d 0h")
+      expect(line({ state: "estimated", resetsAt: NOW + (2 * 24 + 21) * 3_600_000 })).toBe(
+        "5h ████████████░░░░░░░░  62% ~2d 21h",
+      )
+      // No reset known: an empty tail.
+      expect(line({ resetsAt: undefined })).toBe("5h ████████████░░░░░░░░  62%        ")
+    })
+
+    test("reset, dormant, STALE and unknown, muted", () => {
+      const meter = (extra: Partial<PacerWindow>, now = NOW) => usageMeter(window(extra), 2, 37, now)
+      expect(meter({ state: "awaiting-confirmation" }).tail.trim()).toBe("reset")
+      // The reset passed while nothing new was read.
+      expect(meter({}, NOW + 80 * 60_000).tail.trim()).toBe("reset")
+      expect(meter({ state: "dormant", left: 100, resetsAt: undefined }).tail.trim()).toBe("dormant")
+      expect(meter({ stale: true }).tail.trim()).toBe("STALE")
+      // A reading turns stale at staleAt, without anything new being sent.
+      expect(meter({ staleAt: NOW + 1000 }).tail.trim()).toBe("1h 20m")
+      expect(meter({ staleAt: NOW + 1000 }, NOW + 1000).tail.trim()).toBe("STALE")
+      expect(line({ state: "unknown", left: undefined, resetsAt: undefined, stale: true })).toBe(
+        "5h ····················      unknown",
+      )
+      for (const extra of [
+        { state: "awaiting-confirmation" as const },
+        { state: "dormant" as const },
+        { stale: true },
+        { left: undefined },
+      ])
+        expect(meter(extra).tone).toBe("muted")
+    })
+
+    test("the bar's color: above 20% left, at 20% or less, at 10% or less", () => {
+      const tone = (left: number) => usageMeter(window({ left }), 2, 37, NOW).tone
+      expect([tone(21), tone(20), tone(11), tone(10), tone(0)]).toEqual([
+        "normal",
+        "low",
+        "low",
+        "critical",
+        "critical",
+      ])
+    })
   })
 })
 

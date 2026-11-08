@@ -279,6 +279,7 @@ import type {
   ExperimentalAttentionTestOutput,
   ExperimentalPacerStatusOutput,
   ExperimentalPacerAccountsOutput,
+  ExperimentalPacerModelsOutput,
   ExperimentalPacerChatGetInput,
   ExperimentalPacerChatGetOutput,
   ExperimentalPacerChatUpdateInput,
@@ -1808,6 +1809,14 @@ const EndpointExperimentalPacerAccounts = (raw: RawClient["server.experimental"]
     ),
   )
 
+const EndpointExperimentalPacerModels = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerModelsOutput>()(
+    raw["pacer.models"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointExperimentalPacerChatGet =
   (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatGetInput) =>
     preserveEffect<ExperimentalPacerChatGetOutput>()(
@@ -1940,6 +1949,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   pacer: {
     status: EndpointExperimentalPacerStatus(raw),
     accounts: EndpointExperimentalPacerAccounts(raw),
+    models: EndpointExperimentalPacerModels(raw),
     chat: {
       get: EndpointExperimentalPacerChatGet(raw),
       update: EndpointExperimentalPacerChatUpdate(raw),

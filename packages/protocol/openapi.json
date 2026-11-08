@@ -10691,6 +10691,7 @@
                     "artifact.updated",
                     "pacer.status",
                     "pacer.accounts.updated",
+                    "pacer.models.updated",
                     "pacer.chat.updated",
                     "pacer.requests.updated",
                     "pacer.notice.added",
@@ -10810,6 +10811,7 @@
                           "artifact.updated",
                           "pacer.status",
                           "pacer.accounts.updated",
+                          "pacer.models.updated",
                           "pacer.chat.updated",
                           "pacer.requests.updated",
                           "pacer.notice.added",
@@ -14545,6 +14547,62 @@
         },
         "description": "Every account the key sees, with its quota windows, as last read; null before the first read. Never waits on CLIProxyPacer. Experimental: may change without compatibility guarantees.",
         "summary": "List CLIProxyPacer accounts"
+      }
+    },
+    "/api/experimental/pacer/models": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.models",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Pacer.Models"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Each of CLIProxyPacer's models with the providers whose logins (not API keys) serve it, from its capabilities as last read; null while none with the pacer were read. `pacer.models.updated` follows each change. Never waits on CLIProxyPacer. Experimental: may change without compatibility guarantees.",
+        "summary": "List the providers serving CLIProxyPacer models"
       }
     },
     "/api/experimental/pacer/chat/{sessionID}": {
@@ -22606,6 +22664,35 @@
       "Pacer.Kind": {
         "type": "string",
         "enum": ["step", "ping", "title", "compaction", "other", "probe", "search"]
+      },
+      "Pacer.Model": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["id", "providers"],
+        "additionalProperties": false
+      },
+      "Pacer.Models": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.Model"
+            }
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
       },
       "Pacer.NextUse": {
         "type": "object",

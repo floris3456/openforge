@@ -3,6 +3,7 @@ import type {
   OpenCodeEvent,
   PacerAccounts,
   PacerChat,
+  PacerModels,
   PacerNotice,
   PacerPromptChange,
   PacerRequest,
@@ -241,6 +242,8 @@ export function pacerFake(input: { delay?: number } = {}) {
     delay: input.delay ?? 0,
     status: status("unset"),
     accounts: null as PacerAccounts | null,
+    /** The providers serving each of CPP's models (spec cliproxypacer-usage-meters). */
+    models: null as PacerModels | null,
     chats: {} as Record<string, PacerChat | null>,
     /** Each chat's requests, newest first. */
     requests: {} as Record<string, PacerRequest[]>,
@@ -282,6 +285,7 @@ export function pacerFake(input: { delay?: number } = {}) {
     const parts = call.path.split("/")
     if (call.path === "status") return json({ data: fake.status })
     if (call.path === "accounts") return json({ data: fake.accounts })
+    if (call.path === "models") return json({ data: fake.models })
     if (call.path === "refresh" && call.method === "POST") return new Response(null, { status: 204 })
     if (parts[0] === "chat" && parts.length === 2 && call.method === "GET")
       return json({ data: fake.chats[parts[1]!] ?? null })
@@ -523,7 +527,8 @@ export async function renderPacer(input: {
     configure: (mutate: (draft: ConfigDraft) => void) => config.update(mutate),
     /** Where this TUI keeps its storage. */
     state: state.path,
-    emit(event: { type: string; data: unknown }) {
+    /** Sends an event; a session's carries `durable`, its place in the session's history. */
+    emit(event: { type: string; data: unknown; durable?: { aggregateID: string; seq: number; version: number } }) {
       events.emit({ id: `evt_${Math.random()}`, created: NOW, ...event } as unknown as OpenCodeEvent)
     },
     /** Resolves with the frame once one matches; events and answers arrive on their own, so this polls. */

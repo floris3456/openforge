@@ -59,6 +59,11 @@ export interface Interface {
    */
   readonly accounts: () => Effect.Effect<Pacer.Accounts | undefined>
   /**
+   * CPP's models by the providers whose accounts serve them, from the catalog as last read (`PacerModels.served`);
+   * `pacer.models.updated` follows each change. Never waits on CPP. Undefined while no catalog with the pacer is held.
+   */
+  readonly models: () => Effect.Effect<Pacer.Models | undefined>
+  /**
    * The chat's view, held from the last read (its `asOf` says when), answered at once: never waits on CPP. Views are
    * read on demand (spec section 3): when the held one may be out of date (after a step of the chat through CPP, CPP
    * listing it with requests, an account generation or a settings time the view hasn't seen or leaving it out of its
@@ -512,6 +517,10 @@ export const layer = Layer.effect(
         chat.marks = marks
         chat.stale = true
       }
+      // The list has no next use or forced move: those held were for the model and account the view named. Another
+      // model or account drops them, and the view is read again when asked.
+      const moved = (item.model && item.model !== chat.raw.model) || (item.account && item.account !== chat.raw.account)
+      if (moved) chat.stale = true
       chat.raw = {
         ...chat.raw,
         warm: item.warm,
@@ -519,6 +528,7 @@ export const layer = Layer.effect(
         pings: item.pings,
         ...(item.account ? { account: item.account } : {}),
         ...(item.model ? { model: item.model } : {}),
+        ...(moved ? { next_use: null, force_use: null } : {}),
       }
       yield* setView(chat)
     })
@@ -820,6 +830,18 @@ export const layer = Layer.effect(
       staleViews()
     })
 
+    // The providers serving each model, told whenever a catalog read changes them (the sidebar's usage meters).
+    let served: Pacer.Models | undefined
+    yield* models.changes().pipe(
+      Stream.runForEach((catalog) => {
+        const next = PacerModels.served(catalog)
+        if (isDeepStrictEqual(next, served)) return Effect.void
+        served = next
+        return next ? bus.publish(Pacer.Event.ModelsUpdated, { models: next }) : Effect.void
+      }),
+      Effect.forkScoped({ startImmediately: true }),
+    )
+
     const requests = yield* trigger("the new requests", readNew)
     const listing = yield* trigger("the chats", Effect.asVoid(readSessions))
     const meters = yield* trigger("the meters", readMeters, METERS_MS)
@@ -1034,6 +1056,8 @@ export const layer = Layer.effect(
           if (!cpp) return
           chat.on = true
           chat.missing = false
+          // A view without an account is out of date once a step went out: CPP routes it to one.
+          if (chat.view && chat.view.account === undefined) chat.stale = true
           chat.stopped.clear()
           if (chat.info === undefined) mark(chat)
           return
@@ -1262,6 +1286,7 @@ export const layer = Layer.effect(
       status: () =>
         Effect.sync(() => (on() && link.contact !== undefined ? { ...link.status, asOf: link.contact } : link.status)),
       accounts: () => Effect.sync(() => link.accounts),
+      models: () => Effect.sync(() => served),
       chat: (sessionID) =>
         Effect.sync(() => {
           const chat = touch(sessionID)

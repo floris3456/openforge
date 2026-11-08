@@ -1,6 +1,7 @@
 export * as PacerModels from "./models.js"
 
 import { Clock, Context, Effect, Layer, Option, Result, Schema, Semaphore, Stream, SubscriptionRef } from "effect"
+import type { Pacer as Shapes } from "@opencode/schema/pacer"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
@@ -70,6 +71,12 @@ export interface Model {
    * a CPP before `remote_compaction`).
    */
   readonly summaries?: ReadonlyArray<{ readonly provider: string; readonly writes: boolean }>
+  /**
+   * The providers whose logins serve it, in lower case, once each, in capabilities' order: its routes but those of an
+   * API key, which has no meters (the sidebar's usage meters, spec cliproxypacer-usage-meters). Undefined where no
+   * route says (a plain proxy).
+   */
+  readonly providers?: ReadonlyArray<string>
 }
 
 /** CPP's models as last read. */
@@ -115,6 +122,8 @@ const Thinking = Schema.Struct({
 })
 const Route = Schema.Struct({
   provider: Schema.String,
+  /** The kind of login: `oauth` or `api_key`. */
+  login: maybe(Schema.String),
   /** How `/v1/responses/compact` is served for the key: `native`, `forwarded`, `emulated` or `unsupported`. */
   remote_compaction: maybe(Schema.String),
   context_length: maybe(Schema.Number),
@@ -332,6 +341,9 @@ function model(
   const summaries = routes.some((route) => typeof route.remote_compaction === "string")
     ? routes.map((route) => ({ provider: route.provider, writes: routeWrites(route) }))
     : undefined
+  const providers = Array.from(
+    new Set(routes.filter((route) => route.login !== "api_key").map((route) => route.provider.toLowerCase())),
+  )
   return {
     id,
     ...(text(listed.owned_by) ? { ownedBy: text(listed.owned_by) } : {}),
@@ -343,7 +355,14 @@ function model(
     ...(facts.reasoning ? { reasoning: facts.reasoning } : {}),
     ...(price ? { price } : {}),
     ...(summaries ? { summaries } : {}),
+    ...(providers.length > 0 ? { providers } : {}),
   }
+}
+
+/** The catalog's models by the providers serving them, in the service API's shape; undefined without the pacer. */
+export function served(catalog: Catalog | undefined): Shapes.Models | undefined {
+  if (!catalog?.pacer) return undefined
+  return { items: catalog.models.map((model) => ({ id: model.id, providers: [...(model.providers ?? [])] })) }
 }
 
 /**

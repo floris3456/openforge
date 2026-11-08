@@ -457,6 +457,7 @@ const harness = Effect.fnUntraced(function* () {
     .subscribe([
       Pacer.Event.StatusChanged,
       Pacer.Event.AccountsUpdated,
+      Pacer.Event.ModelsUpdated,
       Pacer.Event.ChatUpdated,
       Pacer.Event.RequestsUpdated,
     ])
@@ -1060,6 +1061,68 @@ describe("PacerConnection notices", () => {
     }),
   )
 
+  // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-2): a chat switched to another model without a step
+  // kept its old model's next use, and the Usage section showed that provider's accounts as where it moves.
+  it.effect("drops a merged view's next use and forced move when the list names another model or account", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const moves = {
+        next_use: { credential: "auth-b", reason: "cold_move" },
+        force_use: { credential: "auth-c", when: "soon" },
+      }
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), moves))
+      yield* step(h, id)
+      yield* ask(h, id)
+      expect(toldChat(h, id)).toMatchObject({
+        model: "model-a",
+        nextUse: { account: "auth-b" },
+        forceUse: { when: "soon" },
+      })
+      const listed = (fields: Record<string, unknown>) => {
+        h.cpp.listed = [
+          {
+            id: uuid,
+            session_id: 7,
+            warm: true,
+            warm_until: h.cpp.time() + 300_000,
+            pings: chatView(uuid, h.cpp.time()).pings,
+            ...fields,
+          },
+        ]
+        h.published.length = 0
+        h.cpp.notice("session", { keys: [1], at: 1 })
+      }
+      // The same model and account: the moves stand, and nothing is read.
+      listed({ model: "model-a", account: "auth-a", warm_until: h.cpp.time() + 360_000 })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      expect(yield* h.connection.chat(id)).toMatchObject({ nextUse: { account: "auth-b" }, forceUse: { when: "soon" } })
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(1)
+      // Another model: they were the old model's; the view is read again when asked.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { model: "model-c" }))
+      listed({ model: "model-c" })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      const switched = toldChat(h, id)
+      expect(switched?.model).toBe("model-c")
+      expect(switched?.nextUse).toBeUndefined()
+      expect(switched?.forceUse).toBeUndefined()
+      yield* ask(h, id)
+      expect(seen(h, viewPath(id))).toHaveLength(2)
+      // Another account, the same for it.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { model: "model-c", ...moves }))
+      yield* step(h, id)
+      yield* ask(h, id)
+      expect(toldChat(h, id)?.nextUse).toBeDefined()
+      listed({ model: "model-c", account: "auth-d" })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      expect(toldChat(h, id)?.nextUse).toBeUndefined()
+      expect(toldChat(h, id)?.forceUse).toBeUndefined()
+    }),
+  )
+
   it.effect(
     "marks a listed chat's view stale when its requests moved, read once when asked however often listed, never for an older list",
     () =>
@@ -1507,6 +1570,42 @@ describe("PacerConnection chats", () => {
         yield* settle
         expect(seen(h, viewPath(id))).toHaveLength(round + 1)
       }
+    }),
+  )
+
+  // Spec cliproxypacer-usage-meters, section 5: a TUI showing the chat asks for its view as its first step starts, so
+  // the Usage section marks the account in use.
+  it.effect("reads a held view without an account again once a step of the chat starts, not one with an account", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const started = h.bus.publish(SessionEvent.Step.Started, {
+        sessionID: id,
+        assistantMessageID: SessionMessage.ID.create(),
+        agent: Agent.ID.make("build"),
+        model: cppModel,
+        started: 0,
+      })
+      // CPP knows the chat, not yet routed to an account.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { account: null }))
+      expect((yield* ask(h, id))?.account).toBeUndefined()
+      yield* until("the view held", () => toldChat(h, id) !== undefined)
+      expect(yield* h.connection.chat(id)).toMatchObject({ sessionID: id })
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(1)
+      // The step went out: CPP routed it. Asked as it starts, the view is read again.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time()))
+      yield* started
+      yield* ask(h, id)
+      expect(seen(h, viewPath(id))).toHaveLength(2)
+      expect((yield* h.connection.chat(id))?.account).toBe("auth-a")
+      // With an account held, a step's start makes it no older: asking reads nothing.
+      yield* started
+      yield* h.connection.chat(id)
+      yield* settle
+      expect(seen(h, viewPath(id))).toHaveLength(2)
     }),
   )
 
@@ -2045,6 +2144,49 @@ describe("PacerConnection chats", () => {
 })
 
 describe("PacerConnection reads", () => {
+  it.effect(
+    "holds the providers serving each model, and tells each change of them (spec cliproxypacer-usage-meters)",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const told = () =>
+          h.published.filter((event) => event.type === "pacer.models.updated").map((event) => event.data)
+        // The catalog as the connection starts: CPP's, with no models yet.
+        yield* until("the first models told", () => told().length === 1)
+        expect(yield* h.connection.models()).toEqual({ items: [] })
+        const model = (id: string, providers?: string[]): PacerModels.Model => ({
+          id,
+          ...(providers ? { providers } : {}),
+        })
+        yield* SubscriptionRef.set(h.catalog, {
+          ...catalog(1),
+          models: [model("claude-opus-5-5", ["claude"]), model("gpt-6-luna", ["codex", "commandcode"]), model("plain")],
+        })
+        yield* until("the models told", () => told().length === 2)
+        const served = {
+          items: [
+            { id: "claude-opus-5-5", providers: ["claude"] },
+            { id: "gpt-6-luna", providers: ["codex", "commandcode"] },
+            { id: "plain", providers: [] },
+          ],
+        }
+        expect(told()[1]).toEqual({ models: served })
+        expect(yield* h.connection.models()).toEqual(served)
+        // A catalog read again with the same providers, prices moved: nothing told.
+        yield* SubscriptionRef.set(h.catalog, {
+          ...catalog(2),
+          models: [model("claude-opus-5-5", ["claude"]), model("gpt-6-luna", ["codex", "commandcode"]), model("plain")],
+        })
+        yield* settle
+        expect(told()).toHaveLength(2)
+        // Without the pacer: none held, nothing told.
+        yield* SubscriptionRef.set(h.catalog, catalog(3, false))
+        yield* settle
+        expect(yield* h.connection.models()).toBeUndefined()
+        expect(told()).toHaveLength(2)
+      }),
+  )
+
   it.effect("lists a chat's requests with its subagents', and keeps the last 50 what-changed answers", () =>
     Effect.gen(function* () {
       const h = yield* harness()

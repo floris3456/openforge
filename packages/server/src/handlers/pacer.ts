@@ -21,6 +21,7 @@ export const makePacer = Effect.gen(function* () {
   return {
     status: Effect.map(pacer.status(), (data) => ({ data })),
     accounts: Effect.map(pacer.accounts(), (data) => ({ data: data ?? null })),
+    models: Effect.map(pacer.models(), (data) => ({ data: data ?? null })),
     chat: (sessionID: Session.ID) => Effect.map(pacer.chat(sessionID), (data) => ({ data: data ?? null })),
     update: (sessionID: Session.ID, input: Pacer.ChatUpdate) =>
       pacer.update(sessionID, input).pipe(

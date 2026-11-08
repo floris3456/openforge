@@ -46,6 +46,7 @@ describe("pacer shapes", () => {
     expect(Pacer.Event.Definitions.map((definition) => definition.type)).toEqual([
       "pacer.status",
       "pacer.accounts.updated",
+      "pacer.models.updated",
       "pacer.chat.updated",
       "pacer.requests.updated",
       "pacer.notice.added",

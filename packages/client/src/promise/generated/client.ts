@@ -281,6 +281,7 @@ import type {
   ExperimentalAttentionTestOutput,
   ExperimentalPacerStatusOutput,
   ExperimentalPacerAccountsOutput,
+  ExperimentalPacerModelsOutput,
   ExperimentalPacerChatGetInput,
   ExperimentalPacerChatGetOutput,
   ExperimentalPacerChatUpdateInput,
@@ -1813,6 +1814,17 @@ export function make(options: ClientOptions) {
             {
               method: "GET",
               path: `/api/experimental/pacer/accounts`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        models: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerModelsOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/pacer/models`,
               successStatus: 200,
               declaredStatuses: [400, 401],
               empty: false,

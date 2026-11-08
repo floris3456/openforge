@@ -171,6 +171,7 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       modelsSnapshot,
     ],
     external: ["node-gyp"],
+    metafile: true,
     format: "esm",
     minify: true,
     bytecode: true,
@@ -211,6 +212,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     for (const log of result.logs) console.error(log)
     process.exit(1)
   }
+  // The files the binary is built from, beside the artifact folder that verifyArtifact checks.
+  await Bun.write(path.join(outdir, `${name}.inputs.json`), JSON.stringify(Object.keys(result.metafile!.inputs)))
   verifySimulationGraph(simulationInputs)
   await NativeArch.verify(path.join(outdir, name, "bin", item.os === "win32" ? `${binary}.exe` : binary), item.arch)
 

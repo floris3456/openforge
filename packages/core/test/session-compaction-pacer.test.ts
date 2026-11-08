@@ -82,6 +82,33 @@ const userTexts = (body: Record<string, unknown>) =>
         .join(""),
     )
 
+/**
+ * The usage of a summary CLIProxyPacer writes, in its shape since 2026-11-08 (CLIENT-GUIDE 4.2, "The usage of a summary
+ * the server writes", head 272baab4): `input_tokens` counts all input, reads and writes among it; the writes are
+ * `cache_write_tokens` (by lifetime in `cache_creation`); `output_tokens` counts all output, its thinking in
+ * `reasoning_tokens`. Before, the writes stayed inside `input_tokens` with no field of their own, so a summary that
+ * wrote the cache was priced low (`run/evidence/cpp-summaries/live-warm-claude/`: 13 %).
+ */
+const compactUsage = {
+  input_tokens: 2_100,
+  input_tokens_details: {
+    cached_tokens: 1_800,
+    cache_write_tokens: 296,
+    cache_creation: { ephemeral_5m_input_tokens: 296, ephemeral_1h_input_tokens: 0 },
+  },
+  output_tokens: 90,
+  output_tokens_details: { reasoning_tokens: 30 },
+  total_tokens: 2_190,
+}
+/**
+ * How openforge records `compactUsage` at the catalog's prices below: 4 plain input × $1 + 90 output × $5 + 1,800 reads
+ * × $0.10 + 296 writes × $1.25, per million tokens. Read without its writes, it would be 300 input and $0.000930.
+ */
+const compactRecorded = {
+  tokens: { input: 4, output: 60, reasoning: 30, cache: { read: 1_800, write: 296 } },
+  cost: 0.001004,
+}
+
 const sse = (events: ReadonlyArray<readonly [string, unknown]>) =>
   new Response(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""), {
     headers: { "content-type": "text/event-stream" },
@@ -146,12 +173,7 @@ const server = Bun.serve({
           status: "completed",
           id: "resp_cpa_compact_1",
           output: fake.compact === "capsule" ? [checkpoint] : [readable, checkpoint],
-          usage: {
-            input_tokens: 2_100,
-            input_tokens_details: { cached_tokens: 2_048 },
-            output_tokens: 90,
-            total_tokens: 2_190,
-          },
+          usage: compactUsage,
         },
         { headers: fake.header ? { "x-pacer-compaction": fake.header } : {} },
       )
@@ -448,7 +470,9 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
     expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false, userMessages: 2 })
     expect(stored.model).toEqual(pacerRef("kimi-e2e"))
     expect(stored.metadata?.keepID).toBe(messages[2]!.id)
-    expect(stored.tokens).toMatchObject({ output: 90, cache: { read: 2_048 } })
+    // Its usage as CLIProxyPacer's answer gives it: the cache writes priced as writes, the thinking as output once.
+    expect(stored.tokens).toEqual(compactRecorded.tokens)
+    expect(stored.cost).toBeCloseTo(compactRecorded.cost, 12)
 
     // The chat's next step opens with that summary.
     const db = (yield* Database.Service).db
@@ -801,6 +825,9 @@ planned.live(
       expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false })
       expect(stored.model).toEqual(pacerRef("claude-e2e"))
       expect(stored.metadata?.keepID).toBe(messages[2]!.id)
+      // A Messages chat's summary comes back in the Responses format, with its cache writes and thinking all the same.
+      expect(stored.tokens).toEqual(compactRecorded.tokens)
+      expect(stored.cost).toBeCloseTo(compactRecorded.cost, 12)
     }),
 )
 

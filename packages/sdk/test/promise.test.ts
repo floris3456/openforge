@@ -57,9 +57,10 @@ test("closing cancels active Promise event streams", async () => {
   const opencode = await OpenCode.create({ config: { directory: config, project: false, content: "{}" } })
   const events = opencode.events.subscribe()[Symbol.asyncIterator]()
   expect(await events.next()).toMatchObject({ value: { type: "server.connected" }, done: false })
-  const pending = events.next()
+  // close() rejects the pending read before it resolves itself; without a handler attached first, Bun counts that
+  // rejection as unhandled and fails the test.
+  const pending = events.next().catch((error: unknown) => error)
 
   await opencode.close()
-  const error = await pending.catch((error: unknown) => error)
-  expect(error).toMatchObject({ name: "ClientError", reason: "Transport" })
+  expect(await pending).toMatchObject({ name: "ClientError", reason: "Transport" })
 })

@@ -234,29 +234,42 @@ describe("PacerModels", () => {
     }),
   )
 
-  it.live("lists the providers whose logins serve each model, not an API key's, for the usage meters", () =>
+  it.live("lists the providers whose accounts serve each model, API keys too, and those only some of whose do", () =>
     Effect.gen(function* () {
-      // As the owner's CLIProxyPacer answered on 2026-11-08: Claude's commandcode route is an API key, whose accounts
-      // have no meters; the commandcode accounts with meters are logins that don't serve it.
+      // As the owner's CLIProxyPacer answered on 2026-11-08: Claude's commandcode route is its API key only (1 of its 9
+      // accounts), while a GPT model is served by every commandcode account; API keys have meters too.
       const server = yield* serve({
         ...cpp(),
         "/pacer/v1/capabilities": () =>
           Response.json({
             ...capabilities,
+            providers: [
+              { provider: "claude", login: "oauth", accounts: 8 },
+              { provider: "commandcode", login: "oauth", accounts: 8 },
+              { provider: "opencode-go", login: "oauth", accounts: 2 },
+              { provider: "opencode-go", login: "api_key", accounts: 1 },
+              { provider: "commandcode", login: "api_key", accounts: 1 },
+              { provider: "codex", login: "oauth", accounts: 3 },
+              "not a login",
+            ],
             models: [
               {
                 id: "claude-test-1",
                 routes: [
                   { provider: "claude", login: "oauth", accounts: 8 },
                   { provider: "commandcode", login: "api_key", accounts: 1 },
+                  { provider: "opencode-go", login: "oauth", accounts: 2 },
+                  { provider: "opencode-go", login: "api_key", accounts: 1 },
                 ],
               },
               {
                 id: "vendor/slashed-1",
                 routes: [
-                  { provider: "Codex", login: "oauth" },
-                  { provider: "commandcode", login: "oauth" },
-                  { provider: "codex", login: "oauth" },
+                  // Two of the three codex accounts.
+                  { provider: "Codex", login: "oauth", accounts: 2 },
+                  { provider: "commandcode", login: "oauth", accounts: 8 },
+                  { provider: "commandcode", login: "api_key", accounts: 1 },
+                  // A provider capabilities doesn't count, and a route that doesn't count: all, as before.
                   { provider: "plug" },
                 ],
               },
@@ -268,21 +281,61 @@ describe("PacerModels", () => {
       const catalog = yield* until(models, loaded)
       expect(PacerModels.served(catalog)).toEqual({
         items: [
-          { id: "claude-test-1", providers: ["claude"] },
-          // Pinned: the base model's routes of the provider the ID names.
-          { id: "provb/claude-test-1", providers: ["claude"] },
-          // Once each, in lower case, as the accounts name them; a route that doesn't say its login counts.
-          { id: "vendor/slashed-1", providers: ["codex", "commandcode", "plug"] },
+          { id: "claude-test-1", providers: ["claude", "commandcode", "opencode-go"], partial: ["commandcode"] },
+          // Pinned to a provider without a route of its own: the base model's routes.
+          {
+            id: "provb/claude-test-1",
+            providers: ["claude", "commandcode", "opencode-go"],
+            partial: ["commandcode"],
+          },
+          // Once each, in lower case, as the accounts name them.
+          { id: "vendor/slashed-1", providers: ["codex", "commandcode", "plug"], partial: ["codex"] },
           { id: "custom-1", providers: [] },
           { id: "manual-1", providers: [] },
         ],
       })
-      expect(catalog?.models[0]?.providers).toEqual(["claude"])
+      expect(catalog?.models[0]?.partial).toEqual(["commandcode"])
       expect(catalog?.models.find((model) => model.id === "custom-1")?.providers).toBeUndefined()
+      expect(catalog?.models.find((model) => model.id === "custom-1")?.partial).toBeUndefined()
       // Without the pacer, or before a read: none.
       expect(PacerModels.served(undefined)).toBeUndefined()
       expect(PacerModels.served({ ...catalog!, pacer: null })).toBeUndefined()
     }),
+  )
+
+  it.live(
+    "a model pinned to a provider is that provider's accounts, partial when its route doesn't count them all",
+    () =>
+      Effect.gen(function* () {
+        const server = yield* serve({
+          ...cpp(),
+          "/v1/models": () =>
+            Response.json({ object: "list", data: [{ id: "commandcode/claude-test-1", object: "model" }] }),
+          "/pacer/v1/capabilities": () =>
+            Response.json({
+              ...capabilities,
+              providers: [
+                { provider: "claude", login: "oauth", accounts: 8 },
+                { provider: "commandcode", login: "oauth", accounts: 8 },
+                { provider: "commandcode", login: "api_key", accounts: 1 },
+              ],
+              models: [
+                {
+                  id: "claude-test-1",
+                  routes: [
+                    { provider: "claude", login: "oauth", accounts: 8 },
+                    { provider: "commandcode", login: "api_key", accounts: 1 },
+                  ],
+                },
+              ],
+            }),
+        })
+        const { models } = yield* start(endpoint(server.origin))
+        const catalog = yield* until(models, loaded)
+        expect(PacerModels.served(catalog)).toEqual({
+          items: [{ id: "commandcode/claude-test-1", providers: ["commandcode"], partial: ["commandcode"] }],
+        })
+      }),
   )
 
   it.live("says the server has the web tools while capabilities' pacer block names their list's path", () =>

@@ -111,10 +111,15 @@ export const Model = Schema.Struct({
   /** CPP's model ID, the ID of the CLIProxyPacer provider's model. */
   id: Schema.String,
   /**
-   * The providers whose logins serve it, as `Account.provider` names them, from CPP's capabilities: routes of an API
-   * key are left out, since an API key has no meters. Empty when CPP doesn't say.
+   * The providers whose accounts serve it, as `Account.provider` names them in lower case, from CPP's capabilities,
+   * API keys included. Empty when CPP doesn't say.
    */
   providers: Schema.Array(Schema.String),
+  /**
+   * Of `providers`, those only some of whose accounts serve it, by CPP's counts; which of them do, CPP doesn't say.
+   * Absent when every account of each provider does.
+   */
+  partial: Schema.Array(Schema.String).pipe(optional),
 }).annotate({ identifier: "Pacer.Model" })
 
 /** CPP's models, by the providers whose accounts serve them, as last read. */

@@ -317,7 +317,7 @@ export type PacerState = "unset" | "unreachable" | "no-pacer" | "on"
 
 export type PacerWindowState = "current" | "estimated" | "partial" | "unknown" | "dormant" | "awaiting-confirmation"
 
-export type PacerModel = { id: string; providers: Array<string> }
+export type PacerModel = { id: string; providers: Array<string>; partial?: Array<string> }
 
 export type PacerPings = {
   active: boolean

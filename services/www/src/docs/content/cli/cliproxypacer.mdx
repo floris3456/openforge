@@ -44,34 +44,40 @@ cache goes cold if nothing more is sent, including the pings CLIProxyPacer still
 
 ## Sidebar
 
-The **Usage** section, above the sidebar's other sections, shows the usage meters of every account of the provider
-CLIProxyPacer serves the chat from: each of the account's windows as a bar of what is left. The sidebar's **Context**
-section is gone; the toolbar shows the same.
+The **Usage** section, above the sidebar's other sections, shows how much is left on the accounts that serve the chat's
+model, from the provider CLIProxyPacer serves it from. The sidebar's **Context** section is gone; the toolbar shows the
+same.
 
 ```text
 Usage
-claude-max-1 · NEXT USE
-5h ████████████████████  99%  4h 53m
-7d ██████████████████░░  91%   6d 9h
-claude-max-2 · IN USE
-5h ████████████░░░░░░░░  62%  1h 20m
-7d ███████████████░░░░░  76%  ~3d 4h
-claude-pro-1
-5h ████████████████████ 100% dormant
-7d ░░░░░░░░░░░░░░░░░░░░   0%  8h 33m
+Claude Max 20x   5h                7d
+● ████░░░  62%   1h ██████░  80%  ~3d
+  ███████ 100%   5h ███████ 100%   7d
+Claude Pro       5h                7d
+› █░░░░░░  12%  46m ██░░░░░  31%   2d
+● in use  › next use
 ```
 
+- Accounts are grouped by provider and plan (`Claude Max 20x`, `Claude Pro`), one row per account, without its name.
+  On the group's line, each column names its window: its length, after its scope when it covers only some models
+  (`opus 7d`).
+- Only the windows that limit the chat's model show: an Antigravity account shows its Claude and GPT windows for a
+  Claude model, its Gemini windows for a Gemini one.
+- Each window is a bar of what is left, the percent left (rounded down) and the time to its reset: `46m`, `1h`, `2d`
+  (hours and days rounded down); `~` marks a reset CLIProxyPacer estimates. A window nothing has used since its reset
+  shows its length (`5h`), `now` says the reset has passed with no reading since. With three windows the percent goes
+  to make room (the bar still shows it), except where no reset is known, where it takes the time's place.
+- A bar is green above 20% left, yellow at 20% or less and red at 10% or less; grey while the reading isn't current
+  (unused since its reset, past its reset, or older than an hour, when CLIProxyPacer stops counting on it).
+- `●` marks the account serving the chat: green while its step runs (from its first step on), blue for the one that
+  served it last. `›` marks where the chat goes once its cache is cold (blue), or where CLIProxyPacer must move it (a
+  warning). A line under the groups names the marks shown.
 - It follows the model picked in the prompt, before you send. Until CLIProxyPacer has served the chat that model (a
-  new chat, or one just switched to another model), it shows the accounts of every provider whose logins serve the
-  model, each named with its provider when there are several. API keys have no meters, so their accounts don't show.
-- When the chat's next account is another provider's, that provider's accounts show too.
-- `IN USE` marks the account serving the chat while its step runs (from its first step on), `LAST USED` the one that
-  served it last, `NEXT USE` where the chat goes once its cache is cold, and `FORCE USE` (a warning) where
-  CLIProxyPacer must move it.
-- A bar is green above 20% left, yellow at 20% or less and red at 10% or less. The percent is rounded down.
-- After the percent comes the time to the window's reset; `~` marks a reset CLIProxyPacer estimates. `reset` says the
-  reset has passed with no reading since, `dormant` that nothing has used the window since it last reset, and `STALE`
-  that CLIProxyPacer no longer counts on the reading (older than an hour). Those bars are grey.
+  new chat, or one just switched to another model), it shows every provider that serves the model, API keys included.
+  When the chat's next account is another provider's, that provider shows too.
+- When only some of a provider's accounts serve the model (Command Code's API key serves Claude models, its logins
+  don't), only the accounts CLIProxyPacer names for the chat show: its own and where it moves. CLIProxyPacer tells how
+  many accounts serve a model, not which.
 - While CLIProxyPacer is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it
   says `no pacer`.
 - It polls nothing: the meters come with CLIProxyPacer's change stream, as they are read. A chat's view is read once

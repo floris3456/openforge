@@ -22676,6 +22676,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "partial": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": ["id", "providers"],

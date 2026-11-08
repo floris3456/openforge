@@ -72,11 +72,17 @@ export interface Model {
    */
   readonly summaries?: ReadonlyArray<{ readonly provider: string; readonly writes: boolean }>
   /**
-   * The providers whose logins serve it, in lower case, once each, in capabilities' order: its routes but those of an
-   * API key, which has no meters (the sidebar's usage meters, spec cliproxypacer-usage-meters). Undefined where no
-   * route says (a plain proxy).
+   * The providers whose accounts serve it, in lower case, once each, in capabilities' order, API keys included: they
+   * have meters too (the sidebar's usage meters, spec cliproxypacer-usage-meters). Undefined where no route says (a
+   * plain proxy).
    */
   readonly providers?: ReadonlyArray<string>
+  /**
+   * Of `providers`, those only some of whose accounts serve it: a login of the provider without a route of the model,
+   * or with a route counting fewer of its accounts (capabilities' `providers[]` against `routes[].accounts`). Which
+   * of them do, CPP doesn't say. Undefined when none.
+   */
+  readonly partial?: ReadonlyArray<string>
 }
 
 /** CPP's models as last read. */
@@ -124,6 +130,8 @@ const Route = Schema.Struct({
   provider: Schema.String,
   /** The kind of login: `oauth` or `api_key`. */
   login: maybe(Schema.String),
+  /** How many of the provider's accounts of that login serve the model. */
+  accounts: maybe(Schema.Number),
   /** How `/v1/responses/compact` is served for the key: `native`, `forwarded`, `emulated` or `unsupported`. */
   remote_compaction: maybe(Schema.String),
   context_length: maybe(Schema.Number),
@@ -138,11 +146,15 @@ const Capable = Schema.Struct({
   display_name: maybe(Schema.String),
   routes: Items,
 })
+/** One kind of login of a provider, with how many accounts the key has of it (capabilities' `providers[]`). */
+const Login = Schema.Struct({ provider: Schema.String, login: maybe(Schema.String), accounts: maybe(Schema.Number) })
+type Login = typeof Login.Type
 // `web_tools` is read on its own (`webTools`), so a block this version does not understand leaves the rest alone.
 const CapabilitiesAnswer = Schema.Struct({
   pacer: Schema.NullOr(
     Schema.Struct({ compact_tokens: maybe(Schema.Array(Schema.String)), web_tools: Schema.optional(Schema.Unknown) }),
   ),
+  providers: Items,
   models: Items,
 })
 const WebTools = Schema.Struct({ tools: Schema.String })
@@ -183,6 +195,7 @@ const PricesAnswer = Schema.Struct({ models: Items, manual: Items, settings: Ite
 const decodeListed = Schema.decodeUnknownOption(Listed)
 const decodeCapable = Schema.decodeUnknownOption(Capable)
 const decodeRoute = Schema.decodeUnknownOption(Route)
+const decodeLogin = Schema.decodeUnknownOption(Login)
 const decodePriced = Schema.decodeUnknownOption(Priced)
 const decodeManual = Schema.decodeUnknownOption(Manual)
 const decodeSetting = Schema.decodeUnknownOption(Setting)
@@ -239,6 +252,7 @@ export const layer = Layer.effect(
         yield* Clock.currentTimeMillis,
         each(list.body.data, decodeListed),
         pacer ? capable(capabilities?.models) : new Map(),
+        pacer ? each(capabilities?.providers, decodeLogin) : [],
         pacer && {
           compactTokens: pacer.compact_tokens ?? [],
           webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
@@ -302,6 +316,7 @@ function build(
   at: number,
   listed: ReadonlyArray<typeof Listed.Type>,
   capabilities: ReadonlyMap<string, Capability>,
+  logins: ReadonlyArray<Login>,
   pacer: Pacer | null,
   prices: Prices | undefined,
 ): Catalog {
@@ -309,7 +324,7 @@ function build(
   const models = listed.flatMap((item) => {
     if (seen.has(item.id)) return []
     seen.add(item.id)
-    return [model(item, capabilities, prices)]
+    return [model(item, capabilities, logins, prices)]
   })
   return { at, pacer, models }
 }
@@ -317,6 +332,7 @@ function build(
 function model(
   listed: typeof Listed.Type,
   capabilities: ReadonlyMap<string, Capability>,
+  logins: ReadonlyArray<Login>,
   prices: Prices | undefined,
 ): Model {
   const id = listed.id
@@ -341,9 +357,8 @@ function model(
   const summaries = routes.some((route) => typeof route.remote_compaction === "string")
     ? routes.map((route) => ({ provider: route.provider, writes: routeWrites(route) }))
     : undefined
-  const providers = Array.from(
-    new Set(routes.filter((route) => route.login !== "api_key").map((route) => route.provider.toLowerCase())),
-  )
+  const providers = Array.from(new Set(routes.map((route) => route.provider.toLowerCase())))
+  const partial = providers.filter((provider) => !servesAll(provider, routes, logins))
   return {
     id,
     ...(text(listed.owned_by) ? { ownedBy: text(listed.owned_by) } : {}),
@@ -356,13 +371,37 @@ function model(
     ...(price ? { price } : {}),
     ...(summaries ? { summaries } : {}),
     ...(providers.length > 0 ? { providers } : {}),
+    ...(partial.length > 0 ? { partial } : {}),
   }
+}
+
+/**
+ * Whether every account of `provider` serves a model of these routes: each of its logins has a route of the model
+ * counting all its accounts. What CPP doesn't count (an older CPP) counts as all.
+ */
+function servesAll(provider: string, routes: ReadonlyArray<Route>, logins: ReadonlyArray<Login>) {
+  return logins
+    .filter((login) => login.provider.toLowerCase() === provider)
+    .every((login) =>
+      routes.some(
+        (route) =>
+          route.provider.toLowerCase() === provider &&
+          (route.login ?? undefined) === (login.login ?? undefined) &&
+          (route.accounts == null || login.accounts == null || route.accounts >= login.accounts),
+      ),
+    )
 }
 
 /** The catalog's models by the providers serving them, in the service API's shape; undefined without the pacer. */
 export function served(catalog: Catalog | undefined): Shapes.Models | undefined {
   if (!catalog?.pacer) return undefined
-  return { items: catalog.models.map((model) => ({ id: model.id, providers: [...(model.providers ?? [])] })) }
+  return {
+    items: catalog.models.map((model) => ({
+      id: model.id,
+      providers: [...(model.providers ?? [])],
+      ...(model.partial ? { partial: [...model.partial] } : {}),
+    })),
+  }
 }
 
 /**

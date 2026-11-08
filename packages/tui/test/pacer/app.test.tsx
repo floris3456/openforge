@@ -99,14 +99,15 @@ async function app(input: { state: Parameters<typeof status>[0]; providerID: str
 test("on CPP: the cache item in the toolbar, Usage where Context was, and the Requests tab moving the chat", async () => {
   const { setup, fake } = await app({ state: "on", providerID: "cliproxypacer" })
   await using _ = setup
-  await waitForHighlightedFrame(setup, (frame) => frame.includes("Latest reply") && frame.includes("max-2"), {
+  await waitForHighlightedFrame(setup, (frame) => frame.includes("Latest reply") && frame.includes("Claude Max"), {
     maxPasses: 200,
   })
   const frame = await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame), {
     maxPasses: 200,
   })
   expect(frame).toMatch(/^\s*Usage\s*$/m)
-  expect(frame).toContain("5h ████████████░░░░░░░░  62%")
+  expect(frame).toContain("Claude Max       5h                7d")
+  expect(frame).toContain("████░░░  62%   1h")
   expect(frame).not.toMatch(/^\s*Context\s*$/m)
   expect(frame).not.toContain("spent")
   // A click on the cache item opens the footer at the Requests tab; Enter on the long step's row moves the
@@ -129,7 +130,7 @@ test("on CPP: the cache item in the toolbar, Usage where Context was, and the Re
 test("moved to another provider: the cache item and Usage go, the Requests tab stays", async () => {
   const { setup } = await app({ state: "on", providerID: "cliproxypacer" })
   await using _ = setup
-  await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame) && frame.includes("max-2"), {
+  await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame) && frame.includes("Claude Max"), {
     maxPasses: 200,
   })
   setup.events.emit({
@@ -143,7 +144,7 @@ test("moved to another provider: the cache item and Usage go, the Requests tab s
     maxPasses: 200,
   })
   expect(frame).not.toMatch(/^\s*Usage\s*$/m)
-  expect(frame).not.toContain("max-2")
+  expect(frame).not.toContain("Claude Max")
   // Its requests went through CPP: they still show.
   setup.mockInput.pressArrow("down")
   await setup.waitForFrame((frame) => frame.includes("Subagents") && frame.includes("Requests"), { maxPasses: 100 })

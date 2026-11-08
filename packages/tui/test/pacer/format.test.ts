@@ -21,14 +21,17 @@ import {
   requestRow,
   requestTone,
   usageAccounts,
+  usageCells,
   usageCountdown,
-  usageLabelWidth,
-  usageLine,
-  usageMeter,
-  usageProvider,
-  usageTags,
+  usageGroupName,
+  usageLines,
+  usageText,
+  windowApplies,
+  windowLength,
+  type UsageSpan,
 } from "../../src/pacer/format"
 import { requestTarget } from "../../src/pacer/jump"
+import { stringWidth } from "../../src/util/string-width"
 import { listTop } from "../../src/routes/session/composer/requests-tab"
 import { chat, miss, notice, NOW, promptChange, request, step, webCall } from "./fixture"
 
@@ -155,6 +158,7 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
     stale: false,
     ...extra,
   })
+  const SEVEN = { label: "7d", seconds: 604_800 }
   const account = (alias: string, provider: string, extra: Partial<PacerAccount> = {}): PacerAccount => ({
     id: `id-${alias}`,
     alias,
@@ -162,40 +166,43 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
     windows: [window({})],
     ...extra,
   })
-  // As the owner's CLIProxyPacer listed them on 2026-11-08: logins of claude, codex and commandcode, and the providers
-  // whose logins serve each model (API keys left out by the service).
-  const all = [
-    account("claude b", "claude"),
-    account("commandcode a", "commandcode"),
-    account("claude a", "claude"),
-    account("codex a", "codex"),
-  ]
-  const models = {
-    items: [
-      { id: "claude-opus-5-5", providers: ["claude"] },
-      { id: "gpt-6-luna", providers: ["codex", "commandcode"] },
-    ],
-  }
-  const aliases = (input: Partial<Parameters<typeof usageAccounts>[0]>) =>
-    usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: undefined, models, ...input }).accounts.map(
-      (item) => item.alias,
-    )
-  const line = (extra: Partial<PacerWindow>, now = NOW, width = 37) =>
-    usageLine(usageMeter(window(extra), 2, width, now))
 
   describe("which accounts (section 1)", () => {
-    test("served: every account of the serving account's provider, by alias", () => {
+    // As the owner's CLIProxyPacer listed them on 2026-11-08: logins of claude, codex and commandcode, commandcode's
+    // API key, and the providers serving each model, API keys included.
+    const all = [
+      account("claude b", "claude"),
+      account("commandcode a", "commandcode"),
+      account("commandcode-apikey", "commandcode"),
+      account("claude a", "claude"),
+      account("codex a", "codex"),
+    ]
+    const models = {
+      items: [
+        // Claude's commandcode route is the API key only: 1 of commandcode's accounts.
+        { id: "claude-haiku-5-5", providers: ["claude", "commandcode"], partial: ["commandcode"] },
+        { id: "commandcode/claude-haiku-5-5", providers: ["commandcode"], partial: ["commandcode"] },
+        { id: "claude-opus-5-5", providers: ["claude"] },
+        { id: "gpt-6-luna", providers: ["codex", "commandcode"] },
+      ],
+    }
+    const aliases = (input: Partial<Parameters<typeof usageAccounts>[0]>) =>
+      usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: undefined, models, ...input }).accounts.map(
+        (item) => item.alias,
+      )
+
+    test("served: every account of the serving account's provider that serves the model, by alias", () => {
       const served = chat({ model: "gpt-6-luna", provider: "codex", account: "codex a", accountID: "id-codex a" })
       expect(aliases({ model: "gpt-6-luna", chat: served })).toEqual(["codex a"])
       const claude = chat({ model: "claude-opus-5-5", account: "claude b", accountID: "id-claude b" })
       expect(aliases({ chat: claude })).toEqual(["claude a", "claude b"])
     })
 
-    test("a new chat, or one switched to another model: the providers whose logins serve the model", () => {
-      expect(aliases({ model: "gpt-6-luna" })).toEqual(["codex a", "commandcode a"])
+    test("a new chat, or one switched to another model: the providers serving the model, API keys too", () => {
+      expect(aliases({ model: "gpt-6-luna" })).toEqual(["codex a", "commandcode a", "commandcode-apikey"])
       // The view is of the model the chat had before.
       const before = chat({ model: "claude-opus-5-5", account: "claude b", accountID: "id-claude b" })
-      expect(aliases({ model: "gpt-6-luna", chat: before })).toEqual(["codex a", "commandcode a"])
+      expect(aliases({ model: "gpt-6-luna", chat: before })).toEqual(["codex a", "commandcode a", "commandcode-apikey"])
       // A model CPP doesn't list, or no models read yet: none.
       expect(aliases({ model: "unknown-model" })).toEqual([])
       expect(aliases({ models: undefined })).toEqual([])
@@ -207,9 +214,32 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
       expect(aliases({ model: "CODEX/GPT-6-Luna", chat: served })).toEqual(["codex a"])
     })
 
-    test("served from an account without meters (an API key): the providers whose logins serve the model", () => {
-      const keyed = chat({ model: "claude-opus-5-5", provider: "commandcode", account: "cc-key", accountID: "key-1" })
-      expect(aliases({ chat: keyed })).toEqual(["claude a", "claude b"])
+    // The owner, 2026-11-08: "If that same model is used, but from a different provider (command code haiku for
+    // example), you see only those", of the accounts "that has that model available".
+    test("a provider only some of whose accounts serve the model: only those CPP names for the chat", () => {
+      const keyed = chat({
+        model: "claude-haiku-5-5",
+        provider: "commandcode",
+        account: "commandcode-apikey",
+        accountID: "id-commandcode-apikey",
+      })
+      expect(aliases({ model: "claude-haiku-5-5", chat: keyed })).toEqual(["commandcode-apikey"])
+      expect(aliases({ model: "commandcode/claude-haiku-5-5", chat: keyed })).toEqual(["commandcode-apikey"])
+      // Before CPP has served it: that provider's none, the other provider's all.
+      expect(aliases({ model: "claude-haiku-5-5" })).toEqual(["claude a", "claude b"])
+      expect(aliases({ model: "commandcode/claude-haiku-5-5" })).toEqual([])
+      // Where the chat moves, though CPP names it by alias.
+      const moving = chat({
+        model: "claude-haiku-5-5",
+        account: "claude a",
+        accountID: "id-claude a",
+        nextUse: { account: "commandcode-apikey", reason: "cold_move" },
+      })
+      expect(aliases({ model: "claude-haiku-5-5", chat: moving })).toEqual([
+        "claude a",
+        "claude b",
+        "commandcode-apikey",
+      ])
     })
 
     // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-1, issue 1): CPP takes the new model into the
@@ -235,23 +265,14 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
         accountID: "id-codex a",
       }
       const next = chat({ ...served, nextUse: { account: "commandcode a", reason: "cold_move" } })
-      expect(aliases({ model: "gpt-6-luna", chat: next })).toEqual(["codex a", "commandcode a"])
+      expect(aliases({ model: "gpt-6-luna", chat: next })).toEqual(["codex a", "commandcode a", "commandcode-apikey"])
       const forced = chat({ ...served, forceUse: { account: "claude a", when: "now" } })
-      // Every account of the provider it moves to.
       expect(aliases({ model: "gpt-6-luna", chat: forced })).toEqual(["claude a", "claude b", "codex a"])
-      // A view of another model: its moves are that model's, so they neither add accounts nor tag them.
+      // A view of another model: its moves are that model's, so they neither add accounts nor mark them.
       const other = usageAccounts({ accounts: all, model: "claude-opus-5-5", chat: next, models })
       expect(other.accounts.map((item) => item.alias)).toEqual(["claude a", "claude b"])
       expect(other.chat).toBeUndefined()
       expect(usageAccounts({ accounts: all, model: "gpt-6-luna", chat: next, models }).chat).toBe(next)
-    })
-
-    test("the provider after the alias only when the alias doesn't start with it", () => {
-      expect(usageProvider(account("max-1", "claude"))).toBe("claude")
-      // CPP's alias of an account without a label, and one named after its provider.
-      expect(usageProvider(account("claude 193e40", "claude"))).toBeUndefined()
-      expect(usageProvider(account("opencode-go-apikey", "opencode-go"))).toBeUndefined()
-      expect(usageProvider(account("Codex main", "codex"))).toBeUndefined()
     })
 
     test("two logins of one address: the serving one by its ID", () => {
@@ -263,104 +284,290 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
     })
   })
 
-  describe("the tags (section 2)", () => {
-    const tags = (input: Partial<Parameters<typeof usageTags>[0]>) =>
-      usageTags({ account: all[0]!, serving: undefined, chat: undefined, running: false, ...input }).map(
-        (tag) => `${tag.text}:${tag.tone}`,
-      )
-
-    test("IN USE while the chat's step runs on it, else LAST USED", () => {
-      expect(tags({ serving: all[0], running: true })).toEqual(["IN USE:success"])
-      expect(tags({ serving: all[0] })).toEqual(["LAST USED:info"])
-      expect(tags({ serving: all[2], running: true })).toEqual([])
-    })
-
-    test("NEXT USE where the chat goes once its cache is cold, FORCE USE where a forced move sends it", () => {
-      const next = chat({ nextUse: { account: "claude b", reason: "cold_move" } })
-      expect(tags({ chat: next })).toEqual(["NEXT USE:info"])
-      const forced = chat({
-        forceUse: { account: "claude b", when: "now" },
-        nextUse: { account: "claude b", reason: "x" },
-      })
-      expect(tags({ chat: forced })).toEqual(["FORCE USE:warning"])
-      // On the chat's own account too: it stays there once cold.
-      expect(tags({ chat: next, serving: all[0] })).toEqual(["LAST USED:info", "NEXT USE:info"])
-      expect(tags({ chat: chat({ nextUse: { account: "claude a", reason: "cold_move" } }) })).toEqual([])
-    })
+  // CLIProxyPacer's own cases (`applies_and_antigravity_groups`, crates/cpa-pacer/src/meters/tests.rs at 272baab4).
+  test("the windows that limit a model, as CPP decides", () => {
+    const cases: [string, string, boolean][] = [
+      ["all", "anything", true],
+      ["oauth", "anything", true],
+      ["opus", "claude-Opus-4-6", true],
+      ["opus", "claude-sonnet-4-6", false],
+      ["spark", "gpt-5.3-codex-spark", true],
+      ["gemini", "gemini-3-pro", true],
+      ["gemini", "gemini-opus-4-6-thinking", false],
+      ["claude_gpt", "gemini-opus-4-6-thinking", true],
+      ["claude_gpt", "gpt-oss-120b", true],
+      ["model:GPT-5", "gpt-5", true],
+      ["model:gpt-5", "gpt-5.1", false],
+      ["limit:foo", "foo", false],
+      ["code-review", "gpt-5", false],
+      ["fable", "claude-opus-4-6", false],
+      ["fable", "claude-Fable-5-1", true],
+      ["unknown", "x", false],
+      // Pinned to a provider.
+      ["haiku", "commandcode/claude-haiku-5-5", true],
+      ["model:claude-haiku-5-5", "commandcode/claude-haiku-5-5", true],
+    ]
+    for (const [scope, model, applies] of cases)
+      expect([scope, model, windowApplies({ scope }, model)]).toEqual([scope, model, applies])
   })
 
-  describe("a meter (section 3)", () => {
-    test("the label, a bar as wide as the rest allows, the percent left and the time to the reset", () => {
-      expect(line({})).toBe("5h ████████████░░░░░░░░  62%  1h 20m")
-      expect(line({}).length).toBe(36)
-      expect(line({ left: 100, resetsAt: NOW + 4 * 3_600_000 + 49 * 60_000 })).toBe(
-        "5h ████████████████████ 100%  4h 49m",
-      )
-      expect(line({ left: 0, resetsAt: NOW + (6 * 24 + 23) * 3_600_000 })).toBe("5h ░░░░░░░░░░░░░░░░░░░░   0%  6d 23h")
-      // The bar keeps at least 4 cells.
-      expect(usageLine(usageMeter(window({}), 18, 20, NOW))).toBe("5h                 ██░░  62%  1h 20m")
+  test("a group's name: the provider's, then its plan made readable", () => {
+    expect(usageGroupName("claude", "default_claude_max_20x")).toBe("Claude Max 20x")
+    expect(usageGroupName("claude", "default_claude_max_5x")).toBe("Claude Max 5x")
+    expect(usageGroupName("claude", "claude_pro")).toBe("Claude Pro")
+    expect(usageGroupName("antigravity", "g1-pro-tier")).toBe("Antigravity Pro")
+    expect(usageGroupName("commandcode", "individual-goat")).toBe("Command Code Goat")
+    expect(usageGroupName("commandcode", "teams-pro")).toBe("Command Code Teams Pro")
+    expect(usageGroupName("codex", "plus")).toBe("Codex Plus")
+    expect(usageGroupName("opencode-go", undefined)).toBe("OpenCode Go")
+    // A provider of no known name, and a plan of no word left: CPP's own words.
+    expect(usageGroupName("newprov", "default")).toBe("newprov default")
+  })
+
+  test("a window's length, and the time to its reset in one unit", () => {
+    expect([18_000, 604_800, 2_592_000, 5_400, 45].map(windowLength)).toEqual(["5h", "7d", "30d", "90m", "45s"])
+    expect(usageCountdown(59_999)).toBe("<1m")
+    expect(usageCountdown(59 * 60_000)).toBe("59m")
+    // Minutes round up, hours and days down.
+    expect(usageCountdown(59 * 60_000 + 1)).toBe("1h")
+    expect(usageCountdown(119 * 60_000)).toBe("1h")
+    expect(usageCountdown(24 * 3_600_000 - 60_000)).toBe("23h")
+    expect(usageCountdown(24 * 3_600_000)).toBe("1d")
+    expect(usageCountdown((6 * 24 + 23) * 3_600_000)).toBe("6d")
+  })
+
+  test("the cells: two windows' width at most, the percent while the bar keeps 4, at most 4 windows a line", () => {
+    const cells = (count: number) => {
+      const cell = usageCells(37, count)
+      return [cell.width, cell.bar, cell.percent, cell.perLine]
+    }
+    expect(cells(1)).toEqual([17, 7, true, 1])
+    expect(cells(2)).toEqual([17, 7, true, 2])
+    expect(cells(3)).toEqual([11, 6, false, 3])
+    expect(cells(4)).toEqual([8, 3, false, 4])
+    expect(cells(5)).toEqual([8, 3, false, 4])
+    // A wider sidebar keeps the percent with three.
+    expect(usageCells(46, 3).percent).toBe(true)
+  })
+
+  describe("the section's lines (sections 2 and 3)", () => {
+    const lines = (input: Partial<Parameters<typeof usageLines>[0]> & { accounts: PacerAccount[] }) =>
+      usageLines({
+        model: "claude-opus-5-5",
+        serving: undefined,
+        chat: undefined,
+        running: false,
+        width: 37,
+        now: NOW,
+        ...input,
+      })
+    // Trailing blanks (a cell an account lacks) don't show.
+    const texts = (spans: UsageSpan[][]) => spans.map((line) => usageText(line).trimEnd())
+    const inks = (line: UsageSpan[]) =>
+      line.map((span) => `${span.text.trim() || "·"}:${span.ink}${span.bold ? ":bold" : ""}`)
+    // The owner's plans as CPP names them.
+    const max = (alias: string, windows: PacerWindow[]) =>
+      account(alias, "claude", { plan: "default_claude_max_20x", windows })
+    const served = max("max-2", [
+      window({}),
+      window({ ...SEVEN, left: 80.4, state: "estimated", resetsAt: NOW + (3 * 24 + 4) * 3_600_000 }),
+    ])
+    const idle = max("max-3", [
+      window({ left: 100, state: "dormant", resetsAt: undefined }),
+      window({ ...SEVEN, left: 100, state: "dormant", resetsAt: undefined }),
+    ])
+    const pro = account("pro-1", "claude", {
+      plan: "claude_pro",
+      windows: [
+        window({ left: 12, resetsAt: NOW + 46 * 60_000 }),
+        window({ ...SEVEN, left: 31, resetsAt: NOW + (2 * 24 + 5) * 3_600_000 }),
+      ],
     })
 
-    test("the label column is the card's longest label, from 2 to 18 cells", () => {
-      expect(usageLabelWidth([window({ label: "5h" })])).toBe(2)
-      expect(usageLabelWidth([window({ label: "5h" }), window({ label: "7d claude_gpt" })])).toBe(13)
-      expect(usageLabelWidth([window({ label: "7d a-very-long-scope-name" })])).toBe(18)
-      expect(usageLabelWidth([])).toBe(2)
-      expect(usageLine(usageMeter(window({ label: "7d claude_gpt" }), 13, 37, NOW))).toBe(
-        "7d claude_gpt ██████░░░  62%  1h 20m",
-      )
+    test("a group per plan, the windows' labels over their columns, a row per account without its name, the legend", () => {
+      const view = chat({ account: "max-2", accountID: "id-max-2", nextUse: { account: "pro-1", reason: "cold_move" } })
+      const out = lines({ accounts: [pro, idle, served], serving: served, chat: view })
+      expect(texts(out)).toEqual([
+        "Claude Max 20x   5h                7d",
+        "● ████░░░  62%   1h ██████░  80%  ~3d",
+        "  ███████ 100%   5h ███████ 100%   7d",
+        "Claude Pro       5h                7d",
+        "› █░░░░░░  12%  46m ██░░░░░  31%   2d",
+        "● last used  › next use",
+      ])
+      expect(out.every((line) => stringWidth(usageText(line)) <= 37)).toBe(true)
+      expect(inks(out[0]!)).toEqual(["Claude Max 20x:base:bold", "·:muted", "5h:muted", "·:muted", "7d:muted"])
+      expect(inks(out[1]!)).toEqual([
+        "●:info",
+        "·:muted",
+        "████:success",
+        "░░░:muted",
+        "62%:base",
+        "1h:muted",
+        "·:muted",
+        "██████:success",
+        "░:muted",
+        "80%:base",
+        "~3d:muted",
+      ])
+      // A dormant window: its bar and percent muted, its length as its time.
+      expect(inks(out[2]!).slice(1, 4)).toEqual(["███████:muted", "100%:muted", "5h:muted"])
+      expect(inks(out[4]!)[0]).toBe("›:info")
+      expect(inks(out[5]!)).toEqual(["●:info", "last used:muted", "·:muted", "›:info", "next use:muted"])
     })
 
-    test("the percent left rounded down, a sliver as <1%", () => {
-      expect(usageMeter(window({ left: 99.9 }), 2, 37, NOW).percent).toBe(" 99%")
-      expect(usageMeter(window({ left: 0.4 }), 2, 37, NOW).percent).toBe(" <1%")
-      expect(usageMeter(window({ left: 0 }), 2, 37, NOW).percent).toBe("  0%")
+    test("the marks: in use, last used, next use, force use, two on one account; none for another model's view", () => {
+      const mark = (input: Omit<Partial<Parameters<typeof usageLines>[0]>, "accounts">) => {
+        const out = lines({ accounts: [served], ...input })
+        return { mark: inks(out[1]!).slice(0, 2), legend: out.length > 2 ? usageText(out.at(-1)!) : undefined }
+      }
+      const view = chat({ account: "max-2", accountID: "id-max-2" })
+      expect(mark({ serving: served, chat: view, running: true })).toEqual({
+        mark: ["●:success", "·:muted"],
+        legend: "● in use",
+      })
+      expect(mark({ serving: served, chat: view })).toEqual({ mark: ["●:info", "·:muted"], legend: "● last used" })
+      const forced = chat({ forceUse: { account: "max-2", when: "now" }, nextUse: { account: "max-2", reason: "x" } })
+      expect(mark({ serving: served, chat: forced, running: true })).toEqual({
+        mark: ["●:success", "›:warning"],
+        legend: "● in use  › force use",
+      })
+      expect(mark({ chat: chat({ nextUse: { account: "max-2", reason: "cold_stay" } }) })).toEqual({
+        mark: ["›:info", "·:muted"],
+        legend: "› next use",
+      })
+      expect(mark({ serving: served, chat: undefined })).toEqual({
+        mark: ["·:muted", "████:success"],
+        legend: undefined,
+      })
     })
 
-    test("the time to the reset: two units, minutes rounded up, ~ for CPP's estimate", () => {
-      expect(usageCountdown(59 * 60_000)).toBe("59m")
-      expect(usageCountdown(59 * 60_000 + 1)).toBe("1h 0m")
-      expect(usageCountdown(5 * 3_600_000)).toBe("5h 0m")
-      expect(usageCountdown(59_999)).toBe("<1m")
-      expect(usageCountdown(24 * 3_600_000)).toBe("1d 0h")
-      expect(line({ state: "estimated", resetsAt: NOW + (2 * 24 + 21) * 3_600_000 })).toBe(
-        "5h ████████████░░░░░░░░  62% ~2d 21h",
+    test("a scope over its length, unless every column shares it; cut to fit, never the length", () => {
+      const opus = max("max-2", [window({}), window(SEVEN), window({ ...SEVEN, label: "7d opus", scope: "opus" })])
+      // Three columns leave the name 10 cells: the provider's name is cut, not the plan.
+      expect(texts(lines({ accounts: [opus] }))[0]).toBe("C… Max 20x 5h          7d     opus 7d")
+      // An Antigravity account for a Claude model: its claude_gpt pair, without the scope.
+      const antigravity = account("ag", "antigravity", {
+        plan: "g1-pro-tier",
+        windows: [
+          window({ scope: "claude_gpt" }),
+          window({ ...SEVEN, scope: "claude_gpt" }),
+          window({ scope: "gemini" }),
+          window({ ...SEVEN, scope: "gemini" }),
+        ],
+      })
+      expect(texts(lines({ accounts: [antigravity], model: "claude-sonnet-4-6" }))[0]).toBe(
+        "Antigravity Pro  5h                7d",
       )
-      // No reset known: an empty tail.
-      expect(line({ resetsAt: undefined })).toBe("5h ████████████░░░░░░░░  62%        ")
+      expect(texts(lines({ accounts: [antigravity], model: "gemini-3-pro" }))[0]).toBe(
+        "Antigravity Pro  5h                7d",
+      )
+      const named = account("x", "claude", {
+        windows: [window({}), window(SEVEN), window({ ...SEVEN, scope: "model:claude-opus-5-5" })],
+      })
+      expect(texts(lines({ accounts: [named] }))[0]).toBe("Claude     5h          7d model:c… 7d")
     })
 
-    test("reset, dormant, STALE and unknown, muted", () => {
-      const meter = (extra: Partial<PacerWindow>, now = NOW) => usageMeter(window(extra), 2, 37, now)
-      expect(meter({ state: "awaiting-confirmation" }).tail.trim()).toBe("reset")
-      // The reset passed while nothing new was read.
-      expect(meter({}, NOW + 80 * 60_000).tail.trim()).toBe("reset")
-      expect(meter({ state: "dormant", left: 100, resetsAt: undefined }).tail.trim()).toBe("dormant")
-      expect(meter({ stale: true }).tail.trim()).toBe("STALE")
-      // A reading turns stale at staleAt, without anything new being sent.
-      expect(meter({ staleAt: NOW + 1000 }).tail.trim()).toBe("1h 20m")
-      expect(meter({ staleAt: NOW + 1000 }, NOW + 1000).tail.trim()).toBe("STALE")
-      expect(line({ state: "unknown", left: undefined, resetsAt: undefined, stale: true })).toBe(
-        "5h ····················      unknown",
-      )
+    // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-3): `Command C…` (the Goat plan) above the plan-less
+    // `Command Code`, and Command Code rows of bars only, their windows having no reset.
+    test("three windows: the percent goes, the bar keeps 6; the name keeps its plan, cut before the first label", () => {
+      const thirty = { label: "30d", seconds: 2_592_000 }
+      const goat = account("cc", "commandcode", {
+        plan: "individual-goat",
+        windows: [
+          window({}),
+          window({ ...SEVEN, left: 50, resetsAt: NOW + 3 * 86_400_000 }),
+          window({ ...thirty, left: 0, resetsAt: NOW + 20 * 86_400_000 }),
+        ],
+      })
+      const plain = account("cc-key", "commandcode", {
+        windows: [window({}), window({ ...SEVEN, state: "partial", left: 40, resetsAt: undefined }), window(thirty)],
+      })
+      const out = lines({ accounts: [goat, plain], model: "gpt-6-luna" })
+      expect(texts(out)).toEqual([
+        "Comm… Goat 5h          7d         30d",
+        "  ████░░   1h ███░░░   3d ░░░░░░  20d",
+        "Command C… 5h          7d         30d",
+        // No reset known: the percent in the time's place.
+        "  ████░░   1h ██░░░░  40% ████░░   1h",
+      ])
+      expect(out[3]!.find((span) => span.text.trim() === "40%")?.ink).toBe("base")
+      // With room for the percent, the time's place stays empty.
+      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).toContain("40%")
+      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).not.toContain("40%  40%")
+    })
+
+    test("a name that fits stays whole; without a plan, it is cut at its end", () => {
+      expect(
+        texts(
+          lines({
+            accounts: [
+              account("og", "opencode-go", { windows: [window({}), window(SEVEN), window({ seconds: 2_592_000 })] }),
+            ],
+            model: "gpt-6-luna",
+          }),
+        )[0],
+      ).toBe("OpenCode … 5h          7d         30d")
+    })
+
+    test("more windows than four: the rest on a second line, under the first, the labels too", () => {
+      const lengths = [18_000, 86_400, 604_800, 2_592_000, 7_776_000]
+      const many = account("m", "codex", { windows: lengths.map((seconds) => window({ seconds })) })
+      expect(texts(lines({ accounts: [many], model: "gpt-6-luna" }))).toEqual([
+        "Codex   5h       1d       7d      30d",
+        "       90d",
+        "  ██░   1h ██░   1h ██░   1h ██░   1h",
+        "  ██░   1h",
+      ])
+    })
+
+    test("a window an account lacks is blank; an account without one limiting the model has no reading yet", () => {
+      const both = max("a", [window({}), window(SEVEN)])
+      const five = max("b", [window({})])
+      const seven = max("b2", [window(SEVEN)])
+      const none = max("c", [window({ scope: "sonnet" })])
+      expect(texts(lines({ accounts: [both, five, seven, none] }))).toEqual([
+        "Claude Max 20x   5h                7d",
+        "  ████░░░  62%   1h ████░░░  62%   1h",
+        "  ████░░░  62%   1h",
+        "                    ████░░░  62%   1h",
+        "  no reading yet",
+      ])
+    })
+
+    test("each time and its bar: CPP's estimate, dormant, the reset passed, none known, stale, unknown", () => {
+      const cell = (extra: Partial<PacerWindow>, now = NOW) =>
+        usageText(
+          lines({ accounts: [account("a", "codex", { windows: [window(extra)] })], model: "gpt-6-luna", now })[1]!,
+        ).trimEnd()
+      expect(cell({ state: "estimated" })).toBe("  ████░░░  62%  ~1h")
+      expect(cell({ state: "dormant", left: 100, resetsAt: undefined })).toBe("  ███████ 100%   5h")
+      expect(cell({ state: "awaiting-confirmation" })).toBe("  ████░░░  62%  now")
+      expect(cell({}, NOW + 80 * 60_000)).toBe("  ████░░░  62%  now")
+      expect(cell({ resetsAt: undefined })).toBe("  ████░░░  62%")
+      expect(cell({ stale: true })).toBe("  ████░░░  62%   1h")
+      expect(cell({ left: undefined, state: "unknown", resetsAt: undefined, stale: true })).toBe("  ·······")
+      expect(cell({ left: 0.4 })).toBe("  ░░░░░░░  <1%   1h")
+      expect(cell({ left: 99.9 })).toBe("  ███████  99%   1h")
+      const ink = (extra: Partial<PacerWindow>, now = NOW) =>
+        lines({ accounts: [account("a", "codex", { windows: [window(extra)] })], model: "gpt-6-luna", now })[1]![1]!.ink
       for (const extra of [
         { state: "awaiting-confirmation" as const },
         { state: "dormant" as const },
         { stale: true },
+        { staleAt: NOW },
         { left: undefined },
       ])
-        expect(meter(extra).tone).toBe("muted")
+        expect([extra, ink(extra)]).toEqual([extra, "muted"])
+      expect(ink({}, NOW + 80 * 60_000)).toBe("muted")
+      expect(ink({ staleAt: NOW + 1 })).toBe("success")
     })
 
     test("the bar's color: above 20% left, at 20% or less, at 10% or less", () => {
-      const tone = (left: number) => usageMeter(window({ left }), 2, 37, NOW).tone
-      expect([tone(21), tone(20), tone(11), tone(10), tone(0)]).toEqual([
-        "normal",
-        "low",
-        "low",
-        "critical",
-        "critical",
-      ])
+      const ink = (left: number) =>
+        lines({ accounts: [account("a", "codex", { windows: [window({ left })] })], model: "gpt-6-luna" })[1]![1]!.ink
+      // 8% is still one of the bar's 7 cells.
+      expect([ink(21), ink(20), ink(11), ink(10), ink(8)]).toEqual(["success", "warning", "warning", "error", "error"])
     })
   })
 })

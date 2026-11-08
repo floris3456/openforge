@@ -3,9 +3,10 @@
 // Builds an openforge release on this machine, and uploads one to GitHub Releases with --publish.
 //
 // A build writes the release assets into the release folder: release.json, one archive per target (holding only
-// the binary), SHA256SUMS and install.sh, as packages/cli/src/upgrade/release.ts reads them, plus build-info.json,
-// which is not uploaded. --publish uploads exactly those assets, so the bytes that were tested are the bytes that are
-// released; it never builds. The packages are imported by path: the workspace root does not depend on them.
+// the binary), SHA256SUMS and install.sh, as packages/cli/src/upgrade/release.ts reads them, plus build-info.json and
+// inputs.json (the repository's files the binaries are built from, and the Bun that built them), which are not
+// uploaded. --publish uploads exactly those assets, so the bytes that were tested are the bytes that are released; it
+// never builds. The packages are imported by path: the workspace root does not depend on them.
 
 import { $ } from "bun"
 import { closeSync, openSync } from "node:fs"
@@ -15,6 +16,7 @@ import path from "node:path"
 import { parseArgs } from "node:util"
 import { Release } from "../../packages/cli/src/upgrade/release"
 import { Product } from "../../packages/schema/src/product"
+import { repositoryInputs } from "./inputs"
 
 const targets = Release.platforms
 type Target = Release.Platform
@@ -70,6 +72,12 @@ async function build(version: string) {
   for (const target of targets) builds.push(await buildTarget(version, target, builds.length === 0))
 
   await fs.copyFile(installer, path.join(out, "install.sh"))
+  const files = repositoryInputs(
+    builds.flatMap((item) => item.inputs),
+    cli,
+    root,
+  )
+  await Bun.write(path.join(out, "inputs.json"), JSON.stringify({ bun: Bun.version, files }, null, 2) + "\n")
 
   const assets = Object.fromEntries(
     await Promise.all(
@@ -120,7 +128,8 @@ async function buildTarget(version: string, target: Target, install: boolean) {
 
   const binary = path.join(outdir, `cli-${target}`, "bin", Product.binary)
   if (target === `${process.platform}-${process.arch}`) await checkVersion(binary, version)
-  return { target, seconds, archive: await pack(binary, target) }
+  const inputs: string[] = await Bun.file(path.join(outdir, `cli-${target}.inputs.json`)).json()
+  return { target, seconds, inputs, archive: await pack(binary, target) }
 }
 
 // The built binary must report the release's version ("openforge v1.2.3"). It runs in a throwaway home, since starting

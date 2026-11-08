@@ -22,7 +22,6 @@ import {
   type MediaPart,
   type ProviderMetadata,
   type ProviderOptions,
-  type ReasoningPart,
   type ToolCallPart,
   type ToolDefinition,
   type ToolResultPart,
@@ -901,24 +900,6 @@ const appendToUserTurn = (messages: AnthropicMessage[], block: AnthropicUserBloc
   else messages.push({ role: "user", content: [block] })
 }
 
-/**
- * The block an assistant message's reasoning part lowers to, or none. A signature marks visible thinking; only
- * signature-less parts carrying redactedData round-trip as opaque redacted_thinking blocks. Exported (fork) so that a
- * request rendered in another format for the same conversation replays exactly these (`PacerSummaries.responses`).
- */
-export const thinkingBlock = (part: ReasoningPart, request: LLMRequest) => {
-  const providerMetadataKey = request.model.route.providerMetadataKey ?? request.model.provider
-  const signature = part.encrypted ?? signatureFromMetadata(part.providerMetadata, providerMetadataKey)
-  const redactedData = redactedDataFromMetadata(part.providerMetadata, providerMetadataKey)
-  if (signature === undefined && redactedData !== undefined)
-    return { type: "redacted_thinking" as const, data: redactedData }
-  if (!signature || signature.trim().length === 0)
-    return part.text.trim().length > 0 && !requireThinkingSignature(request)
-      ? { type: "thinking" as const, thinking: part.text, signature: "" }
-      : undefined
-  return { type: "thinking" as const, thinking: part.text, signature }
-}
-
 const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, breakpoints: Cache.Breakpoints) {
   const messages: AnthropicMessage[] = []
   const providerMetadataKey = request.model.route.providerMetadataKey ?? request.model.provider
@@ -982,8 +963,21 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, breakpoi
           continue
         }
         if (part.type === "reasoning") {
-          const block = thinkingBlock(part, request)
-          if (block) content.push(block)
+          // A signature marks visible thinking; only signature-less parts carrying
+          // redactedData round-trip as opaque redacted_thinking blocks.
+          const signature = part.encrypted ?? signatureFromMetadata(part.providerMetadata, providerMetadataKey)
+          const redactedData = redactedDataFromMetadata(part.providerMetadata, providerMetadataKey)
+          if (signature === undefined && redactedData !== undefined) {
+            content.push({ type: "redacted_thinking", data: redactedData })
+            continue
+          }
+          if (!signature || signature.trim().length === 0) {
+            if (part.text.trim().length > 0 && !requireThinkingSignature(request)) {
+              content.push({ type: "thinking", thinking: part.text, signature: "" })
+            }
+            continue
+          }
+          content.push({ type: "thinking", thinking: part.text, signature })
           continue
         }
         if (part.type === "tool-call") {

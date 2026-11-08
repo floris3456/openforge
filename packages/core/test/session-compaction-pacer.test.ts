@@ -1,5 +1,5 @@
 import { afterAll, expect } from "bun:test"
-import { ai, CacheHint, LLMClient, type LanguageModel, Message } from "@opencode/ai/effect"
+import { LLMClient, type LanguageModel, ToolDefinition } from "@opencode/ai/effect"
 import { AnthropicCompatible, OpenAICompatibleResponses } from "@opencode/ai/providers"
 import { Auth, RequestExecutor } from "@opencode/ai/route"
 import { Agent } from "@opencode/core/agent"
@@ -38,10 +38,12 @@ import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { testEffect } from "./lib/effect"
 
-// Spec cliproxypacer-server-summaries, section 3: CLIProxyPacer writes a chat's summary through
-// `POST /v1/responses/compact`, and openforge keeps it as its own; openforge writes it when it is to, or when
-// CLIProxyPacer can't. A fake CLIProxyPacer on 127.0.0.1 answers in its shapes (`compaction_write.rs`, `dispatch.rs`)
-// with synthetic data only; who writes is `PacerSummaries.plan`'s (its own tests), set here per test.
+// Spec cliproxypacer-server-summaries, section 3: CLIProxyPacer writes a Responses chat's summary through
+// `POST /v1/responses/compact`, and openforge keeps it as its own; openforge writes it when it is to, when
+// CLIProxyPacer can't, and always for a model whose steps go as Anthropic Messages (Claude), as an ordinary
+// `POST /v1/messages` of the chat with `X-Pacer-Kind: compaction`. A fake CLIProxyPacer on 127.0.0.1 answers in its
+// shapes (`compaction_write.rs`, `dispatch.rs`) with synthetic data only; who writes is `PacerSummaries.plan`'s (its own
+// tests), set here per test, or the real one (`planned`).
 
 interface Seen {
   readonly method: string
@@ -290,7 +292,7 @@ const it = testEffect(
 
 /**
  * The same with the real `PacerSummaries.plan`, which asks the fake CLIProxyPacer for the chat's view and the key
- * level, and finds its models in this catalog: CLIProxyPacer writes for Claude and Kimi.
+ * level, and finds its models in this catalog: CLIProxyPacer writes for Claude and Kimi with `server`.
  */
 const planned = testEffect(
   AppNodeBuilder.build(LayerNode.group([...nodes, PacerStatus.node]), [
@@ -315,6 +317,7 @@ const planned = testEffect(
               models: [
                 { id: "claude-e2e", summaries: [{ provider: "claude", writes: true }] },
                 { id: "kimi-e2e", summaries: [{ provider: "kimi", writes: true }] },
+                { id: "kimi-e2e-mini", summaries: [{ provider: "kimi", writes: true }] },
               ],
             }),
           changes: () => Effect.die("unused") as never,
@@ -383,17 +386,25 @@ const assistant = (text: string, model: SessionRunnerModel.Resolved) =>
   })
 
 /** A chat of two exchanges on `model`, and `newest` (a prompt not answered yet) when given, stored as its history. */
-const chat = Effect.fnUntraced(function* (name: string, model: SessionRunnerModel.Resolved, newest?: string) {
-  const id = Session.ID.make(`ses_pacer_summary_${name}`)
-  const parentID = Session.ID.make(`ses_pacer_summary_${name}_parent`)
-  const session = yield* insertSession(id, parentID)
-  const messages = [
+const chat = (name: string, model: SessionRunnerModel.Resolved, newest?: string) =>
+  stored(name, model, [
     user("Plan a dark mode."),
     assistant("Here is a five-step plan.", model),
     user("Now list three risks."),
     assistant("Missed styles, contrast, preference behaviour.", model),
     ...(newest === undefined ? [] : [user(newest)]),
-  ]
+  ])
+
+/** `messages` stored as the history of a subagent's chat on `model` (it has a parent), whose steps offer `tools`. */
+const stored = Effect.fnUntraced(function* (
+  name: string,
+  model: SessionRunnerModel.Resolved,
+  messages: ReadonlyArray<SessionMessage.Info>,
+  tools: ReadonlyArray<ToolDefinition> = [],
+) {
+  const id = Session.ID.make(`ses_pacer_summary_${name}`)
+  const parentID = Session.ID.make(`ses_pacer_summary_${name}_parent`)
+  const session = yield* insertSession(id, parentID)
   const db = (yield* Database.Service).db
   yield* db
     .insert(SessionMessageTable)
@@ -415,10 +426,63 @@ const chat = Effect.fnUntraced(function* (name: string, model: SessionRunnerMode
       model,
       agent: { id: Agent.defaultID, info: Agent.Info.default(Agent.defaultID) },
       initial: [{ key: Instructions.Key.make("test/session"), text: "Session instructions" }],
-      tools: { definitions: [], execute: () => Effect.die("Compaction must not execute tools") },
+      tools: { definitions: [...tools], execute: () => Effect.die("Compaction must not execute tools") },
     },
   }
 })
+
+/** An answer of `model` with `content` (its text, signed thinking, tool calls), as a finished step stores it. */
+const answer = (model: SessionRunnerModel.Resolved, content: ReadonlyArray<Record<string, unknown>>) =>
+  Schema.decodeUnknownSync(SessionMessage.Assistant)({
+    id: SessionMessage.ID.create(),
+    type: "assistant",
+    agent: Agent.defaultID,
+    model: model.ref,
+    content,
+    tokens: { input: 2_000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, completed: 1 },
+  })
+const thought = (text: string, signature: string) => ({ type: "reasoning", text, native: { signature } })
+const read = ToolDefinition.make({
+  name: "read",
+  description: "Read a file",
+  inputSchema: { type: "object", properties: { path: { type: "string" } } },
+})
+
+/**
+ * A Claude chat of the kind CLIProxyPacer's rendering of a `/responses/compact` request broke (the owner's chat, its
+ * row 2778, read 15,333 of ~146k prompt tokens): a tool call whose result the user's text follows, and signed thinking
+ * in every answer.
+ */
+const toolHistory = (model: SessionRunnerModel.Resolved) => [
+  user("Read notes.txt and sum the digits of line three."),
+  answer(model, [
+    thought("I should read the file first.", "sig-1"),
+    { type: "text", text: "Reading it." },
+    {
+      type: "tool",
+      id: "toolu_1",
+      name: "read",
+      state: { status: "completed", input: { path: "notes.txt" }, content: [{ type: "text", text: "4711" }] },
+      time: { created: 0 },
+    },
+  ]),
+  user("Also tell me whether the sum is prime."),
+  answer(model, [thought("4+7+1+1 = 13.", "sig-2"), { type: "text", text: "The sum is 13, which is prime." }]),
+  user("Now multiply it by three."),
+  answer(model, [thought("13 × 3 = 39.", "sig-3"), { type: "text", text: "39." }]),
+]
+
+/** A Claude model on CLIProxyPacer whose variant sets `options` (its thinking), as the provider builds it. */
+const claudeWith = (options: AnthropicCompatible.Config["providerOptions"]) =>
+  resolved(
+    AnthropicCompatible.configure({
+      auth: Auth.bearer(key),
+      baseURL,
+      provider: "cliproxypacer",
+      providerOptions: options,
+    }).model("claude-e2e"),
+  )
 
 /** The chat's completed compaction, as stored. */
 const record = Effect.fnUntraced(function* (sessionID: Session.ID) {
@@ -440,7 +504,14 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
       yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
     ).toEqual({ status: "completed" })
 
-    expect(plans).toEqual([{ sessionID: session.id, parentID: session.parentID, model: "kimi-e2e" }])
+    expect(plans).toEqual([
+      {
+        sessionID: session.id,
+        parentID: session.parentID,
+        model: "kimi-e2e",
+        protocol: kimi.model.route.protocol,
+      },
+    ])
     // The request on the wire: the summary's headers, the step's body in the Responses format.
     const [sent] = compactions()
     expect(compactions()).toHaveLength(1)
@@ -514,13 +585,6 @@ const stepBody = Effect.fnUntraced(function* (
   return sent[0]!.body
 })
 
-/** A Messages step's system blocks as the `system` input item CLIProxyPacer turns back into the same blocks. */
-const systemItem = (step: Record<string, unknown>) => ({
-  type: "message",
-  role: "system",
-  content: (step.system as Array<{ text: string }>).map((block) => ({ type: "input_text", text: block.text })),
-})
-
 const occurrences = (body: Record<string, unknown>, text: string) =>
   JSON.stringify(body).split(JSON.stringify(text).slice(1, -1)).length - 1
 
@@ -563,236 +627,39 @@ it.effect(
     }),
 )
 
-it.effect("a Messages chat CLIProxyPacer writes for gets its request rendered as Responses, at the same address", () =>
-  Effect.gen(function* () {
-    reset()
-    fake.header = "cold; model=kimi-e2e-mini; writer=server"
-    const { session, messages, context } = yield* chat("messages", claude)
-    const step = yield* stepBody(context, messages, "/v1/messages")
-    fake.seen.length = 0
-    const compaction = yield* SessionCompaction.Service
-    expect(
-      yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
-    ).toEqual({ status: "completed" })
-    expect(plans).toEqual([{ sessionID: session.id, parentID: session.parentID, model: "claude-e2e" }])
-    const [sent] = compactions()
-    expect(own()).toEqual([])
-    expect(sent?.headers.authorization).toBe(`Bearer ${key}`)
-    expect(sent?.headers["x-pacer-kind"]).toBe("compaction")
-    // The step's system blocks first, each its own part, as CLIProxyPacer renders them back; nothing joined into
-    // `instructions`.
-    expect(sent?.body).not.toHaveProperty("instructions")
-    expect(sent?.body).toMatchObject({
-      model: "claude-e2e",
-      input: [
-        systemItem(step),
-        { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
-      ],
-    })
-    expect(sent?.body.input).toHaveLength(3)
-    // Written on CLIProxyPacer's cheaper model for the cold chat, as its header says.
-    const stored = yield* record(session.id)
-    expect(stored.writer).toEqual({ by: "cliproxypacer", cold: true })
-    expect(stored.model).toEqual(pacerRef("kimi-e2e-mini"))
-  }),
-)
+/** The requests the fake CLIProxyPacer got, as `METHOD path`. */
+const wire = () => fake.seen.map((item) => `${item.method} ${item.path}`)
 
-// CLIProxyPacer renders a Messages chat's summary request back into Messages (`claude_responses.rs`): `instructions`
-// becomes one system block, and each text part of a `system` input item one more, in order. Joined into `instructions`,
-// four system blocks came back as one (on a Claude login, CLIProxyPacer's first user message then differed from the
-// step's at the first join: `run/evidence/cpp-summaries/live-warm-claude/`).
-it.effect("a Messages chat's summary request carries its step's four system blocks as one system item, in order", () =>
-  Effect.gen(function* () {
-    reset()
-    const hint = new CacheHint({ type: "ephemeral" })
-    const system = [
-      { type: "text" as const, text: "You are an agent.\nFollow the user's lead.\n", cache: hint },
-      { type: "text" as const, text: "# Your Model\n- claude-e2e" },
-      { type: "text" as const, text: "# Code Mode\n\nCall tools as code." },
-      { type: "text" as const, text: "A worktree hint.", cache: hint },
-    ]
-    const request = ai.request({
-      model: claude.model,
-      system,
-      messages: [Message.user("Plan a dark mode."), Message.assistant("Here is a five-step plan.")],
-    })
-    const llm = yield* LLMClient.Service
-    yield* llm.stream(request).pipe(Stream.runDrain)
-    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
-    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
-    const sent = compactions()[0]!.body
+/** The chat's view at CLIProxyPacer: warm for ten more minutes, with `settings` of its own. */
+const warmView = (uuid: string, provider: string, model: string, settings: Record<string, unknown> = {}) => ({
+  id: uuid,
+  session_id: 7,
+  provider,
+  model,
+  warm: true,
+  warm_until: Date.now() + 600_000,
+  settings,
+})
 
-    expect((step.system as Array<{ text: string }>).map((block) => block.text)).toEqual(system.map((part) => part.text))
-    expect(sent).not.toHaveProperty("instructions")
-    // The cache hints have no Responses form: the parts carry the text alone.
-    expect(sent.input).toEqual([
-      systemItem(step),
-      { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
-      {
-        type: "message",
-        role: "assistant",
-        status: "completed",
-        content: [{ type: "output_text", text: "Here is a five-step plan." }],
-      },
-    ])
-  }),
-)
+const on = Effect.gen(function* () {
+  yield* (yield* PacerStatus.Service).set({ state: "on", since: 0, refused: false })
+})
 
-/**
- * The conversation in a body, item by item, as CLIProxyPacer renders a Responses body back into Messages
- * (`claude_responses.rs`): a reasoning item is the thinking block `{thinking: summary text, signature: encrypted
- * content}`, or a redacted one for `claude-redacted-thinking:<data>`. A Messages body's blocks read the same way.
- */
-const REDACTED = "claude-redacted-thinking:"
-const conversation = (body: Record<string, unknown>) =>
-  "messages" in body
-    ? (body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>).flatMap((message) =>
-        message.content.map((block) => {
-          if (block.type === "thinking") return `thinking ${JSON.stringify([block.thinking, block.signature])}`
-          if (block.type === "redacted_thinking") return `thinking ${JSON.stringify(["", `${REDACTED}${block.data}`])}`
-          if (block.type === "tool_use") return `tool_use ${block.id}`
-          if (block.type === "tool_result") return `tool_result ${block.tool_use_id}`
-          return `${message.role} ${block.text}`
-        }),
-      )
-    : (body.input as Array<Record<string, unknown>>).flatMap((item) => {
-        if (item.type === "reasoning") {
-          const text = (item.summary as Array<{ text: string }>).map((part) => part.text).join("")
-          return [`thinking ${JSON.stringify([text, item.encrypted_content])}`]
-        }
-        if (item.type === "function_call") return [`tool_use ${item.call_id}`]
-        if (item.type === "function_call_output") return [`tool_result ${item.call_id}`]
-        if (item.role === "system") return []
-        return (item.content as Array<{ text: string }>).map((part) => `${item.role} ${part.text}`)
-      })
-
-// The step's thinking blocks go to CLIProxyPacer as reasoning items in the same places, with the same text and
-// signatures, so the summary's prefix is the step's (`run/evidence/cpp-summaries/live-warm-claude-2/`: without them,
-// the read stopped at the first assistant message with thinking).
-it.effect(
-  "a Messages chat's summary request carries exactly its step's thinking blocks, in place, as reasoning items",
-  () =>
-    Effect.gen(function* () {
-      reset()
-      const key = claude.model.route.providerMetadataKey ?? claude.model.provider
-      const signed = (text: string, signature: string) => ({
-        type: "reasoning" as const,
-        text,
-        providerMetadata: { [key]: { signature } },
-      })
-      const request = ai.request({
-        model: claude.model,
-        system: "You are an agent.",
-        messages: [
-          Message.user("Plan a dark mode."),
-          Message.assistant([
-            signed("I should read the styles first.", "sig-1"),
-            { type: "tool-call", id: "toolu_1", name: "read", input: { path: "styles.css" } },
-          ]),
-          Message.make({
-            role: "tool",
-            content: [{ type: "tool-result", id: "toolu_1", name: "read", result: { type: "text", value: "body {}" } }],
-          }),
-          Message.assistant([
-            // Safety-filtered thinking: no text, its data alone.
-            { type: "reasoning", text: "", providerMetadata: { [key]: { redactedData: "opaque-1" } } },
-            signed("The styles use one variable.", "sig-2"),
-            { type: "text", text: "Here is the plan." },
-          ]),
-          Message.user("Now list three risks."),
-          Message.assistant([
-            // Another model's readable reasoning, without a signature: the step leaves it out.
-            { type: "reasoning", text: "Thinking on another model." },
-            signed("Contrast first.", "sig-3"),
-            signed("Then preferences.", "sig-4"),
-            { type: "text", text: "Missed styles, contrast, preference behaviour." },
-          ]),
-        ],
-      })
-      const llm = yield* LLMClient.Service
-      yield* llm.stream(request).pipe(Stream.runDrain)
-      const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
-      yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
-      const sent = compactions()[0]!.body
-
-      // Item by item the same conversation, the thinking blocks included, byte for byte.
-      expect(conversation(sent)).toEqual(conversation(step))
-      expect(conversation(step).filter((item) => item.startsWith("thinking"))).toEqual([
-        `thinking ${JSON.stringify(["I should read the styles first.", "sig-1"])}`,
-        `thinking ${JSON.stringify(["", `${REDACTED}opaque-1`])}`,
-        `thinking ${JSON.stringify(["The styles use one variable.", "sig-2"])}`,
-        `thinking ${JSON.stringify(["Contrast first.", "sig-3"])}`,
-        `thinking ${JSON.stringify(["Then preferences.", "sig-4"])}`,
-      ])
-      expect(JSON.stringify(sent)).not.toContain("Thinking on another model.")
-      // The reasoning items as sent; a redacted one has no summary.
-      expect((sent.input as Array<Record<string, unknown>>).filter((item) => item.type === "reasoning")).toEqual([
-        {
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: "I should read the styles first." }],
-          encrypted_content: "sig-1",
-        },
-        { type: "reasoning", summary: [], encrypted_content: `${REDACTED}opaque-1` },
-        {
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: "The styles use one variable." }],
-          encrypted_content: "sig-2",
-        },
-        { type: "reasoning", summary: [{ type: "summary_text", text: "Contrast first." }], encrypted_content: "sig-3" },
-        {
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: "Then preferences." }],
-          encrypted_content: "sig-4",
-        },
-      ])
-    }),
-)
-
-it.effect("a Messages chat whose reasoning came from another model: its summary request carries none", () =>
-  Effect.gen(function* () {
-    reset()
-    const request = ai.request({
-      model: claude.model,
-      system: "You are an agent.",
-      messages: [
-        Message.user("Plan a dark mode."),
-        Message.assistant([
-          { type: "reasoning", text: "Readable reasoning of another model." },
-          { type: "text", text: "Here is the plan." },
-        ]),
-      ],
-    })
-    const llm = yield* LLMClient.Service
-    yield* llm.stream(request).pipe(Stream.runDrain)
-    const step = fake.seen.find((item) => item.path === "/v1/messages")!.body
-    yield* llm.compact(PacerSummaries.responses(request), { mechanism: "endpoint" })
-    const sent = compactions()[0]!.body
-    expect(JSON.stringify(step)).not.toContain("Readable reasoning of another model.")
-    expect((sent.input as Array<{ type: string }>).some((item) => item.type === "reasoning")).toBe(false)
-    expect(conversation(sent)).toEqual(conversation(step))
-  }),
-)
-
+// The summary takes the format of the writing model's steps (the owner, 2026-11-08: "you should ofc use the right
+// format for the right provder"). Sent as Responses, CLIProxyPacer rendered a Claude chat's history back into Messages
+// that were not the steps' bytes (a text block next to a tool result merged into it, thinking blocks dropped), and the
+// summary missed the cache (the owner's chat, row 2778: 15,333 of ~146k read). As the chat's own Messages request it is
+// the last step's body plus its answer and the prompt (CLIProxyPacer's own check, row 5889: 26,011 of 26,015 read).
 planned.live(
-  "a warm Claude chat: CLIProxyPacer writes its summary, its own writer set to server first; none of openforge's own",
+  "a Claude chat, writer server: openforge writes its summary as the chat's own /v1/messages request with X-Pacer-Kind: compaction; nothing read or set",
   () =>
     Effect.gen(function* () {
       reset()
-      fake.header = "warm; model=claude-e2e; writer=server"
-      yield* (yield* PacerStatus.Service).set({ state: "on", since: 0, refused: false })
-      const { session, messages, context } = yield* chat("claude-warm", claude)
+      yield* on
+      const { session, context } = yield* stored("claude-messages", claude, toolHistory(claude), [read])
       const uuid = PacerSessionID.make(session.id)
-      // Warm at CLIProxyPacer for ten more minutes; no writer of its own, none at the key or server level.
-      fake.views.set(uuid, {
-        id: uuid,
-        session_id: 7,
-        provider: "claude",
-        model: "claude-e2e",
-        warm: true,
-        warm_until: Date.now() + 600_000,
-        settings: {},
-      })
+      // Its own writer `server`, as openforge set it for 0.0.10's CLIProxyPacer-written summaries.
+      fake.views.set(uuid, warmView(uuid, "claude", "claude-e2e", { "compaction.writer": "server" }))
       expect(
         yield* (yield* SessionCompaction.Service).compact({
           reason: "auto",
@@ -801,7 +668,149 @@ planned.live(
         }),
       ).toEqual({ status: "completed" })
 
-      expect(fake.seen.map((item) => `${item.method} ${item.path}`)).toEqual([
+      // One request: no view, settings or PATCH, no /v1/responses/compact.
+      expect(wire()).toEqual(["POST /v1/messages"])
+      const sent = fake.seen[0]!
+      expect(sent.headers).toMatchObject({
+        authorization: `Bearer ${key}`,
+        "x-pacer-session": uuid,
+        "x-pacer-parent-session": PacerSessionID.make(session.parentID!),
+        "x-pacer-kind": "compaction",
+      })
+      expect(sent.headers).not.toHaveProperty("x-pacer-compact")
+      expect(sent.body.model).toBe("claude-e2e")
+      // The whole conversation, its last answer included, then the summary prompt.
+      const messages = sent.body.messages as Array<{ role: string; content: Array<{ type: string; text?: string }> }>
+      expect(messages.at(-2)?.content.map((block) => block.text ?? block.type)).toEqual(["thinking", "39."])
+      expect(messages.at(-1)?.role).toBe("user")
+      expect(messages.at(-1)?.content[0]?.text).toStartWith("You MUST summarize the conversation above")
+
+      // The record: openforge's summary on the chat's model, no reason, so its divider says "by openforge".
+      const kept = yield* record(session.id)
+      expect(kept.summary).toBe(ownSummary)
+      expect(kept.writer).toEqual({ by: "openforge" })
+      expect(kept.model).toEqual(claude.ref)
+    }),
+)
+
+// The prefix the summary shares with the last step is that step's bytes up to its last message: model, system, tools,
+// tool_choice, thinking, output limit, and the cache markers where the step put them. A marker moved onto the prompt
+// leaves the read to the cache's look-back over the blocks of the answer between them; a thinking budget fitted under
+// a smaller output limit (16,000 became 15,000) misses every cached message, as a changed budget does at Anthropic.
+planned.live(
+  "a Claude chat's summary request is its last step's body up to that step's last message, cache markers and thinking included",
+  () =>
+    Effect.gen(function* () {
+      yield* on
+      const compaction = yield* SessionCompaction.Service
+      for (const [name, thinking] of [
+        ["adaptive", { thinking: { type: "adaptive", display: "summarized" }, effort: "high" }],
+        ["budget", { thinking: { type: "enabled", budgetTokens: 16_000 } }],
+      ] as const) {
+        reset()
+        const model = claudeWith(thinking)
+        const history = toolHistory(model)
+        const { context } = yield* stored(`claude-body-${name}`, model, history, [read])
+        // The last step: everything before its answer, as the runner sends it.
+        const step = yield* stepBody(context, history.slice(0, -1), "/v1/messages")
+        fake.seen.length = 0
+        expect(
+          yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
+        ).toEqual({ status: "completed" })
+        const sent = fake.seen.find((item) => item.path === "/v1/messages")!.body
+        const stepMessages = step.messages as unknown[]
+        const sentMessages = sent.messages as unknown[]
+
+        expect(JSON.stringify({ ...sent, messages: undefined })).toBe(JSON.stringify({ ...step, messages: undefined }))
+        expect(JSON.stringify(sentMessages.slice(0, stepMessages.length))).toBe(JSON.stringify(stepMessages))
+        // The step's marker stays on its last message; its answer and the prompt carry none (tools, system and that
+        // message hold all four).
+        expect(JSON.stringify(stepMessages.at(-1))).toContain("cache_control")
+        expect(sentMessages.slice(stepMessages.length).map((message) => (message as { role: string }).role)).toEqual([
+          "assistant",
+          "user",
+        ])
+        expect(JSON.stringify(sentMessages.slice(stepMessages.length))).not.toContain("cache_control")
+        expect(sent.thinking).toEqual(
+          name === "budget" ? { type: "enabled", budget_tokens: 16_000 } : { type: "adaptive", display: "summarized" },
+        )
+      }
+    }),
+)
+
+planned.live(
+  "a move and a cold ask on a Claude pick: openforge writes it on the pick as /v1/messages; a Responses pick is CLIProxyPacer's",
+  () =>
+    Effect.gen(function* () {
+      yield* on
+      const compaction = yield* SessionCompaction.Service
+      // A Claude chat's move whose picks start with its own model: openforge, on it.
+      reset()
+      const move = yield* stored("move-claude", claude, toolHistory(claude), [read])
+      expect(
+        yield* compaction.compact({
+          reason: "move",
+          context: move.context,
+          models: [pacerRef("claude-e2e"), pacerRef("kimi-e2e-mini")],
+        }),
+      ).toEqual({ status: "completed" })
+      expect(wire()).toEqual(["POST /v1/messages"])
+      expect(fake.seen[0]?.headers["x-pacer-kind"]).toBe("compaction")
+      expect(fake.seen[0]?.body.model).toBe("claude-e2e")
+      expect((yield* record(move.session.id)).writer).toEqual({ by: "openforge" })
+
+      // A Responses chat's cold ask on a Claude pick: openforge, on the pick.
+      reset()
+      const cold = yield* chat("cold-claude-pick", kimi)
+      expect(
+        yield* compaction.compact({ reason: "cold", context: cold.context, models: [pacerRef("claude-e2e")] }),
+      ).toEqual({ status: "completed" })
+      expect(wire()).toEqual(["POST /v1/messages"])
+      expect(fake.seen[0]?.headers["x-pacer-kind"]).toBe("compaction")
+      expect(fake.seen[0]?.body.model).toBe("claude-e2e")
+      const coldRecord = yield* record(cold.session.id)
+      expect(coldRecord.writer).toEqual({ by: "openforge" })
+      expect(coldRecord.model).toEqual(pacerRef("claude-e2e"))
+
+      // A Claude chat's cold ask on a Responses pick: CLIProxyPacer, as before.
+      reset()
+      fake.header = "warm; model=kimi-e2e-mini; writer=server"
+      const pick = yield* chat("cold-kimi-pick", claude)
+      const uuid = PacerSessionID.make(pick.session.id)
+      expect(
+        yield* compaction.compact({ reason: "cold", context: pick.context, models: [pacerRef("kimi-e2e-mini")] }),
+      ).toEqual({ status: "completed" })
+      expect(wire()).toEqual([
+        `GET /pacer/v1/sessions/${uuid}`,
+        "GET /pacer/v1/settings",
+        `PATCH /pacer/v1/sessions/${uuid}`,
+        "POST /v1/responses/compact",
+      ])
+      expect(compactions()[0]?.body.model).toBe("kimi-e2e-mini")
+      expect((yield* record(pick.session.id)).writer).toEqual({ by: "cliproxypacer", cold: true })
+    }),
+)
+
+planned.live(
+  "a warm Responses chat: CLIProxyPacer writes its summary, its own writer set to server first; none of openforge's own",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      fake.header = "warm; model=kimi-e2e; writer=server"
+      yield* on
+      const { session, messages, context } = yield* chat("responses-warm", kimi)
+      const uuid = PacerSessionID.make(session.id)
+      // No writer of its own, none at the key or server level.
+      fake.views.set(uuid, warmView(uuid, "kimi", "kimi-e2e"))
+      expect(
+        yield* (yield* SessionCompaction.Service).compact({
+          reason: "auto",
+          context,
+          estimate: { measured: 190_000, estimated: 0 },
+        }),
+      ).toEqual({ status: "completed" })
+
+      expect(wire()).toEqual([
         `GET /pacer/v1/sessions/${uuid}`,
         "GET /pacer/v1/settings",
         `PATCH /pacer/v1/sessions/${uuid}`,
@@ -811,23 +820,16 @@ planned.live(
       expect(own()).toEqual([])
       const [sent] = compactions()
       expect(sent?.headers).toMatchObject({ "x-pacer-session": uuid, "x-pacer-kind": "compaction" })
-      expect(sent?.body.model).toBe("claude-e2e")
-      // The step's system parts as the first item, then the history before the kept exchange.
-      expect(sent?.body).not.toHaveProperty("instructions")
-      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual([
-        "system",
-        "user",
-        "assistant",
-      ])
+      expect(sent?.body.model).toBe("kimi-e2e")
+      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual(["user", "assistant"])
 
-      const stored = yield* record(session.id)
-      expect(stored.summary).toBe(cppSummary)
-      expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false })
-      expect(stored.model).toEqual(pacerRef("claude-e2e"))
-      expect(stored.metadata?.keepID).toBe(messages[2]!.id)
-      // A Messages chat's summary comes back in the Responses format, with its cache writes and thinking all the same.
-      expect(stored.tokens).toEqual(compactRecorded.tokens)
-      expect(stored.cost).toBeCloseTo(compactRecorded.cost, 12)
+      const kept = yield* record(session.id)
+      expect(kept.summary).toBe(cppSummary)
+      expect(kept.writer).toEqual({ by: "cliproxypacer", cold: false })
+      expect(kept.model).toEqual(pacerRef("kimi-e2e"))
+      expect(kept.metadata?.keepID).toBe(messages[2]!.id)
+      expect(kept.tokens).toEqual(compactRecorded.tokens)
+      expect(kept.cost).toBeCloseTo(compactRecorded.cost, 12)
     }),
 )
 

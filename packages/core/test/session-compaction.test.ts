@@ -1115,7 +1115,8 @@ for (const background of [false, true]) {
         system: normal.request.system,
         tools: normal.request.tools,
         messages: [...normal.request.messages, Message.user(SessionCompaction.buildPrompt(false))],
-        generation: { maxTokens: summaryBuffer },
+        // The step's own output limit, which the conversation under the ceiling leaves room for.
+        generation: { maxTokens: normal.request.generation?.maxTokens },
       })
     }),
   )
@@ -1234,7 +1235,8 @@ it.effect("summary measured recovery reuses usage only for the matching agent", 
         ...toLLMMessages(fixture.context.messages, resolved.ref),
         Message.user(SessionCompaction.buildPrompt(false)),
       ],
-      generation: { maxTokens: summaryBuffer },
+      // The conversation under the ceiling leaves the model's whole output limit, as its step has.
+      generation: { maxTokens: resolved.limit.output },
     })
   }),
 )

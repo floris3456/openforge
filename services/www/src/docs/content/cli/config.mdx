@@ -248,9 +248,15 @@ An invalid or unreadable override falls back to the built-in sound for that even
 
 The TUI shows a system notification as a terminal escape sequence. Inside tmux, turn on `set -g allow-passthrough on` so
 it reaches the terminal, and `set -s focus-events on` so the TUI knows whether its window is focused. While it doesn't
-know, a notification shows even when you look at the chat. Inside tmux, `auto` cannot see which terminal is behind
-it and may send no notification at all: set `attention.protocol` to a sequence your terminal's documentation lists.
-OSC 99 is kitty's protocol, OSC 9 is iTerm2's, and OSC 777 comes from urxvt.
+know, a notification shows even when you look at the chat. Inside tmux, `auto` asks tmux which terminal is attached
+when the TUI starts, and uses OSC 777 for Ghostty, Konsole, WezTerm and the other terminals that take it, OSC 99 for
+kitty and foot, and OSC 9 for iTerm2 and Terminal.app. For a terminal it doesn't know it sends none: set
+`attention.protocol` to a sequence your terminal's documentation lists. OSC 99 is kitty's protocol, OSC 9 is iTerm2's,
+and OSC 777 comes from urxvt.
+
+A TUI notifies only for its own chats: the chats in its tabs and the one it shows, with their subagents. A chat that no
+TUI has open stays quiet. With `session.permissions` set to `autoaccept`, a permission the TUI accepts by itself makes
+no notification and no sound; one that waits for you still does.
 
 For a terminal that shows no notifications (Terminal.app), or for openforge on another machine, run
 [`openforge notify`](/cli/commands#notify) on the machine you sit at: it plays the sounds there and with `--desktop`

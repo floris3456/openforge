@@ -162,11 +162,11 @@ Compaction · by CLIProxyPacer on gemini-3.8-flash-high · cold · 20,182 in · 
 
 - This covers every compaction of a chat whose model is CLIProxyPacer's: automatic, on overflow, `/compact`, and the
   ones CLIProxyPacer asks for.
-- The summary request goes in the format of the writing model's steps. CLIProxyPacer writes summaries only from a
-  request in the OpenAI Responses format, which every model but Claude speaks. A summary written on a Claude model,
-  whose steps go in the Anthropic Messages format, is openforge's own, whatever **Summaries written by** says: the
-  chat's own request, its last step's exactly, with the summary prompt after it, so it reads the chat's prompt cache.
-  Its divider says `Compaction · by openforge`.
+- A Claude chat follows **Summaries written by** like every other chat. Its steps go in the Anthropic Messages format;
+  openforge sends CLIProxyPacer the same conversation in the OpenAI Responses format, its system blocks and thinking
+  in place, and CLIProxyPacer writes the summary from the chat's last request while its prompt cache is warm.
+- When openforge writes the summary of a Claude chat, it sends the chat's own request, its last step's exactly, with
+  the summary prompt after it, so it reads the chat's prompt cache.
 - The model is one of CLIProxyPacer's picks for a move or a cold ask, else the chat's own; `agents.compaction.model`
   doesn't apply when CLIProxyPacer writes. CLIProxyPacer may write a cold chat's summary on a cheaper model; the
   divider then names that model and says `cold`.
@@ -177,7 +177,7 @@ Two rows in **Settings**, under CLIProxyPacer, are CLIProxyPacer's settings for 
 
 | Row | Choices | Does |
 | --- | --- | --- |
-| Summaries written by | CLIProxyPacer (default), openforge | Who writes a chat's summary, Claude's aside (openforge's, above). With openforge, it is written as on any other provider ([Compaction](/compaction)). |
+| Summaries written by | CLIProxyPacer (default), openforge | Who writes a chat's summary. With openforge, it is written as on any other provider ([Compaction](/compaction)). |
 | Keep my messages in summaries | off (default), on | Whether CLIProxyPacer adds your own earlier messages, word for word, after its summary. |
 
 openforge writes the summary itself in these cases, and the divider says why when CLIProxyPacer was meant to write it:
@@ -185,7 +185,6 @@ openforge writes the summary itself in these cases, and the divider says why whe
 | When | The divider says |
 | --- | --- |
 | **Summaries written by** is openforge | `Compaction · by openforge` |
-| the summary is written on a Claude model | `Compaction · by openforge` |
 | CLIProxyPacer doesn't write summaries for the model, as when it passes that model's compactions on to its provider: a Codex API key, xAI or an OpenAI-compatible upstream | `… CLIProxyPacer couldn't: it writes no summaries on this model's route` |
 | CLIProxyPacer refused, failed, or answered without a summary | `… CLIProxyPacer couldn't: it answered 501`, `it failed` or `no readable summary` |
 | no answer within 4 minutes | `… CLIProxyPacer couldn't: no answer in 4 minutes` |

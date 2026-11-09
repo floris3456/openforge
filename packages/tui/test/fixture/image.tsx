@@ -19,20 +19,29 @@ import { createTuiResolvedConfig } from "./tui-runtime"
  * An image terminal as inside tmux with Ghostty 1.4 attached (`placeholders`), or as outside it; what it sends is
  * kept in `sent`, as the sequences tmux's passthrough carries.
  */
-export function imageTerminal(input: { placeholders: boolean; cell?: Cell }) {
+export function imageTerminal(input: {
+  placeholders: boolean
+  cell?: Cell
+  /** tmux's client when the TUI starts, instead of Ghostty 1.4 or none; and its answer when asked again. */
+  client?: TmuxClient
+  ask?: () => Promise<TmuxClient | undefined>
+}) {
   const renderer = Object.assign(new EventEmitter(), {
     capabilities: { ansi256: true },
     resolution: null,
     terminalWidth: 100,
     terminalHeight: 30,
   })
-  const client: TmuxClient | undefined = input.placeholders
-    ? { termtype: "ghostty 1.4.0", passthrough: true, cell: input.cell ?? { width: 9, height: 20 } }
-    : undefined
+  const client: TmuxClient | undefined =
+    input.client ??
+    (input.placeholders
+      ? { termtype: "ghostty 1.4.0", passthrough: true, cell: input.cell ?? { width: 9, height: 20 } }
+      : undefined)
   const sent: string[] = []
   const terminal = createImageTerminal({
     renderer,
     client,
+    ask: input.ask,
     settleMs: 1,
     output: {
       write: (bytes) => {

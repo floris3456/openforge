@@ -146,6 +146,28 @@ test("a resize sends every image again", async () => {
   }
 })
 
+test("a client that shows placeholders attaching later turns an image drawn by OpenTUI into placeholder cells", async () => {
+  const images = imageTerminal({
+    placeholders: false,
+    client: { termtype: "", passthrough: true },
+    ask: async () => ({ termtype: "kitty(0.41.1)", passthrough: true, cell: { width: 9, height: 20 } }),
+  })
+  const app = await renderWithImages(
+    () => <ImageView source={diffImageFixture} fit="fit" width={10} height={4} />,
+    images.terminal,
+  )
+  try {
+    await until(app, () => findImage(app.renderer.root)?.image?.width === 96)
+    expect(images.sent).toEqual([])
+    images.renderer.emit("resize", 100, 30)
+    await until(app, () => placeholderCells(app.captureCharFrame()).length === 4)
+    expect(findImage(app.renderer.root)).toBeUndefined()
+    expect(transmitted(images.sent)).toHaveLength(1)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("without placeholders OpenTUI draws the image and nothing is sent", async () => {
   const images = imageTerminal({ placeholders: false })
   const app = await renderWithImages(

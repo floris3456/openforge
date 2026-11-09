@@ -148,6 +148,39 @@ describe("sending again", () => {
   })
 })
 
+describe("the client attached now", () => {
+  test("a TUI started before a client attached draws placeholders once one that shows them attaches", async () => {
+    const { terminal, renderer, settle } = fixture({
+      client: { termtype: "", passthrough: true },
+      ask: async () => ghostty,
+    })
+    expect(terminal.placeholders).toBe(false)
+    renderer.emit("resize", 140, 47)
+    await settle()
+    expect(terminal.placeholders).toBe(true)
+    expect(terminal.cell()).toEqual({ width: 19, height: 42 })
+  })
+
+  test("a client whose terminal can't show them turns them off, and nothing old is sent again", async () => {
+    const { terminal, renderer, settle, written } = fixture({
+      ask: async () => ({ termtype: "WezTerm 20240203", passthrough: true }),
+    })
+    terminal.show(number, image)
+    await settle()
+    written.length = 0
+    renderer.emit("focus")
+    await settle()
+    expect(terminal.placeholders).toBe(false)
+    expect(written).toEqual([])
+  })
+
+  test("outside tmux nothing is asked", () => {
+    const { renderer } = fixture({ client: undefined })
+    expect(renderer.listenerCount("resize")).toBe(0)
+    expect(renderer.listenerCount("focus")).toBe(0)
+  })
+})
+
 describe("the cell size", () => {
   test("inside tmux, tmux's client's (or another client's), else 9×20, whatever pixel size tmux makes up", () => {
     expect(fixture().terminal.cell()).toEqual({ width: 19, height: 42 })

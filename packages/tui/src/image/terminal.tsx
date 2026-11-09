@@ -1,12 +1,13 @@
 import type { CliRenderer } from "@opentui/core"
-import { createContext, createSignal, useContext, type ParentProps } from "solid-js"
+import { batch, createContext, createSignal, useContext, type ParentProps } from "solid-js"
 import { showsPlaceholders, type TmuxClient } from "../tmux-terminal"
 import { imageIDs, passthrough, remove, transmit, type ImageNumber, type Pixels } from "./placeholder"
 
 // openforge (spec image-view): where the TUI's images go. Inside tmux, when the terminal attached to it draws Kitty
 // graphics through Unicode placeholders, images go to it through the renderer's own ordered output, so a frame is never
 // cut by them, and again whenever the terminal may have lost them: a resize (a client of another size attached) and a
-// focus change (a client attached, or the window or pane switched back). Everywhere else OpenTUI draws images itself.
+// focus change (a client attached, or the window or pane switched back). Then tmux is asked again, so the images follow
+// the client attached now: its terminal and its cell size. Everywhere else OpenTUI draws images itself.
 
 export type Cell = { readonly width: number; readonly height: number }
 
@@ -14,7 +15,7 @@ export type Cell = { readonly width: number; readonly height: number }
 export type Shown = { readonly pixels: Pixels; readonly columns: number; readonly rows: number }
 
 export type ImageTerminal = {
-  /** Whether images are drawn with placeholders; otherwise OpenTUI draws them its own way. */
+  /** Whether images are drawn with placeholders, now; otherwise OpenTUI draws them its own way. */
   readonly placeholders: boolean
   /** The terminal's cell in pixels. */
   readonly cell: () => Cell
@@ -54,17 +55,21 @@ export function createImageTerminal(input: {
   readonly settleMs?: number
 }): ImageTerminal & { readonly drained: () => Promise<void>; readonly dispose: () => void } {
   const output = input.output
-  const placeholders = Boolean(output && input.client?.passthrough && showsPlaceholders(input.client.termtype))
-  const [tmuxCell, setTmuxCell] = createSignal(input.client?.cell)
+  const [client, setClient] = createSignal(input.client)
   const [version, setVersion] = createSignal(0)
   const shown = new Map<string, { readonly number: ImageNumber; readonly image: Shown; readonly ids: number[] }>()
   let queue = Promise.resolve()
   let timer: ReturnType<typeof setTimeout> | undefined
   let again: Promise<void> = Promise.resolve()
 
+  const placeholders = () => {
+    const current = client()
+    return Boolean(output && current?.passthrough && showsPlaceholders(current.termtype))
+  }
+
   const cell = () => {
     version()
-    const known = tmuxCell()
+    const known = client()?.cell
     if (known) return known
     // Inside tmux the terminal's pixel size is tmux's answer, which is made up (16×32 a cell) for a client that doesn't
     // tell it its own, as one that came in by `docker exec` doesn't; another client's, asked above, or 9×20 then.
@@ -84,7 +89,7 @@ export function createImageTerminal(input: {
   }
 
   const show = (number: ImageNumber, image: Shown) => {
-    if (!placeholders) return
+    if (!placeholders()) return
     const ids = imageIDs(number, input.renderer.capabilities?.ansi256 === true)
     shown.set(key(number), { number, image, ids })
     send(ids.flatMap((id) => transmit(id, image.pixels, image.columns, image.rows)))
@@ -98,15 +103,16 @@ export function createImageTerminal(input: {
   }
 
   const resend = async () => {
-    const client = input.ask ? await input.ask() : undefined
-    const before = tmuxCell()
-    if (client?.cell && (client.cell.width !== before?.width || client.cell.height !== before?.height)) {
-      // Every image is fitted to the cell again, and shown at once by its view.
-      setTmuxCell(client.cell)
+    const next = input.ask ? await input.ask() : undefined
+    const before = { placeholders: placeholders(), cell: cell() }
+    batch(() => {
+      if (next) setClient(next)
       setVersion((value) => value + 1)
-      return
-    }
-    setVersion((value) => value + 1)
+    })
+    // Another terminal or cell size: each image's view draws it the new way, or fits it again, and shows it itself.
+    const after = cell()
+    if (placeholders() !== before.placeholders) return
+    if (after.width !== before.cell.width || after.height !== before.cell.height) return
     shown.forEach((entry) => show(entry.number, entry.image))
   }
 
@@ -118,13 +124,16 @@ export function createImageTerminal(input: {
     }, input.settleMs ?? SETTLE_MS)
   }
 
-  if (placeholders) {
+  // Inside tmux only, where the client attached may change.
+  if (input.client && output) {
     input.renderer.on("resize", changed)
     input.renderer.on("focus", changed)
   }
 
   return {
-    placeholders,
+    get placeholders() {
+      return placeholders()
+    },
     cell,
     show,
     hide,

@@ -9,7 +9,6 @@ import {
   ProviderID,
   TransportError,
 } from "@opencode/ai/effect"
-import { AnthropicMessages, OpenAICompatibleResponses } from "@opencode/ai/protocols"
 import { Context, Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import type { Pacer } from "@opencode/schema/pacer"
@@ -101,9 +100,9 @@ describe("PacerSummaries, read", () => {
 })
 
 describe("PacerSummaries, who writes", () => {
-  // Only these two for a Responses chat: whether it is warm doesn't matter. A Claude chat never gets here
-  // (`plan`, below).
-  test("the chat's writer, then the route", () => {
+  // Only these two: whether the chat is warm, and whether its steps go to CPP in the Messages format (Claude), don't
+  // matter (they did in 0.0.9, which gave a warm Claude chat openforge's own summary).
+  test("the chat's writer, then the route; a warm Claude chat as any other", () => {
     const decide = (input: Partial<Parameters<typeof PacerSummaries.decide>[0]>) =>
       PacerSummaries.decide({ writer: "server", writes: true, ...input })
     expect(decide({})).toEqual({ by: "cliproxypacer" })
@@ -248,14 +247,7 @@ const view = (own: string | null, fields: Json = { warm: true }) => ({
   settings: own === null ? {} : { "compaction.writer": own },
   ...fields,
 })
-const responses = OpenAICompatibleResponses.route.protocol
-const messages = AnthropicMessages.protocol.id
-const plan = (input: Partial<PacerSummaries.PlanInput>) => ({
-  sessionID,
-  model: "kimi-e2e",
-  protocol: responses,
-  ...input,
-})
+const plan = (input: Partial<PacerSummaries.PlanInput>) => ({ sessionID, model: "kimi-e2e", ...input })
 
 describe("PacerSummaries.plan", () => {
   // The key level decides, as the Settings row shows it, so a choice there reaches every chat (the lead's fix of
@@ -328,38 +320,24 @@ describe("PacerSummaries.plan", () => {
     }),
   )
 
-  // The summary takes the format of the writing model's steps (the owner, 2026-11-08: "you should ofc use the right
-  // format for the right provder"): CPP writes only from a Responses body, so a Claude model, whose steps go as
-  // Anthropic Messages, gets openforge's own summary, an ordinary request of the chat; CPP's guide never tells such a
-  // client `server`.
-  it.live(
-    "a model whose steps go as Anthropic Messages: openforge, whatever the writer says; nothing read or set",
-    () =>
-      Effect.gen(function* () {
-        const { cpp, summaries, state } = yield* start()
-        const claude = { model: "claude-e2e", protocol: messages }
-        const warm = { warm: true, warm_until: Date.now() + 60_000, provider: "claude", model: "claude-e2e" }
-        // Unset everywhere, the chat's own `server`, the key's `server`: CPP would write a Responses chat's.
-        for (const [own, key] of [
-          [null, null],
-          ["server", null],
-          [null, "server"],
-        ] as const) {
-          cpp.views.set(uuid, view(own, warm))
-          cpp.keyWriter = key
-          expect(yield* summaries.plan(plan(claude))).toEqual({ by: "openforge" })
-        }
-        expect(cpp.seen).toEqual([])
-        // The same chat's Responses pick (a move's, a cold ask's) is CPP's, as before.
-        cpp.keyWriter = null
-        cpp.views.set(uuid, view(null, warm))
-        expect(yield* summaries.plan(plan({ model: "kimi-e2e" }))).toEqual({ by: "cliproxypacer" })
-        // Unreachable and without a pacer as for any chat.
-        yield* state("unreachable")
-        expect(yield* summaries.plan(plan(claude))).toEqual({ by: "openforge", fallback: "unreachable" })
-        yield* state("no-pacer")
-        expect(yield* summaries.plan(plan(claude))).toBeUndefined()
-      }),
+  it.live("a Claude chat warm by its view gets CPP's summary as any other: its unset writer set to `server` once", () =>
+    Effect.gen(function* () {
+      const { cpp, summaries } = yield* start()
+      const writes = () => cpp.seen.filter((item) => item.method === "PATCH")
+      const claude = { model: "claude-e2e" }
+      const warm = { warm: true, warm_until: Date.now() + 60_000, provider: "claude", model: "claude-e2e" }
+      cpp.views.set(uuid, view(null, warm))
+      expect(yield* summaries.plan(plan(claude))).toEqual({ by: "cliproxypacer" })
+      expect(writes()).toEqual([
+        { method: "PATCH", path: `/pacer/v1/sessions/${uuid}`, body: { "compaction.writer": "server" } },
+      ])
+      // Its own `server` now applies: no second write.
+      expect(yield* summaries.plan(plan(claude))).toEqual({ by: "cliproxypacer" })
+      expect(writes()).toHaveLength(1)
+      // The key level's `client` still decides for it.
+      cpp.keyWriter = "client"
+      expect(yield* summaries.plan(plan(claude))).toEqual({ by: "openforge" })
+    }),
   )
 
   it.live("only on routes where CPP writes with writer server; elsewhere openforge, saying why", () =>

@@ -12,6 +12,7 @@ import type { SessionRunnerModel } from "../session/runner/model.js"
 import type { SessionSchema } from "../session/schema.js"
 import { BlobRefTable } from "../session/sql.js"
 import { ImageFit } from "./fit.js"
+import { ImageLine } from "./line.js"
 import { ImageTable } from "./sql.js"
 
 // A chat's image bank (spec images): while Settings › Session "Optimize images" is on and the chat's model has an entry
@@ -42,8 +43,7 @@ export const Current = Context.Reference<
 >("@opencode/ImageBank/Current", { defaultValue: () => undefined })
 
 /** The line before an image, fixed on arrival. */
-export const line = (number: number, name: string, image: Pick<ImageFit.Fitted, "width" | "height" | "shown">) =>
-  `[Image ${number}: ${name}, ${image.width}×${image.height}, shown at ${image.shown.width}×${image.shown.height}; see it again or zoom with image]`
+export const line = ImageLine.make
 
 export interface Arrived extends ImageFit.Fitted {
   readonly number: number

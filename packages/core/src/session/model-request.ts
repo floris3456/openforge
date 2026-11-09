@@ -333,6 +333,9 @@ export const layer = Layer.effect(
       const generation = Object.fromEntries(entries.filter(([k]) => GENERATION_KEYS.has(k))) as GenerationOptionsFields
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = SessionAffinity.get(session)
+      const supported = unsupportedParts(shaped.messages, model.capabilities, model.model.provider)
+      // openforge: optimized images are never cut (ImageBudget).
+      const images = input.images
       const base = ai.request({
         model: model.model,
         http: {
@@ -359,9 +362,9 @@ export const layer = Layer.effect(
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
         system: shaped.system,
-        messages: (input.images ? (messages: LLMRequest["messages"]) => ImageBudget.bound(messages, ImageFit.requestLimits(input.images!)) : boundImages)(
-          unsupportedParts(shaped.messages, model.capabilities, model.model.provider),
-        ),
+        messages: images
+          ? ImageBudget.bound(supported, ImageFit.requestLimits(images))
+          : boundImages(supported),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,

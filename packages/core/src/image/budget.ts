@@ -10,6 +10,7 @@ import { SessionEvent } from "../session/event.js"
 import { SessionInbox } from "../session/inbox.js"
 import { SessionMessage } from "../session/message.js"
 import { ImageFit } from "./fit.js"
+import { ImageLine } from "./line.js"
 
 // The images of a chat with optimized images (spec images), request by request: never cut, replaced or changed once
 // sent, so each request repeats the one before and only adds to it. Once what was sent leaves less room than one more
@@ -115,7 +116,7 @@ export const ledger = (messages: ReadonlyArray<SessionMessage.Info>, model: Imag
         const before = content[index - 1]
         return [
           {
-            line: before?.type === "text" && before.text.startsWith("[Image ") ? before.text : undefined,
+            line: before?.type === "text" && ImageLine.is(before.text) ? before.text : undefined,
             data,
             mime: item.mime,
             name: item.name,

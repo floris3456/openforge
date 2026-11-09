@@ -21,10 +21,11 @@ import {
   requestRow,
   requestTone,
   usageAccounts,
-  usageCells,
   usageCountdown,
   usageGroupName,
-  usageLines,
+  usagePlanName,
+  usageSection,
+  usageStrips,
   usageText,
   windowApplies,
   windowLength,
@@ -311,48 +312,13 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
       expect([scope, model, windowApplies({ scope }, model)]).toEqual([scope, model, applies])
   })
 
-  test("a group's name: the provider's, then its plan made readable", () => {
-    expect(usageGroupName("claude", "default_claude_max_20x")).toBe("Claude Max 20x")
-    expect(usageGroupName("claude", "default_claude_max_5x")).toBe("Claude Max 5x")
-    expect(usageGroupName("claude", "claude_pro")).toBe("Claude Pro")
-    expect(usageGroupName("antigravity", "g1-pro-tier")).toBe("Antigravity Pro")
-    expect(usageGroupName("commandcode", "individual-goat")).toBe("Command Code Goat")
-    expect(usageGroupName("commandcode", "teams-pro")).toBe("Command Code Teams Pro")
-    expect(usageGroupName("codex", "plus")).toBe("Codex Plus")
-    expect(usageGroupName("opencode-go", undefined)).toBe("OpenCode Go")
-    // A provider of no known name, and a plan of no word left: CPP's own words.
-    expect(usageGroupName("newprov", "default")).toBe("newprov default")
-  })
-
-  test("a window's length, and the time to its reset in one unit", () => {
-    expect([18_000, 604_800, 2_592_000, 5_400, 45].map(windowLength)).toEqual(["5h", "7d", "30d", "90m", "45s"])
-    expect(usageCountdown(59_999)).toBe("<1m")
-    expect(usageCountdown(59 * 60_000)).toBe("59m")
-    // Minutes round up, hours and days down.
-    expect(usageCountdown(59 * 60_000 + 1)).toBe("1h")
-    expect(usageCountdown(119 * 60_000)).toBe("1h")
-    expect(usageCountdown(24 * 3_600_000 - 60_000)).toBe("23h")
-    expect(usageCountdown(24 * 3_600_000)).toBe("1d")
-    expect(usageCountdown((6 * 24 + 23) * 3_600_000)).toBe("6d")
-  })
-
-  test("the cells: two windows' width at most, the percent while the bar keeps 4, at most 4 windows a line", () => {
-    const cells = (count: number) => {
-      const cell = usageCells(37, count)
-      return [cell.width, cell.bar, cell.percent, cell.perLine]
-    }
-    expect(cells(1)).toEqual([17, 7, true, 1])
-    expect(cells(2)).toEqual([17, 7, true, 2])
-    expect(cells(3)).toEqual([11, 6, false, 3])
-    expect(cells(4)).toEqual([8, 3, false, 4])
-    expect(cells(5)).toEqual([8, 3, false, 4])
-    // A wider sidebar keeps the percent with three.
-    expect(usageCells(46, 3).percent).toBe(true)
-  })
-
-  describe("the section's lines (sections 2 and 3)", () => {
-    const lines = (input: Partial<Parameters<typeof usageLines>[0]> & { accounts: PacerAccount[] }) =>
-      usageLines({
+  describe("the section (sections 2 to 4)", () => {
+    const M = 60_000
+    const H = 60 * M
+    const D = 24 * H
+    /** The section at 37 cells by default; every line of it exactly the section's width. */
+    const section = (input: Partial<Parameters<typeof usageSection>[0]> & { accounts: readonly PacerAccount[] }) => {
+      const out = usageSection({
         model: "claude-opus-5-5",
         serving: undefined,
         chat: undefined,
@@ -361,213 +327,786 @@ describe("the sidebar's usage meters (spec cliproxypacer-usage-meters)", () => {
         now: NOW,
         ...input,
       })
-    // Trailing blanks (a cell an account lacks) don't show.
-    const texts = (spans: UsageSpan[][]) => spans.map((line) => usageText(line).trimEnd())
-    const inks = (line: UsageSpan[]) =>
-      line.map((span) => `${span.text.trim() || "·"}:${span.ink}${span.bold ? ":bold" : ""}`)
-    // The owner's plans as CPP names them.
-    const max = (alias: string, windows: PacerWindow[]) =>
-      account(alias, "claude", { plan: "default_claude_max_20x", windows })
-    const served = max("max-2", [
-      window({}),
-      window({ ...SEVEN, left: 80.4, state: "estimated", resetsAt: NOW + (3 * 24 + 4) * 3_600_000 }),
-    ])
-    const idle = max("max-3", [
-      window({ left: 100, state: "dormant", resetsAt: undefined }),
-      window({ ...SEVEN, left: 100, state: "dormant", resetsAt: undefined }),
-    ])
-    const pro = account("pro-1", "claude", {
-      plan: "claude_pro",
-      windows: [
-        window({ left: 12, resetsAt: NOW + 46 * 60_000 }),
-        window({ ...SEVEN, left: 31, resetsAt: NOW + (2 * 24 + 5) * 3_600_000 }),
-      ],
+      expect(out.map((line) => stringWidth(usageText(line)))).toEqual(out.map(() => input.width ?? 37))
+      return out
+    }
+    const texts = (lines: UsageSpan[][]) => lines.map(usageText)
+    /** As the design's preview draws a section: `▒` a fill, `·` a track (an alternate row's track blank). */
+    const preview = (lines: UsageSpan[][]) =>
+      lines.map((line) =>
+        line
+          .flatMap((span) =>
+            Array.from(span.text, (character) => {
+              if (character !== " " || span.background === undefined) return character
+              if (span.background !== "track") return "▒"
+              return span.alternate ? " " : "·"
+            }),
+          )
+          .join(""),
+      )
+    const BACKGROUND = { track: "T", success: "S", warning: "W", error: "E", muted: "M" } as const
+    const INK = { base: "b", muted: "m", faint: "f", success: "s", info: "i", warning: "w", error: "e" } as const
+    /**
+     * Each line's text, each cell's background (`.` the sidebar's, `S` a success fill, `T` a track…, lower case on an
+     * alternate row) and each non-blank cell's ink (`b` base, `m` muted, `f` faint…, upper case in bold).
+     */
+    const grid = (lines: UsageSpan[][]) =>
+      lines.map((line) => {
+        const cells = line.flatMap((span) => Array.from(span.text, (character) => ({ character, span })))
+        return [
+          cells.map((cell) => cell.character).join(""),
+          cells
+            .map(({ span }) => {
+              if (span.background === undefined) return "."
+              const tone = BACKGROUND[span.background]
+              return span.alternate ? tone.toLowerCase() : tone
+            })
+            .join(""),
+          cells
+            .map(({ character, span }) => {
+              if (character === " ") return " "
+              return span.bold ? INK[span.ink].toUpperCase() : INK[span.ink]
+            })
+            .join(""),
+        ] as const
+      })
+    /** The lines that aren't rows: the title, names and labels. */
+    const heads = (lines: UsageSpan[][]) =>
+      lines
+        .filter((line) => line.every((span) => span.background === undefined && span.text.trim() !== "no reading yet"))
+        .map(usageText)
+
+    test("a group's name: the provider's, then the provider's own name of the plan, else CPP's name of its ID", () => {
+      const name = (provider: string, plan?: string, planName?: string) => usageGroupName({ provider, plan, planName })
+      // The owner's server on 2026-11-09.
+      expect(name("claude", "default_claude_max_20x", "Ultra")).toBe("Claude Ultra")
+      expect(name("antigravity", "g1-pro-tier", "Google AI Pro")).toBe("Antigravity Google AI Pro")
+      expect(name("claude", "claude_pro")).toBe("Claude Pro")
+      expect(name("commandcode", "individual-goat")).toBe("Command Code GOAT")
+      expect(name("codex", "plus")).toBe("Codex Plus")
+      // The provider's own name first, whatever CPP's name of the ID.
+      expect(name("claude", "claude_pro", "Team")).toBe("Claude Team")
+      // CPP's table (ui/src/core.ts planName, CPP 1bc19d1e), row by row.
+      const table: [string, string][] = [
+        ["default_claude_max_20x", "Ultra"],
+        ["default_claude_max_5x", "Max 5x"],
+        ["default_claude_pro", "Pro"],
+        ["claude_pro", "Pro"],
+        ["claude_max", "Max"],
+        ["claude_team", "Team"],
+        ["claude_enterprise", "Enterprise"],
+        ["g1-pro-tier", "Pro"],
+        ["g1-ultra-tier", "Ultra"],
+        ["free-tier", "Free"],
+        ["standard-tier", "Standard"],
+        ["legacy-tier", "Legacy"],
+        ["edu", "Edu"],
+        ["individual-go", "Go"],
+        ["individual-goat", "GOAT"],
+        ["individual-pro", "Pro"],
+        ["individual-pro-v1", "Pro"],
+        ["individual-max", "Max"],
+        ["individual-provider", "Provider"],
+        ["individual-ultra", "Ultra"],
+        ["teams-pro", "Teams Pro"],
+      ]
+      for (const [plan, plain] of table)
+        expect([plan, usagePlanName({ provider: "codex", plan })]).toEqual([plan, plain])
+      // Any other ID: without a leading default_ or claude_ and a trailing -tier, _ and - as spaces, each word
+      // capitalized.
+      expect(usagePlanName({ provider: "codex", plan: "plus" })).toBe("Plus")
+      expect(usagePlanName({ provider: "codex", plan: "default_team_plan" })).toBe("Team Plan")
+      expect(usagePlanName({ provider: "claude", plan: "claude_max_8x" })).toBe("Max 8x")
+      expect(usagePlanName({ provider: "antigravity", plan: "g1-business-tier" })).toBe("G1 Business")
+      // No plan: default_claude_ai, and for Claude a free one; the provider alone.
+      expect(name("claude", "default_claude_ai")).toBe("Claude")
+      expect(name("claude", "free-tier")).toBe("Claude")
+      expect(name("claude", "free")).toBe("Claude")
+      expect(name("claude", undefined, "Free")).toBe("Claude")
+      expect(name("antigravity", "free-tier")).toBe("Antigravity Free")
+      expect(name("opencode-go")).toBe("OpenCode Go")
+      // A provider of no known name: CPP's.
+      expect(name("newprov", "plus")).toBe("newprov Plus")
     })
 
-    test("a group per plan, the windows' labels over their columns, a row per account without its name, the legend", () => {
-      const view = chat({ account: "max-2", accountID: "id-max-2", nextUse: { account: "pro-1", reason: "cold_move" } })
-      const out = lines({ accounts: [pro, idle, served], serving: served, chat: view })
-      expect(texts(out)).toEqual([
-        "Claude Max 20x   5h                7d",
-        "● ████░░░  62%   1h ██████░  80%  ~3d",
-        "  ███████ 100%   5h ███████ 100%   7d",
-        "Claude Pro       5h                7d",
-        "› █░░░░░░  12%  46m ██░░░░░  31%   2d",
-        "● last used  › next use",
-      ])
-      expect(out.every((line) => stringWidth(usageText(line)) <= 37)).toBe(true)
-      expect(inks(out[0]!)).toEqual(["Claude Max 20x:base:bold", "·:muted", "5h:muted", "·:muted", "7d:muted"])
-      expect(inks(out[1]!)).toEqual([
-        "●:info",
-        "·:muted",
-        "████:success",
-        "░░░:muted",
-        "62%:base",
-        "1h:muted",
-        "·:muted",
-        "██████:success",
-        "░:muted",
-        "80%:base",
-        "~3d:muted",
-      ])
-      // A dormant window: its bar and percent muted, its length as its time.
-      expect(inks(out[2]!).slice(1, 4)).toEqual(["███████:muted", "100%:muted", "5h:muted"])
-      expect(inks(out[4]!)[0]).toBe("›:info")
-      expect(inks(out[5]!)).toEqual(["●:info", "last used:muted", "·:muted", "›:info", "next use:muted"])
+    test("a window's length, and the time to its reset in one unit or two", () => {
+      expect([18_000, 604_800, 2_592_000, 5_400, 45].map(windowLength)).toEqual(["5h", "7d", "30d", "90m", "45s"])
+      const both = (ms: number) => [usageCountdown(ms), usageCountdown(ms, true)]
+      expect(both(59_999)).toEqual(["<1m", "<1m"])
+      // Minutes round up, hours and days down; the second unit goes when it is 0.
+      expect(both(46 * M + 1)).toEqual(["47m", "47m"])
+      expect(both(59 * M + 1)).toEqual(["1h", "1h"])
+      expect(both(2 * H + 9 * M + 30_000)).toEqual(["2h", "2h 10m"])
+      expect(both(2 * H)).toEqual(["2h", "2h"])
+      expect(both(23 * H + 59 * M)).toEqual(["23h", "23h 59m"])
+      expect(both(D)).toEqual(["1d", "1d"])
+      expect(both(6 * D + 23 * H)).toEqual(["6d", "6d 23h"])
+      expect(both(7 * D)).toEqual(["7d", "7d"])
     })
 
-    test("the marks: in use, last used, next use, force use, two on one account; none for another model's view", () => {
-      const mark = (input: Omit<Partial<Parameters<typeof usageLines>[0]>, "accounts">) => {
-        const out = lines({ accounts: [served], ...input })
-        return { mark: inks(out[1]!).slice(0, 2), legend: out.length > 2 ? usageText(out.at(-1)!) : undefined }
-      }
-      const view = chat({ account: "max-2", accountID: "id-max-2" })
-      expect(mark({ serving: served, chat: view, running: true })).toEqual({
-        mark: ["●:success", "·:muted"],
-        legend: "● in use",
-      })
-      expect(mark({ serving: served, chat: view })).toEqual({ mark: ["●:info", "·:muted"], legend: "● last used" })
-      const forced = chat({ forceUse: { account: "max-2", when: "now" }, nextUse: { account: "max-2", reason: "x" } })
-      expect(mark({ serving: served, chat: forced, running: true })).toEqual({
-        mark: ["●:success", "›:warning"],
-        legend: "● in use  › force use",
-      })
-      expect(mark({ chat: chat({ nextUse: { account: "max-2", reason: "cold_stay" } }) })).toEqual({
-        mark: ["›:info", "·:muted"],
-        legend: "› next use",
-      })
-      expect(mark({ serving: served, chat: undefined })).toEqual({
-        mark: ["·:muted", "████:success"],
-        legend: undefined,
-      })
-    })
-
-    test("a scope over its length, unless every column shares it; cut to fit, never the length", () => {
-      const opus = max("max-2", [window({}), window(SEVEN), window({ ...SEVEN, label: "7d opus", scope: "opus" })])
-      // Three columns leave the name 10 cells: the provider's name is cut, not the plan.
-      expect(texts(lines({ accounts: [opus] }))[0]).toBe("C… Max 20x 5h          7d     opus 7d")
-      // An Antigravity account for a Claude model: its claude_gpt pair, without the scope.
-      const antigravity = account("ag", "antigravity", {
-        plan: "g1-pro-tier",
-        windows: [
-          window({ scope: "claude_gpt" }),
-          window({ ...SEVEN, scope: "claude_gpt" }),
-          window({ scope: "gemini" }),
-          window({ ...SEVEN, scope: "gemini" }),
+    test("one group per provider and plan: by provider, then plan in CPP's order, others after, none last", () => {
+      const one = (alias: string, provider: string, extra: Partial<PacerAccount> = {}) =>
+        account(alias, provider, { windows: [window({})], ...extra })
+      const out = section({
+        accounts: [
+          one("p1", "claude", { plan: "claude_pro" }),
+          one("u1", "claude", { plan: "default_claude_max_20x", planName: "Ultra" }),
+          one("n1", "claude"),
+          one("b1", "claude", { plan: "claude_bespoke" }),
+          one("p2", "claude", { plan: "default_claude_pro" }),
+          one("x1", "codex", { plan: "plus" }),
+          one("a1", "antigravity", { plan: "g1-ultra-tier" }),
+          one("a2", "antigravity", { plan: "g1-pro-tier" }),
         ],
       })
-      expect(texts(lines({ accounts: [antigravity], model: "claude-sonnet-4-6" }))[0]).toBe(
-        "Antigravity Pro  5h                7d",
-      )
-      expect(texts(lines({ accounts: [antigravity], model: "gemini-3-pro" }))[0]).toBe(
-        "Antigravity Pro  5h                7d",
-      )
-      const named = account("x", "claude", {
-        windows: [window({}), window(SEVEN), window({ ...SEVEN, scope: "model:claude-opus-5-5" })],
-      })
-      expect(texts(lines({ accounts: [named] }))[0]).toBe("Claude     5h          7d model:c… 7d")
-    })
-
-    // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-3): `Command C…` (the Goat plan) above the plan-less
-    // `Command Code`, and Command Code rows of bars only, their windows having no reset.
-    test("three windows: the percent goes, the bar keeps 6; the name keeps its plan, cut before the first label", () => {
-      const thirty = { label: "30d", seconds: 2_592_000 }
-      const goat = account("cc", "commandcode", {
-        plan: "individual-goat",
-        windows: [
-          window({}),
-          window({ ...SEVEN, left: 50, resetsAt: NOW + 3 * 86_400_000 }),
-          window({ ...thirty, left: 0, resetsAt: NOW + 20 * 86_400_000 }),
-        ],
-      })
-      const plain = account("cc-key", "commandcode", {
-        windows: [window({}), window({ ...SEVEN, state: "partial", left: 40, resetsAt: undefined }), window(thirty)],
-      })
-      const out = lines({ accounts: [goat, plain], model: "gpt-6-luna" })
-      expect(texts(out)).toEqual([
-        "Comm… Goat 5h          7d         30d",
-        "  ████░░   1h ███░░░   3d ░░░░░░  20d",
-        "Command C… 5h          7d         30d",
-        // No reset known: the percent in the time's place.
-        "  ████░░   1h ██░░░░  40% ████░░   1h",
+      expect(heads(out).map((line) => line.trimEnd())).toEqual([
+        "Usage",
+        "Antigravity Pro 5h",
+        "Antigravity Ultra",
+        "                5h",
+        "Claude Ultra    5h",
+        "Claude Pro      5h",
+        "Claude Bespoke  5h",
+        "Claude          5h",
+        "Codex Plus      5h",
       ])
-      expect(out[3]!.find((span) => span.text.trim() === "40%")?.ink).toBe("base")
-      // With room for the percent, the time's place stays empty.
-      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).toContain("40%")
-      expect(texts(lines({ accounts: [plain], model: "gpt-6-luna", width: 80 }))[1]).not.toContain("40%  40%")
-    })
-
-    test("a name that fits stays whole; without a plan, it is cut at its end", () => {
+      // Two plan IDs CPP names alike: one group, its accounts by alias.
       expect(
-        texts(
-          lines({
+        texts(out)
+          .slice(8, 11)
+          .map((line) => line.trimEnd()),
+      ).toEqual(["Claude Pro      5h", "   62%      1h 20m", "   62%      1h 20m"])
+    })
+
+    test("the labels: on the name's line when it ends a cell before the first, else under it; names never cut", () => {
+      const head = (provider: string, plan: string | undefined, windows: PacerWindow[], model = "claude-fable-5") =>
+        heads(section({ accounts: [account("a", provider, { plan, windows })], model }))
+          .slice(1)
+          .map((line) => line.trimEnd())
+      const two = [window({}), window(SEVEN)]
+      expect(head("claude", "claude_pro", two)).toEqual(["Claude Pro      5h                7d"])
+      // The first label starts at 16: a name of 15 cells ends a cell before it, one of 16 doesn't.
+      expect(head("provider-123456", undefined, two)).toEqual(["provider-123456 5h                7d"])
+      expect(head("provider-1234567", undefined, two)).toEqual([
+        "provider-1234567",
+        "                5h                7d",
+      ])
+      // Three windows: the first label starts at 10.
+      const fable = [...two, window({ ...SEVEN, scope: "fable" })]
+      expect(head("codex", undefined, fable)).toEqual(["Codex     5h          7d    fable 7d"])
+      expect(head("claude", "default_claude_max_20x", fable)).toEqual([
+        "Claude Ultra",
+        "          5h          7d    fable 7d",
+      ])
+      // A scope every column shares goes unsaid; one too long for its strip is cut, never the length.
+      expect(head("codex", undefined, [window({ scope: "fable" }), window({ ...SEVEN, scope: "fable" })])).toEqual([
+        "Codex           5h                7d",
+      ])
+      expect(head("codex", undefined, [window({}), window({ ...SEVEN, scope: "model:claude-fable-5" })])).toEqual([
+        "Codex           5h  model:claude… 7d",
+      ])
+      // Only a name wider than the whole line is cut.
+      expect(head("a-provider-whose-name-is-wider-than-37", undefined, [window({})])[0]).toBe(
+        "a-provider-whose-name-is-wider-than-…",
+      )
+    })
+
+    test("the strips: two windows 17 cells, three 11, one as wide as two; a fourth and on on the next line", () => {
+      const strips = (width: number) => [1, 2, 3, 4, 5].map((count) => Object.values(usageStrips(width, count)))
+      expect(strips(37)).toEqual([
+        [1, 17],
+        [2, 17],
+        [3, 11],
+        [3, 11],
+        [3, 11],
+      ])
+      // Narrower: fewer on a line, none under 11 cells; one on the whole line once two don't fit.
+      expect(strips(30)).toEqual([
+        [1, 13],
+        [2, 13],
+        [2, 13],
+        [2, 13],
+        [2, 13],
+      ])
+      expect(strips(24)).toEqual([
+        [1, 22],
+        [1, 22],
+        [1, 22],
+        [1, 22],
+        [1, 22],
+      ])
+      // Wider: never more than three on a line.
+      expect(strips(50)).toEqual([
+        [1, 23],
+        [2, 23],
+        [3, 15],
+        [3, 15],
+        [3, 15],
+      ])
+      const lengths = [18_000, 86_400, 604_800, 2_592_000, 7_776_000]
+      const many = (count: number, width = 37) =>
+        preview(
+          section({
             accounts: [
-              account("og", "opencode-go", { windows: [window({}), window(SEVEN), window({ seconds: 2_592_000 })] }),
+              account("m", "codex", { windows: lengths.slice(0, count).map((seconds) => window({ seconds })) }),
             ],
             model: "gpt-6-luna",
+            width,
           }),
-        )[0],
-      ).toBe("OpenCode … 5h          7d         30d")
-    })
-
-    test("more windows than four: the rest on a second line, under the first, the labels too", () => {
-      const lengths = [18_000, 86_400, 604_800, 2_592_000, 7_776_000]
-      const many = account("m", "codex", { windows: lengths.map((seconds) => window({ seconds })) })
-      expect(texts(lines({ accounts: [many], model: "gpt-6-luna" }))).toEqual([
-        "Codex   5h       1d       7d      30d",
-        "       90d",
-        "  ██░   1h ██░   1h ██░   1h ██░   1h",
-        "  ██░   1h",
+        ).slice(1)
+      expect(many(1)).toEqual(["Codex           5h                   ", "  ▒62%▒▒▒▒▒▒1h·20m·                  "])
+      expect(many(4)).toEqual([
+        "Codex     5h          1d          7d ",
+        "         30d                         ",
+        "  ▒62%▒▒▒·1h· ▒62%▒▒▒·1h· ▒62%▒▒▒·1h·",
+        "  ▒62%▒▒▒·1h·                        ",
+      ])
+      expect(many(5)).toEqual([
+        "Codex     5h          1d          7d ",
+        "         30d         90d             ",
+        "  ▒62%▒▒▒·1h· ▒62%▒▒▒·1h· ▒62%▒▒▒·1h·",
+        "  ▒62%▒▒▒·1h· ▒62%▒▒▒·1h·            ",
+      ])
+      expect(many(3, 30)).toEqual([
+        "Codex       5h            1d  ",
+        "            7d                ",
+        "  ▒62%▒▒▒▒··1h· ▒62%▒▒▒▒··1h· ",
+        "  ▒62%▒▒▒▒··1h·               ",
       ])
     })
 
-    test("a window an account lacks is blank; an account without one limiting the model has no reading yet", () => {
-      const both = max("a", [window({}), window(SEVEN)])
-      const five = max("b", [window({})])
-      const seven = max("b2", [window(SEVEN)])
-      const none = max("c", [window({ scope: "sonnet" })])
-      expect(texts(lines({ accounts: [both, five, seven, none] }))).toEqual([
-        "Claude Max 20x   5h                7d",
-        "  ████░░░  62%   1h ████░░░  62%   1h",
-        "  ████░░░  62%   1h",
-        "                    ████░░░  62%   1h",
-        "  no reading yet",
+    describe("a strip (section 3)", () => {
+      /** A codex account's only window as its strip: its text, its cells' backgrounds and its inks. */
+      const strip = (extra: Partial<PacerWindow>, input: { now?: number; three?: boolean } = {}) => {
+        const windows = input.three
+          ? [window(extra), window({ ...SEVEN, ...extra }), window({ seconds: 2_592_000, ...extra })]
+          : [window(extra)]
+        const lines = section({
+          accounts: [account("a", "codex", { windows })],
+          model: "gpt-6-luna",
+          now: input.now ?? NOW,
+        })
+        const [text, bg, ink] = grid(lines).at(-1)!
+        const end = 2 + (input.three ? 11 : 17)
+        return { text: text.slice(2, end), bg: bg.slice(2, end), ink: ink.slice(2, end) }
+      }
+
+      test("the fill is what is left, round(left / 100 × width) cells from the start; 100% all of it", () => {
+        const fill = (left: number) => strip({ left }).bg
+        expect(fill(100)).toBe("SSSSSSSSSSSSSSSSS")
+        expect(fill(99)).toBe("SSSSSSSSSSSSSSSSS")
+        expect(fill(97)).toBe("SSSSSSSSSSSSSSSST")
+        expect(fill(50)).toBe("SSSSSSSSSTTTTTTTT")
+        expect(fill(21)).toBe("SSSSTTTTTTTTTTTTT")
+        expect(fill(3)).toBe("ETTTTTTTTTTTTTTTT")
+        expect(fill(2)).toBe("TTTTTTTTTTTTTTTTT")
+        expect(fill(0)).toBe("TTTTTTTTTTTTTTTTT")
+      })
+
+      test("the percent left at its start after a cell, bold, rounded down; <1% for a sliver; ? unknown, muted", () => {
+        expect(strip({ left: 100 })).toMatchObject({ text: " 100%     1h 20m ", ink: " BBBB     bb bbb " })
+        expect(strip({ left: 0 })).toMatchObject({ text: " 0%       1h 20m ", ink: " EE       bb bbb " })
+        expect(strip({ left: 99.9 }).text).toBe(" 99%      1h 20m ")
+        expect(strip({ left: 0.4 })).toMatchObject({ text: " <1%      1h 20m ", ink: " EEE      bb bbb " })
+        expect(strip({ left: undefined, state: "partial" })).toEqual({
+          text: " ?        1h 20m ",
+          bg: "TTTTTTTTTTTTTTTTT",
+          ink: " m        bb bbb ",
+        })
+      })
+
+      test("the fill's tone and the percent's color: above 20% left, at 20% or less, at 10% or less", () => {
+        const tone = (left: number) => {
+          const cells = strip({ left })
+          return `${cells.bg[0]}${cells.ink[1]}`
+        }
+        expect([100, 21, 20, 11, 10, 8].map(tone)).toEqual(["SB", "SB", "WW", "WW", "EE", "EE"])
+      })
+
+      test("muted, the percent in text color, while the reading isn't current; a dormant window is current", () => {
+        const tone = (extra: Partial<PacerWindow>, now = NOW) => {
+          const cells = strip({ left: 15, ...extra }, { now })
+          return `${cells.bg[0]}${cells.ink[1]}`
+        }
+        expect(tone({ stale: true })).toBe("MB")
+        expect(tone({ staleAt: NOW })).toBe("MB")
+        expect(tone({ staleAt: NOW + 1 })).toBe("WW")
+        expect(tone({ state: "awaiting-confirmation" })).toBe("MB")
+        expect(tone({}, NOW + 80 * M)).toBe("MB")
+        expect(tone({ state: "dormant", resetsAt: undefined })).toBe("WW")
+        expect(tone({ state: "dormant", left: 100, resetsAt: undefined })).toBe("SB")
+      })
+
+      test("the time to the reset at its end, a cell before it: two units in strips of 15 cells or more, else one", () => {
+        const time = (extra: Partial<PacerWindow>, three = false) => strip(extra, { three }).text
+        expect(time({ resetsAt: NOW + 46 * M + 1 })).toBe(" 62%         47m ")
+        expect(time({ resetsAt: NOW + 2 * H + 10 * M })).toBe(" 62%      2h 10m ")
+        expect(time({ resetsAt: NOW + 2 * H })).toBe(" 62%          2h ")
+        expect(time({ resetsAt: NOW + 6 * D + 23 * H })).toBe(" 62%      6d 23h ")
+        expect(time({ resetsAt: NOW + 7 * D })).toBe(" 62%          7d ")
+        expect(time({ resetsAt: NOW + 30_000 })).toBe(" 62%         <1m ")
+        expect(time({ resetsAt: NOW + 6 * D + 23 * H, state: "estimated" })).toBe(" 62%     ~6d 23h ")
+        expect(time({ resetsAt: NOW + 30_000, state: "estimated" })).toBe(" 62%        ~<1m ")
+        // A window that starts with the next request; one whose reset passed with no reading since, or that CPP
+        // waits to confirm; one without a known reset.
+        expect(time({ left: 100, state: "dormant", resetsAt: undefined })).toBe(" 100%       idle ")
+        expect(time({ resetsAt: NOW })).toBe(" 62%         now ")
+        expect(time({ state: "awaiting-confirmation", resetsAt: undefined })).toBe(" 62%         now ")
+        expect(time({ resetsAt: undefined, state: "partial" })).toBe(" 62%             ")
+        // Three windows: 11 cells, one unit.
+        expect(time({ resetsAt: NOW + 2 * H + 10 * M }, true)).toBe(" 62%    2h ")
+        expect(time({ resetsAt: NOW + 6 * D + 23 * H, state: "estimated" }, true)).toBe(" 62%   ~6d ")
+        expect(time({ resetsAt: NOW + 46 * M + 1 }, true)).toBe(" 62%   47m ")
+        expect(time({ left: 100, state: "dormant", resetsAt: undefined }, true)).toBe(" 100% idle ")
+        // The time keeps its color where the fill ends under it: text color, not bold.
+        expect(strip({ left: 80, resetsAt: NOW + 6 * D + 23 * H })).toEqual({
+          text: " 80%      6d 23h ",
+          bg: "SSSSSSSSSSSSSSTTT",
+          ink: " BBB      bb bbb ",
+        })
+      })
+
+      test("a window an account lacks: an empty track, a faint – in its middle; none at all: no reading yet", () => {
+        const accounts = [
+          account("a", "claude", { windows: [window({}), window(SEVEN)] }),
+          account("b", "claude", { windows: [window({})] }),
+          account("c", "claude", { windows: [window(SEVEN)] }),
+          account("d", "claude", { windows: [window({ scope: "sonnet" })] }),
+        ]
+        const out = section({ accounts })
+        expect(preview(out).slice(1)).toEqual([
+          "Claude          5h                7d ",
+          "  ▒62%▒▒▒▒▒▒1h·20m· ▒62%▒▒▒▒▒▒1h·20m·",
+          "  ▒62%▒▒▒▒▒▒1h 20m          –        ",
+          "  ········–········ ▒62%▒▒▒▒▒▒1h·20m·",
+          "  no reading yet                     ",
+        ])
+        expect(grid(out)[3]![2]).toBe("   BBB      bb bbb          f        ")
+        expect(grid(out)[5]![2]).toBe("  mm mmmmmmm mmm                     ")
+      })
+    })
+
+    test("a group with model groups: its name alone, a block per model group in order, the accounts in one order", () => {
+      const ag = (alias: string, windows: PacerWindow[]) =>
+        account(alias, "antigravity", { plan: "g1-pro-tier", planName: "Google AI Pro", windows })
+      const both = (left: number) => [
+        window({ scope: "claude_gpt", left }),
+        window({ ...SEVEN, scope: "claude_gpt", left }),
+        window({ scope: "gemini", left: 100 - left }),
+        window({ ...SEVEN, scope: "gemini", left: 100 - left }),
+      ]
+      // Given out of order, one of them with Gemini's windows only.
+      const accounts = [ag("ag-3", both(30)), ag("ag-1", both(90)), ag("ag-2", both(60).slice(2))]
+      for (const model of ["claude-opus-5-5", "gemini-3-flash", "kimi-k3"]) {
+        const out = section({ accounts, model })
+        expect([model, texts(out)]).toEqual([
+          model,
+          [
+            "Usage                                ",
+            "Antigravity Google AI Pro            ",
+            "Claude & GPT    5h                7d ",
+            "   90%      1h 20m   90%      1h 20m ",
+            "          –                 –        ",
+            "   30%      1h 20m   30%      1h 20m ",
+            "Gemini          5h                7d ",
+            "   10%      1h 20m   10%      1h 20m ",
+            "   40%      1h 20m   40%      1h 20m ",
+            "   70%      1h 20m   70%      1h 20m ",
+          ],
+        ])
+        // The model group's name in text, not bold; the group's in bold.
+        expect(grid(out)[1]![2]).toBe("BBBBBBBBBBB BBBBBB BB BBB            ")
+        expect(grid(out)[2]![2]).toBe("bbbbbb b bbb    mm                mm ")
+      }
+      // A model group none of the accounts has: no block.
+      expect(heads(section({ accounts: [ag("ag-2", both(60).slice(2))], model: "gemini-3-flash" }))).toEqual([
+        "Usage                                ",
+        "Antigravity Google AI Pro            ",
+        "Gemini          5h                7d ",
+      ])
+      // The other windows that limit the model: a block of their own, first, without a name, their scope named.
+      const sonnet = ag("ag-1", [...both(90), window({ ...SEVEN, scope: "sonnet", left: 50 })])
+      expect(texts(section({ accounts: [sonnet], model: "claude-sonnet-4-6" })).slice(1, 5)).toEqual([
+        "Antigravity Google AI Pro            ",
+        "         sonnet 7d                   ",
+        "   50%      1h 20m                   ",
+        "Claude & GPT    5h                7d ",
       ])
     })
 
-    test("each time and its bar: CPP's estimate, dormant, the reset passed, none known, stale, unknown", () => {
-      const cell = (extra: Partial<PacerWindow>, now = NOW) =>
-        usageText(
-          lines({ accounts: [account("a", "codex", { windows: [window(extra)] })], model: "gpt-6-luna", now })[1]!,
-        ).trimEnd()
-      expect(cell({ state: "estimated" })).toBe("  ████░░░  62%  ~1h")
-      expect(cell({ state: "dormant", left: 100, resetsAt: undefined })).toBe("  ███████ 100%   5h")
-      expect(cell({ state: "awaiting-confirmation" })).toBe("  ████░░░  62%  now")
-      expect(cell({}, NOW + 80 * 60_000)).toBe("  ████░░░  62%  now")
-      expect(cell({ resetsAt: undefined })).toBe("  ████░░░  62%")
-      expect(cell({ stale: true })).toBe("  ████░░░  62%   1h")
-      expect(cell({ left: undefined, state: "unknown", resetsAt: undefined, stale: true })).toBe("  ·······")
-      expect(cell({ left: 0.4 })).toBe("  ░░░░░░░  <1%   1h")
-      expect(cell({ left: 99.9 })).toBe("  ███████  99%   1h")
-      const ink = (extra: Partial<PacerWindow>, now = NOW) =>
-        lines({ accounts: [account("a", "codex", { windows: [window(extra)] })], model: "gpt-6-luna", now })[1]![1]!.ink
-      for (const extra of [
-        { state: "awaiting-confirmation" as const },
-        { state: "dormant" as const },
-        { stale: true },
-        { staleAt: NOW },
-        { left: undefined },
-      ])
-        expect([extra, ink(extra)]).toEqual([extra, "muted"])
-      expect(ink({}, NOW + 80 * 60_000)).toBe("muted")
-      expect(ink({ staleAt: NOW + 1 })).toBe("success")
+    describe("the marks and the legend", () => {
+      const pair = [
+        account("a", "claude", { windows: [window({})] }),
+        account("b", "claude", { windows: [window({})] }),
+      ]
+      const marks = (input: Omit<Partial<Parameters<typeof usageSection>[0]>, "accounts">, width = 37) => {
+        const out = section({ accounts: pair, width, ...input })
+        return {
+          lines: preview(out).map((line) => line.trimEnd()),
+          inks: grid(out).map((row) => row[2].trimEnd()),
+        }
+      }
+      const view = chat({ model: "claude-opus-5-5", account: "a", accountID: "id-a" })
+
+      test("● the chat's account: success while its step runs (in use), else info (last used); the legend", () => {
+        expect(marks({ serving: pair[0], chat: view, running: true })).toEqual({
+          lines: [
+            "Usage                        ● in use",
+            "Claude          5h",
+            "● ▒62%▒▒▒▒▒▒1h·20m·",
+            "  ▒62%▒▒▒▒▒▒1h 20m",
+          ],
+          inks: [
+            "BBBBB                        s mm mmm",
+            "BBBBBB          mm",
+            "S  BBB      bb bbb",
+            "   BBB      bb bbb",
+          ],
+        })
+        expect(marks({ serving: pair[0], chat: view })).toMatchObject({
+          lines: [
+            "Usage                     ● last used",
+            "Claude          5h",
+            "● ▒62%▒▒▒▒▒▒1h·20m·",
+            "  ▒62%▒▒▒▒▒▒1h 20m",
+          ],
+          inks: [
+            "BBBBB                     i mmmm mmmm",
+            "BBBBBB          mm",
+            "I  BBB      bb bbb",
+            "   BBB      bb bbb",
+          ],
+        })
+      })
+
+      test("› where the chat moves once its cache is cold, info; » where its next step moves now, warning; ●› ●»", () => {
+        const next = marks({
+          serving: pair[0],
+          chat: chat({ ...view, nextUse: { account: "b", reason: "cold_move" } }),
+        })
+        expect(next.lines[0]).toBe("Usage             ● last used  › next")
+        expect([next.lines[3], next.inks[3]]).toEqual(["› ▒62%▒▒▒▒▒▒1h 20m", "I  BBB      bb bbb"])
+        const forced = chat({
+          ...view,
+          forceUse: { account: "b", when: "now" },
+          nextUse: { account: "b", reason: "x" },
+        })
+        const moved = marks({ serving: pair[0], chat: forced, running: true })
+        expect(moved.lines[0]).toBe("Usage              ● in use  » forced")
+        expect([moved.lines[3], moved.inks[3]]).toEqual(["» ▒62%▒▒▒▒▒▒1h 20m", "W  BBB      bb bbb"])
+        const stays = chat({ ...view, nextUse: { account: "a", reason: "cold_stay" } })
+        expect(marks({ serving: pair[0], chat: stays, running: true })).toEqual({
+          lines: [
+            "Usage                ● in use  › next",
+            "Claude          5h",
+            "●›▒62%▒▒▒▒▒▒1h·20m·",
+            "  ▒62%▒▒▒▒▒▒1h 20m",
+          ],
+          inks: [
+            "BBBBB                s mm mmm  i mmmm",
+            "BBBBBB          mm",
+            "SI BBB      bb bbb",
+            "   BBB      bb bbb",
+          ],
+        })
+        const both = marks({ serving: pair[0], chat: chat({ ...view, forceUse: { account: "a", when: "now" } }) })
+        expect([both.lines[2], both.inks[2]]).toEqual(["●»▒62%▒▒▒▒▒▒1h·20m·", "IW BBB      bb bbb"])
+        // No view of the model (usageAccounts gives none): no marks, no legend.
+        expect(marks({ serving: pair[0], chat: undefined }).lines.slice(0, 3)).toEqual([
+          "Usage",
+          "Claude          5h",
+          "  ▒62%▒▒▒▒▒▒1h·20m·",
+        ])
+      })
+
+      test("the legend on a line of its own under the groups when it doesn't fit beside the title", () => {
+        const all = chat({
+          ...view,
+          nextUse: { account: "b", reason: "cold_move" },
+          forceUse: { account: "b", when: "now" },
+        })
+        // At 37 the longest legend still fits: `● last used  › next` or `● last used  » forced`.
+        expect(marks({ serving: pair[0], chat: all }).lines[0]).toBe("Usage           ● last used  » forced")
+        const next = chat({ ...view, nextUse: { account: "b", reason: "cold_move" } })
+        const narrow = marks({ serving: pair[0], chat: next }, 24)
+        expect(narrow.lines).toEqual([
+          "Usage",
+          "Claude               5h",
+          "● ▒62%▒▒▒▒▒▒▒▒▒▒·1h·20m·",
+          "› ▒62%▒▒▒▒▒▒▒▒▒▒ 1h 20m",
+          "● last used  › next",
+        ])
+        expect(narrow.inks.at(-1)).toBe("i mmmm mmmm  i mmmm")
+      })
+
+      test("in a group with model groups: on the account's row in the block of the model's group, the first for none", () => {
+        // Each block's strip says which it is: Claude & GPT's 90% left, Gemini's 50%, the fable window's 20%.
+        const pools = ["x", "y"].map((alias) =>
+          account(alias, "antigravity", {
+            windows: [
+              window({ scope: "claude_gpt", left: 90 }),
+              window({ scope: "gemini", left: 50 }),
+              window({ ...SEVEN, scope: "fable", left: 20 }),
+            ],
+          }),
+        )
+        const where = (model: string) =>
+          texts(
+            section({
+              accounts: pools,
+              model,
+              serving: pools[1],
+              chat: chat({ model, account: "y", accountID: "id-y" }),
+            }),
+          ).flatMap((line, index) => (line.startsWith("●") ? [[index, line.trimEnd()]] : []))
+        // The title, the group's name, then each block's label line over two rows.
+        expect(where("claude-opus-5-5")).toEqual([[4, "●  90%      1h 20m"]])
+        expect(where("gemini-3-flash")).toEqual([[7, "●  50%      1h 20m"]])
+        // A model of neither group: the first block, here of the fable window that limits it, else Claude & GPT's.
+        expect(where("kimi-fable-3")).toEqual([[4, "●  20%      1h 20m"]])
+        expect(where("kimi-k3")).toEqual([[4, "●  90%      1h 20m"]])
+      })
     })
 
-    test("the bar's color: above 20% left, at 20% or less, at 10% or less", () => {
-      const ink = (left: number) =>
-        lines({ accounts: [account("a", "codex", { windows: [window({ left })] })], model: "gpt-6-luna" })[1]![1]!.ink
-      // 8% is still one of the bar's 7 cells.
-      expect([ink(21), ink(20), ink(11), ink(10), ink(8)]).toEqual(["success", "warning", "warning", "error", "error"])
+    test("every other account a step quieter, the same account alike in every block", () => {
+      const four = ["a", "b", "c", "d"].map((alias) =>
+        account(alias, "antigravity", {
+          windows: [window({ scope: "claude_gpt", left: 100 }), window({ scope: "gemini", left: 0 })],
+        }),
+      )
+      expect(grid(section({ accounts: four, model: "gemini-3-flash" })).map((row) => row[1].slice(0, 19))).toEqual([
+        "...................",
+        "...................",
+        "...................",
+        "..SSSSSSSSSSSSSSSSS",
+        "..sssssssssssssssss",
+        "..SSSSSSSSSSSSSSSSS",
+        "..sssssssssssssssss",
+        "...................",
+        "..TTTTTTTTTTTTTTTTT",
+        "..ttttttttttttttttt",
+        "..TTTTTTTTTTTTTTTTT",
+        "..ttttttttttttttttt",
+      ])
+    })
+
+    test("CLIProxyPacer unreachable: every line faint and dimmed, the fills muted, as of on the title line", () => {
+      const view = chat({
+        model: "claude-opus-5-5",
+        account: "a",
+        accountID: "id-a",
+        nextUse: { account: "b", reason: "cold_move" },
+      })
+      const pair = [
+        account("a", "claude", { plan: "claude_pro", windows: [window({ left: 15 })] }),
+        account("b", "claude", {
+          plan: "claude_pro",
+          windows: [window({ left: 100, state: "dormant", resetsAt: undefined })],
+        }),
+      ]
+      // As CPP last said, a minute ago.
+      const out = section({ accounts: pair, serving: pair[0], chat: view, asOf: NOW - M, now: NOW - M })
+      expect(grid(out)).toEqual([
+        [
+          "Usage                     as of 14:01",
+          ".....................................",
+          "FFFFF                     ff ff fffff",
+        ],
+        [
+          "Claude Pro      5h                   ",
+          ".....................................",
+          "ffffff fff      ff                   ",
+        ],
+        [
+          "●  15%      1h 21m                   ",
+          "..MMMTTTTTTTTTTTTTT..................",
+          "F  fff      ff fff                   ",
+        ],
+        [
+          "›  100%       idle                   ",
+          "..mmmmmmmmmmmmmmmmm..................",
+          "F  ffff       ffff                   ",
+        ],
+      ])
+      expect(out.flat().every((span) => span.dim === true)).toBe(true)
+    })
+
+    test("a proxy without the pacer: no pacer at the title's end, muted, nothing under it", () => {
+      expect(grid(section({ accounts: [], noPacer: true }))).toEqual([
+        [
+          "Usage                        no pacer",
+          ".....................................",
+          "BBBBB                        mm mmmmm",
+        ],
+      ])
+    })
+
+    // The design (run/evidence/usage-redesign/design-2): proto.py's sample data and its screens, as preview.txt draws
+    // them (▒ a fill, · a track, an alternate row's track blank) and compact.json colors them, cell by cell.
+    describe("the design's screens", () => {
+      const at = (left: number, ms: number, extra: Partial<PacerWindow> = {}) => ({
+        left,
+        resetsAt: NOW + ms,
+        ...extra,
+      })
+      const IDLE = { left: 100, state: "dormant" as const, resetsAt: undefined }
+      const claude = (alias: string, plan: Partial<PacerAccount>, windows: (Partial<PacerWindow> | null)[]) =>
+        account(alias, "claude", {
+          ...plan,
+          windows: windows.flatMap((extra, index) =>
+            extra === null ? [] : [window({ ...(index === 1 ? SEVEN : {}), ...extra })],
+          ),
+        })
+      const ULTRA = { plan: "default_claude_max_20x", planName: "Ultra" }
+      const PRO = { plan: "claude_pro" }
+      const CLAUDE = [
+        claude("ultra-1", ULTRA, [null, at(0, 2 * D + 2 * H + 14 * M)]),
+        claude("ultra-2", ULTRA, [at(88, 22 * M), at(71, 5 * D + 2 * H)]),
+        claude("ultra-3", ULTRA, [null, at(100, 6 * D + 16 * H)]),
+        claude("pro-1", PRO, [IDLE, at(1, D + 14 * H)]),
+        claude("pro-2", PRO, [IDLE, at(86, 6 * D + 2 * H)]),
+        claude("pro-3", PRO, [at(96, 3 * H + 24 * M), at(71, 2 * D + 7 * H)]),
+      ]
+      const pool = (alias: string, windows: Partial<PacerWindow>[]) =>
+        account(alias, "antigravity", {
+          plan: "g1-pro-tier",
+          planName: "Google AI Pro",
+          windows: windows.map((extra, index) =>
+            window({ ...(index % 2 === 1 ? SEVEN : {}), scope: index < 2 ? "claude_gpt" : "gemini", ...extra }),
+          ),
+        })
+      const ANTIGRAVITY = [
+        pool("ag-1", [IDLE, at(97, 6 * D + 23 * H, { state: "estimated" }), IDLE, at(100, 7 * D)]),
+        pool("ag-2", [at(62, 2 * H + 10 * M), at(81, 5 * D + 4 * H), IDLE, at(93, 5 * D + 4 * H)]),
+        pool("ag-3", [at(14, 47 * M), at(38, 3 * D + 9 * H), at(88, 4 * H + 2 * M), at(71, 3 * D + 9 * H)]),
+      ]
+
+      test("antigravity-claude: Antigravity's rows by model group, then the Claude plans", () => {
+        const out = section({ accounts: [...CLAUDE, ...ANTIGRAVITY], model: "claude-sonnet-4-6" })
+        expect(preview(out)).toEqual([
+          "Usage                                ",
+          "Antigravity Google AI Pro            ",
+          "Claude & GPT    5h                7d ",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ▒97%▒▒▒▒▒~6d▒23h·",
+          "  ▒62%▒▒▒▒▒▒2h 10m  ▒81%▒▒▒▒▒▒▒5d▒4h ",
+          "  ▒14%·········47m· ▒38%▒▒·····3d·9h·",
+          "Gemini          5h                7d ",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ▒100%▒▒▒▒▒▒▒▒▒7d▒",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ▒93%▒▒▒▒▒▒▒5d▒4h ",
+          "  ▒88%▒▒▒▒▒▒▒4h▒2m· ▒71%▒▒▒▒▒▒▒3d·9h·",
+          "Claude Ultra    5h                7d ",
+          "  ········–········ ·0%········2d·2h·",
+          "  ▒88%▒▒▒▒▒▒▒▒▒22m  ▒71%▒▒▒▒▒▒▒5d 2h ",
+          "  ········–········ ▒100%▒▒▒▒▒6d▒16h▒",
+          "Claude Pro      5h                7d ",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ·1%·······1d·14h·",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ▒86%▒▒▒▒▒▒▒6d▒2h ",
+          "  ▒96%▒▒▒▒▒▒3h▒24m· ▒71%▒▒▒▒▒▒▒2d·7h·",
+        ])
+        expect(grid(out).map((row) => row.slice(1))).toEqual([
+          [".....................................", "BBBBB                                "],
+          [".....................................", "BBBBBBBBBBB BBBBBB BB BBB            "],
+          [".....................................", "bbbbbb b bbb    mm                mm "],
+          ["..SSSSSSSSSSSSSSSSS.SSSSSSSSSSSSSSSST", "   BBBB       bbbb   BBB     bbb bbb "],
+          ["..ssssssssssstttttt.ssssssssssssssttt", "   BBB      bb bbb   BBB       bb bb "],
+          ["..WWTTTTTTTTTTTTTTT.SSSSSSTTTTTTTTTTT", "   WWW         bbb   BBB       bb bb "],
+          [".....................................", "bbbbbb          mm                mm "],
+          ["..SSSSSSSSSSSSSSSSS.SSSSSSSSSSSSSSSSS", "   BBBB       bbbb   BBBB         bb "],
+          ["..sssssssssssssssss.sssssssssssssssst", "   BBBB       bbbb   BBB       bb bb "],
+          ["..SSSSSSSSSSSSSSSTT.SSSSSSSSSSSSTTTTT", "   BBB       bb bb   BBB       bb bb "],
+          [".....................................", "BBBBBB BBBBB    mm                mm "],
+          ["..TTTTTTTTTTTTTTTTT.TTTTTTTTTTTTTTTTT", "          f          EE        bb bb "],
+          ["..ssssssssssssssstt.ssssssssssssttttt", "   BBB         bbb   BBB       bb bb "],
+          ["..TTTTTTTTTTTTTTTTT.SSSSSSSSSSSSSSSSS", "          f          BBBB     bb bbb "],
+          [".....................................", "BBBBBB BBB      mm                mm "],
+          ["..SSSSSSSSSSSSSSSSS.TTTTTTTTTTTTTTTTT", "   BBBB       bbbb   EE       bb bbb "],
+          ["..sssssssssssssssss.ssssssssssssssstt", "   BBBB       bbbb   BBB       bb bb "],
+          ["..SSSSSSSSSSSSSSSST.SSSSSSSSSSSSTTTTT", "   BBB      bb bbb   BBB       bb bb "],
+        ])
+      })
+
+      test("claude-running: the chat's account in use, its next use, the legend on the title line", () => {
+        const view = chat({
+          model: "claude-opus-5-5",
+          account: "ultra-2",
+          accountID: "id-ultra-2",
+          nextUse: { account: "pro-3", reason: "cold_move" },
+        })
+        const out = section({ accounts: CLAUDE, serving: CLAUDE[1], chat: view, running: true })
+        expect(preview(out)).toEqual([
+          "Usage                ● in use  › next",
+          "Claude Ultra    5h                7d ",
+          "  ········–········ ·0%········2d·2h·",
+          "● ▒88%▒▒▒▒▒▒▒▒▒22m  ▒71%▒▒▒▒▒▒▒5d 2h ",
+          "  ········–········ ▒100%▒▒▒▒▒6d▒16h▒",
+          "Claude Pro      5h                7d ",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ·1%·······1d·14h·",
+          "  ▒100%▒▒▒▒▒▒▒idle▒ ▒86%▒▒▒▒▒▒▒6d▒2h ",
+          "› ▒96%▒▒▒▒▒▒3h▒24m· ▒71%▒▒▒▒▒▒▒2d·7h·",
+        ])
+        expect(grid(out).map((row) => row[2])).toEqual([
+          "BBBBB                s mm mmm  i mmmm",
+          "BBBBBB BBBBB    mm                mm ",
+          "          f          EE        bb bb ",
+          "S  BBB         bbb   BBB       bb bb ",
+          "          f          BBBB     bb bbb ",
+          "BBBBBB BBB      mm                mm ",
+          "   BBBB       bbbb   EE       bb bbb ",
+          "   BBBB       bbbb   BBB       bb bb ",
+          "I  BBB      bb bbb   BBB       bb bb ",
+        ])
+      })
+
+      test("command-3: three windows of 11 cells, one unit; a reset passed, none known, a sliver", () => {
+        const goat = (alias: string, windows: Partial<PacerWindow>[]) =>
+          account(alias, "commandcode", {
+            plan: "individual-goat",
+            windows: windows.map((extra, index) => window({ seconds: [18_000, 604_800, 2_592_000][index]!, ...extra })),
+          })
+        const PASSED = { state: "awaiting-confirmation" as const, resetsAt: undefined, stale: true }
+        const PARTIAL = { state: "partial" as const, resetsAt: undefined }
+        const accounts = [
+          goat("goat-1", [{ left: 100, ...PASSED }, at(90.2, 6 * D + 3 * H), { left: 45.1, ...PARTIAL }]),
+          goat("goat-2", [IDLE, { left: 0.02, ...PASSED }, { left: 0, ...PARTIAL }]),
+          goat("goat-3", [at(72, 3 * H + 10 * M), at(65.7, D + 20 * H), { left: 32.8, ...PARTIAL }]),
+          goat("goat-4", [IDLE, at(90.1, 5 * D + 19 * H), { left: 52.7, ...PARTIAL }]),
+          goat("goat-5", [IDLE, at(18, 28 * M), { left: 50, ...PARTIAL }]),
+          account("key-1", "commandcode", {
+            windows: [window(at(99, H + 5 * M)), window({ ...SEVEN, ...at(75, 2 * D + 4 * H) })],
+          }),
+        ]
+        const view = chat({
+          model: "gpt-6-luna",
+          account: "goat-3",
+          accountID: "id-goat-3",
+          nextUse: { account: "goat-5", reason: "cold_move" },
+        })
+        const out = section({ accounts, model: "gpt-6-luna", serving: accounts[2], chat: view, running: true })
+        expect(preview(out)).toEqual([
+          "Usage                ● in use  › next",
+          "Command Code GOAT                    ",
+          "          5h          7d         30d ",
+          "  ▒100%▒▒now▒ ▒90%▒▒▒▒6d· ▒45%▒······",
+          "  ▒100%▒idle▒  <1%   now   0%        ",
+          "● ▒72%▒▒▒▒3h· ▒65%▒▒▒·1d· ▒32%·······",
+          "  ▒100%▒idle▒ ▒90%▒▒▒▒5d  ▒52%▒▒     ",
+          "› ▒100%▒idle▒ ▒18%···28m· ▒50%▒▒·····",
+          "Command Code    5h                7d ",
+          "  ▒99%▒▒▒▒▒▒▒1h▒5m▒ ▒75%▒▒▒▒▒▒▒2d·4h·",
+        ])
+        expect(grid(out).map((row) => row[1])).toEqual([
+          ".....................................",
+          ".....................................",
+          ".....................................",
+          "..MMMMMMMMMMM.SSSSSSSSSST.SSSSSTTTTTT",
+          "..sssssssssss.ttttttttttt.ttttttttttt",
+          "..SSSSSSSSTTT.SSSSSSSTTTT.SSSSTTTTTTT",
+          "..sssssssssss.sssssssssst.ssssssttttt",
+          "..SSSSSSSSSSS.WWTTTTTTTTT.SSSSSSTTTTT",
+          ".....................................",
+          "..SSSSSSSSSSSSSSSSS.SSSSSSSSSSSSSTTTT",
+        ])
+      })
     })
   })
 })

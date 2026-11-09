@@ -9,6 +9,7 @@ import type {
   SessionMessageCompactionWriter,
 } from "@opencode/client"
 import { Pacer } from "@opencode/schema/pacer"
+import type { MeterTone } from "@opencode/theme/tui"
 import { Locale } from "../util/locale"
 import { stringWidth } from "../util/string-width"
 
@@ -213,26 +214,38 @@ function sameAccount(other: PacerAccount, account: PacerAccount) {
 const FAMILIES = ["opus", "sonnet", "haiku", "spark", "fable"]
 
 /**
+ * CPP's model groups (`antigravity_group`): a group's windows limit the models whose names hold one of its markers, the
+ * first group that matches. An account's windows of every group show, a block each, in this order (section 2).
+ */
+const MODEL_GROUPS = [
+  { scope: "claude_gpt", name: "Claude & GPT", markers: ["claude", "gpt", "opus", "sonnet", "haiku", "oss"] },
+  { scope: "gemini", name: "Gemini", markers: ["gemini"] },
+] as const
+
+/**
  * Whether a window limits requests for `model`, as CPP's `Window::applies` decides (spec, section 1): `all` and `oauth`
- * every model; a family a model whose name holds it; `gemini` and `claude_gpt` the models of that Antigravity group;
- * `model:<name>` that model, also pinned as `<provider>/<name>`; any other scope none.
+ * every model; a family a model whose name holds it; a model group's scope the models of that group; `model:<name>`
+ * that model, also pinned as `<provider>/<name>`; any other scope none.
  */
 export function windowApplies(window: Pick<PacerWindow, "scope">, model: string) {
   const name = model.toLowerCase()
   const scope = window.scope.toLowerCase()
   if (scope === "all" || scope === "oauth") return true
   if (FAMILIES.includes(scope)) return name.includes(scope)
-  if (scope === "gemini" || scope === "claude_gpt") return antigravityGroup(name) === scope
+  if (isModelGroup(scope)) return modelGroup(name) === scope
   if (!scope.startsWith("model:")) return false
   const wanted = scope.slice("model:".length)
   return name === wanted || name.slice(name.indexOf("/") + 1) === wanted
 }
 
-/** CPP's `antigravity_group`: which of an Antigravity account's window pairs a model counts against. */
-function antigravityGroup(model: string) {
-  if (["claude", "gpt", "opus", "sonnet", "haiku", "oss"].some((marker) => model.includes(marker))) return "claude_gpt"
-  if (model.includes("gemini")) return "gemini"
-  return ""
+/** The model group whose windows a model counts against, if any. */
+function modelGroup(model: string) {
+  const name = model.toLowerCase()
+  return MODEL_GROUPS.find((group) => group.markers.some((marker) => name.includes(marker)))?.scope
+}
+
+function isModelGroup(scope: string) {
+  return MODEL_GROUPS.some((group) => group.scope === scope)
 }
 
 const PROVIDERS: Record<string, string> = {
@@ -243,47 +256,64 @@ const PROVIDERS: Record<string, string> = {
   "opencode-go": "OpenCode Go",
 }
 
-/** Words of CPP's plan IDs that say nothing a reader needs. */
-const PLAN_NOISE = new Set(["default", "individual", "tier", "g1"])
-
 /**
- * A group's name (section 2): the provider's, then its plan made readable: split at `_` and `-`, without the words of
- * {@link PLAN_NOISE} and the provider's own name, each word capitalized; the plan as given when no word is left.
- * `claude` + `default_claude_max_20x` → `Claude Max 20x`.
+ * CPP's names of its plan IDs, as its pages give them (`ui/src/core.ts` `planName`, CPP `1bc19d1e`), in its order: the
+ * order of the groups of one provider.
  */
-export function usageGroupName(provider: string, plan: string | undefined) {
-  const name = groupName(provider, plan)
-  return name.plan ? `${name.provider} ${name.plan}` : name.provider
+const PLANS: Record<string, string> = {
+  default_claude_max_20x: "Ultra",
+  default_claude_max_5x: "Max 5x",
+  default_claude_pro: "Pro",
+  claude_pro: "Pro",
+  claude_max: "Max",
+  claude_team: "Team",
+  claude_enterprise: "Enterprise",
+  "g1-pro-tier": "Pro",
+  "g1-ultra-tier": "Ultra",
+  "free-tier": "Free",
+  "standard-tier": "Standard",
+  "legacy-tier": "Legacy",
+  edu: "Edu",
+  "individual-go": "Go",
+  "individual-goat": "GOAT",
+  "individual-pro": "Pro",
+  "individual-pro-v1": "Pro",
+  "individual-max": "Max",
+  "individual-provider": "Provider",
+  "individual-ultra": "Ultra",
+  "teams-pro": "Teams Pro",
+}
+const PLAN_ORDER = Object.keys(PLANS)
+
+/** A group's name (section 2): the provider's, then its plan's (`Claude Ultra`, `Antigravity Google AI Pro`). */
+export function usageGroupName(account: Pick<PacerAccount, "provider" | "plan" | "planName">) {
+  const provider = PROVIDERS[account.provider.toLowerCase()] ?? account.provider
+  const plan = usagePlanName(account)
+  return plan ? `${provider} ${plan}` : provider
 }
 
 /**
- * A group's name at most `width` cells: whole when it fits; else the provider's name is cut and the plan kept, the part
- * that tells two groups of one provider apart (`Comm… Goat`); the plan alone, cut, when not even `C…` fits beside it.
+ * The plan in a group's name (section 2): the provider's own name of it (CPP's `plan_name`); else CPP's name of its ID;
+ * else the ID without a leading `default_` or `claude_` and a trailing `-tier`, `_` and `-` as spaces, each word
+ * capitalized. None for `default_claude_ai` and, for Claude, a free plan (Claude Code needs Pro or Max).
  */
-function fitGroupName(provider: string, plan: string | undefined, width: number) {
-  const name = groupName(provider, plan)
-  const whole = name.plan ? `${name.provider} ${name.plan}` : name.provider
-  if (stringWidth(whole) <= width || !name.plan) return Locale.truncateWidth(whole, width)
-  const room = width - stringWidth(name.plan) - 1
-  if (room < 2) return Locale.truncateWidth(name.plan, width)
-  return `${Locale.truncateWidth(name.provider, room)} ${name.plan}`
+export function usagePlanName(account: Pick<PacerAccount, "provider" | "plan" | "planName">) {
+  const name = account.planName?.trim() || planIDName(account.plan?.trim() ?? "")
+  if (/^(claude|anthropic)$/i.test(account.provider) && /^free\b/i.test(name)) return ""
+  return name
 }
 
-function groupName(provider: string, plan: string | undefined) {
-  const name = PROVIDERS[provider.toLowerCase()] ?? provider
-  if (!plan) return { provider: name }
+function planIDName(plan: string) {
+  if (plan === "" || plan.toLowerCase() === "default_claude_ai") return ""
+  const known = PLANS[plan.toLowerCase()]
+  if (known) return known
   const words = plan
-    .split(/[_\-\s]+/)
-    .filter(
-      (word) => word !== "" && !PLAN_NOISE.has(word.toLowerCase()) && word.toLowerCase() !== provider.toLowerCase(),
-    )
-  if (words.length === 0) return { provider: name, plan }
-  return {
-    provider: name,
-    plan: words
-      .map((word) => (/^\d/.test(word) ? word.toLowerCase() : word[0]!.toUpperCase() + word.slice(1).toLowerCase()))
-      .join(" "),
-  }
+    .replace(/^default_/i, "")
+    .replace(/^claude_/i, "")
+    .replace(/-tier$/i, "")
+    .replace(/[_-]+/g, " ")
+    .trim()
+  return (words || plan).replace(/\b([a-z])/g, (letter) => letter.toUpperCase())
 }
 
 /** A window's length in its largest whole unit: 18000 s → `5h`, 604800 s → `7d`, 2592000 s → `30d`. */
@@ -299,72 +329,82 @@ export function windowLength(seconds: number) {
 }
 
 /**
- * The time to a reset in one unit, to fit a cell (section 3): `<1m`; minutes, rounded up, under an hour; then hours,
- * then days, rounded down: `46m`, `1h`, `23h`, `6d`.
+ * The time to a reset (section 3): `<1m`; minutes, rounded up, under an hour; then hours, then days, rounded down. With
+ * `two`, the next unit after the first unless it is 0: `47m`, `2h 10m`, `2h`, `6d 23h`, `7d`; else one: `2h`, `6d`.
  */
-export function usageCountdown(ms: number) {
+export function usageCountdown(ms: number, two = false) {
   if (ms < 60_000) return "<1m"
   const minutes = Math.ceil(ms / 60_000)
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h`
-  return `${Math.floor(hours / 24)}d`
+  if (hours < 24) return two && minutes % 60 > 0 ? `${hours}h ${minutes % 60}m` : `${hours}h`
+  const days = Math.floor(hours / 24)
+  return two && hours % 24 > 0 ? `${days}d ${hours % 24}h` : `${days}d`
 }
 
 /** The theme's text color of a part of a line: its role. */
-export type UsageInk = "base" | "muted" | "success" | "info" | "warning" | "error"
+export type UsageInk = "base" | "muted" | "faint" | "success" | "info" | "warning" | "error"
 
-/** A part of a line of the Usage section, in one color. */
+/** A part of a line of the Usage section: its text in one color, on the sidebar's background or a meter's tone. */
 export interface UsageSpan {
   readonly text: string
   readonly ink: UsageInk
   readonly bold?: boolean
+  /** Dimmed: everything is while CPP is unreachable. */
+  readonly dim?: boolean
+  /** Its cells' background, a tone of the theme's `background.meter`; the sidebar's own without one. */
+  readonly background?: MeterTone
+  /** The tone of every other account's row (`background.meter.alternate`). */
+  readonly alternate?: boolean
 }
 
-/** The row's first cells, for its mark. */
-const MARK = 2
-/** Between two cells. */
-const CELL_GAP = 1
-const CELL_PERCENT = 4
-const CELL_TIME = 4
-/** The fewest cells a bar keeps beside the percent; under it the percent goes and the bar takes its room. */
-const BAR_WITH_PERCENT = 4
-/** The fewest cells a bar keeps at all; more windows than leave it go on another line. */
-const BAR = 3
-
-/** A cell `width` wide: its bar, and whether the percent shows. */
-function cellLayout(width: number) {
-  const percent = width - (1 + CELL_PERCENT + 1 + CELL_TIME) >= BAR_WITH_PERCENT
-  return { width, percent, bar: Math.max(0, width - (percent ? 1 + CELL_PERCENT + 1 + CELL_TIME : 1 + CELL_TIME)) }
+/** A cell of a line; a wide character's second cell has no text. */
+interface Cell {
+  readonly text: string
+  readonly ink: UsageInk
+  readonly bold?: boolean
+  readonly background?: MeterTone
+  readonly alternate?: boolean
 }
 
-/**
- * The cells of a group with `count` windows on lines `width` wide (section 3): as wide as `perLine` of them on a line
- * allow, never wider than two allow, with as many on a line as keep a bar of {@link BAR} cells.
- */
-export function usageCells(width: number, count: number) {
-  const widest = Math.floor((width - MARK - CELL_GAP) / 2)
-  const cell = (n: number) => cellLayout(Math.min(widest, Math.floor((width - MARK - CELL_GAP * (n - 1)) / n)))
-  const fits = Array.from({ length: Math.max(1, count) }, (_, index) => index + 1).filter((n) => cell(n).bar >= BAR)
-  const perLine = Math.max(1, ...fits)
-  return { ...cell(perLine), perLine }
-}
+const TITLE = "Usage"
+/** A row's first cells, for its marks. */
+const GUTTER = 2
+/** Between two strips. */
+const STRIP_GAP = 1
+/** The narrowest strip a line keeps, and the most strips on a line. */
+const STRIP = 11
+const PER_LINE = 3
+/** The narrowest strip that gives a time in two units. */
+const TWO_UNITS = 15
 
-type Mark = "in use" | "last used" | "next use" | "force use"
+type Mark = "in use" | "last used" | "next" | "forced"
 const MARKS: Record<Mark, { readonly text: string; readonly ink: UsageInk }> = {
   "in use": { text: "●", ink: "success" },
   "last used": { text: "●", ink: "info" },
-  "next use": { text: "›", ink: "info" },
-  "force use": { text: "›", ink: "warning" },
+  next: { text: "›", ink: "info" },
+  forced: { text: "»", ink: "warning" },
 }
 
 /**
- * The Usage section's lines below its title (spec cliproxypacer-usage-meters, section 2), each at most `width` cells:
- * one group per provider and plan, its header with the windows' labels over their columns, then a row per account
- * without its name, each window that limits `model` a cell of section 3; then the legend of the marks shown. `chat` is
- * `usageAccounts`' view: the marks show only while it is of the model.
+ * The strips of a group whose blocks have at most `count` windows, on lines `width` wide (section 3): as many on a line
+ * as keep them {@link STRIP} cells wide, at most three; two 17 cells wide and three 11 at 37, and one as wide as two.
  */
-export function usageLines(input: {
+export function usageStrips(width: number, count: number) {
+  const size = (n: number) => Math.floor((width - GUTTER - STRIP_GAP * (n - 1)) / n)
+  const perLine = [PER_LINE, 2].find((n) => n <= count && size(n) >= STRIP) ?? 1
+  return { perLine, width: perLine > 1 || size(2) >= STRIP ? size(Math.max(2, perLine)) : size(1) }
+}
+
+/**
+ * The sidebar's Usage section (spec cliproxypacer-usage-meters, sections 2 to 4), each line exactly `width` cells: the
+ * title, with the legend of the marks shown at its right end (on a line of its own under the groups when it doesn't
+ * fit), `as of` while CPP is unreachable, or `no pacer` alone on a proxy without the pacer; then one group per provider
+ * and plan, its windows' labels over their strips, one row per account without its name, each window that limits
+ * `model` (and every window of a model group) a strip. `chat` is `usageAccounts`' view: the marks show only while it is
+ * of the model. With `asOf`, every line is faint and dimmed, the fills muted and the times as of then.
+ */
+export function usageSection(input: {
   readonly accounts: readonly PacerAccount[]
   readonly model: string
   readonly serving: PacerAccount | undefined
@@ -372,146 +412,330 @@ export function usageLines(input: {
   readonly running: boolean
   readonly width: number
   readonly now: number
+  readonly asOf?: number
+  readonly noPacer?: boolean
 }): UsageSpan[][] {
-  const groups = Map.groupBy(input.accounts, (account) => `${account.provider.toLowerCase()}\n${account.plan ?? ""}`)
+  const greyed = input.asOf !== undefined
+  const title = (right: Cell[]) => titleLine(input.width, greyed, right)
+  if (input.noPacer) return [spans(title(textCells("no pacer", "muted")), false)]
   const shown = new Set<Mark>()
   const marks = (account: PacerAccount): Mark[] => {
     const chat = input.chat
     if (chat === undefined) return []
     const identity: Mark[] =
       input.serving !== undefined && sameAccount(input.serving, account) ? [input.running ? "in use" : "last used"] : []
-    if (chat.forceUse?.account === account.alias) return [...identity, "force use"]
-    if (chat.nextUse?.account === account.alias) return [...identity, "next use"]
-    return identity
+    const own: Mark[] =
+      chat.forceUse?.account === account.alias
+        ? [...identity, "forced"]
+        : chat.nextUse?.account === account.alias
+          ? [...identity, "next"]
+          : identity
+    for (const mark of own) shown.add(mark)
+    return own
   }
-  const lines = Array.from(groups.values())
+  const body = Array.from(Map.groupBy(input.accounts, (account) => groupKey(account)).values())
     .toSorted(
       (a, b) =>
-        a[0]!.provider.localeCompare(b[0]!.provider) ||
-        Number(a[0]!.plan === undefined) - Number(b[0]!.plan === undefined) ||
-        usageGroupName(a[0]!.provider, a[0]!.plan).localeCompare(usageGroupName(b[0]!.provider, b[0]!.plan)),
+        a[0]!.provider.toLowerCase().localeCompare(b[0]!.provider.toLowerCase()) ||
+        Number(usagePlanName(a[0]!) === "") - Number(usagePlanName(b[0]!) === "") ||
+        planRank(a) - planRank(b) ||
+        usageGroupName(a[0]!).localeCompare(usageGroupName(b[0]!)),
     )
-    .flatMap((group) => {
-      const accounts = group.toSorted(
-        (a, b) => a.alias.localeCompare(b.alias) || (a.id ?? "").localeCompare(b.id ?? ""),
-      )
-      const windows = (account: PacerAccount) => account.windows.filter((window) => windowApplies(window, input.model))
-      const columns = Array.from(
-        new Map(accounts.flatMap(windows).map((window) => [`${window.scope}\n${window.seconds}`, window])).values(),
-      ).toSorted(
-        (a, b) =>
-          Number(a.scope !== "all") - Number(b.scope !== "all") ||
-          a.scope.localeCompare(b.scope) ||
-          a.seconds - b.seconds,
-      )
-      const shared = columns.every((column) => column.scope === columns[0]?.scope) ? columns[0]?.scope : undefined
-      const cells = usageCells(input.width, columns.length)
-      const chunks = Array.from({ length: Math.ceil(columns.length / cells.perLine) }, (_, index) =>
-        columns.slice(index * cells.perLine, (index + 1) * cells.perLine),
-      )
-      const name = (width: number) => fitGroupName(group[0]!.provider, group[0]!.plan, width)
-      const header =
-        chunks.length === 0
-          ? [[{ text: name(input.width), ink: "base", bold: true } satisfies UsageSpan]]
-          : chunks.map((chunk, index) =>
-              headerLine(
-                index === 0 ? name : () => "",
-                chunk.map((column) => columnLabel(column, shared, cells.width)),
-                cells.width,
-              ),
-            )
-      const rows = accounts.flatMap((account) => {
-        const own = marks(account)
-        for (const mark of own) shown.add(mark)
-        const mark: UsageSpan[] = [
-          ...own.map((item) => MARKS[item]),
-          ...(own.length < MARK ? [{ text: " ".repeat(MARK - own.length), ink: "muted" as const }] : []),
-        ]
-        const held = windows(account)
-        if (held.length === 0) return [[...mark, { text: "no reading yet", ink: "muted" } satisfies UsageSpan]]
-        return chunks.map((chunk, index) => [
-          ...(index === 0 ? mark : [{ text: " ".repeat(MARK), ink: "muted" as const }]),
-          ...chunk.flatMap((column, at) => [
-            ...(at > 0 ? [{ text: " ".repeat(CELL_GAP), ink: "muted" as const }] : []),
-            ...cellSpans(
-              held.find((window) => window.scope === column.scope && window.seconds === column.seconds),
-              cells,
-              input.now,
-            ),
-          ]),
-        ])
-      })
-      return [...header, ...rows]
-    })
-  const legend = (["in use", "last used", "next use", "force use"] as const)
+    .flatMap((group) =>
+      groupLines(
+        group.toSorted((a, b) => a.alias.localeCompare(b.alias) || (a.id ?? "").localeCompare(b.id ?? "")),
+        marks,
+        { model: input.model, width: input.width, now: input.now, greyed },
+      ),
+    )
+  if (input.asOf !== undefined)
+    return [title(textCells(`as of ${clockTime(input.asOf)}`, "faint")), ...body].map((line) => spans(line, true))
+  const legend = (["in use", "last used", "next", "forced"] as const)
     .filter((mark) => shown.has(mark))
-    .flatMap((mark, index): UsageSpan[] => [
-      ...(index > 0 ? [{ text: "  ", ink: "muted" as const }] : []),
-      MARKS[mark],
-      { text: ` ${mark}`, ink: "muted" },
+    .flatMap((mark, index) => [
+      ...(index > 0 ? blank(2) : []),
+      { text: MARKS[mark].text, ink: MARKS[mark].ink },
+      ...textCells(` ${mark}`, "muted"),
     ])
-  return legend.length > 0 ? [...lines, legend] : lines
+  const beside = TITLE.length + 1 + legend.length <= input.width
+  const lines = beside ? [title(legend), ...body] : [title([]), ...body, fit(legend, input.width)]
+  return lines.map((line) => spans(line, false))
 }
 
-/** A column's label: its length after its scope, unless that is `all` or every column's; the scope cut to fit. */
-function columnLabel(window: PacerWindow, shared: string | undefined, width: number) {
-  const length = windowLength(window.seconds)
-  if (window.scope === "all" || window.scope === shared) return Locale.truncateWidth(length, width)
-  const label = `${window.scope} ${length}`
-  if (stringWidth(label) <= width) return label
-  const room = width - stringWidth(length) - 1
-  return room >= 2 ? `${Locale.truncateWidth(window.scope, room)} ${length}` : Locale.truncateWidth(length, width)
+/** A group's accounts: one provider's of one plan, as its name says. */
+function groupKey(account: PacerAccount) {
+  return `${account.provider.toLowerCase()}\n${usagePlanName(account).toLowerCase()}`
 }
 
-/** A group's header line: its name in bold, cut with `…` to end a cell before the first label, each label at its cell's end. */
-function headerLine(name: (width: number) => string, labels: readonly string[], cell: number): UsageSpan[] {
-  const ends = labels.map((_, index) => MARK + (index + 1) * cell + index * CELL_GAP)
-  const starts = labels.map((label, index) => ends[index]! - stringWidth(label))
-  const title = name(Math.max(0, starts[0]! - 1))
-  const spans: UsageSpan[] = [{ text: title, ink: "base", bold: true }]
-  labels.reduce((cursor, label, index) => {
-    spans.push({ text: " ".repeat(Math.max(0, starts[index]! - cursor)), ink: "muted" }, { text: label, ink: "muted" })
-    return Math.max(cursor, starts[index]!) + stringWidth(label)
-  }, stringWidth(title))
-  return spans.filter((span) => span.text !== "")
+/** Where a group's plan comes in CPP's order of its plans; after them, plans of IDs it doesn't name. */
+function planRank(group: readonly PacerAccount[]) {
+  return Math.min(
+    ...group.map((account) => {
+      const index = PLAN_ORDER.indexOf(account.plan?.trim().toLowerCase() ?? "")
+      return index < 0 ? PLAN_ORDER.length : index
+    }),
+  )
 }
 
 /**
- * One window's cell (section 3): a bar of `█` and `░` colored by what is left (muted when the reading isn't current),
- * of `·` when the balance is unknown; the percent left, rounded down, when the cell has room; the time to the reset,
- * `~` in front of CPP's estimate, the length of a dormant window, `now` once the reset has passed with no reading since.
- * Blank where the account has no such window.
+ * A group's lines (section 2): its name, with its labels when they leave it room; then its rows. A group with model
+ * groups has its name on a line of its own, then a block per model group, each with its name and labels over its rows:
+ * the accounts in one order in every block, the marks in the block of the model's group (the first for none).
  */
-function cellSpans(window: PacerWindow | undefined, cell: ReturnType<typeof cellLayout>, now: number): UsageSpan[] {
-  if (window === undefined) return [{ text: " ".repeat(cell.width), ink: "muted" }]
+function groupLines(
+  accounts: readonly PacerAccount[],
+  marks: (account: PacerAccount) => Mark[],
+  input: { readonly model: string; readonly width: number; readonly now: number; readonly greyed: boolean },
+) {
+  const held = (account: PacerAccount) =>
+    account.windows.filter((window) => isModelGroup(window.scope) || windowApplies(window, input.model))
+  const all = accounts.flatMap(held)
+  const grouped = all.some((window) => isModelGroup(window.scope))
+  const blocks = [
+    { name: undefined, scope: undefined, columns: columnsOf(all.filter((window) => !isModelGroup(window.scope))) },
+    ...MODEL_GROUPS.map((group) => ({
+      name: group.name as string,
+      scope: group.scope as string,
+      columns: columnsOf(all.filter((window) => window.scope === group.scope)),
+    })),
+  ].filter((block, index) => block.columns.length > 0 || (index === 0 && !grouped))
+  const marked = Math.max(
+    0,
+    blocks.findIndex((block) => block.scope !== undefined && block.scope === modelGroup(input.model)),
+  )
+  const strips = usageStrips(input.width, Math.max(...blocks.map((block) => block.columns.length)))
+  const name = textCells(
+    Locale.truncateWidth(usageGroupName(accounts[0]!), input.width),
+    input.greyed ? "faint" : "base",
+    !input.greyed,
+  )
+  const rows = accounts.map((account, index) => ({
+    windows: held(account),
+    marks: marks(account),
+    alternate: index % 2 === 1,
+  }))
+  // A model group's block names its scope; the other windows' scope goes unsaid only when every column shares it.
+  const columns = blocks.flatMap((block) => block.columns)
+  const shared = columns.every((column) => column.scope === columns[0]?.scope) ? columns[0]?.scope : undefined
+  const block = (item: (typeof blocks)[number], index: number) => {
+    const head =
+      item.name === undefined ? (grouped ? undefined : name) : textCells(item.name, input.greyed ? "faint" : "base")
+    const labels = labelLines(item.columns, item.scope ?? shared, strips, input)
+    return [
+      ...withName(head, labels, input.width),
+      ...rows.flatMap((row) =>
+        rowLines({ ...row, marks: index === marked ? row.marks : [] }, item.columns, strips, input),
+      ),
+    ]
+  }
+  return [...(grouped ? [fit(name, input.width)] : []), ...blocks.flatMap(block)]
+}
+
+/** The windows of a group, once each: `all` first, then the other scopes alphabetically, each by length. */
+function columnsOf(windows: readonly PacerWindow[]) {
+  return Array.from(new Map(windows.map((window) => [`${window.scope}\n${window.seconds}`, window])).values()).toSorted(
+    (a, b) =>
+      Number(a.scope !== "all") - Number(b.scope !== "all") || a.scope.localeCompare(b.scope) || a.seconds - b.seconds,
+  )
+}
+
+/**
+ * The label lines of a block, each label at its strip's end, over the time, without the scope `shared` (the block's
+ * model group, or every column's); and where the first label starts.
+ */
+function labelLines(
+  columns: readonly PacerWindow[],
+  shared: string | undefined,
+  strips: ReturnType<typeof usageStrips>,
+  input: { readonly width: number; readonly greyed: boolean },
+) {
+  const labels = columns.map((column) => columnLabel(column, shared, strips.width - 1))
+  const lines = chunk(labels, strips.perLine).map((chunk) =>
+    chunk.reduce((line, label, index) => {
+      const end = GUTTER + (index + 1) * strips.width + index * STRIP_GAP - 1
+      return place(line, end - label.length, textCells(label, input.greyed ? "faint" : "muted"))
+    }, blank(input.width)),
+  )
+  return { lines, start: GUTTER + strips.width - 1 - (labels[0]?.length ?? 0) }
+}
+
+/** A column's label: its length after its scope, unless that is `all` or every column's; the scope cut to fit. */
+function columnLabel(window: PacerWindow, shared: string | undefined, room: number) {
+  const length = windowLength(window.seconds)
+  if (window.scope === "all" || window.scope === shared) return length
+  const label = `${window.scope} ${length}`
+  if (label.length <= room) return label
+  const left = room - length.length - 1
+  return left >= 2 ? `${Locale.truncateWidth(window.scope, left)} ${length}` : length
+}
+
+/** A name on its labels' first line when it ends a cell before the first label; else on a line of its own above. */
+function withName(name: Cell[] | undefined, labels: ReturnType<typeof labelLines>, width: number) {
+  if (name === undefined) return labels.lines
+  if (labels.lines.length === 0 || name.length + 1 > labels.start) return [fit(name, width), ...labels.lines]
+  return [place(labels.lines[0]!, 0, name), ...labels.lines.slice(1)]
+}
+
+/**
+ * An account's lines in a block (section 2): its marks, then a strip per column, one cell apart, up to a line's strips
+ * on each line; `no reading yet` for an account with no window shown at all.
+ */
+function rowLines(
+  row: { readonly windows: readonly PacerWindow[]; readonly marks: readonly Mark[]; readonly alternate: boolean },
+  columns: readonly PacerWindow[],
+  strips: ReturnType<typeof usageStrips>,
+  input: { readonly width: number; readonly now: number; readonly greyed: boolean },
+) {
+  const gutter = [
+    ...row.marks.slice(0, GUTTER).map((mark) => ({
+      text: MARKS[mark].text,
+      ink: input.greyed ? ("faint" as const) : MARKS[mark].ink,
+      bold: true,
+    })),
+    ...blank(Math.max(0, GUTTER - row.marks.length)),
+  ]
+  if (row.windows.length === 0)
+    return [fit([...gutter, ...textCells("no reading yet", input.greyed ? "faint" : "muted")], input.width)]
+  return chunk(columns, strips.perLine).map((line, index) =>
+    fit(
+      [
+        ...(index === 0 ? gutter : blank(GUTTER)),
+        ...line.flatMap((column, at) => [
+          ...(at > 0 ? blank(STRIP_GAP) : []),
+          ...strip(
+            row.windows.find((window) => window.scope === column.scope && window.seconds === column.seconds),
+            { width: strips.width, alternate: row.alternate, now: input.now, greyed: input.greyed },
+          ),
+        ]),
+      ],
+      input.width,
+    ),
+  )
+}
+
+/**
+ * One window as a strip (section 3): its fill what is left, in the tone of how much (muted when the reading isn't
+ * current); the percent left at its start, bold, after a cell; the time to its reset at its end, a cell before it. An
+ * empty track with a faint `–` in its middle where the account has no such window.
+ */
+function strip(
+  window: PacerWindow | undefined,
+  input: { readonly width: number; readonly alternate: boolean; readonly now: number; readonly greyed: boolean },
+): Cell[] {
+  const alternate = input.alternate ? { alternate: true } : {}
+  if (window === undefined)
+    return Array.from(
+      { length: input.width },
+      (_, index): Cell => ({
+        text: index === Math.floor(input.width / 2) ? "–" : " ",
+        ink: index === Math.floor(input.width / 2) ? "faint" : "base",
+        background: "track",
+        ...alternate,
+      }),
+    )
   const left = window.left === undefined ? undefined : Math.max(0, Math.min(100, window.left))
-  const passed = window.state === "awaiting-confirmation" || (window.resetsAt !== undefined && window.resetsAt <= now)
-  const current = window.state !== "dormant" && !passed && left !== undefined && !windowStale(window, now)
-  const time = (() => {
-    if (window.state === "dormant") return windowLength(window.seconds)
-    if (passed) return "now"
-    if (window.resetsAt === undefined) return ""
-    return `${window.state === "estimated" ? "~" : ""}${usageCountdown(window.resetsAt - now)}`
-  })()
-  const ink = ((): UsageInk => {
-    if (!current) return "muted"
+  const passed =
+    window.state === "awaiting-confirmation" || (window.resetsAt !== undefined && window.resetsAt <= input.now)
+  const current = left !== undefined && !passed && !windowStale(window, input.now)
+  const tone = ((): MeterTone => {
+    if (input.greyed || !current) return "muted"
     if (left <= 10) return "error"
     if (left <= 20) return "warning"
     return "success"
   })()
-  const filled = left === undefined ? 0 : Math.min(cell.bar, Math.round((left / 100) * cell.bar))
-  const percent = left === undefined ? "" : left > 0 && left < 1 ? "<1%" : `${Math.floor(left)}%`
-  // A cell without room for the percent shows it in the time's place while no reset is known, so it still says something.
-  const tail = time === "" && !cell.percent ? percent : time
-  const spans: UsageSpan[] = [
-    left === undefined ? { text: "·".repeat(cell.bar), ink: "muted" } : { text: "█".repeat(filled), ink },
-    { text: left === undefined ? "" : "░".repeat(cell.bar - filled), ink: "muted" },
-    ...(cell.percent
-      ? [{ text: ` ${padStart(percent, CELL_PERCENT)}`, ink: current ? "base" : "muted" } as const]
-      : []),
-    { text: ` ${padStart(tail, CELL_TIME)}`, ink: tail === time ? "muted" : current ? "base" : "muted" },
-  ]
-  return spans.filter((span) => span.text !== "")
+  const filled = left === undefined ? 0 : left >= 100 ? input.width : Math.round((left / 100) * input.width)
+  const percent = left === undefined ? "?" : left > 0 && left < 1 ? "<1%" : `${Math.floor(left)}%`
+  const percentInk = ((): UsageInk => {
+    if (input.greyed) return "faint"
+    if (left === undefined) return "muted"
+    if (tone === "warning" || tone === "error") return tone
+    return "base"
+  })()
+  const time = (() => {
+    if (window.state === "dormant") return "idle"
+    if (passed) return "now"
+    if (window.resetsAt === undefined) return ""
+    return `${window.state === "estimated" ? "~" : ""}${usageCountdown(window.resetsAt - input.now, input.width >= TWO_UNITS)}`
+  })()
+  const inner = input.width - 2
+  const tail = percent.length + 1 + time.length <= inner ? time : ""
+  const text = ` ${(percent + " ".repeat(Math.max(0, inner - percent.length - tail.length)) + tail).slice(0, inner)} `
+  return Array.from(
+    text,
+    (character, index): Cell => ({
+      text: character,
+      ...(index === 0 || index === input.width - 1
+        ? { ink: "base" as const }
+        : index <= percent.length
+          ? { ink: percentInk, ...(input.greyed || left === undefined ? {} : { bold: true }) }
+          : { ink: input.greyed ? ("faint" as const) : ("base" as const) }),
+      background: index < filled ? tone : "track",
+      ...alternate,
+    }),
+  )
+}
+
+/** The title line: `Usage` in bold, and `right` at its right end. */
+function titleLine(width: number, greyed: boolean, right: Cell[]) {
+  const tail = right.slice(0, Math.max(0, width - TITLE.length - 1))
+  return fit(
+    [...textCells(TITLE, greyed ? "faint" : "base", true), ...blank(width - TITLE.length - tail.length), ...tail],
+    width,
+  )
+}
+
+const graphemes = new Intl.Segmenter()
+
+/** `text` as cells: a wide character takes two, the second without text. */
+function textCells(text: string, ink: UsageInk, bold = false): Cell[] {
+  return Array.from(graphemes.segment(text), (part) => part.segment).flatMap((grapheme) => {
+    const cell = { text: grapheme, ink, ...(bold ? { bold } : {}) }
+    return stringWidth(grapheme) > 1 ? [cell, { ...cell, text: "" }] : [cell]
+  })
+}
+
+function blank(count: number): Cell[] {
+  return Array.from({ length: Math.max(0, count) }, () => ({ text: " ", ink: "base" }))
+}
+
+/** `cells` at `start` of `line`, over what was there. */
+function place(line: readonly Cell[], start: number, cells: readonly Cell[]) {
+  return [...line.slice(0, start), ...cells, ...line.slice(start + cells.length)]
+}
+
+/** A line exactly `width` cells: padded, or cut. */
+function fit(cells: readonly Cell[], width: number) {
+  return [...cells.slice(0, width), ...blank(width - cells.length)]
+}
+
+function chunk<Item>(items: readonly Item[], size: number) {
+  return Array.from({ length: Math.ceil(items.length / size) }, (_, index) =>
+    items.slice(index * size, (index + 1) * size),
+  )
+}
+
+/** A line's cells as spans: each run of cells drawn alike. */
+function spans(cells: readonly Cell[], dim: boolean): UsageSpan[] {
+  const key = (cell: Cell) => `${cell.ink}/${cell.bold === true}/${cell.background ?? ""}/${cell.alternate === true}`
+  return cells
+    .reduce<{ key: string; cell: Cell; text: string }[]>((runs, cell) => {
+      const last = runs.at(-1)
+      if (last && last.key === key(cell)) {
+        last.text += cell.text
+        return runs
+      }
+      runs.push({ key: key(cell), cell, text: cell.text })
+      return runs
+    }, [])
+    .map((run) => ({
+      text: run.text,
+      ink: run.cell.ink,
+      ...(run.cell.bold ? { bold: true } : {}),
+      ...(dim ? { dim: true } : {}),
+      ...(run.cell.background === undefined
+        ? {}
+        : { background: run.cell.background, ...(run.cell.alternate ? { alternate: true } : {}) }),
+    }))
 }
 
 /** A line as text, as the screen shows it. */

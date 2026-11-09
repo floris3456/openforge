@@ -26,7 +26,7 @@ async function settings(
   const setup = await renderPacer({
     fake,
     width: 100,
-    height: 140,
+    height: 160,
     newDesigns: input.newDesigns,
     content: () => (
       <>

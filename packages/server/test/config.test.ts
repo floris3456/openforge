@@ -99,6 +99,39 @@ it.live("updates the global shell without replacing unrelated JSONC", () =>
   }),
 )
 
+// openforge: Settings › Optimize images writes, then reads the value back at once; the read must give what was written.
+it.live("a config read right after an update gives the written value", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-config-readback-")))
+    const global = path.join(tmp.path, "global")
+    yield* Effect.promise(() => fs.mkdir(global, { recursive: true }))
+    const server = yield* startServer(global)
+    const optimize = Effect.fn(function* () {
+      const response = yield* Effect.promise(() =>
+        fetch(new URL("/api/config", server.base), { headers: server.headers }),
+      )
+      const entries = Schema.decodeUnknownSync(Schema.Array(Config.Entry))(yield* Effect.promise(() => response.json()))
+      return entries
+        .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.optimize] : []))
+        .findLast((value) => value !== undefined)
+    })
+    const write = (value: boolean) =>
+      Effect.promise(() =>
+        fetch(new URL("/api/experimental/config", server.base), {
+          method: "PATCH",
+          headers: { ...server.headers, "content-type": "application/json" },
+          body: JSON.stringify({ media: { image: { optimize: value } } }),
+        }),
+      )
+
+    expect(yield* optimize()).toBeUndefined()
+    for (const value of [true, false, true]) {
+      expect((yield* write(value)).status).toBe(204)
+      expect(yield* optimize()).toBe(value)
+    }
+  }),
+)
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }

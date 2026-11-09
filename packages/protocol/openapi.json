@@ -22760,6 +22760,9 @@
           "plan": {
             "type": "string"
           },
+          "planName": {
+            "type": "string"
+          },
           "windows": {
             "type": "array",
             "items": {

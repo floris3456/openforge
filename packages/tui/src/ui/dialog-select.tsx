@@ -22,7 +22,7 @@ import { Locale } from "../util/locale"
 import { getScrollAcceleration } from "../util/scroll"
 import { useConfig, useCursorStyle, useNewDesigns } from "../config"
 import { moveSelection, reconcileSelection } from "./select-controller"
-import { RowHelp } from "./row-help"
+import { RowHelpPopup } from "./row-help"
 
 export interface DialogSelectProps<T> {
   title: string
@@ -120,7 +120,7 @@ export interface DialogSelectOption<T = any> {
    * once it is removed.
    */
   detail?: string | (() => JSX.Element)
-  /** openforge (spec row-help): the longer explanation `?` shows in the dialog's place while this option is selected. */
+  /** openforge (spec row-help): the longer explanation `?` shows in a popup over the list while this option is selected. */
   help?: string
   onSelect?: (ctx: DialogContext) => void
 }
@@ -479,24 +479,17 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     props.onSelect?.(option)
   }
 
-  // The list stays mounted, hidden, while a row's help shows in its place, so its selection and search are kept; its
-  // scroll position is put back once it shows again.
+  // A row's help is a popup over this one, which stays as it was; the list's keys and search are off until it closes.
   const [help, setHelp] = createSignal<DialogSelectOption<T>>()
-  let helpScroll = 0
   function openHelp() {
     const option = selected()
     if (!option) return
-    helpScroll = scroll?.scrollTop ?? 0
     input?.blur()
     setHelp(() => option)
   }
   function closeHelp() {
     setHelp(undefined)
     if (input && !input.isDestroyed) input.focus()
-    renderer.once(CliRenderEvents.FRAME, () => {
-      if (scroll && !scroll.isDestroyed) scroll.scrollTo(helpScroll)
-    })
-    renderer.requestRender()
   }
 
   Keymap.createLayer(() => {
@@ -899,10 +892,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
   return (
     <>
-      <box visible={help() === undefined}>{list}</box>
+      {list}
       <Show when={help()} keyed>
         {(option) => (
-          <RowHelp
+          <RowHelpPopup
+            under={dialogWidth(dialog.size)}
             title={option.title}
             help={option.help}
             description={option.description ?? (typeof option.detail === "string" ? option.detail : undefined)}

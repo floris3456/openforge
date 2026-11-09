@@ -55,3 +55,24 @@ test("the row shows the service's value and writes the service's global config, 
   await setup.waitForFrame((frame) => /Optimize images\s+off/.test(frame))
   expect(writes).toEqual([{ media: { image: { optimize: true } } }, { media: { image: { optimize: false } } }])
 })
+
+test("without the service's answer the row hides", async () => {
+  const state = { answered: false }
+  await using setup = await createAppFixture({
+    width: 120,
+    height: 40,
+    config: { animations: false, keybinds: { "opencode.settings": "f6" } },
+    fetch: (url) => {
+      if (url.pathname !== "/api/config") return undefined
+      state.answered = true
+      return new Response("unavailable", { status: 503 })
+    },
+  })
+  await setup.ready
+  await setup.waitForFrame((frame) => frame.includes("commands"))
+  setup.mockInput.pressKey("F6")
+  await setup.waitForFrame((frame) => frame.includes("Settings"))
+  await setup.mockInput.typeText("Optimize images")
+  await setup.waitForFrame((frame) => state.answered && frame.includes("Optimize images") && !/Optimize images\s+off/.test(frame))
+  expect(setup.captureCharFrame()).not.toMatch(/Optimize images\s+(off|on)/)
+})

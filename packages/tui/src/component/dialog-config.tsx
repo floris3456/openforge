@@ -606,8 +606,9 @@ export function useShownSettings() {
   const client = useContext(ClientContext)
   const [updateStatus, setUpdateStatus] = createSignal<AutoUpdateStatus>()
   void client?.api.experimental.update.get().then(setUpdateStatus, () => undefined)
-  // The service's own config keys: the last document that sets each, as the service reads them.
-  const [serviceConfig, setServiceConfig] = createSignal<ServiceConfig>()
+  // The service's own config keys: the last document that sets each, as the service reads them. Their rows show while
+  // the read is under way, so the list doesn't move when it answers; null hides them: no service, or no answer.
+  const [serviceConfig, setServiceConfig] = createSignal<ServiceConfig | null | undefined>(client ? undefined : null)
   const readServiceConfig = () =>
     client?.api.config.get().then(
       (entries) =>
@@ -617,7 +618,7 @@ export function useShownSettings() {
               .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.optimize] : []))
               .findLast((value) => value !== undefined) ?? false,
         }),
-      () => undefined,
+      () => setServiceConfig(null),
     )
   void readServiceConfig()
   // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
@@ -639,7 +640,7 @@ export function useShownSettings() {
   // from it, and the cache notices' rows tune what only it sends.
   const shown = (setting: Setting) => {
     if (setting.update) return updateStatus() !== undefined
-    if (setting.service) return serviceConfig() !== undefined
+    if (setting.service) return serviceConfig() !== null
     return (
       setting.category !== "CLIProxyPacer" ||
       (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))

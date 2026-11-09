@@ -545,6 +545,24 @@ $ openforge notify --volume 0.2 --verbose
 - When the connection is lost, it is made again after 1 s, then twice as long each time, up to 30 s. Press Ctrl+C to
   stop; the other machine's side stops when ssh closes.
 
+Keep the player running as a service of this machine with `--install`: a LaunchAgent on macOS, a systemd user unit on
+Linux. It starts at login and again whenever it stops. Give the same ssh target or `--via` command and flags you tested
+it with:
+
+```bash
+$ openforge notify --via "docker exec -i devbox" --install
+```
+
+- openforge must be installed with `install.sh`: the service runs `~/.local/bin/openforge`, and within a minute of an
+  upgrade it restarts on the new release.
+- There is one player per ssh target, `--via` command, or this machine. Installing the same one again replaces it.
+- The service gets the `PATH` of the shell you ran `--install` in, so the `--via` command and `ssh` are found as they
+  were. Its output goes to `~/Library/Logs/openforge/notify-<name>.log` on macOS and
+  `~/.local/state/openforge/notify-<name>.log` on Linux.
+- `--install` checks that the player runs, then prints its name, its file, its log and the command that removes it.
+- `--uninstall` with the same ssh target or `--via` command stops and removes it. `openforge uninstall` removes every
+  installed player.
+
 View all flags.
 
 ```bash

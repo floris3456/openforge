@@ -486,7 +486,11 @@ export const layer = (options?: Options) =>
             catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
           })
           yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
-          yield* requestReload
+          // openforge: reloaded before answering, so a read right after the write gets the written value.
+          yield* reload().pipe(
+            Effect.provide(context),
+            Effect.catchCause((cause) => Effect.logError("failed to reload config", { cause })),
+          )
         },
         (effect) => updateLock.withPermit(effect),
       )

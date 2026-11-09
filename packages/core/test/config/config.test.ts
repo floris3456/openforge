@@ -2291,4 +2291,29 @@ describe("Config", () => {
       }),
     ),
   )
+
+  // openforge: Settings reads the value back as soon as the write answers; a read that still gave the old value made
+  // the row show the old value, so every other press looked like it did nothing.
+  it.live("entries give the written value as soon as update returns", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) => {
+        const global = path.join(tmp.path, "global")
+        const optimize = (entries: readonly Entry[]) => Config.latest(entries, "media")?.image?.optimize
+        return Effect.promise(() => fs.mkdir(global, { recursive: true })).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              const config = yield* Config.Service
+              expect(optimize(yield* config.entries())).toBeUndefined()
+              yield* config.update!({ media: { image: { optimize: true } } })
+              expect(optimize(yield* config.entries())).toBe(true)
+              yield* config.update!({ media: { image: { optimize: false } } })
+              expect(optimize(yield* config.entries())).toBe(false)
+              yield* config.update!({ media: { image: { optimize: true } } })
+              expect(optimize(yield* config.entries())).toBe(true)
+            }).pipe(Effect.provide(testLayer(tmp.path, global))),
+          ),
+        )
+      }),
+    ),
+  )
 })

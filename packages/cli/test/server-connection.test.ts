@@ -85,6 +85,9 @@ test("a reconnect while a release switch runs takes the service the switch start
   const updater = {
     current: () => Effect.succeed(undefined),
     startup: () => Effect.void,
+    policy: () => Effect.succeed("notify" as const),
+    unavailable: () => Effect.succeed(undefined),
+    newer: () => Effect.succeed(undefined),
     upgrade: () => Effect.die(new Error("no upgrade in this test")),
     switched: () => Effect.sync(() => asked.resolve("asked")).pipe(Effect.andThen(Deferred.await(done))),
     // The switch starts after this client connected.

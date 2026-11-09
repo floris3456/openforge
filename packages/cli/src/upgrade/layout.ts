@@ -201,7 +201,13 @@ const unpack = Effect.fnUntraced(function* (archive: string, directory: string) 
   return file
 })
 
-const Bad = Schema.Struct({ reason: Schema.String, log: Schema.String, at: Schema.String })
+const Bad = Schema.Struct({
+  reason: Schema.String,
+  log: Schema.String,
+  at: Schema.String,
+  /** The background service's automatic update tried it (spec auto-update). */
+  automatic: Schema.optional(Schema.Boolean),
+})
 const State = Schema.Struct({ bad: Schema.optional(Schema.Record(Schema.String, Bad)) })
 const decodeState = Schema.decodeUnknownOption(Schema.fromJsonString(State))
 
@@ -215,7 +221,7 @@ export const bad = Effect.fn("upgrade.layout.bad")(function* (layout: Layout) {
 export const markBad = Effect.fn("upgrade.layout.mark-bad")(function* (
   layout: Layout,
   version: string,
-  info: { readonly reason: string; readonly log: string },
+  info: { readonly reason: string; readonly log: string; readonly automatic?: boolean },
 ) {
   yield* writeBad(layout, { ...(yield* bad(layout)), [version]: { ...info, at: new Date().toISOString() } })
 })

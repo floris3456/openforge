@@ -1,5 +1,6 @@
 import { ArtifactEndpoints } from "./artifact.js"
 import { AttentionEndpoints } from "./attention.js"
+import { AutoUpdateEndpoints } from "./auto-update.js"
 import { MediaGetEndpoint } from "./media.js"
 import { PacerEndpoints } from "./pacer.js"
 import { PacerNoticeEndpoints } from "./pacer-notices.js"
@@ -16,4 +17,5 @@ export const ExperimentalGroup = PersistentPtyGroup.add(
   ...AttentionEndpoints,
   ...PacerEndpoints,
   ...PacerNoticeEndpoints,
+  ...AutoUpdateEndpoints,
 )

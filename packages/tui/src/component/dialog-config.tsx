@@ -1,9 +1,10 @@
-import type { PacerSettings } from "@opencode/client"
+import type { AutoUpdateStatus, PacerSettings } from "@opencode/client"
 import { Attention } from "@opencode/schema/attention"
 import { Schema } from "effect"
 import { createEffect, createMemo, createSignal, on } from "solid-js"
 import { attentionEventDefaults, useConfig, useNewDesigns, type AttentionEvent } from "../config"
 import { useOptionalAttention } from "../context/attention"
+import { useClient } from "../context/client"
 import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
 import { useDialog, type DialogContext } from "../ui/dialog"
@@ -35,6 +36,11 @@ type Setting = {
   pacer?: keyof PacerSettings
   /** openforge: a sound row of this event, which plays the sound it moves to once, as a preview. */
   preview?: AttentionEvent
+  /**
+   * openforge (spec auto-update): the service's automatic updates, the `update` key of its global config, instead of
+   * the TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
+   */
+  update?: true
 }
 
 // openforge (notifications step 2): each event's notification switch and sound, and Subagent done's levels.
@@ -472,6 +478,18 @@ export const settings: Setting[] = [
     keywords: ["cache miss", "notices", "dismiss", "every tui"],
   },
   {
+    title: "Automatic updates",
+    category: "Updates",
+    path: ["update"],
+    update: true,
+    description:
+      "Whether the background service installs a new release by itself and switches to it, at the end of the running steps; it checks every 15 minutes",
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["upgrade", "update", "release", "auto update", "version"],
+  },
+  {
     title: "Window title",
     category: "Terminal",
     path: ["terminal", "title"],
@@ -559,6 +577,10 @@ export function settingID(setting: Setting) {
  */
 export function useShownSettings() {
   const pacer = usePacer()
+  const client = useClient()
+  // Automatic updates are the service's: read once when Settings opens.
+  const [updateStatus, setUpdateStatus] = createSignal<AutoUpdateStatus>()
+  void client.api.experimental.update.get().then(setUpdateStatus, () => undefined)
   // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
@@ -576,10 +598,14 @@ export function useShownSettings() {
   )
   // Settings › CLIProxyPacer shows only while CLIProxyPacer answers, as its other screens do: its own settings are read
   // from it, and the cache notices' rows tune what only it sends.
-  const shown = (setting: Setting) =>
-    setting.category !== "CLIProxyPacer" ||
-    (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
-  return { shown, pacerValues, setPacerValues }
+  const shown = (setting: Setting) => {
+    if (setting.update) return updateStatus() !== undefined
+    return (
+      setting.category !== "CLIProxyPacer" ||
+      (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
+    )
+  }
+  return { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus }
 }
 
 export function DialogConfig(props: { current?: string }) {
@@ -596,13 +622,15 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const { shown, pacerValues, setPacerValues } = useShownSettings()
+  const client = useClient()
+  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus } = useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
 
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
+    if (setting.update) return updateStatus()?.enabled ?? setting.default
     const current = setting.path.reduce<unknown>((result, key) => {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
@@ -615,6 +643,7 @@ export function DialogConfig(props: { current?: string }) {
       ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
       : setting.values
   const display = (setting: Setting) => {
+    if (setting.update && updateStatus()?.unavailable) return "unavailable"
     const current = value(setting)
     if (setting.format) return setting.format(current)
     const index = setting.values?.indexOf(current)
@@ -631,7 +660,7 @@ export function DialogConfig(props: { current?: string }) {
         display(setting)
       ),
       footerOverhang: newDesigns() ? 2 : undefined,
-      detail: newDesigns() ? setting.description : undefined,
+      detail: newDesigns() ? ((setting.update && updateStatus()?.unavailable) || setting.description) : undefined,
       disabled: !shown(setting),
       value: index,
     })),
@@ -641,6 +670,9 @@ export function DialogConfig(props: { current?: string }) {
     if (saving()) return
     const setting = settings[index]
     if (!shown(setting)) return
+    // Where it can't update, the row says why instead of changing.
+    const unavailable = setting.update ? updateStatus()?.unavailable : undefined
+    if (unavailable) return toast.show({ variant: "info", message: unavailable })
     const current = value(setting)
     const choices = values(setting)
     const next = choices
@@ -649,6 +681,14 @@ export function DialogConfig(props: { current?: string }) {
     if (next === current) return
     if (setting.preview && Schema.is(Attention.SoundID)(next)) preview(setting.preview, next)
     setSaving(true)
+    if (setting.update) {
+      await client.api.experimental.update
+        .set({ enabled: next === true })
+        .then(setUpdateStatus)
+        .catch(toast.error)
+        .finally(() => setSaving(false))
+      return
+    }
     if (setting.pacer) {
       await pacer!
         // One of the row's own values, which are the setting's.

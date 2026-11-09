@@ -38,6 +38,7 @@ import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
+import { AutoUpdate } from "./auto-update"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Schedule } from "@opencode/core/schedule"
 import { PluginUpdate } from "@opencode/core/plugin/update"
@@ -99,6 +100,7 @@ const applicationServiceNodes = [
   PacerHttp.node,
   PacerModels.node,
   PacerNotices.node,
+  AutoUpdate.node,
 ] as const
 const applicationServices = LayerNode.group(applicationServiceNodes)
 

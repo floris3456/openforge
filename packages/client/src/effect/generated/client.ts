@@ -295,6 +295,9 @@ import type {
   ExperimentalPacerNoticesListOutput,
   ExperimentalPacerNoticesDismissInput,
   ExperimentalPacerNoticesDismissOutput,
+  ExperimentalUpdateGetOutput,
+  ExperimentalUpdateSetInput,
+  ExperimentalUpdateSetOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1907,6 +1910,22 @@ const EndpointExperimentalPacerNoticesDismiss =
       ),
     )
 
+const EndpointExperimentalUpdateGet = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalUpdateGetOutput>()(
+    raw["update.get"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalUpdateSet = (raw: RawClient["server.experimental"]) => (input: ExperimentalUpdateSetInput) =>
+  preserveEffect<ExperimentalUpdateSetOutput>()(
+    raw["update.set"]({ payload: { enabled: input["enabled"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1960,6 +1979,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     settings: { get: EndpointExperimentalPacerSettingsGet(raw), update: EndpointExperimentalPacerSettingsUpdate(raw) },
     notices: { list: EndpointExperimentalPacerNoticesList(raw), dismiss: EndpointExperimentalPacerNoticesDismiss(raw) },
   },
+  update: { get: EndpointExperimentalUpdateGet(raw), set: EndpointExperimentalUpdateSet(raw) },
 })
 
 const EndpointShellList = (raw: RawClient["server.shell"]) => (input?: ShellListInput) =>

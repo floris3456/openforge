@@ -82,6 +82,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDescription("Use the database copy made when that version was left instead of the current database"),
           Flag.withDefault(false),
         ),
+        // Run by the background service's automatic update (spec auto-update).
+        automatic: Flag.Boolean("automatic").pipe(Flag.withDefault(false), Flag.withHidden),
       },
     }),
     Spec.make("uninstall", {

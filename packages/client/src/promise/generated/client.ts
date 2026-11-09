@@ -297,6 +297,9 @@ import type {
   ExperimentalPacerNoticesListOutput,
   ExperimentalPacerNoticesDismissInput,
   ExperimentalPacerNoticesDismissOutput,
+  ExperimentalUpdateGetOutput,
+  ExperimentalUpdateSetInput,
+  ExperimentalUpdateSetOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1948,6 +1951,31 @@ export function make(options: ClientOptions) {
               requestOptions,
             ).then((value) => value.data),
         },
+      },
+      update: {
+        get: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalUpdateGetOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/update`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        set: (input: ExperimentalUpdateSetInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalUpdateSetOutput }>(
+            {
+              method: "PUT",
+              path: `/api/experimental/update`,
+              body: { enabled: input["enabled"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
       },
       shell: {
         watch: (

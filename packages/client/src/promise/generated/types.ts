@@ -348,6 +348,8 @@ export type SessionStatus =
     }
   | { type: "busy" }
 
+export type AutoUpdateFailure = { version: string; message: string; at: number }
+
 export type PersistentPtyHandoff = { directory: string; instanceID: string; ticket: string; expiresAt: number }
 
 export type ScheduleID = string
@@ -1065,6 +1067,8 @@ export type PacerChat = {
   size?: PacerSize
   asOf: number
 }
+
+export type AutoUpdateStatus = { enabled: boolean; unavailable?: string; failure?: AutoUpdateFailure }
 
 export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
 
@@ -2268,6 +2272,15 @@ export type InstallationUpdateAvailable = {
   data: { version: string }
 }
 
+export type InstallationUpdateFailed = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "installation.update-failed"
+  location?: LocationRef
+  data: { failure: AutoUpdateFailure }
+}
+
 export type ServicePausing = {
   id: EventID
   created: number
@@ -3242,6 +3255,7 @@ export type V2Event =
   | TuiSessionSelect
   | InstallationUpdated
   | InstallationUpdateAvailable
+  | InstallationUpdateFailed
   | ServicePausing
   | ServicePaused
   | ServicePauseExpired
@@ -4744,6 +4758,7 @@ export type EventSubscribeInput = {
         | "tui.session.select"
         | "installation.updated"
         | "installation.update-available"
+        | "installation.update-failed"
         | "service.pausing"
         | "service.paused"
         | "service.pause.expired"
@@ -5146,6 +5161,12 @@ export type ExperimentalPacerNoticesListOutput = { data: Array<PacerNotice> }["d
 export type ExperimentalPacerNoticesDismissInput = { readonly requestID: string }
 
 export type ExperimentalPacerNoticesDismissOutput = { data: true }["data"]
+
+export type ExperimentalUpdateGetOutput = { data: AutoUpdateStatus }["data"]
+
+export type ExperimentalUpdateSetInput = { readonly enabled: boolean }
+
+export type ExperimentalUpdateSetOutput = { data: AutoUpdateStatus }["data"]
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

@@ -12,7 +12,7 @@ import type { SessionRunnerModel } from "../session/runner/model.js"
 import type { SessionSchema } from "../session/schema.js"
 import { BlobRefTable } from "../session/sql.js"
 import { ImageFit } from "./fit.js"
-import { ImageLine } from "./line.js"
+import { ImageLine } from "@opencode/util/image-line"
 import { ImageTable } from "./sql.js"
 
 // A chat's image bank (spec images): while Settings › Session "Optimize images" is on and the chat's model has an entry

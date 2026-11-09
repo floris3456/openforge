@@ -1,4 +1,4 @@
-import { ImageLine } from "@opencode/core/image/line"
+import { ImageLine } from "@opencode/util/image-line"
 import {
   mediaHashFromUri,
   type PromptAttachment,

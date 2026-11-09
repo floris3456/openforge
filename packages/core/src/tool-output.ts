@@ -6,9 +6,9 @@ import { Context, Duration, Effect, Layer, Schedule } from "effect"
 import { makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { ImageLine } from "@opencode/util/image-line"
 import { Identifier } from "@opencode/schema/identifier"
 import { FileRetention } from "./file-retention.js"
-import { ImageLine } from "./image/line.js"
 import { State } from "./state.js"
 
 export const MAX_LINES = 2_000

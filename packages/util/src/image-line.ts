@@ -1,7 +1,8 @@
-export * as ImageLine from "./line.js"
+export * as ImageLine from "./image-line.js"
 
 // The line before an optimized image (spec images), fixed on arrival. Its own module, so places that only need to
-// recognize it, such as the runner's cut of long tool output, don't load the bank.
+// recognize it, such as the runner's cut of long tool output, don't load the bank; in util, so the TUI's mini view,
+// which may not load core (packages/cli/test/import-boundaries.test.ts), recognizes it too (spec image-view).
 
 /** The line for image `number`, its name, original size and the size it is shown at. */
 export const make = (

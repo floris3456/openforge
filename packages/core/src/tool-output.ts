@@ -8,6 +8,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Identifier } from "@opencode/schema/identifier"
 import { FileRetention } from "./file-retention.js"
+import { ImageLine } from "./image/line.js"
 import { State } from "./state.js"
 
 export const MAX_LINES = 2_000
@@ -69,7 +70,10 @@ const layer = Layer.effect(
     const truncate = Effect.fnUntraced(function* (result: Result) {
       if (result.metadata?.truncated !== undefined) return result
       const content = result.content
-      const text = content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n")
+      // openforge: an image's line stays with its image, as files do, and doesn't count (ImageLine).
+      const text = content
+        .flatMap((item) => (item.type === "text" && !ImageLine.is(item.text) ? [item.text] : []))
+        .join("\n")
       const limits = state.get()
       const lines = text.split("\n")
       if (text.endsWith("\n")) lines.pop()
@@ -95,7 +99,7 @@ const layer = Layer.effect(
       let seenText = false
       let marked = false
       for (const item of content) {
-        if (item.type === "file") {
+        if (item.type === "file" || ImageLine.is(item.text)) {
           bounded.push(item)
           continue
         }

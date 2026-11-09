@@ -3,7 +3,7 @@ export * as Config from "./config.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
 import { isDeepStrictEqual } from "node:util"
-import { applyEdits, modify, type ParseError, parse } from "jsonc-parser"
+import { applyEdits, type JSONPath, modify, type ParseError, parse } from "jsonc-parser"
 import { Context, Effect, FiberMap, Layer, Option, PubSub, Ref, Schema, Semaphore, Stream } from "effect"
 import { Directory, Document, Info, type Patch, type Entry, Event } from "@opencode/schema/config"
 import { Credential } from "./credential.js"
@@ -469,13 +469,19 @@ export const layer = (options?: Options) =>
           const filepath =
             (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
+          const edits: Array<[JSONPath, unknown]> = [
+            ...("shell" in patch ? [[["shell"], patch.shell ?? undefined] as [JSONPath, unknown]] : []),
+            ...(patch.media ? [[["media", "image", "optimize"], patch.media.image.optimize] as [JSONPath, unknown]] : []),
+          ]
           const updated = yield* Effect.try({
             try: () =>
-              applyEdits(
+              edits.reduce(
+                (current, [key, value]) =>
+                  applyEdits(
+                    current,
+                    modify(current, key, value, { formattingOptions: { tabSize: 2, insertSpaces: true } }),
+                  ),
                 text,
-                modify(text, ["shell"], patch.shell ?? undefined, {
-                  formattingOptions: { tabSize: 2, insertSpaces: true },
-                }),
               ),
             catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
           })

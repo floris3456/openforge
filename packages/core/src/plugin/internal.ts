@@ -79,6 +79,7 @@ import { EditTool } from "../tool/plugin/edit.js"
 import { GlobTool } from "../tool/plugin/glob.js"
 import { GrepTool } from "../tool/plugin/grep.js"
 import { ImageGenerateTool } from "../tool/plugin/image-generate.js"
+import { ImageTool } from "../tool/plugin/image.js"
 import { McpResourceTools } from "../tool/plugin/mcp-resource.js"
 import { OpenCodeTools } from "../tool/plugin/opencode.js"
 import { PacerWebTools } from "../tool/plugin/pacer-web.js"
@@ -263,6 +264,7 @@ const pre = [
   GlobTool.Plugin,
   GrepTool.Plugin,
   ImageGenerateTool.Plugin,
+  ImageTool.Plugin,
   OpenCodeTools.Plugin,
   McpResourceTools.Plugin,
   QuestionTool.Plugin,

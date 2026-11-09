@@ -150,6 +150,28 @@ If the image resizer is unavailable, OpenCode passes the original image through
 unchanged. Image settings are therefore processing limits, not an upload or
 security boundary.
 
+## Optimized images
+
+With **Settings › Session › Optimize images** on (`"media": { "image": { "optimize": true } }` in the global config,
+off by default), a chat whose model has image limits on record handles images its own way; for now that is
+`claude-opus-5-5` through Anthropic's Messages API, from any provider. Every other chat keeps the processing above.
+
+- **Fitted once, on arrival.** A pasted or attached image, and an image in a tool's result, is converted on this
+  machine to the largest size the model reads without shrinking it itself (for `claude-opus-5-5`: long edge 2,576 px
+  and 4,784 visual tokens, ⌈w/28⌉ × ⌈h/28⌉; never enlarged), as WebP at the highest quality within 120 Base64 bytes
+  per visual token, or kept as it came when that is smaller. The same image always gives the same bytes.
+- **Numbered, original kept.** Each image gets a number in its chat and one line before it, such as
+  `[Image 7: photo.jpg, 4000×3000, shown at 2212×1659; see it again or zoom with image]`. Its full-resolution
+  original is kept with the chat.
+- **The `image` tool** (in Code Mode): `image({ id })` shows an image again, also after a compaction;
+  `image({ id, zoom: { x, y, width, height } })` cuts a region, in pixels of the image as shown, from the original and
+  shows it at its own resolution up to the model's limits; `image({})` lists the chat's images. Each result says the
+  scale it is shown at.
+- **Never changed once sent.** Images are not cut or replaced in later requests, so the prompt cache keeps working.
+  Each request carries at most 600 images and 120 MB of them. When what was sent leaves less room than one more
+  full-size image, the chat says once: "The next image will compact this chat first." An image that would not fit
+  then compacts the chat first, and goes out after the summary.
+
 ## Limits
 
 | Limit                         | Value or behavior                                             | Example                                      |

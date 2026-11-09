@@ -12,6 +12,7 @@ import { SessionMessage } from "./message.js"
 import { SessionMessageUpdater } from "./message-updater.js"
 import { SessionInbox } from "./inbox.js"
 import { InstructionState } from "./instruction-state.js"
+import { ImageBank } from "../image/bank.js"
 import { SessionBlob } from "./blob.js"
 import { SessionInboxTable, SessionMessageTable, SessionPartTable, SessionTable, type SessionPartData } from "./sql.js"
 import { SessionStored } from "./stored.js"
@@ -252,6 +253,13 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
     )
 
     cursor = rows.at(-1)!.seq
+    // openforge: the fork's image bank, for the images these rows name (ImageBank).
+    yield* ImageBank.fork(
+      db,
+      event.data.parentID,
+      event.data.sessionID,
+      values.map((value) => value.data),
+    )
   }
   if (copiedSeq !== undefined) yield* Bus.reserveSequence(db, event.data.sessionID, copiedSeq)
   if (event.data.instructions)

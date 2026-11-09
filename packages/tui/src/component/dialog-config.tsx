@@ -41,6 +41,13 @@ type Setting = {
    * the TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
    */
   update?: true
+  /**
+   * openforge (spec images): a key of the service's global config, which the service reads, instead of the
+   * TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
+   */
+  service?: true
+  /** openforge: the longer explanation a row's help shows. */
+  help?: string
 }
 
 // openforge (notifications step 2): each event's notification switch and sound, and Subagent done's levels.
@@ -184,6 +191,23 @@ export const settings: Setting[] = [
     values: [false, true],
     labels: ["off", "on"],
     keywords: ["attachments", "images", "tool output"],
+  },
+  {
+    title: "Optimize images",
+    category: "Session",
+    path: ["media", "image", "optimize"],
+    service: true,
+    description: "Fit images to the model, keep the originals, and let the model zoom and recall them",
+    help: [
+      "Every image that reaches the chat (pasted, attached, or read by a tool) is converted once, on this machine, to the largest size the model reads without shrinking it itself, as WebP at the highest quality that keeps a full context of images within one request. The full-resolution original is kept with the chat.",
+      "Each image is numbered, with one line before it saying its name, original size and the size it is shown at. The model's image tool lists the chat's images, shows one again (also after a compaction), or zooms into a region of the original at full detail.",
+      "Images are never changed or cut once sent, so the model's prompt cache keeps working. When the images sent leave room for less than one more full-size image, the chat says so once; the next image that would not fit compacts the chat first, and the image goes out after the summary.",
+      "For now this works only for claude-opus-5-5 (through Anthropic's Messages API, from any provider); other models keep today's handling. Kept in the service's global config.",
+    ].join("\n\n"),
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["images", "optimize", "zoom", "screenshots", "vision", "originals"],
   },
   {
     title: "TPS",
@@ -582,6 +606,21 @@ export function useShownSettings() {
   const client = useContext(ClientContext)
   const [updateStatus, setUpdateStatus] = createSignal<AutoUpdateStatus>()
   void client?.api.experimental.update.get().then(setUpdateStatus, () => undefined)
+  // The service's own config keys: the last document that sets each, as the service reads them. Their rows show while
+  // the read is under way, so the list doesn't move when it answers; null hides them: no service, or no answer.
+  const [serviceConfig, setServiceConfig] = createSignal<ServiceConfig | null | undefined>(client ? undefined : null)
+  const readServiceConfig = () =>
+    client?.api.config.get().then(
+      (entries) =>
+        setServiceConfig({
+          optimize:
+            entries
+              .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.optimize] : []))
+              .findLast((value) => value !== undefined) ?? false,
+        }),
+      () => setServiceConfig(null),
+    )
+  void readServiceConfig()
   // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
@@ -601,13 +640,25 @@ export function useShownSettings() {
   // from it, and the cache notices' rows tune what only it sends.
   const shown = (setting: Setting) => {
     if (setting.update) return updateStatus() !== undefined
+    if (setting.service) return serviceConfig() !== null
     return (
       setting.category !== "CLIProxyPacer" ||
       (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
     )
   }
-  return { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client }
+  return {
+    shown,
+    pacerValues,
+    setPacerValues,
+    updateStatus,
+    setUpdateStatus,
+    client,
+    serviceConfig,
+    readServiceConfig,
+  }
 }
+
+type ServiceConfig = { readonly optimize: boolean }
 
 export function DialogConfig(props: { current?: string }) {
   const config = useConfig()
@@ -623,7 +674,8 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client } = useShownSettings()
+  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client, serviceConfig, readServiceConfig } =
+    useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
@@ -631,6 +683,7 @@ export function DialogConfig(props: { current?: string }) {
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
+    if (setting.service) return serviceConfig()?.optimize ?? setting.default
     const current = setting.path.reduce<unknown>((result, key) => {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
@@ -685,6 +738,14 @@ export function DialogConfig(props: { current?: string }) {
       await client!.api.experimental.update
         .set({ enabled: next === true })
         .then(setUpdateStatus)
+        .catch(toast.error)
+        .finally(() => setSaving(false))
+      return
+    }
+    if (setting.service) {
+      await client!.api.experimental.config
+        .update({ media: { image: { optimize: next === true } } })
+        .then(readServiceConfig)
         .catch(toast.error)
         .finally(() => setSaving(false))
       return

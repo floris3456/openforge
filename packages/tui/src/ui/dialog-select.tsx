@@ -22,6 +22,7 @@ import { Locale } from "../util/locale"
 import { getScrollAcceleration } from "../util/scroll"
 import { useConfig, useCursorStyle, useNewDesigns } from "../config"
 import { moveSelection, reconcileSelection } from "./select-controller"
+import { RowHelp } from "./row-help"
 
 export interface DialogSelectProps<T> {
   title: string
@@ -119,6 +120,8 @@ export interface DialogSelectOption<T = any> {
    * once it is removed.
    */
   detail?: string | (() => JSX.Element)
+  /** openforge (spec row-help): the longer explanation `?` shows in the dialog's place while this option is selected. */
+  help?: string
   onSelect?: (ctx: DialogContext) => void
 }
 
@@ -201,11 +204,17 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
     return labels
   })
+  const helpHint = createMemo((): FooterHint[] => {
+    const label = shortcuts.get("row.help")
+    if (!label || !props.options.some((option) => option.help)) return []
+    return [{ title: "help", label }]
+  })
   const visibleActions = createMemo(() => [
     ...shownActions()
       .map((item) => ({ ...item, label: actionLabels().get(item.command) ?? "" }))
       .filter((item) => item.label),
     ...(props.footerHints ?? []),
+    ...helpHint(),
   ])
 
   const filtered = createMemo(() => {
@@ -470,11 +479,32 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     props.onSelect?.(option)
   }
 
+  // The list stays mounted, hidden, while a row's help shows in its place, so its selection and search are kept; its
+  // scroll position is put back once it shows again.
+  const [help, setHelp] = createSignal<DialogSelectOption<T>>()
+  let helpScroll = 0
+  function openHelp() {
+    const option = selected()
+    if (!option) return
+    helpScroll = scroll?.scrollTop ?? 0
+    input?.blur()
+    setHelp(() => option)
+  }
+  function closeHelp() {
+    setHelp(undefined)
+    if (input && !input.isDestroyed) input.focus()
+    renderer.once(CliRenderEvents.FRAME, () => {
+      if (scroll && !scroll.isDestroyed) scroll.scrollTo(helpScroll)
+    })
+    renderer.requestRender()
+  }
+
   Keymap.createLayer(() => {
     const visible = shownActions()
 
     return {
       mode: "modal",
+      enabled: () => help() === undefined,
       commands: [
         {
           id: "dialog.select.prev",
@@ -531,6 +561,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           title: "Select item",
           group: "Dialog",
           run: submit,
+        },
+        {
+          id: "row.help",
+          title: "Show help for the selected row",
+          group: "Dialog",
+          run: openHelp,
         },
         ...visible.map((item) => ({
           id: item.command,
@@ -689,7 +725,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     />
   )
 
-  return (
+  const list = (
     <DialogLayout
       footerGap={props.footerGap}
       header={
@@ -859,6 +895,22 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
         </Show>
       </DialogBleed>
     </DialogLayout>
+  )
+
+  return (
+    <>
+      <box visible={help() === undefined}>{list}</box>
+      <Show when={help()} keyed>
+        {(option) => (
+          <RowHelp
+            title={option.title}
+            help={option.help}
+            description={option.description ?? (typeof option.detail === "string" ? option.detail : undefined)}
+            onBack={closeHelp}
+          />
+        )}
+      </Show>
+    </>
   )
 }
 

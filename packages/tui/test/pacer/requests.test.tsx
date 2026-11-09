@@ -667,6 +667,28 @@ describe("CPP going away and coming back", () => {
   })
 })
 
+// Spec row-help: `?` over a full-screen list opens the selected row's help as a popup; Esc returns to the same row.
+describe("a row's help", () => {
+  test("? opens the selected request's help as a popup over the screen; Esc and ? return to the same row", async () => {
+    await using setup = await requestsTab({ requests: [request(0), miss(1), request(2)] })
+    await clickCacheItem(setup)
+    const list = await setup.frame((frame) => rowsOf(frame).length > 0)
+    expect(list).toMatch(/help \?/)
+    setup.app.mockInput.pressArrow("down")
+    await setup.frame(() => selectedTime(setup) === time(1))
+    for (const back of ["escape", "?"] as const) {
+      setup.app.mockInput.pressKey("?")
+      const help = await setup.frame((frame) => frame.includes("Each row is one request"))
+      expect(help).toContain(`${time(1)} · step`)
+      expect(help).toContain("back esc/?")
+      if (back === "escape") setup.app.mockInput.pressEscape()
+      else setup.app.mockInput.pressKey("?")
+      await setup.frame((frame) => !frame.includes("Each row is one request") && rowsOf(frame).length > 0)
+      expect(selectedTime(setup)).toBe(time(1))
+    }
+  })
+})
+
 describe("empty and hidden", () => {
   test("No requests yet, and No cache misses yet", async () => {
     await using setup = await requestsTab({ requests: [] })

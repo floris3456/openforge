@@ -362,6 +362,8 @@ export interface DialogSelectOption<Value> {
   readonly title: string
   readonly value: Value
   readonly description?: string
+  /** The longer explanation `?` shows for the selected row. */
+  readonly help?: string
   readonly footer?: string
   readonly category?: string
   readonly disabled?: boolean

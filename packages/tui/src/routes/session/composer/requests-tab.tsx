@@ -15,10 +15,13 @@ import {
   promptlessLines,
   requestHeader,
   requestLayout,
+  requestHelp,
   requestRow,
   requestTone,
   type RequestLayout,
 } from "../../../pacer/format"
+import { useDialog } from "../../../ui/dialog"
+import { openRowHelp } from "../../../ui/row-help"
 import { useToast } from "../../../ui/toast"
 import { errorMessage } from "../../../util/error"
 import { context as sessionContext } from "../render-context"
@@ -48,6 +51,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
   const composer = useComposerTab()
   const theme = useTheme()
   const toast = useToast()
+  const dialog = useDialog()
   const navigate = useRoute().navigate
   const shortcuts = Keymap.useShortcuts()
   const dimensions = useTerminalDimensions()
@@ -116,6 +120,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
               label: `show ${filter.misses ? "all" : "misses"}`,
               shortcut: shortcuts.get("composer.request.toggle-misses") ?? "",
             },
+            ...(items().length ? [{ label: "help", shortcut: shortcuts.get("row.help") ?? "" }] : []),
           ]
         },
       }),
@@ -285,6 +290,15 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
         run: () => moveTo(selectedIndex() + LIST_ROWS),
       },
       { id: "composer.request.select", title: "Go to where the request ended", group: "Composer", run: go },
+      {
+        id: "row.help",
+        title: "Show help for the request",
+        group: "Composer",
+        run() {
+          const request = selected()
+          if (request) openRowHelp(dialog, { title: "Request", help: requestHelp(request) })
+        },
+      },
       {
         id: "composer.request.toggle-misses",
         title: "Toggle cache misses",

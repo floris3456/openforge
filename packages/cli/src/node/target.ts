@@ -1,3 +1,5 @@
+import { Attention } from "@opencode/schema/attention"
+
 const platforms = ["darwin", "linux", "win32"] as const
 
 export type NodeTarget = ReturnType<typeof nodeTarget>
@@ -33,10 +35,5 @@ export function nodeTarget(platform: string, arch: string) {
 export const photonWasmAsset = "@silvia-odwyer/photon-node/photon_rs_bg.wasm"
 export const nodeExecArgv = ["--experimental-ffi", "--use-system-ca", "--disable-warning=ExperimentalWarning"] as const
 
-export const attentionSoundAssets = [
-  "@opencode/ui/audio/bip-bop-01.mp3",
-  "@opencode/ui/audio/bip-bop-03.mp3",
-  "@opencode/ui/audio/staplebops-06.mp3",
-  "@opencode/ui/audio/nope-03.mp3",
-  "@opencode/ui/audio/yup-01.mp3",
-] as const
+// Every built-in sound: a TUI or a player plays any of them, by its ID.
+export const attentionSoundAssets = Attention.sounds.map((id) => `@opencode/ui/audio/${id}.mp3` as const)

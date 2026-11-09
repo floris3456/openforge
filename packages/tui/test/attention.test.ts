@@ -4,9 +4,9 @@ import type { Attention } from "@opencode/schema/attention"
 import { Product } from "@opencode/schema/product"
 import { SessionID } from "@opencode/schema/session-id"
 import type { AttentionNotifyOptions } from "@opencode/plugin/tui/context"
-import { BUILTIN_SOUNDS, createTuiAttention } from "../src/attention"
+import { BUILTIN_SOUNDS, SOUND_FILES, createTuiAttention, type AttentionRequest } from "../src/attention"
 import { createReport, noPlayers } from "../src/attention-report"
-import type { Resolved } from "../src/config"
+import { resolve, type Resolved } from "../src/config"
 
 // openforge: the TUI still decides what to notify, tells its service of each occurrence, and leaves to the
 // service's players (`openforge notify`) what they take over, so nothing comes twice.
@@ -39,21 +39,16 @@ function setup(
     },
     config: {
       attention: {
-        notifications: true,
-        sound: true,
-        volume: 0.4,
-        sound_pack: "opencode.default",
-        sounds: {},
-        protocol: "auto",
+        ...resolve({}, { terminalSuspend: true, environment: {} }).attention,
         ...options.attention,
       },
     },
     audio: {
       // A sound is its file's index here; the TUI only hands it back to play().
-      loadSoundFile: async (file) => Object.values(BUILTIN_SOUNDS).concat(file).indexOf(file),
+      loadSoundFile: async (file) => Object.values(SOUND_FILES).concat(file).indexOf(file),
       play: (sound, playOptions) => {
         played.push({
-          file: Object.values(BUILTIN_SOUNDS).concat("custom")[sound] ?? "custom",
+          file: Object.values(SOUND_FILES).concat("custom")[sound] ?? "custom",
           volume: playOptions?.volume,
         })
         return 1
@@ -245,5 +240,55 @@ describe("the report", () => {
     const started = performance.now()
     expect(await silent(occurrence)).toEqual(noPlayers)
     expect(performance.now() - started).toBeGreaterThanOrEqual(900)
+  })
+})
+
+// openforge (notifications step 2): the TUI's own events choose their sounds; a plugin's request plays its kind's.
+describe("an event's sound", () => {
+  const event = (sound: AttentionRequest["sound"]): AttentionRequest => ({
+    kind: "reply",
+    sessionID,
+    title: "Fix the build",
+    message: "Session replied",
+    notification: "blurred",
+    sound,
+  })
+
+  test("a built-in sound goes to the service by its ID, and plays here without a player", async () => {
+    const tui = setup()
+    await tui.attention.raise(event({ when: "always", id: "alert-07" }))
+    expect(tui.reported[0].sound).toEqual({ name: "reply", id: "alert-07", file: undefined })
+    expect(tui.played).toEqual([{ file: SOUND_FILES["alert-07"], volume: 0.4 }])
+  })
+
+  test("a file goes as a file", async () => {
+    const tui = setup()
+    await tui.attention.raise(event({ when: "always", file: "/sounds/mine.wav" }))
+    expect(tui.reported[0].sound).toEqual({ name: "reply", id: undefined, file: "/sounds/mine.wav" })
+  })
+
+  test("no sound: none reported and none played; the notification still shows", async () => {
+    const tui = setup()
+    expect(await tui.attention.raise(event(false))).toEqual({ ok: true, notification: true, sound: false })
+    expect(tui.reported[0]).toMatchObject({ kind: "reply", notify: true, sound: undefined })
+    expect(tui.played).toEqual([])
+  })
+
+  test("the machine's switches still win: Sounds off plays no event's sound", async () => {
+    const tui = setup({ attention: { sound: false } })
+    await tui.attention.raise(event({ when: "always", id: "alert-07" }))
+    expect(tui.reported[0].sound).toBeUndefined()
+  })
+
+  test("a plugin's request plays its kind's built-in sound; a permission's is bip-bop-03", async () => {
+    const tui = setup()
+    await tui.attention.notify({ message: "Permission needs input", sound: { name: "permission" }, sessionID })
+    expect(tui.played).toEqual([{ file: SOUND_FILES["bip-bop-03"], volume: 0.4 }])
+    expect(BUILTIN_SOUNDS.permission).toBe(SOUND_FILES["bip-bop-03"])
+  })
+
+  test("every built-in sound is in this build", () => {
+    expect(Object.keys(SOUND_FILES)).toHaveLength(45)
+    for (const file of Object.values(SOUND_FILES)) expect(Bun.file(file).size).toBeGreaterThan(0)
   })
 })

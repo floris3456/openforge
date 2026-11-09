@@ -1,7 +1,7 @@
 export * as Speaker from "./speaker"
 
 import { Audio, type AudioSound } from "@opentui/core"
-import type { Attention } from "@opencode/schema/attention"
+import { Attention } from "@opencode/schema/attention"
 import { SoundOutput } from "@opencode/tui/sound-output"
 import { errorMessage } from "../util/error"
 
@@ -74,21 +74,23 @@ export function command(words: readonly string[]): Speaker {
 }
 
 /**
- * Plays a sound the TUI named: its built-in sound from this install, or the custom file it set, which the source gets
- * (from the relay, or from disk on this machine). A custom file that can't be had plays the built-in sound instead.
- * Answers what was played.
+ * Plays a sound the TUI named: the custom file it set, which the source gets (from the relay, or from disk on this
+ * machine), else the built-in sound it named by ID, else its kind's, both from this install. A custom file that can't
+ * be had plays the built-in sound instead. Answers what was played.
  */
 export function player(input: {
   readonly speaker: Speaker
   readonly volume: number
-  readonly builtin: (name: Attention.Kind) => string
+  /** A built-in sound's file. */
+  readonly builtin: (id: Attention.SoundID) => string
   readonly custom: (file: string) => Promise<Uint8Array>
 }) {
-  const builtin = (name: Attention.Kind) =>
-    input.speaker.play(name, () => Bun.file(input.builtin(name)).bytes(), input.volume).then(() => name)
+  const play = (id: Attention.SoundID) =>
+    input.speaker.play(id, () => Bun.file(input.builtin(id)).bytes(), input.volume).then(() => id)
   return async (sound: Attention.Sound) => {
+    const builtin = () => play(sound.id ?? Attention.kindSounds[sound.name])
     const file = sound.file
-    if (file === undefined) return builtin(sound.name)
+    if (file === undefined) return builtin()
     const custom = await input.speaker
       .play(`file:${file}`, () => input.custom(file), input.volume)
       .then(
@@ -96,6 +98,6 @@ export function player(input: {
         (error: unknown) => errorMessage(error),
       )
     if (custom === undefined) return file
-    return builtin(sound.name).then((name) => `${name} (built-in; ${file} did not play: ${custom})`)
+    return builtin().then((id) => `${id} (built-in; ${file} did not play: ${custom})`)
   }
 }

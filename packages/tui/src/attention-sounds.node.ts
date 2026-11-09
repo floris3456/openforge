@@ -1,5 +1,6 @@
 import { createRequire } from "node:module"
 import path from "node:path"
+import { Attention } from "@opencode/schema/attention"
 
 const require = createRequire(import.meta.url)
 const resolve = (name: string) => {
@@ -9,8 +10,7 @@ const resolve = (name: string) => {
     : require.resolve(key)
 }
 
-export const defaultSoundPath = resolve("bip-bop-01.mp3")
-export const questionSoundPath = resolve("bip-bop-03.mp3")
-export const permissionSoundPath = resolve("staplebops-06.mp3")
-export const errorSoundPath = resolve("nope-03.mp3")
-export const subagentDoneSoundPath = resolve("yup-01.mp3")
+export const soundFiles = Object.fromEntries(Attention.sounds.map((id) => [id, resolve(`${id}.mp3`)])) as Record<
+  Attention.SoundID,
+  string
+>

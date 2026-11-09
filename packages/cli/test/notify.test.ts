@@ -373,9 +373,42 @@ describe("player", () => {
       custom: () => Promise.reject(new Error("mac did not send it")),
     })
     expect(await play({ name: "question", file: "/sounds/q.wav" })).toBe(
-      "question (built-in; /sounds/q.wav did not play: mac did not send it)",
+      "bip-bop-03 (built-in; /sounds/q.wav did not play: mac did not send it)",
     )
-    expect(played).toEqual(["question 0.2"])
+    expect(played).toEqual(["bip-bop-03 0.2"])
+  })
+
+  // openforge (notifications step 2): a TUI names the event's sound by its ID; this install has all 45.
+  test("plays the file, else the built-in sound the TUI named by ID, else its kind's", async () => {
+    const keys: string[] = []
+    const files: string[] = []
+    const play = Speaker.player({
+      speaker: {
+        play: async (key, bytes) => {
+          await bytes()
+          keys.push(key)
+        },
+        dispose: () => {},
+      },
+      volume: 0.4,
+      builtin: (id) => {
+        files.push(id)
+        return path.join(import.meta.dir, "notify.test.ts")
+      },
+      custom: async () => new Uint8Array([1]),
+    })
+    expect(await play({ name: "done", id: "alert-07" })).toBe("alert-07")
+    expect(await play({ name: "permission" })).toBe("bip-bop-03")
+    expect(await play({ name: "reply" })).toBe("bip-bop-01")
+    expect(await play({ name: "error", id: "yup-02", file: "/sounds/e.wav" })).toBe("/sounds/e.wav")
+    expect(keys).toEqual(["alert-07", "bip-bop-03", "bip-bop-01", "file:/sounds/e.wav"])
+    expect(files).toEqual(["alert-07", "bip-bop-03", "bip-bop-01"])
+  })
+
+  test("every built-in sound a TUI may name is in this install", async () => {
+    const { SOUND_FILES } = await import("@opencode/tui/attention")
+    const { Attention } = await import("@opencode/schema/attention")
+    for (const id of Attention.sounds) expect(Bun.file(SOUND_FILES[id]).size).toBeGreaterThan(0)
   })
 
   test("the desktop command takes the text as arguments, never as code", () => {

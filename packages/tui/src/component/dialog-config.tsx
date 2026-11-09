@@ -1,6 +1,9 @@
 import type { PacerSettings } from "@opencode/client"
+import { Attention } from "@opencode/schema/attention"
+import { Schema } from "effect"
 import { createEffect, createMemo, createSignal, on } from "solid-js"
-import { useConfig, useNewDesigns } from "../config"
+import { attentionEventDefaults, useConfig, useNewDesigns, type AttentionEvent } from "../config"
+import { useOptionalAttention } from "../context/attention"
 import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
 import { useDialog, type DialogContext } from "../ui/dialog"
@@ -30,7 +33,54 @@ type Setting = {
    * only the setting's ID.
    */
   pacer?: keyof PacerSettings
+  /** openforge: a sound row of this event, which plays the sound it moves to once, as a preview. */
+  preview?: AttentionEvent
 }
+
+// openforge (notifications step 2): each event's notification switch and sound, and Subagent done's levels.
+const eventRows = (
+  [
+    ["done", "Done", "a chat's final reply, when nothing it started still runs"],
+    ["reply", "Reply", "every final reply of a chat, also while its subagents or shells run"],
+    ["subagent_done", "Subagent done", "a subagent's final reply"],
+    ["question", "Question", "a question, form or permission that waits for you"],
+    ["error", "Error", "a failed turn"],
+  ] as const
+).flatMap(([event, title, what]): Setting[] => [
+  {
+    title: `${title}: notification`,
+    category: "Alerts",
+    path: ["attention", "events", event, "notification"],
+    description: `Whether ${what} shows a system notification`,
+    default: attentionEventDefaults[event].notification,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["alerts", "desktop notifications", event.replace("_", " ")],
+  },
+  {
+    title: `${title}: sound`,
+    category: "Alerts",
+    path: ["attention", "events", event, "sound"],
+    description: `The sound for ${what}; a file set in cli.json shows as its path`,
+    default: attentionEventDefaults[event].sound,
+    values: ["off", ...Attention.sounds],
+    keywords: ["alerts", "audio", "sound effects", event.replace("_", " ")],
+    preview: event,
+  },
+  ...(event === "subagent_done"
+    ? [
+        {
+          title: `${title}: levels`,
+          category: "Alerts",
+          path: ["attention", "events", event, "levels"],
+          description: "How many levels of subagents below a chat count; 1 is the chat's own subagents",
+          default: 1,
+          values: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+          keywords: ["alerts", "depth", "subagent done"],
+        },
+      ]
+    : []),
+])
 
 export const settings: Setting[] = [
   {
@@ -349,6 +399,7 @@ export const settings: Setting[] = [
     labels: ["auto", "OSC 99", "OSC 777", "OSC 9"],
     keywords: ["tmux", "ssh", "osc", "escape sequence", "desktop notifications"],
   },
+  ...eventRows,
   {
     title: "Release highlights",
     category: "Alerts",
@@ -538,6 +589,7 @@ export function DialogConfig(props: { current?: string }) {
   const toast = useToast()
   const themes = useThemes()
   const pacer = usePacer()
+  const attention = useOptionalAttention()
   const current = Math.max(
     0,
     settings.findIndex((setting) => settingID(setting) === props.current),
@@ -595,6 +647,7 @@ export function DialogConfig(props: { current?: string }) {
       ? choices[(choices.indexOf(current) + direction + choices.length) % choices.length]
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
     if (next === current) return
+    if (setting.preview && Schema.is(Attention.SoundID)(next)) preview(setting.preview, next)
     setSaving(true)
     if (setting.pacer) {
       await pacer!
@@ -615,6 +668,16 @@ export function DialogConfig(props: { current?: string }) {
       })
       .catch(toast.error)
       .finally(() => setSaving(false))
+  }
+
+  // Through the same report as an event, so a connected player plays it where you sit; never a notification.
+  function preview(event: AttentionEvent, id: Attention.SoundID) {
+    void attention?.raise({
+      kind: event,
+      message: `Sound preview: ${id}`,
+      notification: false,
+      sound: { when: "always", id },
+    })
   }
 
   return (

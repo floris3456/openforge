@@ -380,7 +380,54 @@ export type ContinuityRunner = { version: string; reachable: boolean; reason?: s
 
 export type AttentionPlayers = { sound: boolean; desktop: boolean }
 
-export type AttentionKind = "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+export type AttentionKind = "done" | "reply" | "subagent_done" | "question" | "permission" | "error" | "default"
+
+export type AttentionSoundID =
+  | "alert-01"
+  | "alert-02"
+  | "alert-03"
+  | "alert-04"
+  | "alert-05"
+  | "alert-06"
+  | "alert-07"
+  | "alert-08"
+  | "alert-09"
+  | "alert-10"
+  | "bip-bop-01"
+  | "bip-bop-02"
+  | "bip-bop-03"
+  | "bip-bop-04"
+  | "bip-bop-05"
+  | "bip-bop-06"
+  | "bip-bop-07"
+  | "bip-bop-08"
+  | "bip-bop-09"
+  | "bip-bop-10"
+  | "nope-01"
+  | "nope-02"
+  | "nope-03"
+  | "nope-04"
+  | "nope-05"
+  | "nope-06"
+  | "nope-07"
+  | "nope-08"
+  | "nope-09"
+  | "nope-10"
+  | "nope-11"
+  | "nope-12"
+  | "staplebops-01"
+  | "staplebops-02"
+  | "staplebops-03"
+  | "staplebops-04"
+  | "staplebops-05"
+  | "staplebops-06"
+  | "staplebops-07"
+  | "yup-01"
+  | "yup-02"
+  | "yup-03"
+  | "yup-04"
+  | "yup-05"
+  | "yup-06"
 
 export type PacerKind = "step" | "ping" | "title" | "compaction" | "other" | "probe" | "search"
 
@@ -1039,7 +1086,7 @@ export type ArtifactInfo = {
   time: ArtifactTime
 }
 
-export type AttentionSound = { name: AttentionKind; file?: string }
+export type AttentionSound = { name: AttentionKind; id?: AttentionSoundID; file?: string }
 
 export type PacerRequest = {
   id: string
@@ -4977,14 +5024,60 @@ export type ExperimentalServicePauseOutput = { data: ContinuityPauseResult }["da
 export type ExperimentalServiceResumeOutput = { data: ContinuityStatus }["data"]
 
 export type ExperimentalAttentionOccurrenceInput = {
-  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+  readonly kind: "done" | "reply" | "subagent_done" | "question" | "permission" | "error" | "default"
   readonly sessionID?: string | undefined
   readonly title: string
   readonly message: string
   readonly notify: boolean
   readonly sound?:
     | {
-        readonly name: "done" | "subagent_done" | "question" | "permission" | "error" | "default"
+        readonly name: "done" | "reply" | "subagent_done" | "question" | "permission" | "error" | "default"
+        readonly id?:
+          | "alert-01"
+          | "alert-02"
+          | "alert-03"
+          | "alert-04"
+          | "alert-05"
+          | "alert-06"
+          | "alert-07"
+          | "alert-08"
+          | "alert-09"
+          | "alert-10"
+          | "bip-bop-01"
+          | "bip-bop-02"
+          | "bip-bop-03"
+          | "bip-bop-04"
+          | "bip-bop-05"
+          | "bip-bop-06"
+          | "bip-bop-07"
+          | "bip-bop-08"
+          | "bip-bop-09"
+          | "bip-bop-10"
+          | "nope-01"
+          | "nope-02"
+          | "nope-03"
+          | "nope-04"
+          | "nope-05"
+          | "nope-06"
+          | "nope-07"
+          | "nope-08"
+          | "nope-09"
+          | "nope-10"
+          | "nope-11"
+          | "nope-12"
+          | "staplebops-01"
+          | "staplebops-02"
+          | "staplebops-03"
+          | "staplebops-04"
+          | "staplebops-05"
+          | "staplebops-06"
+          | "staplebops-07"
+          | "yup-01"
+          | "yup-02"
+          | "yup-03"
+          | "yup-04"
+          | "yup-05"
+          | "yup-06"
         readonly file?: string
       }
     | undefined
@@ -4998,7 +5091,7 @@ export type ExperimentalAttentionFollowInput = { readonly desktop?: boolean | un
 export type ExperimentalAttentionFollowOutput = AttentionFollowEvent
 
 export type ExperimentalAttentionTestInput = {
-  readonly kind: "done" | "subagent_done" | "question" | "permission" | "error"
+  readonly kind: "done" | "reply" | "subagent_done" | "question" | "permission" | "error"
 }
 
 export type ExperimentalAttentionTestOutput = { data: AttentionPlayers }["data"]

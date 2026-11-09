@@ -1,7 +1,6 @@
-import type { Attention } from "@opencode/plugin/tui/context"
 import { useRenderer } from "@opentui/solid"
 import { createContext, createSignal, onCleanup, useContext, type Accessor, type ParentProps } from "solid-js"
-import { createTuiAttention } from "../attention"
+import { createTuiAttention, type AttentionHost } from "../attention"
 import { createChatFilter } from "../attention-chats"
 import { createReport } from "../attention-report"
 import { useConfig } from "../config"
@@ -10,7 +9,7 @@ import { useData } from "./data"
 import { useLog } from "./log"
 import { useSessionTabs } from "./session-tabs"
 
-const AttentionContext = createContext<Attention>()
+const AttentionContext = createContext<AttentionHost>()
 
 // openforge: the chats whose permissions this TUI accepts itself. The session route sets them from the same values
 // its auto-reply reads, so a permission it accepts raises no notification.
@@ -56,6 +55,11 @@ export function useAttention() {
   const attention = useContext(AttentionContext)
   if (!attention) throw new Error("AttentionProvider is missing")
   return attention
+}
+
+/** The attention host, where one runs: Settings plays a sound preview through it. */
+export function useOptionalAttention() {
+  return useContext(AttentionContext)
 }
 
 export function useAutoReply() {

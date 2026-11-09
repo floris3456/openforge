@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
-import { Attention } from "../src/attention"
-import { optional } from "../src/schema"
-import { SessionID } from "../src/session-id"
+import { Attention } from "../src/attention.js"
+import { optional } from "../src/schema.js"
+import { SessionID } from "../src/session-id.js"
 
 // openforge (notifications step 2): the wire to the players. A sound may name a built-in sound by ID; a player from
 // before step 2, which knows only `name`, still reads the occurrence and plays its kind's sound.

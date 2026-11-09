@@ -5,12 +5,13 @@ import {
   resolveTheme,
   resolveThemeDocument,
   selectTheme,
+  themeModes,
   type HueScale,
   type Mode,
   type ResolvedTheme,
   type ThemeDefinition,
 } from "@opencode/theme/tui"
-import { getOpenCodeTheme, parseTheme, type ThemeDocumentSource } from "../../../src/theme"
+import { allThemes, getOpenCodeTheme, parseTheme, type ThemeDocumentSource } from "../../../src/theme"
 
 const opencodeLight = selectTheme(getOpenCodeTheme(), "light")
 const opencodeDark = selectTheme(getOpenCodeTheme(), "dark")
@@ -352,6 +353,28 @@ test("dialog footer overrides layer on the dialog surface", () => {
   expect(theme.surface("dialog").text.muted.toInts()).not.toEqual([102, 102, 102, 255])
   const plain = resolveTheme(light)
   expect(plain.surface("dialog.footer")).toBe(plain.surface("dialog"))
+})
+
+test("gives every built-in theme opaque meter tones on each view, the alternate row's closer to its surface", () => {
+  const distance = (a: RGBA, b: RGBA) => Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b)
+  const tones = ["track", "success", "warning", "error", "muted"] as const
+  const checked = Object.entries(allThemes()).flatMap(([name, source]) => {
+    const document = parseTheme(source, name)
+    return themeModes(document).flatMap((mode) => {
+      const base = resolveThemeDocument(document, mode)
+      return [base, base.surface("dialog")].map((theme) => {
+        const meter = theme.background.meter
+        const colors = tones.flatMap((tone) => [meter[tone], meter.alternate[tone]])
+        expect(colors.every((color) => color.a === 1)).toBe(true)
+        const surface = theme.background.raised.base
+        if (surface.a === 1)
+          for (const tone of tones)
+            expect(distance(meter.alternate[tone], surface)).toBeLessThanOrEqual(distance(meter[tone], surface))
+        return `${name} ${mode}`
+      })
+    })
+  })
+  expect(checked.length).toBeGreaterThan(60)
 })
 
 test("rejects missing and circular references", () => {

@@ -66,6 +66,9 @@ export function createImageTerminal(input: {
     version()
     const known = tmuxCell()
     if (known) return known
+    // Inside tmux the terminal's pixel size is tmux's answer, which is made up (16×32 a cell) for a client that doesn't
+    // tell it its own, as one that came in by `docker exec` doesn't; another client's, asked above, or 9×20 then.
+    if (input.client) return DEFAULT_CELL
     const resolution = input.renderer.resolution
     const columns = input.renderer.terminalWidth
     const rows = input.renderer.terminalHeight

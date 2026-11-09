@@ -149,13 +149,18 @@ describe("sending again", () => {
 })
 
 describe("the cell size", () => {
-  test("tmux's, else the terminal's from its pixels, else 9×20", () => {
+  test("inside tmux, tmux's client's (or another client's), else 9×20, whatever pixel size tmux makes up", () => {
     expect(fixture().terminal.cell()).toEqual({ width: 19, height: 42 })
     const { renderer, terminal } = fixture({ client: { ...ghostty, cell: undefined } })
+    renderer.resolution = { width: 1600, height: 960 }
     expect(terminal.cell()).toEqual(DEFAULT_CELL)
     expect(DEFAULT_CELL).toEqual({ width: 9, height: 20 })
+  })
+
+  test("outside tmux, the terminal's from its pixels, else 9×20", () => {
+    const { renderer, terminal } = fixture({ client: undefined })
+    expect(terminal.cell()).toEqual(DEFAULT_CELL)
     renderer.resolution = { width: 1000, height: 600 }
-    renderer.emit("resize", 100, 30)
     expect(terminal.cell()).toEqual({ width: 10, height: 20 })
   })
 })

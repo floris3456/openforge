@@ -1,4 +1,4 @@
-import type { AttentionNotifyOptions, AttentionNotifySkipReason } from "@opencode/plugin/tui/context"
+import type { AttentionNotifySkipReason } from "@opencode/plugin/tui/context"
 import { Schema } from "effect"
 import { SessionID } from "@opencode/schema/session-id"
 
@@ -18,17 +18,17 @@ export function createChatFilter(input: {
   /** Whether this TUI accepts this chat's permissions itself. */
   autoReplied: (sessionID: string) => boolean
 }) {
-  return async (request: AttentionNotifyOptions): Promise<AttentionNotifySkipReason | undefined> => {
+  return async (request: {
+    readonly kind: string
+    readonly sessionID?: string
+  }): Promise<AttentionNotifySkipReason | undefined> => {
     // A request about no chat, or about something else (a form no chat asked for), passes as before.
     if (!Schema.is(SessionID)(request.sessionID)) return
     const sessionID = request.sessionID
-    if (soundName(request) === "permission" && input.autoReplied(sessionID)) return "permission_answered"
+    if (request.kind === "permission" && input.autoReplied(sessionID)) return "permission_answered"
     if (!input.open().includes(await rootOf(input.session, sessionID))) return "session_not_open"
   }
 }
-
-const soundName = (request: AttentionNotifyOptions) =>
-  typeof request.sound === "object" ? request.sound.name : undefined
 
 // The chat a session belongs to: up its parents, loading a session whose info this TUI doesn't have yet (a subagent
 // that started before the TUI did).

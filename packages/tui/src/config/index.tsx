@@ -3,7 +3,8 @@ export * as Config from "."
 import { createBindingLookup } from "@opentui/keymap/extras"
 import { Product } from "@opencode/schema/product"
 import { Vcs } from "@opencode/schema/vcs"
-import { Schema } from "effect"
+import { Attention } from "@opencode/schema/attention"
+import { Effect, Option, Schema } from "effect"
 import { createContext, createMemo, onCleanup, type JSX, useContext } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import { safeWatch } from "../util/watch"
@@ -29,6 +30,56 @@ export type AttentionSoundName = Schema.Schema.Type<typeof AttentionSoundName>
 export const AttentionProtocol = Schema.Literals(["auto", "osc99", "osc777", "osc9"])
 export type AttentionProtocol = Schema.Schema.Type<typeof AttentionProtocol>
 export type AttentionSoundPaths = Partial<Record<AttentionSoundName, string>>
+
+// openforge (notifications step 2): five events, each with its own notification switch and sound. A value that isn't
+// one of a field's own is read as unset, so a mistake in one field takes no other setting with it.
+const lenient = <S extends Schema.Top>(schema: S) =>
+  schema.pipe(Schema.catchDecoding(() => Effect.succeed(Option.none())))
+export const AttentionEventSound = Schema.Union([
+  Schema.Literal("off"),
+  Attention.SoundID,
+  Schema.String.check(Schema.isPattern(/^\//)),
+]).annotate({ description: "off, a built-in sound (alert-01 … yup-06), or the absolute path of a sound file" })
+export type AttentionEventSound = Schema.Schema.Type<typeof AttentionEventSound>
+export const AttentionEvent = ["done", "reply", "subagent_done", "question", "error"] as const
+export type AttentionEvent = (typeof AttentionEvent)[number]
+const eventFields = (what: string) => ({
+  notification: Schema.optional(lenient(Schema.Boolean)).annotate({
+    description: `Show a system notification for ${what}`,
+  }),
+  sound: Schema.optional(lenient(AttentionEventSound)).annotate({ description: `The sound for ${what}` }),
+})
+export const AttentionEvents = Schema.Struct({
+  done: Schema.optional(
+    lenient(Schema.Struct(eventFields("a chat's final reply while nothing it started still runs"))),
+  ),
+  reply: Schema.optional(lenient(Schema.Struct(eventFields("every final reply of a chat")))),
+  subagent_done: Schema.optional(
+    lenient(
+      Schema.Struct({
+        ...eventFields("a subagent's final reply"),
+        levels: Schema.optional(lenient(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 9 })))).annotate({
+          description: "How many levels of subagents below a chat count, 1 to 9 (1: the chat's own subagents)",
+        }),
+      }),
+    ),
+  ),
+  question: Schema.optional(lenient(Schema.Struct(eventFields("a question, a form or a permission that waits")))),
+  error: Schema.optional(lenient(Schema.Struct(eventFields("a failed turn")))),
+})
+export type ResolvedAttentionEvent = { notification: boolean; sound: AttentionEventSound }
+export type ResolvedAttentionEvents = Record<AttentionEvent, ResolvedAttentionEvent> & {
+  subagent_done: { levels: number }
+  /** The sound of a permission: the question's, or while that is unset a file in the old `attention.sounds.permission`. */
+  question: { permission: AttentionEventSound }
+}
+export const attentionEventDefaults: Record<AttentionEvent, ResolvedAttentionEvent> = {
+  done: { notification: true, sound: "bip-bop-01" },
+  reply: { notification: false, sound: "off" },
+  subagent_done: { notification: false, sound: "off" },
+  question: { notification: true, sound: "bip-bop-03" },
+  error: { notification: true, sound: "nope-03" },
+}
 
 export const MiniWorkSpinner = Schema.Literals([
   "block-soft-slide",
@@ -114,6 +165,10 @@ export const Info = Schema.Struct({
       protocol: Schema.optional(AttentionProtocol).annotate({
         description:
           "Notification escape sequence: 'auto' detects it; osc99, osc777 or osc9 for a terminal that is not recognised through tmux or ssh. Read when the TUI starts",
+      }),
+      events: Schema.optional(lenient(AttentionEvents)).annotate({
+        description:
+          "Each event's notification and sound: done, reply, subagent_done, question and error. A value that is not valid counts as unset",
       }),
     }),
   ).annotate({ description: "System notification and sound settings" }),
@@ -300,6 +355,7 @@ export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader"
     sound_pack: string
     sounds: AttentionSoundPaths
     protocol: AttentionProtocol
+    events: ResolvedAttentionEvents
   }
   keybinds: TuiKeybind.BindingLookupView
   leader: { timeout: number }
@@ -348,6 +404,7 @@ export function resolve(
       sound_pack: input.attention?.sound_pack ?? "opencode.default",
       sounds: input.attention?.sounds ?? {},
       protocol: input.attention?.protocol ?? "auto",
+      events: resolveEvents(input.attention),
     },
     keybinds: createBindingLookup(TuiKeybind.toBindingConfig(TuiKeybind.parse(keybinds)), {
       bindingDefaults: TuiKeybind.bindingDefaults(),
@@ -372,6 +429,26 @@ export function resolve(
       layout: input.tabs?.layout ?? "horizontal",
       indicators: input.tabs?.indicators ?? "status",
     },
+  }
+}
+
+// An event's sound while it is unset: the file of its kind in the old `attention.sounds`, else its default.
+function resolveEvents(attention: Info["attention"]): ResolvedAttentionEvents {
+  const events = attention?.events
+  const legacy = attention?.sounds ?? {}
+  const event = (name: AttentionEvent, file: string | undefined) => ({
+    notification: events?.[name]?.notification ?? attentionEventDefaults[name].notification,
+    sound: events?.[name]?.sound ?? file ?? attentionEventDefaults[name].sound,
+  })
+  return {
+    done: event("done", legacy.done),
+    reply: event("reply", undefined),
+    subagent_done: { ...event("subagent_done", legacy.subagent_done), levels: events?.subagent_done?.levels ?? 1 },
+    question: {
+      ...event("question", legacy.question),
+      permission: events?.question?.sound ?? legacy.permission ?? attentionEventDefaults.question.sound,
+    },
+    error: event("error", legacy.error),
   }
 }
 

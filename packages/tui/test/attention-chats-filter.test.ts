@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test"
-import type { AttentionNotifyOptions } from "@opencode/plugin/tui/context"
 import { createChatFilter } from "../src/attention-chats"
 
 // openforge (notifications step 2, fixes 1 and 2): which requests a TUI raises.
@@ -31,16 +30,9 @@ function setup(options: { open?: string[]; autoReplied?: string[]; loaded?: stri
   return { filter, synced }
 }
 
-const done = (sessionID?: string): AttentionNotifyOptions => ({
-  message: "Session done",
-  sound: { name: "done" },
-  sessionID,
-})
-const permission = (sessionID: string): AttentionNotifyOptions => ({
-  message: "Permission needs input",
-  sound: { name: "permission", when: "always" },
-  sessionID,
-})
+// Each request by its kind: a permission's kind is `permission`, whatever sound it plays.
+const done = (sessionID?: string) => ({ kind: "done" as const, sessionID })
+const permission = (sessionID: string) => ({ kind: "permission" as const, sessionID })
 
 describe("own chats", () => {
   test("the chats in its tabs and the one it shows, with their subagents at any depth, raise", async () => {

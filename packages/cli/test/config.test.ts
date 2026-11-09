@@ -587,3 +587,35 @@ async function waitForFile(file: string, exited: Promise<number>) {
   ])
   if (!found) throw new Error(`timed out waiting for ${file}`)
 }
+
+// openforge (notifications step 2): an invalid value in attention.events is read as unset, and takes no other setting
+// with it; Settings writes the event's field and leaves the rest of the file as it was.
+test("an invalid attention.events value counts as unset, and the rest of cli.json still applies", async () => {
+  await using directory = await tmpdir()
+  const file = path.join(directory.path, "cli.json")
+  await Bun.write(
+    file,
+    JSON.stringify({
+      animations: false,
+      attention: { volume: 0.7, events: { done: { sound: "beep", notification: false }, reply: { sound: 3 } } },
+    }),
+  )
+  const result = await run(
+    directory.path,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      const loaded = yield* service.get()
+      const updated = yield* service.update((draft) => {
+        draft.attention = { ...draft.attention, events: { ...draft.attention?.events, reply: { sound: "yup-02" } } }
+      })
+      return { loaded, updated }
+    }),
+  )
+  expect(result.loaded).toEqual({
+    animations: false,
+    attention: { volume: 0.7, events: { done: { notification: false }, reply: {} } },
+  })
+  expect(result.updated.attention?.events?.reply).toEqual({ sound: "yup-02" })
+  const written = await Bun.file(file).json()
+  expect(written.attention.events).toEqual({ done: { sound: "beep", notification: false }, reply: { sound: "yup-02" } })
+})

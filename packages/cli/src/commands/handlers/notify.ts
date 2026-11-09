@@ -80,7 +80,7 @@ export default Runtime.handler(
     const { Player } = yield* Effect.promise(() => import("../../notify/player"))
     const { Speaker } = yield* Effect.promise(() => import("../../notify/speaker"))
     // The TUI's own built-in sounds, from this install.
-    const { BUILTIN_SOUNDS } = yield* Effect.promise(() => import("@opencode/tui/attention"))
+    const { SOUND_FILES } = yield* Effect.promise(() => import("@opencode/tui/attention"))
     const log = (line: string) => process.stdout.write(`${clock()} ${line}${EOL}`)
     const debug = input.verbose ? log : () => {}
     const desktop = input.desktop ? Desktop.notifier() : undefined
@@ -98,7 +98,7 @@ export default Runtime.handler(
       play: Speaker.player({
         speaker,
         volume: input.volume,
-        builtin: (name) => BUILTIN_SOUNDS[name],
+        builtin: (id) => SOUND_FILES[id],
         custom:
           route === undefined
             ? (file) => Bun.file(file).bytes()

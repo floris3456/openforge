@@ -10,6 +10,7 @@ const PLAYER_BACKLOG = 64
 // A test reads as one: its title is "openforge test".
 const TEST_MESSAGES: Record<Attention.TestKind, string> = {
   done: "A chat is done",
+  reply: "A chat replied",
   subagent_done: "A subagent is done",
   question: "A question waits for an answer",
   permission: "A permission waits for an answer",

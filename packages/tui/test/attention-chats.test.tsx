@@ -41,7 +41,8 @@ async function setup(permissions: "prompt" | "autoaccept") {
       animations: false,
       tabs: { mode: "off" },
       session: { sidebar: "hide", permissions },
-      attention: { notifications: true, sound: true },
+      // Subagent done is off by default; on here, two levels deep, so a subagent's own subagent raises it.
+      attention: { notifications: true, sound: true, events: { subagent_done: { notification: true, levels: 2 } } },
     } as Config.Info,
     args: { sessionID: "ses_open" },
     fetch: async (url, request) => {

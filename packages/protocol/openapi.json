@@ -18125,7 +18125,7 @@
       },
       "Attention.Kind": {
         "type": "string",
-        "enum": ["done", "subagent_done", "question", "permission", "error", "default"]
+        "enum": ["done", "reply", "subagent_done", "question", "permission", "error", "default"]
       },
       "Attention.Occurrence": {
         "type": "object",
@@ -18176,6 +18176,9 @@
           "name": {
             "$ref": "#/components/schemas/Attention.Kind"
           },
+          "id": {
+            "$ref": "#/components/schemas/Attention.SoundID"
+          },
           "file": {
             "type": "string",
             "maxLength": 4096
@@ -18184,12 +18187,62 @@
         "required": ["name"],
         "additionalProperties": false
       },
+      "Attention.SoundID": {
+        "type": "string",
+        "enum": [
+          "alert-01",
+          "alert-02",
+          "alert-03",
+          "alert-04",
+          "alert-05",
+          "alert-06",
+          "alert-07",
+          "alert-08",
+          "alert-09",
+          "alert-10",
+          "bip-bop-01",
+          "bip-bop-02",
+          "bip-bop-03",
+          "bip-bop-04",
+          "bip-bop-05",
+          "bip-bop-06",
+          "bip-bop-07",
+          "bip-bop-08",
+          "bip-bop-09",
+          "bip-bop-10",
+          "nope-01",
+          "nope-02",
+          "nope-03",
+          "nope-04",
+          "nope-05",
+          "nope-06",
+          "nope-07",
+          "nope-08",
+          "nope-09",
+          "nope-10",
+          "nope-11",
+          "nope-12",
+          "staplebops-01",
+          "staplebops-02",
+          "staplebops-03",
+          "staplebops-04",
+          "staplebops-05",
+          "staplebops-06",
+          "staplebops-07",
+          "yup-01",
+          "yup-02",
+          "yup-03",
+          "yup-04",
+          "yup-05",
+          "yup-06"
+        ]
+      },
       "Attention.TestPayload": {
         "type": "object",
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["done", "subagent_done", "question", "permission", "error"]
+            "enum": ["done", "reply", "subagent_done", "question", "permission", "error"]
           }
         },
         "required": ["kind"],

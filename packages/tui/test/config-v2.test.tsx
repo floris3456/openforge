@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
-import { expect, test } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import { resolve, ConfigProvider, Info, useConfig, type Interface } from "../src/config"
 import { settings } from "../src/component/dialog-config"
@@ -115,7 +115,7 @@ test("shows resolved tab defaults in settings", () => {
 
 // openforge: notifications and sounds are on by default; the notification protocol is detected unless it is set.
 test("turns notifications and sounds on by default, and detects the notification protocol", () => {
-  expect(resolve({}, { terminalSuspend: true, environment: {} }).attention).toEqual({
+  expect(resolve({}, { terminalSuspend: true, environment: {} }).attention).toMatchObject({
     notifications: true,
     sound: true,
     volume: 0.4,
@@ -356,4 +356,111 @@ test("provides config and its host interface", async () => {
   } finally {
     app.renderer.destroy()
   }
+})
+
+// openforge (notifications step 2): attention.events, each event's notification and sound.
+describe("attention.events", () => {
+  const events = (attention: unknown) =>
+    resolve(decodeInfo({ attention }), { terminalSuspend: true, environment: {} }).attention.events
+
+  test("defaults: Done, Question and Error on with their sounds; Reply and Subagent done off, levels 1", () => {
+    expect(events(undefined)).toEqual({
+      done: { notification: true, sound: "bip-bop-01" },
+      reply: { notification: false, sound: "off" },
+      subagent_done: { notification: false, sound: "off", levels: 1 },
+      question: { notification: true, sound: "bip-bop-03", permission: "bip-bop-03" },
+      error: { notification: true, sound: "nope-03" },
+    })
+  })
+
+  test("a sound is off, a built-in sound, or an absolute path", () => {
+    expect(
+      events({
+        events: {
+          done: { sound: "off" },
+          reply: { notification: true, sound: "yup-06" },
+          error: { sound: "/home/me/fail.mp3" },
+          subagent_done: { levels: 9 },
+        },
+      }),
+    ).toMatchObject({
+      done: { notification: true, sound: "off" },
+      reply: { notification: true, sound: "yup-06" },
+      error: { sound: "/home/me/fail.mp3" },
+      subagent_done: { levels: 9 },
+    })
+  })
+
+  test("an invalid value falls back to its default, field by field, and takes no other setting with it", () => {
+    const info = decodeInfo({
+      animations: true,
+      attention: {
+        volume: 0.7,
+        events: {
+          done: { notification: "yes", sound: "beep" },
+          reply: { notification: true, sound: "sounds/relative.wav" },
+          subagent_done: { notification: true, levels: 12 },
+          question: 5,
+          error: { sound: "nope-03", extra: 1 },
+        },
+      },
+    })
+    expect(info.animations).toBe(true)
+    expect(info.attention?.volume).toBe(0.7)
+    expect(resolve(info, { terminalSuspend: true, environment: {} }).attention.events).toEqual({
+      done: { notification: true, sound: "bip-bop-01" },
+      reply: { notification: true, sound: "off" },
+      subagent_done: { notification: true, sound: "off", levels: 1 },
+      question: { notification: true, sound: "bip-bop-03", permission: "bip-bop-03" },
+      error: { notification: true, sound: "nope-03" },
+    })
+    expect(events({ events: "loud" })).toEqual(events(undefined))
+    expect(events({ events: { subagent_done: { levels: 2.5 } } }).subagent_done.levels).toBe(1)
+  })
+
+  test("a file in the old attention.sounds is used for its event while that event's sound is unset", () => {
+    const sounds = {
+      done: "/old/done.wav",
+      subagent_done: "/old/sub.wav",
+      question: "/old/q.wav",
+      permission: "/old/p.wav",
+      error: "/old/e.wav",
+    }
+    expect(events({ sounds })).toMatchObject({
+      done: { sound: "/old/done.wav" },
+      reply: { sound: "off" },
+      subagent_done: { sound: "/old/sub.wav" },
+      question: { sound: "/old/q.wav", permission: "/old/p.wav" },
+      error: { sound: "/old/e.wav" },
+    })
+    expect(events({ sounds, events: { done: { sound: "alert-02" }, question: { sound: "off" } } })).toMatchObject({
+      done: { sound: "alert-02" },
+      question: { sound: "off", permission: "off" },
+    })
+    // Without the old permission file, a permission plays the question's default, not the old question file.
+    expect(events({ sounds: { question: "/old/q.wav" } }).question.permission).toBe("bip-bop-03")
+  })
+
+  test("the cli.json schema describes them", () => {
+    const document = Schema.toJsonSchemaDocument(Info)
+    expect(document).toHaveProperty([
+      "schema",
+      "properties",
+      "attention",
+      "anyOf",
+      0,
+      "properties",
+      "events",
+      "anyOf",
+      0,
+      "properties",
+      "subagent_done",
+      "anyOf",
+      0,
+      "properties",
+      "levels",
+      "anyOf",
+      0,
+    ])
+  })
 })

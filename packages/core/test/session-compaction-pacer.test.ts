@@ -836,7 +836,6 @@ it.effect("a Messages chat whose reasoning came from another model: its summary 
   }),
 )
 
-
 /** The requests the fake CLIProxyPacer got, as `METHOD path`. */
 const wire = () => fake.seen.map((item) => `${item.method} ${item.path}`)
 

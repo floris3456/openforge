@@ -268,10 +268,14 @@ describe("which chats", () => {
     expect(ImageBank.setting([doc(true), doc()])).toBe(true)
   })
 
-  test("the tool's description states each model's zoom limits, the same text every time", () => {
-    expect(ImageTool.DESCRIPTION).toContain(
-      "claude-opus-5-5 reads up to a long edge of 2,576 px and 4,784 visual tokens (⌈w/28⌉×⌈h/28⌉, about 3.8 MP, e.g. 2576×1449)",
+  test("the tool states each model's zoom limits where the catalog shows them, the same text every time", () => {
+    expect(ImageTool.ZOOM).toContain(
+      "claude-opus-5-5: long edge 2,576 px and 4,784 visual tokens, ⌈w/28⌉×⌈h/28⌉, about 3.75 MP, e.g. 2576×1449",
     )
+    expect(ImageTool.ZOOM).toContain("a larger region is scaled down to fit")
+    // The catalog lists the first line, up to 120 characters, and the signature with `zoom`'s description.
+    expect(ImageTool.DESCRIPTION.split("\n")[0].length).toBeLessThanOrEqual(120)
+    expect(JSON.stringify(Schema.toJsonSchemaDocument(ImageTool.Input))).toContain("2,576 px")
   })
 })
 

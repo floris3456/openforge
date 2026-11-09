@@ -15,33 +15,34 @@ import { ImageFit } from "../../image/fit.js"
 
 const Pixels = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
+// The models' limits, built once from the table, so the cached catalog never changes between requests.
+const limits = Object.entries(ImageFit.MODELS)
+  .map(([id, model]) => {
+    const example = ImageFit.fit(16_000, 9_000, model)
+    return `${id}: long edge ${model.edge.toLocaleString("en-US")} px and ${model.tokens.toLocaleString("en-US")} visual tokens, ⌈w/28⌉×⌈h/28⌉, about ${((model.tokens * 784) / 1e6).toFixed(2)} MP, e.g. ${example.width}×${example.height}`
+  })
+  .join("; ")
+
+export const ZOOM = `The region to show at full detail, in pixels of the image as shown. It is shown at its own resolution up to the model's limits (${limits}); a larger region is scaled down to fit. Omit it to show the whole image again.`
+
 export const Input = Schema.Struct({
   id: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
-    .pipe(optional)
-    .annotate({ description: "The image's number, from the line before it: [Image 7: …]. Omit it to list the images." }),
+    .annotate({ description: "The image's number, from the line before it: [Image 7: …]. Omit it to list the images." })
+    .pipe(optional),
   zoom: Schema.Struct({
     x: Pixels.annotate({ description: "Left edge, in pixels of the image as shown" }),
     y: Pixels.annotate({ description: "Top edge, in pixels of the image as shown" }),
     width: Pixels.annotate({ description: "Width, in pixels of the image as shown" }),
     height: Pixels.annotate({ description: "Height, in pixels of the image as shown" }),
   })
-    .pipe(optional)
-    .annotate({ description: "The region to show at full detail; omit it to show the whole image again" }),
+    .annotate({ description: ZOOM })
+    .pipe(optional),
 })
 
-// Built once from the table, so the cached catalog never changes between requests.
-const limits = Object.entries(ImageFit.MODELS)
-  .map(([id, model]) => {
-    const example = ImageFit.fit(16_000, 9_000, model)
-    return `${id} reads up to a long edge of ${model.edge.toLocaleString("en-US")} px and ${model.tokens.toLocaleString("en-US")} visual tokens (⌈w/28⌉×⌈h/28⌉, about ${((model.tokens * 784) / 1e6).toFixed(1)} MP, e.g. ${example.width}×${example.height})`
-  })
-  .join("; ")
-
+// The catalog shows the first line; the zoom's limits are in its signature, where `zoom` is described.
 export const DESCRIPTION = [
-  "Show this chat's images again, zoom into them, or list them. Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at.",
-  "`image({ id })` shows image `id` again, whole, such as after a compaction.",
-  `\`image({ id, zoom: { x, y, width, height } })\` cuts that region, in pixels of the image as shown, from the full-resolution original and shows it at its own resolution up to the model's limits, scaling a larger region down to fit: ${limits}.`,
-  "`image({})` lists the images. Each result says the scale it is shown at.",
+  "See this chat's images again, zoom into them, or list them; each result says the scale it is shown at.",
+  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image({ id })` shows image `id` again, whole, such as after a compaction. `image({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image({})` lists the images.",
 ].join("\n")
 
 const NOT_HERE =

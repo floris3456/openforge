@@ -2261,4 +2261,34 @@ describe("Config", () => {
       }),
     ),
   )
+
+  // openforge (spec images-opus-5-5): Settings › Session "Images for Opus 5.5" writes the global config.
+  it.live("update writes media.image.opus_5_5 to the global config and leaves the shell alone", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) => {
+        const global = path.join(tmp.path, "global")
+        const file = path.join(global, "opencode.jsonc")
+        return Effect.promise(async () => {
+          await fs.mkdir(global, { recursive: true })
+          await fs.writeFile(file, '{\n  "shell": "zsh"\n}\n')
+        }).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              const config = yield* Config.Service
+              yield* config.update!({ media: { image: { opus_5_5: true } } })
+              expect(JSON.parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual({
+                shell: "zsh",
+                media: { image: { opus_5_5: true } },
+              })
+              yield* config.update!({ media: { image: { opus_5_5: false } } })
+              expect(JSON.parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual({
+                shell: "zsh",
+                media: { image: { opus_5_5: false } },
+              })
+            }).pipe(Effect.provide(testLayer(tmp.path, global))),
+          ),
+        )
+      }),
+    ),
+  )
 })

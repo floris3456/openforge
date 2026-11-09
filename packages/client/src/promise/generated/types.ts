@@ -2733,7 +2733,13 @@ export type ConfigEntry =
                   }
             }
         media?: {
-          image?: { auto_resize?: boolean; max_width?: number; max_height?: number; max_base64_bytes?: number }
+          image?: {
+            auto_resize?: boolean
+            max_width?: number
+            max_height?: number
+            max_base64_bytes?: number
+            opus_5_5?: boolean
+          }
         }
         tool_output?: { max_lines?: number; max_bytes?: number }
         mcp?: {
@@ -5325,7 +5331,10 @@ export type ConfigGetOutput = Array<ConfigEntry>
 
 export type ConfigShellsOutput = Array<ConfigShellOption>
 
-export type ExperimentalConfigUpdateInput = { readonly shell: string | null }
+export type ExperimentalConfigUpdateInput = {
+  readonly shell?: string | null | undefined
+  readonly media?: { readonly image: { readonly opus_5_5: boolean } } | undefined
+}
 
 export type ExperimentalConfigUpdateOutput = void
 

@@ -121,7 +121,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
 }) {}
 
 export const Patch = Schema.Struct({
-  shell: Schema.NullOr(Schema.String),
+  shell: Schema.NullOr(Schema.String).pipe(optional),
+  /** openforge: `media.image.opus_5_5`, Settings › Session › "Images for Opus 5.5". */
+  media: Schema.Struct({ image: Schema.Struct({ opus_5_5: Schema.Boolean }) }).pipe(optional),
 }).annotate({ identifier: "Config.Patch" })
 export interface Patch extends Schema.Schema.Type<typeof Patch> {}
 

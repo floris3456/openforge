@@ -41,6 +41,11 @@ type Setting = {
    * the TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
    */
   update?: true
+  /**
+   * openforge (spec images-opus-5-5): a key of the service's global config, which the service reads, instead of the
+   * TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
+   */
+  service?: true
 }
 
 // openforge (notifications step 2): each event's notification switch and sound, and Subagent done's levels.
@@ -184,6 +189,18 @@ export const settings: Setting[] = [
     values: [false, true],
     labels: ["off", "on"],
     keywords: ["attachments", "images", "tool output"],
+  },
+  {
+    title: "Images for Opus 5.5",
+    category: "Session",
+    path: ["media", "image", "opus_5_5"],
+    service: true,
+    description:
+      "For chats on Claude Opus 5.5: images sent at the most it reads, numbered and never changed once sent, with a zoom tool; the chat compacts when the next image would not fit",
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["images", "opus", "zoom", "screenshots", "vision"],
   },
   {
     title: "TPS",
@@ -582,6 +599,20 @@ export function useShownSettings() {
   const client = useContext(ClientContext)
   const [updateStatus, setUpdateStatus] = createSignal<AutoUpdateStatus>()
   void client?.api.experimental.update.get().then(setUpdateStatus, () => undefined)
+  // The service's own config keys: the last document that sets each, as the service reads them.
+  const [serviceConfig, setServiceConfig] = createSignal<ServiceConfig>()
+  const readServiceConfig = () =>
+    client?.api.config.get().then(
+      (entries) =>
+        setServiceConfig({
+          opus_5_5:
+            entries
+              .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.opus_5_5] : []))
+              .findLast((value) => value !== undefined) ?? false,
+        }),
+      () => undefined,
+    )
+  void readServiceConfig()
   // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
@@ -601,13 +632,25 @@ export function useShownSettings() {
   // from it, and the cache notices' rows tune what only it sends.
   const shown = (setting: Setting) => {
     if (setting.update) return updateStatus() !== undefined
+    if (setting.service) return serviceConfig() !== undefined
     return (
       setting.category !== "CLIProxyPacer" ||
       (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
     )
   }
-  return { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client }
+  return {
+    shown,
+    pacerValues,
+    setPacerValues,
+    updateStatus,
+    setUpdateStatus,
+    client,
+    serviceConfig,
+    readServiceConfig,
+  }
 }
+
+type ServiceConfig = { readonly opus_5_5: boolean }
 
 export function DialogConfig(props: { current?: string }) {
   const config = useConfig()
@@ -623,7 +666,8 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client } = useShownSettings()
+  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client, serviceConfig, readServiceConfig } =
+    useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
@@ -631,6 +675,7 @@ export function DialogConfig(props: { current?: string }) {
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
+    if (setting.service) return serviceConfig()?.opus_5_5 ?? setting.default
     const current = setting.path.reduce<unknown>((result, key) => {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
@@ -685,6 +730,14 @@ export function DialogConfig(props: { current?: string }) {
       await client!.api.experimental.update
         .set({ enabled: next === true })
         .then(setUpdateStatus)
+        .catch(toast.error)
+        .finally(() => setSaving(false))
+      return
+    }
+    if (setting.service) {
+      await client!.api.experimental.config
+        .update({ media: { image: { opus_5_5: next === true } } })
+        .then(readServiceConfig)
         .catch(toast.error)
         .finally(() => setSaving(false))
       return

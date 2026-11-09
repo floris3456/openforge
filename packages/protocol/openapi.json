@@ -18828,6 +18828,9 @@
                     "type": "integer",
                     "maximum": 9007199254740991,
                     "exclusiveMinimum": 0
+                  },
+                  "opus_5_5": {
+                    "type": "boolean"
                   }
                 },
                 "additionalProperties": false
@@ -19431,9 +19434,25 @@
                 "type": "null"
               }
             ]
+          },
+          "media": {
+            "type": "object",
+            "properties": {
+              "image": {
+                "type": "object",
+                "properties": {
+                  "opus_5_5": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["opus_5_5"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["image"],
+            "additionalProperties": false
           }
         },
-        "required": ["shell"],
         "additionalProperties": false
       },
       "Config.Plugin.EntryEncoded": {

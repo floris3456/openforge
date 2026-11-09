@@ -1,6 +1,7 @@
 export * as ServerProcess from "./process"
 
 import { NodeHttpServer } from "@effect/platform-node"
+import { AutoUpdate } from "./auto-update"
 import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
@@ -13,6 +14,7 @@ import { hasMcpClientTicketURL } from "@opencode/protocol/groups/mcp"
 import { isPairingConnectURL } from "@opencode/protocol/groups/server"
 import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { Global } from "@opencode/util/global"
+import type { LayerNode } from "@opencode/util/effect/layer-node"
 import { Cause, Context, Effect, Exit, Latch, Layer, Option, Ref, Scope } from "effect"
 import { HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { NetAddress } from "effect/net"
@@ -54,6 +56,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   lifecycle?: Lifecycle<E, R>,
   transform?: Transform,
   remoteURLs?: () => ReadonlyArray<string>,
+  overrides?: LayerNode.Replacements,
 ) {
   const password = options.password
   if (!password) return yield* Effect.fail(new Error("Missing server password"))
@@ -106,6 +109,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
           password,
         },
         urls,
+        overrides,
       ).pipe(Layer.provideMerge(NodeHttpServer.layerHttpServices)),
       applicationScope,
     )
@@ -123,6 +127,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     // A paused start fires nothing until it is resumed.
     yield* Effect.forkIn(
       continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Schedule.Service).run)),
+      applicationScope,
+    )
+    // openforge: automatic updates check only once the service runs (spec auto-update).
+    yield* Effect.forkIn(
+      continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, AutoUpdate.Service).run)),
       applicationScope,
     )
     yield* Ref.set(

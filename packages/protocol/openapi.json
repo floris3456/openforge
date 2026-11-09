@@ -10704,6 +10704,7 @@
                     "tui.session.select",
                     "installation.updated",
                     "installation.update-available",
+                    "installation.update-failed",
                     "service.pausing",
                     "service.paused",
                     "service.pause.expired",
@@ -10824,6 +10825,7 @@
                           "tui.session.select",
                           "installation.updated",
                           "installation.update-available",
+                          "installation.update-failed",
                           "service.pausing",
                           "service.paused",
                           "service.pause.expired",
@@ -15209,6 +15211,112 @@
         "summary": "Dismiss a cache notice"
       }
     },
+    "/api/experimental/update": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.update.get",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AutoUpdate.Status"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Whether this service installs new releases by itself (the global config's `update` is `auto`), why it can't when it can't, and the last automatic update that failed. Experimental: may change without compatibility guarantees.",
+        "summary": "Get automatic updates"
+      },
+      "put": {
+        "tags": ["experimental"],
+        "operationId": "experimental.update.set",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AutoUpdate.Status"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Write the global config's `update`: `auto` when on, `notify` when off. It applies at once: on checks for a new release now and every 15 minutes, off checks nothing. Experimental: may change without compatibility guarantees.",
+        "summary": "Turn automatic updates on or off",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoUpdate.Update"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/shell": {
       "get": {
         "tags": ["shell"],
@@ -18246,6 +18354,48 @@
           }
         },
         "required": ["kind"],
+        "additionalProperties": false
+      },
+      "AutoUpdate.Failure": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "at": {
+            "type": "number"
+          }
+        },
+        "required": ["version", "message", "at"],
+        "additionalProperties": false
+      },
+      "AutoUpdate.Status": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "unavailable": {
+            "type": "string"
+          },
+          "failure": {
+            "$ref": "#/components/schemas/AutoUpdate.Failure"
+          }
+        },
+        "required": ["enabled"],
+        "additionalProperties": false
+      },
+      "AutoUpdate.Update": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": ["enabled"],
         "additionalProperties": false
       },
       "Command.Info": {

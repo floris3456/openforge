@@ -214,6 +214,8 @@ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof 
       return json({ data: { state: "unset", since: 0, refused: false } })
     // The prompt footer reads the routed session's goal from the goal plugin's RPC; no fixture sets one.
     if (url.pathname === "/api/rpc/opencode.goal/get") return json({ output: null })
+    // Each TUI reads the service's automatic updates when it connects; off and never failed unless a fixture says so.
+    if (url.pathname === "/api/experimental/update") return json({ data: { enabled: false } })
     throw new Error(`unexpected request: ${url.pathname}`)
   }
   fetch.preconnect = () => {}

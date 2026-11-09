@@ -2151,6 +2151,7 @@ export type EventSubscribeInput = {
         | "tui.session.select"
         | "installation.updated"
         | "installation.update-available"
+        | "installation.update-failed"
         | "service.pausing"
         | "service.paused"
         | "service.pause.expired"
@@ -2781,6 +2782,23 @@ export type ExperimentalPacerNoticesDismissOperation<E = never> = (
   input: ExperimentalPacerNoticesDismissInput,
 ) => Effect.Effect<ExperimentalPacerNoticesDismissOutput, E>
 
+export type ExperimentalUpdateGetOutput = {
+  readonly enabled: boolean
+  readonly unavailable?: string | undefined
+  readonly failure?: { readonly version: string; readonly message: string; readonly at: number } | undefined
+}
+export type ExperimentalUpdateGetOperation<E = never> = () => Effect.Effect<ExperimentalUpdateGetOutput, E>
+
+export type ExperimentalUpdateSetInput = { readonly enabled: boolean }
+export type ExperimentalUpdateSetOutput = {
+  readonly enabled: boolean
+  readonly unavailable?: string | undefined
+  readonly failure?: { readonly version: string; readonly message: string; readonly at: number } | undefined
+}
+export type ExperimentalUpdateSetOperation<E = never> = (
+  input: ExperimentalUpdateSetInput,
+) => Effect.Effect<ExperimentalUpdateSetOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2840,6 +2858,7 @@ export interface ExperimentalApi<E = never> {
       readonly dismiss: ExperimentalPacerNoticesDismissOperation<E>
     }
   }
+  readonly update: { readonly get: ExperimentalUpdateGetOperation<E>; readonly set: ExperimentalUpdateSetOperation<E> }
 }
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }

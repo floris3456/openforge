@@ -1,5 +1,6 @@
 // openforge's self-upgrade: one install method (GitHub releases, see ./release.ts), checked once at startup and
-// on `/update` or `openforge upgrade`; never on a timer.
+// on `/update` or `openforge upgrade`. With automatic updates on, the background service also checks every 15 minutes
+// (./auto-update.ts).
 
 import { headers, type Endpoint } from "@opencode/client/effect/service"
 import { OpenCode, type UpgradeOutcome, type UpgradeState } from "@opencode/client/promise"
@@ -32,13 +33,27 @@ export type UpgradeInput = {
   /** Use the database copy made when `target` was left instead of the current database. */
   readonly restoreDatabase?: boolean
   readonly notify?: (state: UpgradeState) => void
+  /**
+   * Started by the background service's automatic update (spec auto-update): the upgrade log says so, and any failure
+   * marks `target` as bad, so that it is not tried again on its own.
+   */
+  readonly automatic?: boolean
 }
 
 export interface Interface {
   /** The release `current` points at, when this openforge runs from the install layout. */
   readonly current: () => Effect.Effect<string | undefined>
-  /** Once at startup: tells about (`notify`) or switches to (`auto`) a newer release. Never fails. */
+  /**
+   * Once at startup: tells about a newer release (`notify`). Never fails. With `auto` it does nothing: the background
+   * service checks and switches by itself (spec auto-update).
+   */
   readonly startup: (notify: (state: UpgradeState) => void) => Effect.Effect<void>
+  /** The global config's `update`: the last of config.json, opencode.json and opencode.jsonc that sets it. */
+  readonly policy: () => Effect.Effect<Policy>
+  /** Why this openforge can't check for releases and upgrade itself; undefined when it can. */
+  readonly unavailable: () => Effect.Effect<string | undefined>
+  /** The latest release when it is newer than the one in use and did not fail before; one request for release.json. */
+  readonly newer: () => Effect.Effect<string | undefined, UpgradeError>
   /** Installs a release and switches to it while chats run, whatever the policy. */
   readonly upgrade: (input?: UpgradeInput) => Effect.Effect<UpgradeOutcome, UpgradeError>
   /** Returns once no process is switching releases, so the service in use is the one the switch left. */
@@ -135,6 +150,21 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
     } satisfies ReleaseSwitch.Target
   })
 
+  // An automatic update that failed is not tried again on its own (spec auto-update), whatever step failed.
+  const markAutomatic = (version: string | undefined, message: string) => {
+    const to = version === undefined ? undefined : ReleaseVersion.normalize(version)
+    if (to === undefined) return Effect.void
+    return Effect.gen(function* () {
+      // A rolled back switch marked it already, before the old release started again.
+      if ((yield* ReleaseLayout.bad(layout))[to]?.automatic) return
+      yield* ReleaseLayout.markBad(layout, to, {
+        reason: message.replace(/^upgrade to \S+ failed: /, "").replace(/; still on \S+\. Log: .*$/s, ""),
+        log: path.join(options.log, "upgrade.log"),
+        automatic: true,
+      })
+    }).pipe(Effect.ignore)
+  }
+
   const install = Effect.fnUntraced(function* (manifest: Release.Manifest, platform: Release.Platform) {
     yield* Effect.scoped(
       Effect.gen(function* () {
@@ -208,6 +238,8 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         reason: `${Product.name} ${to} failed to start before and was rolled back (${bad.reason}; log: ${bad.log}); run "${Product.binary} upgrade ${to}" to try it again`,
       })
     const switching = yield* target()
+    if (input.automatic)
+      yield* ReleaseSwitch.note(switching, { from, to }, "automatic update, started by the background service")
     const restore = yield* database(switching, { from, to, restore: input.restoreDatabase ?? false })
     // Every step from here on is in the upgrade log; a failed one leaves `from` in use.
     const failed = (reason: string) =>
@@ -228,6 +260,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         from,
         to,
         restore,
+        automatic: input.automatic,
         onWaiting: (waiting) => notify({ type: "switching", version: to, waiting }),
       })
       if (outcome.type !== "busy") return outcome
@@ -244,28 +277,41 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
       return yield* failed(
         result.restored ? result.reason : `${result.reason} (${Product.name} ${from} did not start again either)`,
       )
+    if (input.automatic) yield* ReleaseSwitch.note(switching, { from, to }, "switched automatically")
     notify({ type: "switched", version: to })
     return { type: "switched" as const, from, to }
+  })
+
+  const unavailable = Effect.fnUntraced(function* () {
+    if (options.disabled)
+      return `Updates are turned off for this ${Product.name} by OPENCODE_DISABLE_AUTOUPDATE.`
+    const status = yield* inspect()
+    return status.type === "unavailable" ? status.message : undefined
+  })
+
+  const newer = Effect.fnUntraced(function* () {
+    const status = yield* inspect()
+    if (status.type === "unavailable") {
+      yield* Effect.logInfo("upgrade check skipped", { reason: status.message })
+      return undefined
+    }
+    const latest = yield* Release.manifest(options.base, "latest")
+    if (!ReleaseVersion.newer(latest.version, status.from)) return undefined
+    if ((yield* ReleaseLayout.bad(layout))[latest.version]) {
+      yield* Effect.logInfo("upgrade check skipped a release that failed before", { version: latest.version })
+      return undefined
+    }
+    yield* Effect.logInfo("openforge release available", { current: status.from, latest: latest.version })
+    return latest.version
   })
 
   const startup = (notify: (state: UpgradeState) => void) =>
     Effect.gen(function* () {
       if (options.local || options.disabled) return
-      const policy = yield* readPolicy()
-      if (policy === "disable") return
-      const status = yield* inspect()
-      if (status.type === "unavailable")
-        return yield* Effect.logInfo("upgrade check skipped", { reason: status.message })
-      const latest = yield* Release.manifest(options.base, "latest")
-      if (!ReleaseVersion.newer(latest.version, status.from)) return
-      if ((yield* ReleaseLayout.bad(layout))[latest.version])
-        return yield* Effect.logInfo("upgrade check skipped a release that failed before", { version: latest.version })
-      yield* Effect.logInfo("openforge release available", { current: status.from, latest: latest.version, policy })
-      if (policy === "notify") return notify({ type: "available", version: latest.version })
-      // A check that could not run only goes to the log; an automatic upgrade that failed is shown.
-      yield* upgrade({ notify }).pipe(
-        Effect.tapError((error) => Effect.sync(() => notify({ type: "failed", message: error.message }))),
-      )
+      // `auto` is the background service's to act on (spec auto-update); this TUI restarts once it switched.
+      if ((yield* readPolicy()) !== "notify") return
+      const version = yield* newer()
+      if (version) notify({ type: "available", version })
     }).pipe(
       Effect.catch((error) => Effect.logWarning("upgrade check failed", { error })),
       Effect.withSpan("upgrade.updater.startup"),
@@ -278,11 +324,15 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         Effect.provide(context),
       ),
     startup: (notify) => running.withPermits(1)(startup(notify)).pipe(Effect.provide(context)),
+    policy: () => readPolicy().pipe(Effect.provide(context)),
+    unavailable: () => unavailable().pipe(Effect.provide(context)),
+    newer: () => newer().pipe(Effect.provide(context)),
     upgrade: (input) =>
       running
         .withPermits(1)(upgrade(input))
         .pipe(
           Effect.tapError((error) => Effect.sync(() => input?.notify?.({ type: "failed", message: error.message }))),
+          Effect.tapError((error) => (input?.automatic ? markAutomatic(input.target, error.message) : Effect.void)),
           Effect.mapError((cause) =>
             cause instanceof UpgradeError ? cause : new UpgradeError({ reason: cause.message }),
           ),

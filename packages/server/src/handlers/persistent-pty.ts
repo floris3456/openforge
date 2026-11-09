@@ -20,6 +20,7 @@ import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
 import { makeAttention } from "./attention"
+import { makeAutoUpdate } from "./auto-update"
 import { makeMediaGet } from "./media"
 import { makePacer } from "./pacer"
 import { makePacerNotices } from "./pacer-notices"
@@ -39,6 +40,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const attention = yield* makeAttention
     const pacer = yield* makePacer
     const notices = yield* makePacerNotices
+    const updates = yield* makeAutoUpdate
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -63,6 +65,8 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handleRaw("attention.follow", (ctx) => attention.follow(ctx.query.desktop === true))
       .handle("pacer.notices.list", () => notices.list)
       .handle("pacer.notices.dismiss", (ctx) => notices.dismiss(ctx.params.requestID))
+      .handle("update.get", () => updates.get)
+      .handle("update.set", (ctx) => updates.set(ctx.payload.enabled))
       .handle("pacer.status", () => pacer.status)
       .handle("pacer.accounts", () => pacer.accounts)
       .handle("pacer.models", () => pacer.models)

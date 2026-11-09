@@ -20,6 +20,8 @@ import { RemoteTunnel } from "./services/remote-tunnel"
 import { WebUi } from "./services/web-ui"
 import { databasePath } from "./database-path"
 import { SwitchLock } from "./upgrade/switch-lock"
+import { AutoUpdateDriver } from "./upgrade/auto-update"
+import { Updater } from "./upgrade/updater"
 import { selfCommand } from "./util/process"
 
 export type Mode = "default" | "service" | "stdio"
@@ -83,6 +85,15 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       // Desktop can launch the service directly without injecting its saved environment.
       Object.assign(process.env, ServiceConfig.processEnv(config.env))
       const { start } = yield* Effect.promise(() => import("@opencode/server/process"))
+      // Only the background service updates itself (spec auto-update).
+      const overrides =
+        options.mode === "service"
+          ? yield* Effect.gen(function* () {
+              const { AutoUpdate } = yield* Effect.promise(() => import("@opencode/server/auto-update"))
+              const driver = yield* AutoUpdateDriver.make().pipe(Effect.provide(Updater.layer))
+              return [AutoUpdate.node.replace(AutoUpdate.configured(driver))]
+            })
+          : undefined
       const environmentPassword = yield* Env.password
       // Keep the lease credential out of the environment inherited by tools.
       if (options.mode === "stdio") {
@@ -164,6 +175,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
             },
         transform,
         () => remote.urls,
+        overrides,
       )
       const server = yield* launch.pipe(
         Effect.catch((error) => {

@@ -28,6 +28,7 @@ export default Runtime.handler(
       .upgrade({
         target: Option.getOrUndefined(input.target),
         restoreDatabase: input.restoreDatabase,
+        automatic: input.automatic,
         notify: (state) => {
           if (state.type === "installing") return step(`Installing ${Product.name} ${state.version}`)
           if (state.type === "switching" && spinning && state.waiting)

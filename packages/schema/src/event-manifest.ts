@@ -3,6 +3,7 @@ export * as EventManifest from "./event-manifest.js"
 import { Schema } from "effect"
 import { Agent } from "./agent.js"
 import { Artifact } from "./artifact.js"
+import { AutoUpdate } from "./auto-update.js"
 import { Command } from "./command.js"
 import { Config } from "./config.js"
 import { Continuity } from "./continuity.js"
@@ -79,6 +80,7 @@ export const ServerDefinitions = Event.inventory(
   ...SessionStatusEvent.Definitions,
   ...TuiEvent.Definitions,
   ...InstallationEvent.Definitions,
+  ...AutoUpdate.Event.Definitions,
   ...Continuity.Event.Definitions,
   ...VcsEvent.Definitions,
   McpEvent.StatusChanged,
@@ -91,6 +93,7 @@ export const isServer = (event: { readonly type: string }): event is ServerEvent
 export const Definitions = Event.inventory(
   ...foundationDefinitions,
   ...InstallationEvent.Definitions,
+  ...AutoUpdate.Event.Definitions,
   ...Continuity.Event.Definitions,
   ...featureDefinitions,
   ...LspEvent.Definitions,

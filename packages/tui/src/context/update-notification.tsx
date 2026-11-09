@@ -1,12 +1,14 @@
 // openforge's upgrade in the TUI: the CLI process installs a release and switches the background service to it
 // while chats run (see packages/cli/src/upgrade). This screen shows how far that got and, once the service runs the
 // new release, restarts itself on it once no other dialog is open, taking half-typed prompts along.
+import type { AutoUpdateFailure } from "@opencode/client"
 import { waitingMessage, type TitleOf, type UpgradeOutcome, type UpgradeState } from "@opencode/client/promise"
 import { useKeyboard } from "@opentui/solid"
 import { createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
 import { useClient } from "./client"
 import { useData } from "./data"
+import { useEvent } from "./event"
 import { useExit } from "./exit"
 import { useLog } from "./log"
 import { useEpilogue } from "./epilogue"
@@ -41,6 +43,7 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
     const route = useRoute()
     const data = useData()
     const client = useClient()
+    const event = useEvent()
     const log = useLog({ component: "update" })
     // A chat this screen has not loaded, such as one in another project, is read once so the switch can name it.
     const title: TitleOf = (sessionID) => {
@@ -118,6 +121,31 @@ export const { use: useUpdateNotification, provider: UpdateNotificationProvider 
       if (!props.updater) return
       onCleanup(props.updater.subscribe(receive))
     })
+
+    // An automatic update that failed while this TUI is attached (spec auto-update), said once. The service tells it
+    // as it happens; one rolled back by a restart of the service is read after the reconnect.
+    const attached = Date.now()
+    const told = new Set<string>()
+    const failed = (failure: AutoUpdateFailure | undefined) => {
+      if (!failure || failure.at < attached) return
+      const key = `${failure.version}@${failure.at}`
+      if (told.has(key)) return
+      told.add(key)
+      toast.show({
+        variant: "error",
+        message: `Automatic update to v${failure.version} failed: ${failure.message}`,
+        duration: NOTICE_DURATION,
+      })
+    }
+    onCleanup(event.on("installation.update-failed", (event) => failed(event.data.failure)))
+    onCleanup(
+      event.on("server.connected", () => {
+        void client.api.experimental.update.get().then(
+          (status) => failed(status.failure),
+          () => undefined,
+        )
+      }),
+    )
 
     const open = () => {
       const updater = props.updater

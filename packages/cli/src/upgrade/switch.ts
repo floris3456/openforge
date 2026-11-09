@@ -106,6 +106,8 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
     readonly to: string
     readonly restore?: string
     readonly onWaiting?: (waiting: ReadonlyArray<SwitchWork>) => void
+    /** An automatic update (spec auto-update): any failure marks `to` as bad, before the old release starts again. */
+    readonly automatic?: boolean
   },
 ) {
   const flock = yield* EffectFlock.Service
@@ -177,6 +179,15 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           // Without a database before the switch, whatever the new release created goes. A database whose copy
           // failed was not touched yet.
           if (!existed) yield* ReleaseDatabase.remove(target.database)
+          // Only a release whose own service failed is remembered as bad; a full disk is not its fault. An automatic
+          // update that failed is remembered either way, before the old release starts again: that service tells
+          // the TUIs that reconnect to it.
+          if (progress.starting || input.automatic)
+            yield* ReleaseLayout.markBad(target.layout, input.to, {
+              reason,
+              log: target.log,
+              ...(input.automatic ? { automatic: true } : {}),
+            })
           // The chats that rested on the old release continue there.
           const restarted = yield* start(target, input.from).pipe(Effect.flatMap(resume), Effect.exit)
           yield* log(
@@ -184,8 +195,6 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
               ? `rolled back; the service reports ${input.from}`
               : `rolled back, but ${input.from} did not start either: ${failureMessage(restarted)}`,
           )
-          // Only a release whose own service failed is remembered as bad; a full disk is not its fault.
-          if (progress.starting) yield* ReleaseLayout.markBad(target.layout, input.to, { reason, log: target.log })
           return {
             type: "rolled-back" as const,
             from: input.from,

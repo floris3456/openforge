@@ -1,10 +1,10 @@
 import type { AutoUpdateStatus, PacerSettings } from "@opencode/client"
 import { Attention } from "@opencode/schema/attention"
 import { Schema } from "effect"
-import { createEffect, createMemo, createSignal, on } from "solid-js"
+import { createEffect, createMemo, createSignal, on, useContext } from "solid-js"
 import { attentionEventDefaults, useConfig, useNewDesigns, type AttentionEvent } from "../config"
 import { useOptionalAttention } from "../context/attention"
-import { useClient } from "../context/client"
+import { ClientContext } from "../context/client"
 import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
 import { useDialog, type DialogContext } from "../ui/dialog"
@@ -577,10 +577,11 @@ export function settingID(setting: Setting) {
  */
 export function useShownSettings() {
   const pacer = usePacer()
-  const client = useClient()
-  // Automatic updates are the service's: read once when Settings opens.
+  // Automatic updates are the service's: read once when Settings opens. Without a service, as in some tests, the row
+  // stays hidden.
+  const client = useContext(ClientContext)
   const [updateStatus, setUpdateStatus] = createSignal<AutoUpdateStatus>()
-  void client.api.experimental.update.get().then(setUpdateStatus, () => undefined)
+  void client?.api.experimental.update.get().then(setUpdateStatus, () => undefined)
   // CLIProxyPacer's rows: each shown while it is on and its read answered with the row's value.
   const [pacerValues, setPacerValues] = createSignal<PacerSettings>()
   createEffect(
@@ -605,7 +606,7 @@ export function useShownSettings() {
       (pacer?.state() === "on" && (setting.pacer === undefined || pacerValues()?.[setting.pacer] !== undefined))
     )
   }
-  return { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus }
+  return { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client }
 }
 
 export function DialogConfig(props: { current?: string }) {
@@ -622,8 +623,7 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const client = useClient()
-  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus } = useShownSettings()
+  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client } = useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
@@ -682,7 +682,7 @@ export function DialogConfig(props: { current?: string }) {
     if (setting.preview && Schema.is(Attention.SoundID)(next)) preview(setting.preview, next)
     setSaving(true)
     if (setting.update) {
-      await client.api.experimental.update
+      await client!.api.experimental.update
         .set({ enabled: next === true })
         .then(setUpdateStatus)
         .catch(toast.error)

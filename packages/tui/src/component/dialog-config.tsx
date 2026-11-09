@@ -615,7 +615,7 @@ export const settings: Setting[] = [
     pacer: "summaryWriter",
     description:
       "For all chats: who writes a chat's summary when it compacts; openforge does whenever CLIProxyPacer can't",
-    help: 'Who writes a chat\'s summary when it compacts. "CLIProxyPacer" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Where CLIProxyPacer can\'t write one, openforge does. "openforge" always writes it. Kept by CLIProxyPacer for all your chats.',
+    help: 'Who writes a chat\'s summary when it compacts. "CLIProxyPacer" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Where CLIProxyPacer can\'t write one, openforge does. For now a summary written on a Claude model is always openforge\'s own, sent in the chat\'s own Messages format, which is what reads the chat\'s cache. "openforge" always writes it. Kept by CLIProxyPacer for all your chats.',
     default: "cliproxypacer",
     values: ["cliproxypacer", "openforge"],
     labels: ["CLIProxyPacer", "openforge"],

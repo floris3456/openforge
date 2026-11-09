@@ -10,7 +10,7 @@ import { SessionEvent } from "../session/event.js"
 import { SessionInbox } from "../session/inbox.js"
 import { SessionMessage } from "../session/message.js"
 import { ImageFit } from "./fit.js"
-import { ImageLine } from "./line.js"
+import { ImageLine } from "@opencode/util/image-line"
 
 // The images of a chat with optimized images (spec images), request by request: never cut, replaced or changed once
 // sent, so each request repeats the one before and only adds to it. Once what was sent leaves less room than one more

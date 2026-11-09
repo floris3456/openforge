@@ -214,37 +214,57 @@ the TUI exits and do not change `cli.json`.
 
 ## Alerts
 
-System notifications and attention sounds are on by default. Turn them off independently:
+System notifications and attention sounds are on by default. Five events each have their own notification and sound:
+
+| Event           | When                                                                                                                          | Default                    |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `done`          | A chat's final reply, when nothing it started still runs: no subagent at any depth and no shell                               | notification, `bip-bop-01` |
+| `reply`         | Every final reply of a chat, also while its subagents or background shells run                                                | off                        |
+| `subagent_done` | A subagent's final reply, down to `levels` below its chat (1 is the chat's own subagents), when nothing it started still runs | off, levels `1`            |
+| `question`      | A question, a form or a permission that waits for you, at any depth                                                           | notification, `bip-bop-03` |
+| `error`         | A failed turn of a chat, or of a subagent within `levels` while `subagent_done` is on                                         | notification, `nope-03`    |
+
+A reply that is also `done` raises only `done`; with `done` off (no notification and no sound) it raises `reply`, if
+that is on. When a background shell ends, its chat runs again, and that reply is `done`. An interrupted turn raises
+nothing.
 
 ```json title="cli.json"
 {
   "attention": {
     "notifications": true,
-    "sound": false,
+    "sound": true,
     "volume": 0.4,
-    "sound_pack": "opencode.default",
-    "sounds": {
-      "permission": "/home/me/sounds/permission.wav"
-    },
-    "protocol": "auto"
+    "protocol": "auto",
+    "events": {
+      "done": { "notification": true, "sound": "bip-bop-01" },
+      "reply": { "notification": false, "sound": "off" },
+      "subagent_done": { "notification": false, "sound": "yup-01", "levels": 2 },
+      "question": { "notification": true, "sound": "/home/me/sounds/question.wav" },
+      "error": { "notification": true, "sound": "nope-03" }
+    }
   }
 }
 ```
 
 <div class="docs-table-scroll" role="region" aria-label="Alert settings" tabIndex={0}>
 
-| Setting                   | Values                               | Description                                                                                         |
-| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `attention.notifications` | boolean                              | Shows system notifications when the terminal is not focused. On by default.                         |
-| `attention.sound`         | boolean                              | Plays attention sounds. On by default.                                                              |
-| `attention.volume`        | number from `0` to `1`               | Sets sound volume.                                                                                  |
-| `attention.sound_pack`    | string                               | Selects the active sound pack ID.                                                                   |
-| `attention.sounds`        | object                               | Overrides sound files for `default`, `question`, `permission`, `error`, `done`, or `subagent_done`. |
-| `attention.protocol`      | `auto`, `osc99`, `osc777`, or `osc9` | The terminal sequence for system notifications. `auto` recognises the terminal. Applies at start.   |
+| Setting                                 | Values                                       | Description                                                                                                                                                                             |
+| --------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attention.notifications`               | boolean                                      | Shows system notifications when the terminal is not focused, for every event. On by default.                                                                                            |
+| `attention.sound`                       | boolean                                      | Plays attention sounds, for every event. On by default.                                                                                                                                 |
+| `attention.volume`                      | number from `0` to `1`                       | Sets sound volume.                                                                                                                                                                      |
+| `attention.protocol`                    | `auto`, `osc99`, `osc777`, or `osc9`         | The terminal sequence for system notifications. `auto` recognises the terminal. Applies at start.                                                                                       |
+| `attention.events.<event>.notification` | boolean                                      | Whether the event shows a system notification.                                                                                                                                          |
+| `attention.events.<event>.sound`        | `off`, a built-in sound, or an absolute path | The event's sound. The built-in sounds are `alert-01` to `alert-10`, `bip-bop-01` to `bip-bop-10`, `nope-01` to `nope-12`, `staplebops-01` to `staplebops-07` and `yup-01` to `yup-06`. |
+| `attention.events.subagent_done.levels` | `1` to `9`                                   | How many levels of subagents below a chat raise `subagent_done` (and `error`).                                                                                                          |
+| `attention.sound_pack`                  | string                                       | Selects the active sound pack ID.                                                                                                                                                       |
+| `attention.sounds`                      | object                                       | Older sound files for `done`, `subagent_done`, `question`, `permission` and `error`, used while that event's `sound` is unset (`permission` for permissions).                           |
 
 </div>
 
-An invalid or unreadable override falls back to the built-in sound for that event.
+A value that isn't one of a setting's own counts as unset, so that event uses its default and the rest of `cli.json`
+still applies. A sound file that can't be played plays the event's built-in sound instead. The same settings are in
+Settings › Alerts; moving a sound row to a sound plays it once.
 
 The TUI shows a system notification as a terminal escape sequence. Inside tmux, turn on `set -g allow-passthrough on` so
 it reaches the terminal, and `set -s focus-events on` so the TUI knows whether its window is focused. While it doesn't

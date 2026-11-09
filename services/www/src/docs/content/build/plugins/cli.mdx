@@ -218,6 +218,10 @@ While one is connected, it plays the sound instead of the TUI, and with `--deskt
 `sound` or `notification` is `false` and `ok` is `true`. Pass `sessionID` when the request is about a session, so two
 TUIs on that session make one sound.
 
+`sound.name` picks the built-in sound of that kind (`done`, `question`, `permission`, `error`, `subagent_done` or
+`default`), or the file `attention.sounds` sets for it in `cli.json`. The TUI's own events (done, reply, subagent done,
+question, error) use their own settings, `attention.events`, instead.
+
 ## Theme and renderer
 
 Use semantic theme tokens with OpenTUI elements and pass `context.renderer` to renderer-specific helpers.

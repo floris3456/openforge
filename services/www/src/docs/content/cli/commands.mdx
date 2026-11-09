@@ -531,8 +531,9 @@ what it appends, as it does for an ssh target, so the shell there reads it as on
 $ openforge notify --via "ssh me@devbox docker exec -i devbox"
 ```
 
-Once connected, ask the service for a test notification. `--test=<event>` picks `done`, `subagent_done`, `question`,
-`permission` or `error`; `--test` alone is `done`. Test notifications are titled "openforge test".
+Once connected, ask the service for a test notification. `--test=<event>` picks `done`, `reply`, `subagent_done`,
+`question`, `permission` or `error`; `--test` alone is `done`. Test notifications are titled "openforge test" and play
+the event's built-in sound.
 
 ```bash
 $ openforge notify --test=question
@@ -549,6 +550,8 @@ $ openforge notify --volume 0.2 --verbose
 - Two TUIs on the same chat make one sound: the same notification within 300 ms plays once. A chat that no TUI has
   open makes none.
 - No desktop notification shows for a chat whose TUI window is focused.
+- Each sound is the one the TUI's settings chose for its event (`attention.events`), played from this install, or a
+  sound file from the TUI's machine.
 - Desktop notifications go through `notify-send` on Linux and `osascript` on macOS.
 - When the connection is lost, it is made again after 1 s, then twice as long each time, up to 30 s. Press Ctrl+C to
   stop; the other machine's side stops when ssh closes.

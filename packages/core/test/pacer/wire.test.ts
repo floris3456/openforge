@@ -218,6 +218,30 @@ describe("PacerWire", () => {
     expect(accounts.items[0].windows[3].left).toBe(100)
   })
 
+  test("gives a meter row's plan ID and the provider's own name of the plan, each only when CPP sends it", () => {
+    const meters = PacerWire.meters([
+      {
+        auth_index: "auth-a",
+        provider: "claude",
+        label: "a",
+        plan: "default_claude_max_20x",
+        plan_name: "Ultra",
+        windows: [],
+      },
+      { auth_index: "auth-b", provider: "claude", label: "b", plan: "claude_pro", windows: [] },
+      { auth_index: "auth-c", provider: "commandcode", label: "c", plan: null, plan_name: null, windows: [] },
+      { auth_index: "auth-d", provider: "antigravity", label: "d", plan: "g1-pro-tier", plan_name: "", windows: [] },
+    ])
+    const accounts = PacerWire.accounts(meters, { offset: 0, now: 0 }).items
+    expect(accounts.map((account) => [account.alias, account.plan, account.planName])).toEqual([
+      ["a", "default_claude_max_20x", "Ultra"],
+      ["b", "claude_pro", undefined],
+      ["c", undefined, undefined],
+      ["d", "g1-pro-tier", undefined],
+    ])
+    expect("planName" in accounts[1]!).toBeFalse()
+  })
+
   test("turns a request row into openforge's shape", () => {
     const [row] = PacerWire.rows([
       {
@@ -288,7 +312,14 @@ describe("PacerWire", () => {
       { id: 41, at: 1, ext: "", kind: 6, alias: "web_search", provider: "exa" },
       { id: 42, at: 2, ext: "", kind: 6, alias: "web_research", provider: "exa" },
       { id: 43, at: 3, ext: "0b6d1c52-5e0a-4f8e-9a51-2c4b7f1d9e30", kind: 0 },
-      { id: 44, at: 4, ext: "job_4a68e1c0b2d94f3a8c7e5b1d0f2a6c93", kind: 6, alias: "web_crawl", provider: "firecrawl" },
+      {
+        id: 44,
+        at: 4,
+        ext: "job_4a68e1c0b2d94f3a8c7e5b1d0f2a6c93",
+        kind: 6,
+        alias: "web_crawl",
+        provider: "firecrawl",
+      },
     ])
     const shaped = rows.map((row) => PacerWire.request(row, {}, { offset: 0, now: 0 }))
     expect(shaped.map((request) => [request.id, request.kind, request.model])).toEqual([

@@ -49,37 +49,73 @@ model, from the provider CLIProxyPacer serves it from. The sidebar's **Context**
 same.
 
 ```text
-Usage
-Claude Max 20x   5h                7d
-● ████░░░  62%   1h ██████░  80%  ~3d
-  ███████ 100%   5h ███████ 100%   7d
-Claude Pro       5h                7d
-› █░░░░░░  12%  46m ██░░░░░  31%   2d
-● in use  › next use
+Usage                        ● in use
+Antigravity Google AI Pro
+Claude & GPT    5h                7d
+  ▓100%       idle▓ ▓97%     ~6d 23h▓
+● ▓62%      2h 10m  ▓81%       5d 4h
+  ▓14%         47m  ▓38%       3d 9h
+Gemini          5h                7d
+  ▓100%       idle▓ ▓100%         7d▓
+  ▓100%       idle▓ ▓93%       5d 4h▓
+  ▓88%        4h 2m ▓71%       3d 9h
+Claude Ultra    5h                7d
+        –           0%         2d 2h
+  ▓88%         22m  ▓71%       5d 2h
 ```
 
-- Accounts are grouped by provider and plan (`Claude Max 20x`, `Claude Pro`), one row per account, without its name.
-  On the group's line, each column names its window: its length, after its scope when it covers only some models
-  (`opus 7d`).
-- Only the windows that limit the chat's model show: an Antigravity account shows its Claude and GPT windows for a
-  Claude model, its Gemini windows for a Gemini one.
-- Each window is a bar of what is left, the percent left (rounded down) and the time to its reset: `46m`, `1h`, `2d`
-  (hours and days rounded down); `~` marks a reset CLIProxyPacer estimates. A window nothing has used since its reset
-  shows its length (`5h`), `now` says the reset has passed with no reading since. With three windows the percent goes
-  to make room (the bar still shows it), except where no reset is known, where it takes the time's place.
-- A bar is green above 20% left, yellow at 20% or less and red at 10% or less; grey while the reading isn't current
-  (unused since its reset, past its reset, or older than an hour, when CLIProxyPacer stops counting on it).
-- `●` marks the account serving the chat: green while its step runs (from its first step on), blue for the one that
-  served it last. `›` marks where the chat goes once its cache is cold (blue), or where CLIProxyPacer must move it (a
-  warning). A line under the groups names the marks shown.
+Each window is a strip: its colored part (`▓` here) is what is left, with the percent left at its start and the time
+to its reset at its end.
+
+### Groups and rows
+
+- Accounts are grouped by provider and plan, as the provider names the plan (`Claude Ultra`, `Antigravity Google AI
+  Pro`), else as CLIProxyPacer names its plan ID (`Command Code GOAT`); accounts without a plan come last.
+- One row per account, without its name, in the same place every time. Every other row is a shade quieter, so strips
+  on rows next to each other stay apart.
+- Each window's label (`5h`, `7d`, `fable 7d`) sits over its strip's time: on the group's line when the name leaves
+  room, else on a line under it.
+- Only the windows that limit the chat's model show. An Antigravity account shows both its model groups, Claude & GPT
+  and Gemini, each with its label line over one row per account.
+- An account without a window shows an empty strip with `–`; one without any reading says `no reading yet`.
+
+### Strips
+
+| It shows | When |
+| --- | --- |
+| `62%` | the percent left, rounded down; `<1%` for a sliver, `?` when CLIProxyPacer doesn't know |
+| `2h 10m`, `47m`, `6d 23h` | the time to the reset; one unit (`2h`) when three windows share a line |
+| `~6d 23h` | CLIProxyPacer estimates the reset |
+| `idle` | the window starts with the next request |
+| `now` | the reset has passed with no reading since |
+
+- The strip is green above 20% left, yellow at 20% or less and red at 10% or less; grey while the reading isn't
+  current (past its reset, or older than an hour, when CLIProxyPacer stops counting on it).
+- Up to three windows share a line; a fourth goes on the next one.
+- The colors come from the theme's [`background.meter`](/cli/theme#semantic-tokens) tones.
+
+### Marks
+
+```text
+Usage             ● last used  › next
+```
+
+- `●` marks the account serving the chat: green while its step runs (`in use`, from its first step on), blue for the
+  one that served it last (`last used`).
+- `›` marks where the chat goes once its cache is cold (`next`), `»` where CLIProxyPacer must move it now (`forced`).
+  One account can carry two marks (`●›`).
+- The legend at the end of the title line names the marks shown; when it doesn't fit, it goes under the groups.
+
+### What it follows
+
 - It follows the model picked in the prompt, before you send. Until CLIProxyPacer has served the chat that model (a
   new chat, or one just switched to another model), it shows every provider that serves the model, API keys included.
   When the chat's next account is another provider's, that provider shows too.
 - When only some of a provider's accounts serve the model (Command Code's API key serves Claude models, its logins
   don't), only the accounts CLIProxyPacer names for the chat show: its own and where it moves. CLIProxyPacer tells how
   many accounts serve a model, not which.
-- While CLIProxyPacer is unreachable, the section is greyed and ends with `as of 14:02`. On a proxy without the pacer it
-  says `no pacer`.
+- While CLIProxyPacer is unreachable, the section is greyed with `as of 14:02` on its title line, and its times stop.
+  On a proxy without the pacer it says `no pacer`.
 - It polls nothing: the meters come with CLIProxyPacer's change stream, as they are read. A chat's view is read once
   more on its first step, to mark the account in use.
 

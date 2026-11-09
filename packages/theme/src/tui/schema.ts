@@ -103,6 +103,28 @@ const TextDefinition = Schema.Struct({
 })
 export type TextDefinition = Schema.Schema.Type<typeof TextDefinition>
 
+/** A meter's tones: its empty track, and its fill by what is left (`muted` while the reading isn't current). */
+export const MeterTone = Schema.Literals(["track", "success", "warning", "error", "muted"])
+export type MeterTone = Schema.Schema.Type<typeof MeterTone>
+
+const MeterTonesDefinition = Schema.Struct({
+  track: Schema.optional(ColorValue),
+  success: Schema.optional(ColorValue),
+  warning: Schema.optional(ColorValue),
+  error: Schema.optional(ColorValue),
+  muted: Schema.optional(ColorValue),
+})
+
+/**
+ * The cell backgrounds of meters drawn as strips, with the same tones a step quieter under `alternate` for every other
+ * row. Every tone is optional: one a theme doesn't set is derived from its own colors when it resolves.
+ */
+const MeterDefinition = Schema.Struct({
+  ...MeterTonesDefinition.fields,
+  alternate: Schema.optional(MeterTonesDefinition),
+})
+export type MeterDefinition = Schema.Schema.Type<typeof MeterDefinition>
+
 const BackgroundDefinition = Schema.Struct({
   base: Schema.optional(ColorValue),
   raised: Schema.optional(
@@ -122,6 +144,7 @@ const BackgroundDefinition = Schema.Struct({
       info: Schema.optional(BackgroundFeedbackDefinition),
     }),
   ),
+  meter: Schema.optional(MeterDefinition),
 })
 export type BackgroundDefinition = Schema.Schema.Type<typeof BackgroundDefinition>
 
@@ -250,6 +273,7 @@ const CompleteThemeTokensDefinition = Schema.Struct({
       success: CompleteBackgroundFeedbackDefinition,
       info: CompleteBackgroundFeedbackDefinition,
     }),
+    meter: Schema.optional(MeterDefinition),
   }),
   border: Schema.Struct({ base: ColorValue }),
   scrollbar: Schema.Struct({ base: ColorValue }),

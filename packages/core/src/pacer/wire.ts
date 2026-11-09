@@ -123,6 +123,8 @@ const Meter = Schema.Struct({
   /** The alias (a client key never sees an e-mail address). */
   label: maybe(Schema.String),
   plan: maybe(Schema.String),
+  /** The provider's own name of the plan (`Ultra`, `Google AI Pro`), since CPP `1bc19d1e`. */
+  plan_name: maybe(Schema.String),
   windows: Items,
 })
 export type Meter = typeof Meter.Type
@@ -434,6 +436,7 @@ export function accounts(items: ReadonlyArray<Meter>, context: Context): Pacer.A
       alias: meter.label || meter.auth_index,
       provider: meter.provider,
       ...(meter.plan ? { plan: meter.plan } : {}),
+      ...(meter.plan_name ? { planName: meter.plan_name } : {}),
       windows: each(meter.windows, decodeWindow).flatMap((item): Pacer.Window[] => {
         if (item.not_applicable === true || item.state === "not-applicable") return []
         const state = item.state && isWindowState(item.state) ? item.state : "unknown"

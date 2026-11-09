@@ -175,7 +175,7 @@ Semantic tokens assign colors to UI roles. Components use these roles instead of
 | Group | Purpose |
 | --- | --- |
 | `text` | Base, muted, faint, action, form-field, and feedback text. `faint` defaults to `muted`. |
-| `background` | Base, raised surfaces, actions, form fields, and feedback fills. |
+| `background` | Base, raised surfaces, actions, form fields, feedback fills, and meter tones. |
 | `border`, `scrollbar` | Border and scrollbar colors. |
 | `diff` | Added, removed, context, highlight, and line-number colors. |
 | `syntax` | Source-code highlighting. |
@@ -195,6 +195,19 @@ For example, `text.muted` controls secondary text while `background.raised` defi
       "base": "$hue.neutral.700",
       "high": "$hue.neutral.600",
       "max": "$hue.neutral.500"
+    }
+  }
+}
+```
+
+`background.meter` colors the strips of the sidebar's usage meters: `track` for the empty part, `success`, `warning` and `error` for the fill by what is left, and `muted` for a reading that isn't current, with the same five under `alternate` for every other row. Every tone is optional. One a theme doesn't set is mixed from its own colors into `background.raised.base`: the feedback text colors at 34% (26% for `alternate`), `text.muted` at 30% (23%), and `text.base` at 5% (2.5%) for the track. Where `background.raised.base` is fully transparent, `background.base` is used; where both are, black under light text and white under dark text.
+
+```json title="Inside base or a mode"
+{
+  "background": {
+    "meter": {
+      "success": "$hue.green.500",
+      "alternate": { "success": "$hue.green.600" }
     }
   }
 }

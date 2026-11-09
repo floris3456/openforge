@@ -1,16 +1,16 @@
-import { TextAttributes, type BoxRenderable } from "@opentui/core"
+import type { BoxRenderable } from "@opentui/core"
 import { createMemo, createSignal, Index, Show } from "solid-js"
 import { useData } from "../context/data"
 import { usePacer, type Pacer } from "../context/pacer"
 import { useTheme } from "../context/theme"
-import { chatAccount, clockTime, usageAccounts, usageLines, type UsageInk, type UsageSpan } from "./format"
+import { chatAccount, usageAccounts, usageSection, type UsageSpan } from "./format"
 
 // The sidebar's Usage section (spec cliproxypacer-usage-meters), where Context was: for the model picked for the chat
-// now, as the prompt shows it, the accounts of the provider serving it that serve it, one group per plan with the
-// windows' labels over their columns, one row per account without its name, each window that limits the model a bar
-// colored by what is left; the chat's account and where it moves marked, with a legend. Greyed with "as of" while CPP
-// is unreachable, "no pacer" on a plain proxy, hidden while the model picked is another provider's and when no CPP is
-// set up.
+// now, as the prompt shows it, the accounts of the provider serving it that serve it, one group per provider and plan,
+// one row per account without its name, each window a strip whose fill is what is left, with the percent left and the
+// time to its reset on it; the chat's account and where it moves marked, with a legend on the title line. Greyed with
+// "as of" while CPP is unreachable, "no pacer" on a plain proxy, hidden while the model picked is another provider's
+// and when no CPP is set up.
 
 /** `model`: the ID of CPP's model picked for the chat now; undefined while it is another provider's. */
 export function PacerUsage(props: { sessionID: string; model: string | undefined }) {
@@ -60,11 +60,11 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
       ),
   )
   const running = () => data.session.status(props.sessionID) === "running"
-  // The clock ticks every second, the text changes once a minute: a line whose text and colors stand keeps its object,
-  // so it isn't drawn again.
+  // The clock ticks every second, the text changes once a minute: a line whose text, colors and backgrounds stand keeps
+  // its object, so it isn't drawn again.
   const lines = createMemo<UsageSpan[][]>(
     (previous) =>
-      usageLines({
+      usageSection({
         accounts: shown(),
         model: props.model ?? "",
         serving: serving(),
@@ -72,19 +72,24 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
         running: running(),
         width: width(),
         now: asOf() ?? props.pacer.now(),
+        asOf: asOf(),
+        noPacer: noPacer(),
       }).map((line, index) => {
         const old = previous[index]
         return old !== undefined && sameLine(old, line) ? old : line
       }),
     [],
   )
-  const greyed = () => asOf() !== undefined
-  // Greyed as the toolbar's item is: faint, dimmed.
-  const color = (ink: UsageInk) => {
-    if (greyed()) return theme.text.faint
-    if (ink === "base") return theme.text.base
-    if (ink === "muted") return theme.text.muted
-    return theme.text.feedback[ink].base
+  const fg = (span: UsageSpan) => {
+    if (span.ink === "base") return theme.text.base
+    if (span.ink === "muted") return theme.text.muted
+    if (span.ink === "faint") return theme.text.faint
+    return theme.text.feedback[span.ink].base
+  }
+  const bg = (span: UsageSpan) => {
+    if (span.background === undefined) return undefined
+    const meter = theme.background.meter
+    return (span.alternate ? meter.alternate : meter)[span.background]
   }
 
   return (
@@ -94,31 +99,26 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
           setWidth(this.width)
         }}
       >
-        <text fg={theme.text.base}>
-          <b>Usage</b>
-        </text>
-        <Show when={!noPacer()} fallback={<text fg={theme.text.muted}>no pacer</text>}>
-          <Index each={lines()}>
-            {(line) => (
-              <text wrapMode="none">
-                <Index each={line()}>
-                  {(span) => (
-                    <span style={{ fg: color(span().ink), dim: greyed(), bold: span().bold === true }}>
-                      {span().text}
-                    </span>
-                  )}
-                </Index>
-              </text>
-            )}
-          </Index>
-          <Show when={asOf()}>
-            {(time) => (
-              <text fg={theme.text.faint} attributes={TextAttributes.DIM}>
-                as of {clockTime(time())}
-              </text>
-            )}
-          </Show>
-        </Show>
+        <Index each={lines()}>
+          {(line) => (
+            <text wrapMode="none">
+              <Index each={line()}>
+                {(span) => (
+                  <span
+                    style={{
+                      fg: fg(span()),
+                      bg: bg(span()),
+                      bold: span().bold === true,
+                      dim: span().dim === true,
+                    }}
+                  >
+                    {span().text}
+                  </span>
+                )}
+              </Index>
+            </text>
+          )}
+        </Index>
       </box>
     </Show>
   )
@@ -127,6 +127,16 @@ function UsageSection(props: { pacer: Pacer; sessionID: string; model: string | 
 function sameLine(a: readonly UsageSpan[], b: readonly UsageSpan[]) {
   return (
     a.length === b.length &&
-    a.every((span, index) => span.text === b[index]!.text && span.ink === b[index]!.ink && span.bold === b[index]!.bold)
+    a.every((span, index) => {
+      const other = b[index]!
+      return (
+        span.text === other.text &&
+        span.ink === other.ink &&
+        span.bold === other.bold &&
+        span.dim === other.dim &&
+        span.background === other.background &&
+        span.alternate === other.alternate
+      )
+    })
   )
 }

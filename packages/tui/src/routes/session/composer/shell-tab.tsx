@@ -8,6 +8,7 @@ import { Keymap } from "../../../context/keymap"
 import { useComposerTab } from "./context"
 import { useDialog } from "../../../ui/dialog"
 import { DialogShellOutput } from "../../../component/dialog-shell-output"
+import { openRowHelp } from "../../../ui/row-help"
 
 export function ShellTab(props: { sessionID: string }) {
   const data = useData()
@@ -93,6 +94,15 @@ export function ShellTab(props: { sessionID: string }) {
         title: "View shell output",
         group: "Composer",
         run: open,
+      },
+      {
+        id: "row.help",
+        title: "Show help for the shell command",
+        group: "Composer",
+        run() {
+          const entry = selectedEntry()
+          if (entry) openRowHelp(dialog, { title: "Shell command", description: entry.command })
+        },
       },
       {
         id: "composer.shell.kill",

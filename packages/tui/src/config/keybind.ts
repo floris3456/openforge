@@ -274,6 +274,7 @@ export const Definitions = {
   "dialog.select.home": keybind("home", "Move to first dialog item"),
   "dialog.select.end": keybind("end", "Move to last dialog item"),
   "dialog.select.submit": keybind("return", "Submit selected dialog item"),
+  "row.help": keybind("?,shift+?,shift+/", "Show help for the selected row"),
   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
   "dialog.integration.rename": keybind("ctrl+r", "Rename integration account"),
   "dialog.integration.delete": keybind("ctrl+d", "Delete integration account"),

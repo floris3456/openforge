@@ -43,6 +43,7 @@ export function CommandPaletteDialog() {
       category: setting.category,
       searchText: setting.keywords?.join(" "),
       searchFooter: `Settings · ${setting.category}`,
+      help: setting.help,
       value: `setting:${settingID(setting)}`,
       onSelect: (dialog: DialogContext) => {
         dialog.replace(() => <DialogConfig current={settingID(setting)} />)

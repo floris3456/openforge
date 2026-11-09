@@ -62,7 +62,7 @@ async function app(input: { width: number; config: Config.Info }) {
 
 const FULL_BAR = /^Subagents {2}Shell {2}Terminals {2}Requests +esc$/
 const ACTIVE_BAR = /^Requests ←\/→ +esc$/
-const ALL_HINTS = "go to enter  what changed ctrl+enter  show misses ctrl+a  tabs ←/→"
+const ALL_HINTS = "go to enter  what changed ctrl+enter  show misses ctrl+a  help ?  tabs ←/→"
 /** The Requests tab at each width of the session's pane: its tab bar, the list's column header and its hints. */
 const LAYOUTS = {
   // 38 and 60 columns: the sidebar, when shown in a window this narrow, lies over the session.

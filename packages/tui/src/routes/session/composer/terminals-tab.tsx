@@ -3,6 +3,8 @@ import { TextAttributes } from "@opentui/core"
 import { Keymap } from "../../../context/keymap"
 import { useSessionTerminals } from "../../../context/session-terminals"
 import { useTheme } from "../../../context/theme"
+import { useDialog } from "../../../ui/dialog"
+import { openRowHelp } from "../../../ui/row-help"
 import { useToast } from "../../../ui/toast"
 import { useComposerTab } from "./context"
 
@@ -11,6 +13,7 @@ export function TerminalsTab(props: { sessionID: string; visibleTerminalID?: str
   const terminals = useSessionTerminals()
   const theme = useTheme()
   const toast = useToast()
+  const dialog = useDialog()
   const failure = () => toast.show({ variant: "error", message: "Unable to load terminal" })
   const [selected, setSelected] = createSignal<number>()
   const session = () => terminals.get(props.sessionID)
@@ -55,6 +58,20 @@ export function TerminalsTab(props: { sessionID: string; visibleTerminalID?: str
         title: "Next terminal",
         group: "Composer",
         run: () => setSelected((index) => ((index ?? -1) + 1) % (entries().length + 1)),
+      },
+      {
+        id: "row.help",
+        title: "Show help for the terminal",
+        group: "Composer",
+        run() {
+          const index = selected()
+          if (index === undefined) return
+          const terminal = entries()[index]
+          openRowHelp(dialog, {
+            title: terminal?.foregroundProcess ?? terminal?.title ?? "New terminal",
+            description: terminal ? undefined : "Opens a new terminal for this chat.",
+          })
+        },
       },
       {
         id: "composer.terminal.select",

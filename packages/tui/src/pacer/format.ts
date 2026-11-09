@@ -535,6 +535,25 @@ export function requestVerdict(request: PacerRequest) {
   return [request.verdict, Pacer.causeText(request)].filter((part) => part !== "").join(" · ")
 }
 
+/**
+ * openforge (spec row-help): a request row's help, `?` in the Requests tab: every column of the row in full, which a
+ * narrow window drops or cuts, then what a row is and what its keys do.
+ */
+export function requestHelp(request: PacerRequest) {
+  const cells = requestCells(request)
+  return [
+    [
+      `${cells.time} · ${cells.kind} · ${cells.model}`,
+      `Account: ${cells.account}`,
+      `Read from / written to the cache: ${cells.cache} tokens`,
+      `Verdict: ${cells.verdict || "none yet"}`,
+      ...(cells.cost ? [`Cost: ${cells.cost}`] : []),
+    ].join("\n"),
+    "Each row is one request this chat or one of its subagents sent through CLIProxyPacer, newest first. Read/write is how many prompt tokens the provider read from its cache and wrote to it. The verdict says whether the cache was reused, partly reused or missed, and for a miss what caused it.",
+    "A narrow window drops the model, account and read/write columns and cuts long values; this help shows them in full. Enter moves the chat to where the request ended; Ctrl+Enter shows what changed in its prompt. The records come from CLIProxyPacer and show only while it answers.",
+  ].join("\n\n")
+}
+
 /** How a row is drawn: misses as warnings, failures as errors. */
 export function requestTone(request: PacerRequest): "base" | "warning" | "error" {
   if (request.failed || request.refusal !== undefined) return "error"

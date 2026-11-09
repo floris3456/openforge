@@ -71,8 +71,9 @@ describe("the renderer's environment", () => {
     // A `tmux` that never answers: the question is bounded by its limit.
     const started = Date.now()
     expect(
-      await notificationEnvironment("auto", tmux, undefined, { command: ["sleep", "5"], limitMs: 100 }),
+      await notificationEnvironment("auto", tmux, undefined, { command: ["sh", "-c", "sleep 5"], limitMs: 100 }),
     ).toBeUndefined()
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90)
     expect(Date.now() - started).toBeLessThan(3_000)
   })
 

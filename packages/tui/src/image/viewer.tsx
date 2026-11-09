@@ -5,6 +5,7 @@ import { createMediaSource } from "../component/media-source"
 import { Keymap } from "../context/keymap"
 import { useTheme } from "../context/theme"
 import { DialogHeader, useDialog } from "../ui/dialog"
+import { fallbackLine } from "./chat"
 import { useImageTerminal } from "./terminal"
 import { decodeImage, ImageView } from "./view"
 
@@ -16,8 +17,9 @@ import { decodeImage, ImageView } from "./view"
 export type ViewerImage = {
   /** A `data:` URI or a `media:` ref. */
   readonly uri: string
-  /** What the viewer shows as its title: the model's line, or a name. */
-  readonly title: string
+  /** The line the model got before the image, its title; without one, its name and size are. */
+  readonly line?: string
+  readonly name?: string
 }
 
 export function DialogImage(props: { images: readonly ViewerImage[]; initial: number }) {
@@ -33,6 +35,11 @@ export function DialogImage(props: { images: readonly ViewerImage[]; initial: nu
   const [actual, setActual] = createSignal(false)
   const [offset, setOffset] = createSignal({ x: 0, y: 0 })
   const [area, setArea] = createSignal({ width: 0, height: 0 })
+
+  const title = createMemo(() => {
+    const decoded = image()
+    return current().line ?? fallbackLine(current().name, decoded && { width: decoded.width, height: decoded.height })
+  })
 
   dialog.setSize("full")
   dialog.setCentered(true)
@@ -147,7 +154,7 @@ export function DialogImage(props: { images: readonly ViewerImage[]; initial: nu
       paddingBottom={1}
       gap={1}
     >
-      <DialogHeader title={current().title} />
+      <DialogHeader title={title()} />
       <box
         flexGrow={1}
         minHeight={1}

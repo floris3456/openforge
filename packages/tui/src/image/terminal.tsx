@@ -33,7 +33,15 @@ export const DEFAULT_CELL: Cell = { width: 9, height: 20 }
 /** How long after a resize or focus change the images go again, so a burst of them sends once. */
 const SETTLE_MS = 50
 
-type Renderer = Pick<CliRenderer, "on" | "off" | "capabilities" | "resolution" | "terminalWidth" | "terminalHeight">
+/** What of the renderer the image terminal reads: its resize and focus events, its colours and its pixel size. */
+type Renderer = {
+  on(event: "resize" | "focus", listener: () => void): unknown
+  off(event: "resize" | "focus", listener: () => void): unknown
+  readonly capabilities: Pick<NonNullable<CliRenderer["capabilities"]>, "ansi256"> | null
+  readonly resolution: { readonly width: number; readonly height: number } | null
+  readonly terminalWidth: number
+  readonly terminalHeight: number
+}
 
 export function createImageTerminal(input: {
   readonly renderer: Renderer

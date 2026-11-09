@@ -18,8 +18,8 @@ const large = `data:image/png;base64,${Buffer.from(
 const LINE_1 = "[Image 1: sun.png, 96×48, shown at 96×48; see it again or zoom with image]"
 const LINE_2 = "[Image 2: big.png, 2000×1000, shown at 2000×1000; see it again or zoom with image]"
 const images: ViewerImage[] = [
-  { uri: small, title: LINE_1 },
-  { uri: large, title: LINE_2 },
+  { uri: small, line: LINE_1 },
+  { uri: large, line: LINE_2 },
 ]
 
 function Opener(props: { images: readonly ViewerImage[]; initial: number }) {

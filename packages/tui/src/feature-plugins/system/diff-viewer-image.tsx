@@ -2,7 +2,7 @@
 import { useTerminalDimensions } from "@opentui/solid"
 import type { MouseEvent } from "@opentui/core"
 import { createResource, createSignal, Match, onCleanup, Show, Switch } from "solid-js"
-import { DialogImagePreview } from "../../component/dialog-image-preview"
+import { DialogImage } from "../../image/viewer"
 import { useTheme } from "../../context/theme"
 import { useDialog } from "../../ui/dialog"
 
@@ -47,11 +47,11 @@ export function DiffViewerImage(props: {
                 if (event.button !== 0 || !size() || failed()) return
                 event.stopPropagation()
                 dialog.replace(() => (
-                  <DialogImagePreview
+                  <DialogImage
                     images={[
                       {
                         uri: `data:application/octet-stream;base64,${Buffer.from(bytes).toString("base64")}`,
-                        mention: { text: props.file },
+                        name: props.file,
                       },
                     ]}
                     initial={0}

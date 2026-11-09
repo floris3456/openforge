@@ -606,10 +606,11 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     files: SessionMessageUser["files"],
     skills: FooterQueuedPrompt["skills"],
     render = true,
+    metadata?: SessionMessageUser["metadata"],
   ) => {
     const visible = state.messageIDs.has(messageID)
     state.messageIDs.add(messageID)
-    const images = freshImages(userImageCommits(messageID, files), render)
+    const images = freshImages(userImageCommits(messageID, files, metadata), render)
     if (!render) return
     write([
       ...(!visible && showTools() ? skillCommits(messageID, skills) : []),
@@ -777,7 +778,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         promoteWait(state.wait, false, message.id)
       if (state.pending.delete(message.id)) syncPending()
       state.promotedMessages.add(message.id)
-      renderUser(message.id, message.text, message.files, message.skills, render)
+      renderUser(message.id, message.text, message.files, message.skills, render, message.metadata)
       return
     }
     if (message.type === "skill") {

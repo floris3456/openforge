@@ -43,6 +43,8 @@ const messages = [
         mention: { start: 11, end: 20, text: "[Image 1]" },
       },
     ],
+    // The line the model got before the image, so the transcript shows it without the image's bytes.
+    metadata: { imageLines: ["[Image 1: shot.png, 1×1, shown at 1×1; see it again or zoom with image]"] },
     time: { created: 1 },
   },
 ]
@@ -161,7 +163,8 @@ const shown = (frame: string) => frame.split("What is in [Image 1]").length - 1
 test("reads transcripts with media refs and loads a ref's bytes before /undo rewinds its message", async () => {
   await using app = await openSession({})
   expect([...app.capabilities.values()]).toEqual(["experimental-media-uri"])
-  // Image previews are off by default, so showing the transcript reads no media.
+  // An image shows as its line, so showing the transcript reads no media.
+  expect(app.captureCharFrame()).toContain("[Image 1: shot.png, 1×1")
   expect(app.calls).toEqual([])
 
   await undoLast(app)

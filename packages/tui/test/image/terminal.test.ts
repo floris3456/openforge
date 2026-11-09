@@ -19,7 +19,7 @@ const image = {
 
 function fixture(input: { client?: TmuxClient; ansi256?: boolean; ask?: () => Promise<TmuxClient | undefined> } = {}) {
   const renderer = Object.assign(new EventEmitter(), {
-    capabilities: { ansi256: input.ansi256 ?? true } as never,
+    capabilities: { ansi256: input.ansi256 ?? true },
     resolution: null as { width: number; height: number } | null,
     terminalWidth: 100,
     terminalHeight: 30,

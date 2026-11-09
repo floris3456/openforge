@@ -21,7 +21,7 @@ import { createTuiResolvedConfig } from "./tui-runtime"
  */
 export function imageTerminal(input: { placeholders: boolean; cell?: Cell }) {
   const renderer = Object.assign(new EventEmitter(), {
-    capabilities: { ansi256: true } as never,
+    capabilities: { ansi256: true },
     resolution: null,
     terminalWidth: 100,
     terminalHeight: 30,

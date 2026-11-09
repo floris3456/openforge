@@ -81,7 +81,13 @@ export function fallbackLine(name: string | undefined, size?: { width: number; h
 /** The viewer's images and where `key` is among them. */
 export function viewerImages(images: readonly ChatImage[], key: string) {
   return {
-    images: images.map((image): ViewerImage => ({ uri: image.uri, title: image.line ?? fallbackLine(image.name) })),
+    images: images.map(
+      (image): ViewerImage => ({
+        uri: image.uri,
+        ...(image.line !== undefined && { line: image.line }),
+        ...(image.name !== undefined && { name: image.name }),
+      }),
+    ),
     initial: Math.max(
       0,
       images.findIndex((image) => image.key === key),

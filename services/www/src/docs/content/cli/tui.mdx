@@ -30,6 +30,27 @@ You can include a line or range after the path.
 Explain @src/auth.ts#20-45
 ```
 
+## Images
+
+Paste an image or attach one with `@`; with **Settings › Input › Image previews** on, thumbnails of the attached images show above the composer, and clicking one opens it.
+
+In the chat, each image shows as the line the model got before it, at its place: an attached image in its message, an image a tool returned (read, MCP, the browser, the model's zooms with `image`) under that tool. With [optimized images](/attachments#optimized-images) that is the image's numbered line, such as `[Image 9: Screenshot.png, 1235×579, shown at 1235×579; see it again or zoom with image]`; an image without one shows as `[Image: <name>, <width>×<height>]`.
+
+Click a line to open the image viewer. It shows exactly the image the model got, with its line as the title: at one image pixel per screen pixel when the window holds it, otherwise fitted to the window; never enlarged.
+
+<div class="docs-table-scroll" role="region" aria-label="Image viewer keys" tabIndex={0}>
+
+| Key           | Action                                                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| **←** / **→** | The previous or next image of the chat                                                             |
+| **Enter**     | Actual size (one image pixel per screen pixel) or fitted, when the image is larger than the window |
+| Arrow keys    | At actual size, move around the image                                                              |
+| **Esc**       | Close the viewer                                                                                   |
+
+</div>
+
+Images are drawn with the terminal's own graphics where it has them. Inside tmux, with Ghostty 1.4 or later or kitty attached and `allow-passthrough on` in tmux, they are drawn through Kitty graphics' Unicode placeholders: text cells tmux moves, clips and redraws for every client, so an image never stays behind after a scroll, a window switch or a second client of another size. They are sent to the terminal again after a resize or when the pane gets focus, so a client that attached later sees them too. Any other terminal inside tmux shows coloured blocks. Where the terminal's cell size isn't known (a client that came in with `docker exec`), actual size uses the cell size of another client of the same tmux, or 9×20 pixels.
+
 ## Shell
 
 Type `!` at the start of an empty prompt to enter shell mode. Enter a command and press **Enter**; press **Esc** to leave shell mode without running one.

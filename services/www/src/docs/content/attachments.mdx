@@ -171,6 +171,8 @@ off by default), a chat whose model has image limits on record handles images it
   Each request carries at most 600 images and 120 MB of them. When what was sent leaves less room than one more
   full-size image, the chat says once: "The next image will compact this chat first." An image that would not fit
   then compacts the chat first, and goes out after the summary.
+- **In the TUI** each image shows as its line, and a click opens exactly the image the model got in the
+  [image viewer](/cli/tui#images).
 
 ## Limits
 

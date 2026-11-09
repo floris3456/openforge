@@ -29,11 +29,9 @@ import {
   addDefaultParsers,
   TextAttributes,
   RGBA,
-  MouseEvent,
 } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import {
-  mediaHashFromUri,
   type PromptAttachment,
   type SessionMessageInfo,
   type SessionMessageAssistant,
@@ -67,8 +65,9 @@ import { useDialog } from "../../ui/dialog"
 import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { TodoItem } from "../../component/todo-item"
-import { DialogImagePreview } from "../../component/dialog-image-preview"
-import { createMediaSource } from "../../component/media-source"
+import { chatImages, toolImages, userImages, viewerImages, type ChatImage } from "../../image/chat"
+import { ChatImageLine } from "../../image/line"
+import { DialogImage } from "../../image/viewer"
 import { statusLabel } from "../../component/dialog-workspace-file-changes"
 import { DialogMessage } from "./dialog-message"
 import { DialogFork } from "./dialog-fork"
@@ -2382,14 +2381,10 @@ function UserMessage(props: { message: SessionMessageUser }) {
   const local = useLocal()
   // Opted-in reads leave stored files as `media:` refs, a PromptAttachment variant the generated message type omits.
   const files = createMemo(() => deduplicateVisibleImages<PromptAttachment>(props.message.files ?? []))
+  // openforge (spec image-view): an attached image shows as the line the model got, instead of a file chip.
+  const others = createMemo(() => files().filter((file) => !file.mime.startsWith("image/")))
+  const images = createMemo(() => userImages(props.message))
   const skills = createMemo(() => props.message.skills ?? [])
-  const images = createMemo(() =>
-    files().flatMap((file) =>
-      file.mime.startsWith("image/")
-        ? [{ uri: "uri" in file ? file.uri : `data:${file.mime};base64,${file.data}` }]
-        : [],
-    ),
-  )
   const themes = useThemes()
   const theme = useTheme()
   const mode = themes.mode
@@ -2411,7 +2406,6 @@ function UserMessage(props: { message: SessionMessageUser }) {
         customBorderChars={SplitBorder.customBorderChars}
         backgroundColor={theme.background.raised.base}
       >
-        <SessionImages images={images()} paddingLeft={2} />
         <box
           onMouseOver={() => {
             setHover(true)
@@ -2448,6 +2442,11 @@ function UserMessage(props: { message: SessionMessageUser }) {
           flexShrink={0}
         >
           <text fg={theme.text.base}>{props.message.text}</text>
+          <Show when={images().length}>
+            <box paddingTop={1}>
+              <ChatImages images={images()} />
+            </box>
+          </Show>
           <Show when={skills().length}>
             <box flexDirection="row" paddingTop={1} gap={1} flexWrap="wrap">
               <For each={skills()}>
@@ -2470,9 +2469,9 @@ function UserMessage(props: { message: SessionMessageUser }) {
               </For>
             </box>
           </Show>
-          <Show when={files().length}>
+          <Show when={others().length}>
             <box flexDirection="row" paddingTop={1} gap={1} flexWrap="wrap">
-              <For each={files()}>
+              <For each={others()}>
                 {(file) => {
                   const label = file.mime === "application/x-directory" ? "dir" : "file"
                   return (
@@ -2674,79 +2673,27 @@ function ToolPart(props: { part: SessionMessageAssistantTool; images?: boolean }
 }
 
 function ToolImages(props: { parts: readonly SessionMessageAssistantTool[] }) {
-  const images = createMemo(() => props.parts.flatMap(inlineToolImages))
-  return <SessionImages images={images()} />
-}
-
-function SessionImages(props: { images: readonly { uri: string }[]; paddingLeft?: number }) {
-  const ctx = use()
-  const dialog = useDialog()
-  const images = createMemo(() => (ctx.config.session?.image_preview ? props.images : []))
-  const height = createMemo(() => Math.max(4, Math.min(8, Math.floor(ctx.terminal.height / 4))))
-  const visible = createMemo(() => images().slice(0, 3))
-
+  const images = createMemo(() => props.parts.flatMap(toolImages))
   return (
-    <Show when={visible().length > 0}>
-      <box
-        flexDirection="row"
-        flexShrink={0}
-        paddingTop={1}
-        paddingLeft={props.paddingLeft ?? 3}
-        paddingRight={2}
-        paddingBottom={1}
-        gap={1}
-      >
-        <For each={visible()}>
-          {(image, index) => {
-            const media = createMediaSource(() => image.uri)
-            return (
-              <box
-                width={height() * 2}
-                height={height()}
-                flexBasis={height() * 2}
-                flexShrink={1}
-                alignItems="center"
-                justifyContent="center"
-                onMouseUp={(event: MouseEvent) => {
-                  if (event.button !== 0) return
-                  event.stopPropagation()
-                  dialog.replace(() => <DialogImagePreview images={images()} initial={index()} />)
-                }}
-              >
-                <Show when={!media.failed()} fallback={<text>No preview</text>}>
-                  <image
-                    source={media.source()}
-                    fit="cover"
-                    protocol="auto"
-                    width="100%"
-                    height="100%"
-                    onError={media.onError}
-                  />
-                </Show>
-              </box>
-            )
-          }}
-        </For>
-        <Show when={images().length > visible().length}>
-          <box width={8} height={height()} flexShrink={1} alignItems="center" justifyContent="center">
-            <text wrapMode="none" truncate>
-              +{images().length - visible().length} more
-            </text>
-          </box>
-        </Show>
+    <Show when={images().length > 0}>
+      <box flexShrink={0} paddingTop={1} paddingLeft={3} paddingRight={2}>
+        <ChatImages images={images()} />
       </box>
     </Show>
   )
 }
 
-function inlineToolImages(part: SessionMessageAssistantTool) {
-  return toolDisplayContent(part.state).flatMap((content) =>
-    content.type === "file" &&
-    content.mime.startsWith("image/") &&
-    (content.uri.startsWith("data:image/") || mediaHashFromUri(content.uri))
-      ? [{ uri: content.uri }]
-      : [],
-  )
+/** openforge (spec image-view): each image's line; a click opens the viewer on it, with the chat's images around it. */
+function ChatImages(props: { images: readonly ChatImage[] }) {
+  const ctx = use()
+  const data = useData()
+  const dialog = useDialog()
+  const open = (key: string) => {
+    const shown = viewerImages(chatImages(data.session.message.list(ctx.sessionID)), key)
+    if (shown.images.length === 0) return
+    dialog.replace(() => <DialogImage images={shown.images} initial={shown.initial} />)
+  }
+  return <For each={props.images}>{(image) => <ChatImageLine image={image} onOpen={() => open(image.key)} />}</For>
 }
 
 type ToolProps = {

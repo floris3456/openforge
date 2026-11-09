@@ -66,7 +66,8 @@ import {
   preserveMentionlessPromptAttachments,
   promptAttachmentLabel,
 } from "../../prompt/attachment"
-import { DialogImagePreview } from "../dialog-image-preview"
+import { DialogImage } from "../../image/viewer"
+import { ImageView } from "../../image/view"
 import { useDirectoryRecents } from "../../prompt/directory-recents"
 import { directoryRecentValue } from "../../prompt/directory-completion"
 import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
@@ -405,7 +406,8 @@ export function Prompt(props: PromptProps) {
   function openImagePreview(initial: number) {
     const images = imageAttachments()
     if (images.length === 0) return
-    dialog.replace(() => <DialogImagePreview images={images} initial={initial} />)
+    const shown = images.map((file) => ({ uri: file.uri, name: file.name }))
+    dialog.replace(() => <DialogImage images={shown} initial={initial} />)
   }
 
   createEffect(
@@ -1758,11 +1760,10 @@ export function Prompt(props: PromptProps) {
                             </box>
                           }
                         >
-                          <image
+                          <ImageView
                             id={`prompt-image-preview-${index()}`}
                             source={file.uri}
                             fit="cover"
-                            protocol="auto"
                             width="100%"
                             height="100%"
                             onError={() => setFailed(true)}

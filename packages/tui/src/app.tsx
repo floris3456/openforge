@@ -18,6 +18,7 @@ import {
   CliRenderEvents,
   createCliRenderer,
   MouseButton,
+  NativeSession,
   type CliRenderer,
   type CliRendererConfig,
   type ThemeMode,
@@ -109,7 +110,8 @@ import { DialogVariant } from "./component/dialog-variant"
 import { destroyRenderer, setTerminalTitle } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { AttentionProvider } from "./context/attention"
-import { notificationEnvironment } from "./tmux-terminal"
+import { askTmux, notificationEnvironment } from "./tmux-terminal"
+import { createImageTerminal, ImageTerminalProvider, type ImageOutput } from "./image/terminal"
 import { StorageProvider, useStorage } from "./context/storage"
 import { SessionTerminalsProvider } from "./context/session-terminals"
 import { ClientMcp } from "./context/client-mcp"
@@ -227,8 +229,9 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   const config = Config.resolve(yield* Effect.tryPromise(() => input.config.get()), {
     terminalSuspend: process.platform !== "win32",
   })
-  // openforge: behind tmux, `auto` asks tmux for the attached terminal (at most 300 ms), while the TUI connects.
-  const notification = notificationEnvironment(config.attention.protocol, process.env)
+  // openforge: behind tmux, tmux is asked for the attached terminal (at most 300 ms) while the TUI connects, for the
+  // notifications' `auto` and for images (spec image-view).
+  const tmux = askTmux(process.env)
   const headers = Service.headers(input.server.endpoint)
   // Every write this screen sends outlasts a release switch: it is resent until the service takes it (see the client).
   const resender = createResender({ limit: input.resendLimit })
@@ -262,7 +265,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     updatedVersion: undefined as string | undefined,
     reason: undefined as unknown,
   }
-  const environment = yield* Effect.promise(() => notification)
+  const client = yield* Effect.promise(() => tmux)
+  const environment = notificationEnvironment(config.attention.protocol, process.env, client)
+  // openforge (spec image-view): images go to the terminal through the renderer's own ordered output.
+  let output: ImageOutput | undefined
   const result = yield* Effect.scoped(
     Effect.gen(function* () {
       const options = {
@@ -297,7 +303,12 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         }
         return yield* Effect.acquireRelease(
           Effect.tryPromise({
-            try: () => createCliRenderer(options),
+            try: () => {
+              // The renderer owns the session once it is attached; the TUI keeps it to write images into its queue.
+              const session = new NativeSession(process.stdout)
+              output = { write: (bytes) => session.write(bytes), idle: () => session.idle() }
+              return createCliRenderer({ ...options, nativeSession: session })
+            },
             catch: (error) => (error instanceof Error ? error : new Error(String(error))),
           }),
           (renderer) =>
@@ -308,6 +319,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         )
       })
       renderer.setMaxListeners(15)
+      const images = yield* Effect.acquireRelease(
+        Effect.sync(() => createImageTerminal({ renderer, output, client, ask: () => askTmux(process.env) })),
+        (images) => Effect.sync(images.dispose),
+      )
       const clipboard = yield* Effect.acquireRelease(
         Effect.sync(() => createTuiClipboard(renderer)),
         (clipboard) =>
@@ -403,6 +418,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                 }}
                               >
                                 <ClipboardProvider value={clipboard}>
+                                  <ImageTerminalProvider value={images}>
                                   <ArgsProvider {...input.args}>
                                     <ConfigProvider
                                       config={config}
@@ -481,6 +497,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                       </Keymap.Provider>
                                     </ConfigProvider>
                                   </ArgsProvider>
+                                  </ImageTerminalProvider>
                                 </ClipboardProvider>
                               </TuiStartupProvider>
                             </TuiTerminalEnvironmentProvider>

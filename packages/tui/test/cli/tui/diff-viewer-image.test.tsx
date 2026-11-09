@@ -59,23 +59,27 @@ test.each([
   }
 })
 
-test("clicking a thumbnail opens the shared image modal and escape returns to the preview", async () => {
+test("clicking a thumbnail opens the image viewer and escape returns to the preview", async () => {
   const app = await renderImage(() => <DiffViewerImage file="landscape.png" load={async () => diffImageFixture} />)
   try {
     await app.waitForFrame((frame) => frame.includes("Click to enlarge"))
     const thumbnail = findImage(app.renderer.root)!
     await app.mockMouse.click(thumbnail.x + Math.floor(thumbnail.width / 2), thumbnail.y + 1)
-    await app.waitForFrame((frame) => frame.includes("Image 1 of 1"))
-    const modal = app.renderer.root.findDescendantById("prompt-image-viewer-image")
-    expect(modal).toBeInstanceOf(ImageRenderable)
-    if (!(modal instanceof ImageRenderable)) throw new Error("Missing image modal")
-    await app.waitFor(() => modal.image?.width === 96)
+    await app.waitForFrame((frame) => frame.includes("1 of 1"))
+    // openforge (spec image-view): the viewer shows the image at its own size, never enlarged: 96×48 pixels at the
+    // 9×20 cells assumed without a known cell size take 11×2 cells.
+    const viewerImage = () => {
+      const viewer = app.renderer.root.findDescendantById("image-viewer-image")
+      return viewer ? findImage(viewer) : undefined
+    }
+    await app.waitFor(() => viewerImage()?.image?.width === 96)
+    const modal = viewerImage()!
     expect(modal.image?.height).toBe(48)
-    expect(modal.height).toBeGreaterThan(thumbnail.height)
+    expect([modal.width, modal.height]).toEqual([11, 2])
     expect(app.captureCharFrame()).toContain("landscape.png")
 
     app.mockInput.pressEscape()
-    await app.waitForFrame((frame) => !frame.includes("Image 1 of 1"))
+    await app.waitForFrame((frame) => !frame.includes("1 of 1"))
     expect(findImage(app.renderer.root)).toBe(thumbnail)
     expect(app.captureCharFrame()).toContain("Click to enlarge")
   } finally {

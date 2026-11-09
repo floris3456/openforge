@@ -21,13 +21,16 @@ import { useClipboard } from "../context/clipboard"
 import { useConfig, useNewDesigns } from "../config"
 import { copy, copyOnSelectRelease } from "../util/selection"
 
-export type DialogSize = "medium" | "large" | "xlarge"
+// openforge: "full" takes the whole terminal, for the image viewer (spec image-view).
+export type DialogSize = "medium" | "large" | "xlarge" | "full"
 
 export const DIALOG_INSET = 3
 // List rows reserve a 1-cell gutter for the ▌ bar / ● marker.
 export const DIALOG_LIST_INSET = DIALOG_INSET + 1
 
 export function dialogWidth(size: DialogSize) {
+  // Wider than any terminal: the dialog's maxWidth fits it to the terminal.
+  if (size === "full") return 10_000
   if (size === "xlarge") return 116
   if (size === "large") return 88
   return 60
@@ -429,7 +432,7 @@ function init() {
     get key() {
       return store.stack.at(-1)?.key
     },
-    setSize(size: "medium" | "large" | "xlarge") {
+    setSize(size: DialogSize) {
       setStore("size", size)
     },
     setCentered(centered: boolean) {

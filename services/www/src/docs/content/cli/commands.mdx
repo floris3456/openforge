@@ -701,6 +701,11 @@ chats carry on; the switch tries again once that has finished, and the TUI and
 this command say what it waits for. A switch away from a release before 0.1.0
 waits until no chat is running, since those releases cannot pause.
 
+With Settings › Updates › Automatic updates on (`"update": "auto"` in the
+global config), the background service does the same by itself: it checks for
+a new release every 15 minutes and switches to it. See
+[Updates](/config#updates).
+
 Going back to an older release needs a database it can read. Use the copy made
 when that release was left, which lacks everything stored since then:
 

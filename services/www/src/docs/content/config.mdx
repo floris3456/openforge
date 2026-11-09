@@ -167,12 +167,17 @@ Control update checks from the global config. Set `update` to `"disable"` to
 skip them, `"notify"` to show available updates before installing them, or
 `"auto"` to install updates automatically. When omitted, `update` defaults to `"notify"`.
 
-With `"auto"`, openforge installs a newer release when it starts and switches
-the background service to it at once, while chats run: they rest for the
-switch and continue on the new release, and a release that fails to start is
-rolled back. See [`upgrade`](/cli/commands#upgrade). The TUI then restarts on
-the new release and keeps what you were typing. Project-level values are
-ignored.
+`"auto"` is Settings › Updates › Automatic updates turned on (off, the
+default, writes `"notify"`). With it, the background service checks for a
+newer release when it starts and every 15 minutes, installs it and switches to
+it as [`upgrade`](/cli/commands#upgrade) does, while chats run: they rest at
+the end of their current step and continue on the new release, and a release
+that fails to start is rolled back and not tried again on its own. Every open
+TUI restarts on the new release and keeps what you were typing, or says
+"Automatic update to vX failed: …" once. With anything else the service sends
+no update request at all. A change applies at once, without a restart. A source
+checkout, or a binary not installed with `install.sh`, does not update itself,
+and the Settings row says why. Project-level values are ignored.
 
 ```jsonc
 {

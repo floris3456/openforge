@@ -150,8 +150,8 @@ test("clicking a line opens the viewer on that image, the chat's images in order
   expect(flat(app.captureCharFrame())).toContain(READ)
   // The viewer shows the message's own bytes.
   await app.waitFor(() => {
-    const image = app.renderer.root.findDescendantById("image-viewer-image")
-    return image instanceof ImageRenderable && image.image?.width === 96
+    const viewer = app.renderer.root.findDescendantById("image-viewer-image")
+    return viewer !== undefined && findImages(viewer).some((image) => image.image?.width === 96)
   })
 
   app.mockInput.pressArrow("left")

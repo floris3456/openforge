@@ -8,7 +8,7 @@ import { diffImageFixture } from "../fixture/diff-image"
 import { commands, imageTerminal, placeholderCells, renderWithImages, transmitted, until } from "../fixture/image"
 
 // openforge (spec image-view, Proof): the viewer shows exactly the bytes it is given, with their line as its title,
-// fitted and never enlarged; left and right go through the images; Enter toggles actual size when the image is larger
+// fitted and never enlarged (an image the window holds at one pixel per pixel); left and right go through the images; Enter toggles actual size when the image is larger
 // than the window, where the arrows move around it; Esc closes it. Cells are 9×20.
 
 const small = `data:image/png;base64,${Buffer.from(diffImageFixture).toString("base64")}`
@@ -38,7 +38,7 @@ async function open(input: { placeholders: boolean; initial?: number; width?: nu
 }
 
 test.each([100, 60])(
-  "an image smaller than the window is shown at its own size, never enlarged (%p columns)",
+  "an image the window holds is shown at its own size, one image pixel per screen pixel (%p columns)",
   async (width) => {
     const { app, sent } = await open({ placeholders: true, width })
     try {
@@ -47,11 +47,11 @@ test.each([100, 60])(
       expect(frame).toContain("1 of 2 · 96×48")
       // The title may wrap around the dialog's "esc".
       expect(frame.replace(/\s+/g, " ").replace(" esc ", " ")).toContain(LINE_1)
-      // 96×48 pixels are 10.7×2.4 cells: the box is 10×2, and the pixels sent fit it, 90×45 at most.
-      expect(placeholderCells(frame)).toHaveLength(2)
-      expect(placeholderCells(frame)[0]).toHaveLength(10)
-      expect(commands(sent).at(-1)!.keys).toEndWith(",c=10,r=2")
-      expect(Number(transmitted(sent)[0]!.keys.s)).toBeLessThanOrEqual(96)
+      // 96×48 pixels are 10.7×2.4 cells: 11×3 cells, and every pixel sent as it is, padded with transparent ones.
+      expect(placeholderCells(frame)).toHaveLength(3)
+      expect(placeholderCells(frame)[0]).toHaveLength(11)
+      expect(commands(sent).at(-1)!.keys).toEndWith(",c=11,r=3")
+      expect(transmitted(sent)[0]!.keys).toMatchObject({ s: "99", v: "60" })
       expect(frame).not.toContain("actual size")
     } finally {
       app.renderer.destroy()
@@ -148,13 +148,13 @@ test("Esc closes the viewer and deletes its image from the terminal", async () =
   }
 })
 
-test("without placeholders OpenTUI draws the fitted image in a box of its own size", async () => {
+test("without placeholders OpenTUI draws the image in a box of its own size", async () => {
   const { app, sent } = await open({ placeholders: false })
   try {
     await until(app, () => findImage(app.renderer.root)?.image?.width === 96)
     const image = findImage(app.renderer.root)!
-    expect(image.id).toBe("image-viewer-image")
-    expect([image.width, image.height]).toEqual([10, 2])
+    expect(findImage(app.renderer.root.findDescendantById("image-viewer-image")!)).toBe(image)
+    expect([image.width, image.height]).toEqual([11, 2])
     expect(sent).toEqual([])
   } finally {
     app.renderer.destroy()

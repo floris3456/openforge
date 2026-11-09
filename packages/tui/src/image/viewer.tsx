@@ -10,9 +10,9 @@ import { useImageTerminal } from "./terminal"
 import { decodeImage, ImageView } from "./view"
 
 // openforge (spec image-view): the image viewer. It shows exactly the bytes it is given, with their line as its title:
-// fitted to the window and never enlarged beyond its own pixels; Enter toggles actual size (one image pixel per screen
-// pixel) when the image is larger than the window, where the arrows move around it; otherwise left and right go
-// through the images in order. Esc closes it.
+// at one image pixel per screen pixel when the window holds it, otherwise fitted to the window; never enlarged. Enter
+// toggles actual size when the image is larger than the window, where the arrows move around it; otherwise left and
+// right go through the images in order. Esc closes it.
 
 export type ViewerImage = {
   /** A `data:` URI or a `media:` ref. */
@@ -82,19 +82,21 @@ export function DialogImage(props: { images: readonly ViewerImage[]; initial: nu
   })
   const larger = createMemo(() => {
     const size = natural()
-    return size !== undefined && (size.columns > area().width || size.rows > area().height)
+    return size !== undefined && (Math.ceil(size.columns) > area().width || Math.ceil(size.rows) > area().height)
   })
   const zoomed = () => actual() && larger()
-  // The box the image takes: fitted, never larger than the image; or at actual size as much of it as the window holds.
+  // An image the window holds is shown at its own size, one image pixel per screen pixel, as at actual size; a larger
+  // one fitted to the window, or at actual size as much of it as the window holds.
+  const fit = () => (larger() && !zoomed() ? "fit" : "actual")
   const box = createMemo(() => {
     const size = natural()
     if (!size || area().width <= 0 || area().height <= 0) return
-    if (zoomed())
+    if (fit() === "actual")
       return {
         width: Math.min(area().width, Math.ceil(size.columns)),
         height: Math.min(area().height, Math.ceil(size.rows)),
       }
-    const scale = Math.min(1, area().width / size.columns, area().height / size.rows)
+    const scale = Math.min(area().width / size.columns, area().height / size.rows)
     return {
       width: Math.max(1, Math.floor(size.columns * scale)),
       height: Math.max(1, Math.floor(size.rows * scale)),
@@ -171,7 +173,7 @@ export function DialogImage(props: { images: readonly ViewerImage[]; initial: nu
               <ImageView
                 id="image-viewer-image"
                 source={image()}
-                fit={zoomed() ? "actual" : "fit"}
+                fit={fit()}
                 width={size().width}
                 height={size().height}
                 offset={offset()}

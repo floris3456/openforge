@@ -67,14 +67,15 @@ test("clicking a thumbnail opens the image viewer and escape returns to the prev
     await app.mockMouse.click(thumbnail.x + Math.floor(thumbnail.width / 2), thumbnail.y + 1)
     await app.waitForFrame((frame) => frame.includes("1 of 1"))
     // openforge (spec image-view): the viewer shows the image at its own size, never enlarged: 96×48 pixels at the
-    // 9×20 cells assumed without a known cell size are 10×2 cells.
-    await app.waitFor(() => {
-      const modal = app.renderer.root.findDescendantById("image-viewer-image")
-      return modal instanceof ImageRenderable && modal.image?.width === 96
-    })
-    const modal = app.renderer.root.findDescendantById("image-viewer-image") as ImageRenderable
+    // 9×20 cells assumed without a known cell size take 11×2 cells.
+    const viewerImage = () => {
+      const viewer = app.renderer.root.findDescendantById("image-viewer-image")
+      return viewer ? findImage(viewer) : undefined
+    }
+    await app.waitFor(() => viewerImage()?.image?.width === 96)
+    const modal = viewerImage()!
     expect(modal.image?.height).toBe(48)
-    expect([modal.width, modal.height]).toEqual([10, 2])
+    expect([modal.width, modal.height]).toEqual([11, 2])
     expect(app.captureCharFrame()).toContain("landscape.png")
 
     app.mockInput.pressEscape()

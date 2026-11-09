@@ -109,6 +109,7 @@ import { DialogVariant } from "./component/dialog-variant"
 import { destroyRenderer, setTerminalTitle } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { AttentionProvider } from "./context/attention"
+import { notificationEnvironment } from "./tmux-terminal"
 import { StorageProvider, useStorage } from "./context/storage"
 import { SessionTerminalsProvider } from "./context/session-terminals"
 import { ClientMcp } from "./context/client-mcp"
@@ -226,6 +227,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   const config = Config.resolve(yield* Effect.tryPromise(() => input.config.get()), {
     terminalSuspend: process.platform !== "win32",
   })
+  // openforge: behind tmux, `auto` asks tmux for the attached terminal (at most 300 ms), while the TUI connects.
+  const notification = notificationEnvironment(config.attention.protocol, process.env)
   const headers = Service.headers(input.server.endpoint)
   // Every write this screen sends outlasts a release switch: it is resent until the service takes it (see the client).
   const resender = createResender({ limit: input.resendLimit })
@@ -259,6 +262,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     updatedVersion: undefined as string | undefined,
     reason: undefined as unknown,
   }
+  const environment = yield* Effect.promise(() => notification)
   const result = yield* Effect.scoped(
     Effect.gen(function* () {
       const options = {
@@ -274,9 +278,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
           keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
         },
         // openforge: a terminal OpenTUI can't recognise through tmux or ssh gets its notification sequence set.
-        ...(config.attention.protocol !== "auto" && {
-          environment: { OPENTUI_NOTIFICATION_PROTOCOL: config.attention.protocol },
-        }),
+        ...(environment && { environment }),
       } satisfies CliRendererConfig
       const renderer = yield* Effect.gen(function* () {
         if (handoff) {

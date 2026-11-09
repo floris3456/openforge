@@ -6,6 +6,8 @@ import { Effect, FileSystem, Option, Schema } from "effect"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { ServiceConfig } from "../../services/service-config"
+import { Install } from "../../notify/install"
+import { Global } from "@opencode/util/global"
 
 // `openforge notify [<ssh-target>]`: plays the notification sounds of one service's chats on this machine, and with
 // --desktop shows its notifications here. The service is never started: notify waits for one.
@@ -25,6 +27,7 @@ export default Runtime.handler(
       return yield* Effect.fail(new Error("Give an ssh target or --via, not both"))
     if (input.relay && (target !== undefined || via !== undefined))
       return yield* Effect.fail(new Error("--relay follows this machine's service; it takes no ssh target or --via"))
+    if (input.install || input.uninstall) return yield* service(input, target, via)
 
     const { Follow } = yield* Effect.promise(() => import("../../notify/follow"))
     const { Relay } = yield* Effect.promise(() => import("../../notify/relay"))
@@ -120,9 +123,23 @@ export default Runtime.handler(
       occurrence: (occurrence: Attention.Occurrence, isTest: boolean) => player.receive(occurrence, isTest),
     }
     if (route !== undefined) log(`Connecting to ${label}...`)
-    yield* Effect.promise((signal) => {
+    const global = yield* Global.Service
+    yield* Effect.promise((outer) => {
+      const restart = new AbortController()
+      const signal = AbortSignal.any([outer, restart.signal])
+      // Run by the service --install wrote: when <data>/current points at another release, end, so the service starts
+      // the stable link's new release.
+      const watch = input.installed
+        ? setInterval(() => {
+            void Install.upgraded(global.data, process.execPath).then((version) => {
+              if (version === undefined || restart.signal.aborted) return
+              log(`${Product.name} ${version} is installed; restarting`)
+              restart.abort()
+            })
+          }, Install.UPGRADE_CHECK_MS)
+        : undefined
       // Ctrl+C: release the sound device at once.
-      signal.addEventListener(
+      outer.addEventListener(
         "abort",
         () => {
           speaker.dispose()
@@ -131,23 +148,86 @@ export default Runtime.handler(
         { once: true },
       )
       const desktopOn = show !== undefined
-      if (route === undefined)
-        return Follow.local({ ...events, desktop: desktopOn, test, discover, registration }, signal)
-      return Follow.remote(
-        {
-          ...events,
-          route,
-          label,
-          desktop: desktopOn,
-          verbose: input.verbose,
-          test,
-          soundFile: (file, data) => files.set(file, data),
-        },
-        signal,
-      )
+      const follow =
+        route === undefined
+          ? Follow.local({ ...events, desktop: desktopOn, test, discover, registration }, signal)
+          : Follow.remote(
+              {
+                ...events,
+                route,
+                label,
+                desktop: desktopOn,
+                verbose: input.verbose,
+                test,
+                soundFile: (file, data) => files.set(file, data),
+              },
+              signal,
+            )
+      return follow.finally(() => clearInterval(watch))
     }).pipe(Effect.ensuring(Effect.sync(() => speaker.dispose())))
   }),
 )
+
+type Input = Runtime.Input<typeof Commands.commands.notify>
+
+// --install and --uninstall: the player of one route as a service of this machine.
+const service = Effect.fnUntraced(function* (input: Input, target: string | undefined, via: string | undefined) {
+  if (input.install && input.uninstall) return yield* Effect.fail(new Error("Give --install or --uninstall, not both"))
+  const flag = input.install ? "--install" : "--uninstall"
+  const other = [
+    input.relay ? "--relay" : undefined,
+    Option.isSome(input.test) ? "--test" : undefined,
+    Option.isSome(input.soundCommand) ? "--sound-command" : undefined,
+  ].filter((item) => item !== undefined)
+  if (other.length) return yield* Effect.fail(new Error(`${flag} can't be combined with ${other.join(" or ")}`))
+  const machine = Install.machine(yield* Global.Service)
+  if (machine === undefined)
+    return yield* Effect.fail(
+      new Error(`${flag} is not supported on ${process.platform}: a player runs as a service only on macOS and Linux`),
+    )
+  const route: Install.Route =
+    target !== undefined
+      ? { type: "ssh", target }
+      : via !== undefined
+        ? { type: "via", command: (yield* Effect.promise(() => import("../../notify/relay"))).Relay.via(via) }
+        : { type: "local" }
+  const print = (line: string) => process.stdout.write(`${line}${EOL}`)
+  const label = Install.label(route)
+
+  if (input.uninstall) {
+    const named = Install.names(machine, route)
+    if (!(yield* Effect.promise(() => Install.uninstall(machine, route))))
+      return print(`No player is installed for ${label} (${named.file} does not exist).`)
+    return print(`Removed the player for ${label}: ${named.name}, ${named.file}.`)
+  }
+
+  const refused = yield* Effect.promise(() => Install.notInstalled(machine))
+  if (refused !== undefined) return yield* Effect.fail(new Error(refused))
+  const kind = machine.platform === "darwin" ? "LaunchAgent" : "systemd user unit"
+  const result = yield* Effect.tryPromise(() =>
+    Install.install(machine, { route, desktop: input.desktop, volume: input.volume, verbose: input.verbose }),
+  )
+  const details = [
+    `  Name    ${result.name}`,
+    `  File    ${result.file}`,
+    `  Log     ${result.log}`,
+    `  Remove  ${Install.uninstallCommand(route)}`,
+  ]
+  if (!result.running) {
+    process.stderr.write(
+      [
+        `The player for ${label} is installed as a ${kind} but does not run: ${result.why}.`,
+        ...details,
+        result.tail ? `The last lines of its log:${EOL}${result.tail}` : "Its log is empty.",
+        "",
+      ].join(EOL),
+    )
+    process.exitCode = 1
+    return
+  }
+  print(`The player for ${label} runs as a ${kind}: it starts at login and again when it stops.`)
+  details.forEach(print)
+})
 
 const decodeRegistration = Schema.decodeUnknownOption(Schema.fromJsonString(Service.Info))
 

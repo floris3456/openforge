@@ -569,6 +569,20 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDescription("Print every notification and what was done with it"),
           Flag.withDefault(false),
         ),
+        install: Flag.Boolean("install").pipe(
+          Flag.withDescription(
+            "Keep this player running as a service of this machine (a LaunchAgent on macOS, a systemd user unit on Linux): it starts at login and again when it stops",
+          ),
+          Flag.withDefault(false),
+        ),
+        uninstall: Flag.Boolean("uninstall").pipe(
+          Flag.withDescription(
+            "Stop and remove the player installed with --install for this ssh target or --via command",
+          ),
+          Flag.withDefault(false),
+        ),
+        // Set by the service --install writes: the player restarts onto a newly installed release.
+        installed: Flag.Boolean("installed").pipe(Flag.withDefault(false), Flag.withHidden),
         // The other end of `notify <ssh-target>` and `notify --via`, started there: occurrences go to stdout as lines.
         relay: Flag.Boolean("relay").pipe(Flag.withDefault(false), Flag.withHidden),
         // Hands each sound to this command instead of playing it: a recording stand-in where there is no sound device.

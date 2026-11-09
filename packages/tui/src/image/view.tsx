@@ -232,9 +232,11 @@ function Placed(props: {
 }
 
 /**
- * The pixels the terminal gets for a placement, in RGBA rows without padding. `fit` and `cover` are resized here to
- * the box's pixels, so the terminal shows them without scaling them again; `actual` keeps every pixel and is padded
- * with transparent ones to whole cells, so its placement shows it at one image pixel per screen pixel.
+ * The pixels the terminal gets for a placement, in RGBA rows without padding, always exactly the placement's pixels,
+ * so the terminal draws them unscaled (it would fit a smaller image to the placement, and centre it by half a pixel,
+ * which blurs it). `fit` is resized to the box and centred in it with transparent pixels, `cover` resized to fill it
+ * and cut, and `actual` keeps every pixel and is padded with transparent ones to whole cells, so its placement shows
+ * it at one image pixel per screen pixel.
  */
 function prepare(image: NativeImage, fit: ImageFit, cell: Cell, columns: number, rows: number) {
   const owned: NativeImage[] = []
@@ -266,7 +268,21 @@ function prepare(image: NativeImage, fit: ImageFit, cell: Cell, columns: number,
     const placement = { columns, rows }
     if (fit === "fit") {
       const scale = Math.min(width / image.width, height / image.height)
-      return { image: scale === 1 ? image : keep(resize(image, scale)), placement }
+      const sized = scale === 1 ? image : keep(resize(image, scale))
+      const left = Math.max(0, Math.floor((width - sized.width) / 2))
+      const top = Math.max(0, Math.floor((height - sized.height) / 2))
+      return {
+        image: keep(
+          sized.extend({
+            left,
+            top,
+            right: Math.max(0, width - sized.width - left),
+            bottom: Math.max(0, height - sized.height - top),
+            background: [0, 0, 0, 0],
+          }),
+        ),
+        placement,
+      }
     }
     const scale = Math.max(width / image.width, height / image.height)
     const sized = keep(resize(image, scale))

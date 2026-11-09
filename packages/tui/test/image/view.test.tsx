@@ -18,10 +18,13 @@ test("with placeholders, a fitted image is sent at the box's pixels and drawn as
   )
   try {
     await until(app, () => placeholderCells(app.captureCharFrame()).length === 4)
-    // 96×48 into 90×80 pixels: 90×45, the placement the whole box.
+    // 96×48 into 90×80 pixels: 90×45, centred in the box's 90×80 with transparent rows (17 above, 18 below), so the
+    // terminal draws the pixels unscaled.
     const [image] = transmitted(images.sent)
-    expect(image!.keys).toMatchObject({ a: "t", q: "2", f: "32", o: "z", s: "90", v: "45" })
-    expect(image!.rgba.length).toBe(90 * 45 * 4)
+    expect(image!.keys).toMatchObject({ a: "t", q: "2", f: "32", o: "z", s: "90", v: "80" })
+    expect(image!.rgba.length).toBe(90 * 80 * 4)
+    const alpha = (x: number, y: number) => image!.rgba[(y * 90 + x) * 4 + 3]
+    expect([alpha(45, 16), alpha(45, 17), alpha(45, 61), alpha(45, 62)]).toEqual([0, 255, 255, 0])
     expect(commands(images.sent).at(-1)!.keys).toBe(`a=p,U=1,q=2,i=${image!.keys.i},c=10,r=4`)
     expect(placeholderCells(app.captureCharFrame())).toEqual(
       Array.from({ length: 4 }, (_, row) => Array.from({ length: 10 }, (_, column) => [row, column])),

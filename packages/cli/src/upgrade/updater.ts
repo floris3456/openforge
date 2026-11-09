@@ -154,10 +154,14 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
   const markAutomatic = (version: string | undefined, message: string) => {
     const to = version === undefined ? undefined : ReleaseVersion.normalize(version)
     if (to === undefined) return Effect.void
-    return ReleaseLayout.markBad(layout, to, {
-      reason: message.replace(/^upgrade to \S+ failed: /, ""),
-      log: path.join(options.log, "upgrade.log"),
-      automatic: true,
+    return Effect.gen(function* () {
+      // A rolled back switch marked it already, before the old release started again.
+      if ((yield* ReleaseLayout.bad(layout))[to]?.automatic) return
+      yield* ReleaseLayout.markBad(layout, to, {
+        reason: message.replace(/^upgrade to \S+ failed: /, "").replace(/; still on \S+\. Log: .*$/s, ""),
+        log: path.join(options.log, "upgrade.log"),
+        automatic: true,
+      })
     }).pipe(Effect.ignore)
   }
 
@@ -256,6 +260,7 @@ export const make = Effect.fn("upgrade.updater.make")(function* (options: Option
         from,
         to,
         restore,
+        automatic: input.automatic,
         onWaiting: (waiting) => notify({ type: "switching", version: to, waiting }),
       })
       if (outcome.type !== "busy") return outcome

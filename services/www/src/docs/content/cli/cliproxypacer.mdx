@@ -115,6 +115,7 @@ time      kind        model               account       read/write    verdict   
 | **Ctrl+A**                      | Shows only cache misses, or all requests again. The TUI remembers it until it exits, as it does the Subagents filter.                                                         |
 | **Enter**                       | Moves the chat to where the request ended: the end of that step's reply. A subagent's request opens the subagent's chat there; a ping or a title goes to the reply before it. |
 | **Ctrl+Enter** or **Alt+Enter** | Shows what changed in the request's prompt, in place of the list. The same key or **Esc** goes back to the same row.                                                          |
+| **?**                           | Opens the request's help as a popup: every column of the row in full, which a narrow window drops or cuts, and what they mean. **Esc** or **?** goes back to the same row.    |
 
 What changed shows CLIProxyPacer's verdict and its cause, how many tokens were written to the cache again and what the
 miss cost, and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only

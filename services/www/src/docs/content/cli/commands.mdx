@@ -524,6 +524,13 @@ Reach the other machine with a command of your own instead of ssh: one that runs
 $ openforge notify --via "docker exec -i devbox" --desktop
 ```
 
+The command may itself go through ssh, to a container on another machine. When its program is `ssh`, openforge quotes
+what it appends, as it does for an ssh target, so the shell there reads it as one command.
+
+```bash
+$ openforge notify --via "ssh me@devbox docker exec -i devbox"
+```
+
 Once connected, ask the service for a test notification. `--test=<event>` picks `done`, `subagent_done`, `question`,
 `permission` or `error`; `--test` alone is `done`. Test notifications are titled "openforge test".
 
@@ -539,7 +546,8 @@ $ openforge notify --volume 0.2 --verbose
 
 - While a player is connected, the service's TUIs play no sound of their own. While one with `--desktop` is connected,
   they show no notification of their own either.
-- Two TUIs on the same chat make one sound: the same notification within 300 ms plays once.
+- Two TUIs on the same chat make one sound: the same notification within 300 ms plays once. A chat that no TUI has
+  open makes none.
 - No desktop notification shows for a chat whose TUI window is focused.
 - Desktop notifications go through `notify-send` on Linux and `osascript` on macOS.
 - When the connection is lost, it is made again after 1 s, then twice as long each time, up to 30 s. Press Ctrl+C to

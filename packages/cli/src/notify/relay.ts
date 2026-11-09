@@ -2,6 +2,7 @@ export * as Relay from "./relay"
 
 import { Attention } from "@opencode/schema/attention"
 import { Product } from "@opencode/schema/product"
+import path from "node:path"
 import { Option, Schema } from "effect"
 import { errorMessage } from "../util/error"
 
@@ -78,8 +79,12 @@ export type Route = { readonly target: string } | { readonly via: readonly strin
 /**
  * The command that starts the relay. `--via` runs its arguments on the other machine as they are (as `docker exec`
  * does), so the script goes as `sh -c <script>`; ssh hands its command to the login shell there, so it goes quoted.
+ * A `--via` command whose program is ssh joins its words into one line for that shell too, so it gets the quoted
+ * script as well. The script has no single quote or backslash, so the quoting holds in sh and in fish.
  */
 export function command(route: Route, relayFlags: readonly string[]) {
+  if ("via" in route && path.basename(route.via[0] ?? "") === "ssh")
+    return [...route.via, `sh -c '${script(relayFlags)}'`]
   if ("via" in route) return [...route.via, "sh", "-c", script(relayFlags)]
   return [
     "ssh",

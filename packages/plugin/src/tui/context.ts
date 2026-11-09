@@ -313,6 +313,10 @@ export type AttentionNotifySkipReason =
   | "blurred"
   | "focused"
   | "focus_unknown"
+  /** openforge: the request is about a chat this TUI doesn't have open. */
+  | "session_not_open"
+  /** openforge: a permission this TUI accepts itself. */
+  | "permission_answered"
   | "renderer_destroyed"
 
 export interface AttentionNotifyResult {

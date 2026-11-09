@@ -94,6 +94,71 @@ describe("relay lines", () => {
     expect(script).not.toContain("'")
   })
 
+  test("a --via command whose program is ssh gets the script as one quoted word, as an ssh target does", () => {
+    const flags = Relay.flags({ desktop: false, verbose: true })
+    const quoted = `sh -c '${Relay.script(flags)}'`
+    expect(Relay.command({ via: Relay.via("ssh cachyos docker exec -i -u bliss ocp") }, flags)).toEqual([
+      "ssh",
+      "cachyos",
+      "docker",
+      "exec",
+      "-i",
+      "-u",
+      "bliss",
+      "ocp",
+      quoted,
+    ])
+    expect(Relay.command({ via: Relay.via("/usr/bin/ssh -p 2222 box") }, flags)).toEqual([
+      "/usr/bin/ssh",
+      "-p",
+      "2222",
+      "box",
+      quoted,
+    ])
+    // Only the program's name counts: a command that merely has ssh in it stays as it is.
+    expect(Relay.command({ via: Relay.via("ocp run ssh") }, flags)).toEqual([
+      "ocp",
+      "run",
+      "ssh",
+      "sh",
+      "-c",
+      Relay.script(flags),
+    ])
+    expect(Relay.command({ via: Relay.via("sshpass box") }, flags).slice(-3)).toEqual(["sh", "-c", Relay.script(flags)])
+  })
+
+  test.skipIf(process.platform === "win32")(
+    "through ssh, the shell at the other end runs the relay's script whole",
+    async () => {
+      // ssh joins its command's words into one line and hands it to the login shell there. This stand-in does the
+      // same: it drops its host and runs the rest as one line with sh -c; its `docker` runs its arguments as they are.
+      await using dir = await tmpdir()
+      const bin = await tools(dir.path)
+      const local = path.join(dir.path, ".local", "bin")
+      await mkdir(local, { recursive: true })
+      await writeFile(path.join(local, "openforge"), '#!/bin/sh\necho "found $*"\n')
+      await writeFile(path.join(bin, "ssh"), '#!/bin/sh\nshift\nexec sh -c "$*"\n')
+      await writeFile(path.join(bin, "docker"), '#!/bin/sh\nshift 3\nexec "$@"\n')
+      for (const file of [path.join(local, "openforge"), path.join(bin, "ssh"), path.join(bin, "docker")])
+        await chmod(file, 0o755)
+      const words = Relay.command(
+        { via: Relay.via("ssh cachyos docker exec -i ocp") },
+        Relay.flags({ desktop: true, verbose: false }),
+      )
+      const child = Bun.spawn([path.join(bin, words[0]!), ...words.slice(1)], {
+        env: { HOME: dir.path, PATH: bin },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ])
+      expect({ stdout, stderr, code }).toEqual({ stdout: "found notify --relay --desktop\n", stderr: "", code: 0 })
+    },
+  )
+
   test.skipIf(process.platform === "win32")(
     "the script finds openforge in ~/.local/bin, or says it is not there",
     async () => {

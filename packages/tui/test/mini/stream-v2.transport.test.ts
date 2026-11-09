@@ -411,10 +411,11 @@ describe("V2 mini transport", () => {
         messageID: pending.id,
         phase: "start",
       },
+      // openforge (spec image-view): an image without the model's line shows its name, and its size when it decodes.
       {
         kind: "user",
         source: "system",
-        text: "remote.png",
+        text: "[Image: remote.png]",
         image: "data:image/png;base64,c2VydmVy",
         messageID: pending.id,
         partID: "image:0",
@@ -423,7 +424,7 @@ describe("V2 mini transport", () => {
       {
         kind: "user",
         source: "system",
-        text: image.name,
+        text: `[Image: ${image.name}]`,
         image: "data:image/png;base64,cG5n",
         messageID: pending.id,
         partID: "image:1",
@@ -2823,7 +2824,7 @@ describe("V2 mini transport", () => {
         {
           kind: "tool",
           source: "tool",
-          text: "[Image 1]",
+          text: "[Image: image]",
           image: "data:image/png;base64,cG5n",
           messageID: "msg_tool",
           partID: "prt_call_image:image:0",

@@ -34,6 +34,7 @@ import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { PluginHooks } from "../../plugin/hooks.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
+import { ImageBudget } from "../../image/budget.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -177,6 +178,7 @@ const layer = Layer.effect(
                         model,
                         initial: history.initial,
                         messages: history.messages,
+                        images: yield* context.images(model),
                       },
                     })
                   }).pipe(
@@ -314,6 +316,12 @@ const layer = Layer.effect(
             assistantMessageID = SessionMessage.ID.create()
             continue
           }
+          // openforge: an image that would not fit compacts first; the warning before it (ImageBudget).
+          const images = loaded.images
+          if (images && (yield* ImageBudget.before({ loaded: { ...loaded, images }, estimate, compaction, bus }))) {
+            assistantMessageID = SessionMessage.ID.create()
+            continue
+          }
           yield* compaction.precompute(Effect.succeed(loaded), estimate)
         }
         const stepLimitReached = loaded.agent.info.steps !== undefined && step >= loaded.agent.info.steps
@@ -339,6 +347,7 @@ const layer = Layer.effect(
             webSocket: "session",
             inputTokens: estimate,
             autoCompaction: compaction.auto(),
+            images: loaded.images,
           })
           .pipe(
             // The hook event holds every message from before images are bounded, screenshots included, and is a separate

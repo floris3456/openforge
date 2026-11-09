@@ -11,6 +11,8 @@ import { useStorage } from "../../../context/storage"
 import { Locale } from "../../../util/locale"
 import { Keymap } from "../../../context/keymap"
 import { useComposerTab } from "./context"
+import { useDialog } from "../../../ui/dialog"
+import { openRowHelp } from "../../../ui/row-help"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { sessionFamily } from "../../../util/session"
 
@@ -32,6 +34,7 @@ export function SubagentsTab(props: { sessionID: string }) {
   const navigate = useRoute().navigate
   const composer = useComposerTab()
   const shortcuts = Keymap.useShortcuts()
+  const dialog = useDialog()
 
   const session = createMemo(() => data.session.get(props.sessionID))
   const [store, setStore] = createStore({ selected: 0 })
@@ -169,6 +172,19 @@ export function SubagentsTab(props: { sessionID: string }) {
         run() {
           const entry = entries()[store.selected]
           if (entry) navigate({ type: "session", sessionID: entry.sessionID })
+        },
+      },
+      {
+        id: "row.help",
+        title: "Show help for the subagent",
+        group: "Composer",
+        run() {
+          const entry = selectedEntry()
+          if (!entry) return
+          openRowHelp(dialog, {
+            title: entry.agent,
+            description: [entry.title, entry.status === "running" ? "Running" : ""].filter(Boolean).join(" · "),
+          })
         },
       },
       {

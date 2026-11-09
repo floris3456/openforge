@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "5f1c0791-8f10-432c-9d83-c7a8c1e9319c",
-  "prevIds": ["4f6e16c6-f070-4545-b9d0-19fcb6e5210c"],
+  "id": "733b4770-e19d-4b1e-91a0-f87da3b0719b",
+  "prevIds": ["5f1c0791-8f10-432c-9d83-c7a8c1e9319c"],
   "ddl": [
     {
       "name": "account_state",
@@ -34,6 +34,10 @@
     },
     {
       "name": "event",
+      "entityType": "tables"
+    },
+    {
+      "name": "session_image",
       "entityType": "tables"
     },
     {
@@ -633,6 +637,96 @@
       "name": "data",
       "entityType": "columns",
       "table": "event"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "number",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hash",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "width",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "height",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "shown_width",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "shown_height",
+      "entityType": "columns",
+      "table": "session_image"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "session_image"
     },
     {
       "type": "text",
@@ -2219,6 +2313,17 @@
       "table": "event"
     },
     {
+      "columns": ["session_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_session_image_session_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "session_image"
+    },
+    {
       "columns": ["project_id"],
       "tableTo": "project",
       "columnsTo": ["id"],
@@ -2374,6 +2479,13 @@
       "name": "session_rest_pk",
       "entityType": "pks",
       "table": "session_rest"
+    },
+    {
+      "columns": ["session_id", "number"],
+      "nameExplicit": false,
+      "name": "session_image_pk",
+      "entityType": "pks",
+      "table": "session_image"
     },
     {
       "columns": ["project_id", "directory"],

@@ -10,12 +10,17 @@ import { Effect, Option, Schema } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { Database } from "../database/database.js"
+import { Config } from "../config.js"
 import { Image } from "../image.js"
+import { ImageBank } from "../image/bank.js"
+import type { ImageFit } from "../image/fit.js"
+import { Model } from "../model.js"
 import { Mime } from "../mime.js"
 import { Plugin } from "../plugin/service.js"
 import { PluginHooks } from "../plugin/hooks.js"
 import { Skill } from "../skill.js"
 import { SessionBlob } from "./blob.js"
+import { SessionRunnerModel } from "./runner/model.js"
 import { AttachmentError, SkillNotFoundError } from "./error.js"
 import { SessionStored } from "./stored.js"
 
@@ -52,9 +57,13 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
     delivery: request.input.delivery ?? "steer",
   })
   const input = event.prompt
-  const files = input.files
-    ? yield* Effect.forEach(input.files, materializeAttachment, { concurrency: 8 })
+  // openforge: a chat with optimized images fits them once here instead (ImageBank).
+  const bank = input.files?.length ? yield* imageBank(request.session) : undefined
+  const materialized = input.files
+    ? yield* Effect.forEach(input.files, (file) => materializeAttachment(file, bank !== undefined), { concurrency: 8 })
     : undefined
+  const arrived = bank && materialized ? yield* arriveImages(bank, request.session.id, materialized) : undefined
+  const files = arrived?.files ?? materialized
   const requested = input.skills
   const selected = yield* Effect.gen(function* () {
     if (!requested?.length) return undefined
@@ -83,7 +92,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
       agents: input.agents,
       files,
       skills: selected?.length ? selected : undefined,
-      metadata: event.metadata,
+      metadata: arrived?.lines ? { ...event.metadata, imageLines: arrived.lines } : event.metadata,
     }),
     delivery: event.delivery,
   } satisfies SessionInbox.Item
@@ -91,6 +100,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
 
 const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(function* (
   input: PromptInput.FileAttachment,
+  whole = false,
 ) {
   // Stored blob bytes were normalized when first admitted, so a `media:` ref re-admits them unchanged.
   const ref = Schema.decodeUnknownOption(SessionStored.Ref)(input.uri)
@@ -133,7 +143,9 @@ const materializeAttachment = Effect.fn("SessionPrompt.materializeAttachment")(f
             .join("\n"),
         )
       : resolved.bytes
-  const normalized = yield* normalizeImageAttachment(input, Buffer.from(content).toString("base64"), mime)
+  const normalized = whole
+    ? { data: Base64.make(Buffer.from(content).toString("base64")), mime }
+    : yield* normalizeImageAttachment(input, Buffer.from(content).toString("base64"), mime)
   return FileAttachment.create({
     data: normalized.data,
     mime: normalized.mime,
@@ -158,6 +170,55 @@ const normalizeImageAttachment = Effect.fn("SessionPrompt.normalizeImageAttachme
     Effect.mapError((error) => new AttachmentError({ uri: label, message: error.message })),
   )
   return { data: Base64.make(normalized.content), mime: normalized.mime }
+})
+
+/** Where a chat with optimized images banks them, and its model's entry. */
+const imageBank = Effect.fnUntraced(function* (session: Session.Info) {
+  const config = yield* Effect.serviceOption(Config.Service)
+  const models = yield* Effect.serviceOption(SessionRunnerModel.Service)
+  const catalog = yield* Effect.serviceOption(Model.Service)
+  if (Option.isNone(config) || Option.isNone(models) || Option.isNone(catalog)) return undefined
+  // The model is resolved only while the setting is on.
+  if (!ImageBank.setting(yield* config.value.entries())) return undefined
+  const model = yield* models.value.resolve(session, catalog.value.available).pipe(Effect.option)
+  if (Option.isNone(model)) return undefined
+  const entry = yield* ImageBank.applies(config, model.value)
+  if (!entry) return undefined
+  const database = yield* Database.Service
+  return { db: database.db, model: entry }
+})
+
+/** Fits and numbers a prompt's images in order; the lines go in the message's `metadata.imageLines`. */
+const arriveImages = Effect.fnUntraced(function* (
+  bank: { readonly db: Database.Interface["db"]; readonly model: ImageFit.Model },
+  sessionID: Session.ID,
+  files: ReadonlyArray<FileAttachment>,
+) {
+  const images = files.flatMap((file, index) => (RESIZABLE_IMAGE_MIMES.has(file.mime) ? [{ file, index }] : []))
+  if (images.length === 0) return undefined
+  const arrived = yield* ImageBank.arrive(
+    bank.db,
+    sessionID,
+    bank.model,
+    images.map((image) => ({
+      data: Buffer.from(image.file.data, "base64"),
+      mime: image.file.mime,
+      name: image.file.name ?? (image.file.source.type === "uri" ? path.basename(image.file.source.uri) : "pasted image"),
+    })),
+  )
+  const byIndex = new Map(images.map((image, position) => [image.index, arrived[position]]))
+  return {
+    files: files.map((file, index) => {
+      const image = byIndex.get(index)
+      if (!image) return file
+      return FileAttachment.create({
+        ...file,
+        data: Base64.make(Buffer.from(image.data).toString("base64")),
+        mime: image.mime,
+      })
+    }),
+    lines: files.map((_, index) => byIndex.get(index)?.line ?? null),
+  }
 })
 
 /** A `media:` ref a client received from an experimental `experimental-media-uri` read, sent back as an attachment. */

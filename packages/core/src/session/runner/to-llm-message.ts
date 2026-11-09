@@ -10,6 +10,7 @@ import {
 import type { Model } from "@opencode/schema/model"
 import { Option, Schema } from "effect"
 import { fileURLToPath } from "url"
+import { ImageBudget } from "../../image/budget.js"
 import { SessionMessage } from "../message.js"
 import { SessionHistory } from "../history.js"
 import { SessionRecentText } from "../recent-text.js"
@@ -73,32 +74,37 @@ const directoryAttachment = (file: FileAttachment): ContentPart => ({
   },
 })
 
-const attachmentContent = (file: FileAttachment): ContentPart[] => {
+// `line`: openforge's line before an optimized image, fixed on arrival (ImageBank).
+const attachmentContent = (file: FileAttachment, line?: string): ContentPart[] => {
   if (file.mime === "text/plain") return [textAttachment(file)]
   if (file.mime === "application/x-directory") return [directoryAttachment(file)]
   if (imageMimes.has(file.mime) || file.mime === "application/pdf") {
     const location = attachmentLocation(file)
-    return [...(location === undefined ? [] : [Message.text(`Attached file: ${location}`)]), media(file)]
+    return [
+      ...(location === undefined ? [] : [Message.text(`Attached file: ${location}`)]),
+      ...(line === undefined ? [] : [Message.text(line)]),
+      media(file),
+    ]
   }
   return []
 }
 
-const userAttachmentContent = (files: readonly FileAttachment[]) => {
+const userAttachmentContent = (files: readonly FileAttachment[], lines: ReadonlyArray<string | undefined>) => {
   const eligible = files.filter(
     (file) => imageMimes.has(file.mime) && file.source.type === "inline" && file.mention?.text,
   )
-  if (eligible.length < 2) return files.flatMap(attachmentContent)
+  if (eligible.length < 2) return files.flatMap((file, index) => attachmentContent(file, lines[index]))
 
   const seen = new Map<string, Set<string>>()
-  return files.flatMap((file) => {
+  return files.flatMap((file, index) => {
     if (!imageMimes.has(file.mime) || file.source.type !== "inline" || !file.mention?.text)
-      return attachmentContent(file)
+      return attachmentContent(file, lines[index])
     const metadata = JSON.stringify([file.mime, file.name ?? null, file.description ?? null, file.mention.text])
     const payloads = seen.get(metadata) ?? new Set<string>()
     if (payloads.has(file.data)) return []
     payloads.add(file.data)
     seen.set(metadata, payloads)
-    return attachmentContent(file)
+    return attachmentContent(file, lines[index])
   })
 }
 
@@ -259,7 +265,7 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
       const content = [
         ...(message.skills ?? []).flatMap((skill) => (skill.text === undefined ? [] : [Message.text(skill.text)])),
         ...(message.text === "" ? [] : [Message.text(message.text)]),
-        ...userAttachmentContent(message.files ?? []),
+        ...userAttachmentContent(message.files ?? [], ImageBudget.userLines(message)),
       ]
       if (content.length === 0) return []
       return [

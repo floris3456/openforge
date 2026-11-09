@@ -3,6 +3,7 @@ import path from "path"
 import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { ImageLine } from "@opencode/core/image/line"
 import { ToolOutput } from "@opencode/core/tool-output"
 import type { Tool } from "@opencode/core/tool"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -82,6 +83,27 @@ describe("ToolOutput", () => {
             file,
             { type: "text", text: "after" },
             { type: "text", text: expect.stringMatching(/^\[showing lines 1-2 of 3; full output saved to /) },
+          ])
+        }),
+      { maxLines: 2, maxBytes: 1_000 },
+    ),
+  )
+
+  // openforge (spec images): an optimized image's line goes with it, wherever the cut falls.
+  it.live("keeps each image's line with its image and doesn't count it", () =>
+    withStore(
+      (output) =>
+        Effect.gen(function* () {
+          const line = ImageLine.make(3, "shot.png", { width: 1920, height: 1080, shown: { width: 1920, height: 1080 } })
+          const file = { type: "file" as const, uri: "data:image/png;base64,AAAA", mime: "image/png" }
+          const result = yield* output.truncate({
+            content: [{ type: "text", text: "one\ntwo\nthree" }, { type: "text", text: line }, file],
+          })
+          expect(result.content).toEqual([
+            { type: "text", text: "one\ntwo" },
+            { type: "text", text: expect.stringMatching(/^\[showing lines 1-2 of 3; full output saved to /) },
+            { type: "text", text: line },
+            file,
           ])
         }),
       { maxLines: 2, maxBytes: 1_000 },

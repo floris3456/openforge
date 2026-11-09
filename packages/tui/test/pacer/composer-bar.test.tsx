@@ -93,7 +93,7 @@ describe("the composer in a narrow window", () => {
     const expected: Record<number, { bar: RegExp; hints: string }> = {
       120: {
         bar: /^Subagents {2}Shell {2}Requests +esc$/,
-        hints: "go to enter  what changed ctrl+enter  show misses ctrl+a  tabs ←/→",
+        hints: "go to enter  what changed ctrl+enter  show misses ctrl+a  help ?  tabs ←/→",
       },
       45: { bar: /^Subagents {2}Shell {2}Requests +esc$/, hints: "go to enter  what changed ctrl+enter" },
       36: { bar: /^Requests ←\/→ +esc$/, hints: "go to enter" },

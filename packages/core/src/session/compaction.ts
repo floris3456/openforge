@@ -321,7 +321,14 @@ export const layer = Layer.effect(
     ) {
       let picked: SessionRunnerModel.Resolved | undefined
       for (const pick of picks ?? []) {
-        picked = yield* resolveModel(context, pick)
+        // A pick names a model, not a variant: the chat's own model keeps the chat's variant, so the summary goes out
+        // with the steps' effort and thinking and reads their cache; a changed effort misses every cached message.
+        picked =
+          pick.variant === undefined &&
+          pick.id === context.model.ref.id &&
+          pick.providerID === context.model.ref.providerID
+            ? context.model
+            : yield* resolveModel(context, pick)
         if (picked) break
       }
       const agent = native || picks ? undefined : yield* agents.get(Agent.ID.make("compaction"))

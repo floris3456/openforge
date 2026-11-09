@@ -791,6 +791,41 @@ planned.live(
     }),
 )
 
+// CLIProxyPacer's compact notice before it moves a chat to another account names models, not variants. Resolved without
+// the chat's variant, the chat's own model sent the summary without the steps' effort and thinking, and the summary
+// missed every cached message on the account the chat was leaving (2026-11-09, row 13899: effort xhigh dropped, 14,611
+// of ~358k read, $1.62).
+planned.live(
+  "a move whose pick is the chat's own model: the summary keeps the chat's variant, its effort and thinking as the steps send them",
+  () =>
+    Effect.gen(function* () {
+      reset()
+      yield* on
+      const plain = claudeWith({ thinking: { type: "adaptive", display: "summarized" }, effort: "xhigh" })
+      const model = { ...plain, ref: Model.Ref.make({ ...plain.ref, variant: Model.VariantID.make("xhigh") }) }
+      const history = toolHistory(model)
+      const { context } = yield* stored("move-variant", model, history, [read])
+      const step = yield* stepBody(context, history.slice(0, -1), "/v1/messages")
+      fake.seen.length = 0
+      expect(
+        yield* (yield* SessionCompaction.Service).compact({
+          reason: "move",
+          context,
+          models: [pacerRef("claude-e2e"), pacerRef("kimi-e2e-mini")],
+        }),
+      ).toEqual({ status: "completed" })
+      const sent = fake.seen.find((item) => item.path === "/v1/messages")!.body
+      const stepMessages = step.messages as unknown[]
+
+      expect(sent.output_config).toEqual({ effort: "xhigh" })
+      expect(sent.thinking).toEqual({ type: "adaptive", display: "summarized" })
+      expect(JSON.stringify({ ...sent, messages: undefined })).toBe(JSON.stringify({ ...step, messages: undefined }))
+      expect(JSON.stringify((sent.messages as unknown[]).slice(0, stepMessages.length))).toBe(
+        JSON.stringify(stepMessages),
+      )
+    }),
+)
+
 planned.live(
   "a warm Responses chat: CLIProxyPacer writes its summary, its own writer set to server first; none of openforge's own",
   () =>

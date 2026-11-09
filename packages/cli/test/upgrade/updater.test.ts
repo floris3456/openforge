@@ -169,14 +169,63 @@ describe("policy", () => {
     }),
   )
 
-  it.live("true installs and switches at startup", () =>
+  it.live("true (auto) leaves it to the background service: a TUI's startup check sends no request", () =>
     Effect.gen(function* () {
       const test = yield* install({ latest: "0.1.1", policy: '{ "autoupdate": true }' })
       yield* test.publish("0.1.1")
       yield* (yield* test.make()).startup(test.notify)
-      expect(test.states.map((state) => state.type)).toEqual(["installing", "switching", "switched"])
-      expect(yield* test.current).toBe("0.1.1")
+      expect(test.states).toEqual([])
+      expect(test.server.requests).toEqual([])
+      expect(yield* test.current).toBe("0.1.0")
+    }),
+  )
+
+  it.live("the policy is the last of config.json, opencode.json and opencode.jsonc that sets it", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ policy: '{ "update": "auto" }' })
+      const updater = yield* test.make()
+      expect(yield* updater.policy()).toBe("auto")
+      const config = paths(test.directory).config
+      yield* Effect.promise(() => fs.writeFile(path.join(config, "opencode.jsonc"), '{ "update": "disable" }'))
+      expect(yield* updater.policy()).toBe("disable")
+      yield* Effect.promise(() => fs.rm(path.join(config, "opencode.jsonc")))
+      yield* Effect.promise(() => fs.rm(path.join(config, "opencode.json")))
+      expect(yield* updater.policy()).toBe("notify")
+    }),
+  )
+})
+
+describe("automatic update", () => {
+  it.live("finds a newer release with one request, switches to it and says so in the upgrade log", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1" })
+      yield* test.publish("0.1.1")
+      const updater = yield* test.make()
+      expect(yield* updater.newer()).toBe("0.1.1")
+      expect(test.server.requests).toEqual(["/releases/latest/download/release.json"])
+      expect(yield* updater.upgrade({ target: "0.1.1", automatic: true })).toEqual({
+        type: "switched",
+        from: "0.1.0",
+        to: "0.1.1",
+      })
       expect(yield* test.reported).toBe("0.1.1")
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain("0.1.0 -> 0.1.1: automatic update, started by the background service")
+      expect(log).toContain("0.1.0 -> 0.1.1: switched automatically")
+      // On 0.1.1 nothing is newer.
+      expect(yield* (yield* test.make("0.1.1")).newer()).toBeUndefined()
+    }),
+  )
+
+  it.live("says why it can't where it can't, and checks nothing", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1" })
+      const updater = yield* test.make("0.1.0", { local: true })
+      expect(yield* updater.unavailable()).toContain("source checkout")
+      expect(yield* updater.newer()).toBeUndefined()
+      expect(yield* (yield* test.make("0.1.0", { platform: undefined })).unavailable()).toContain("releases are built for")
+      expect(test.server.requests).toEqual([])
+      expect(yield* (yield* test.make()).unavailable()).toBeUndefined()
     }),
   )
 })
@@ -396,22 +445,22 @@ describe("upgrade", () => {
 
   it.live("rolls back a release that fails to start and does not retry it on its own until a newer one is out", () =>
     Effect.gen(function* () {
-      const test = yield* install({ latest: "0.1.1", policy: '{ "autoupdate": true }' })
+      const test = yield* install({ latest: "0.1.1" })
       yield* test.publish("0.1.1", "crash")
       const updater = yield* test.make()
-      yield* updater.startup(test.notify)
-      const error = test.states.at(-1)
-      expect(error?.type).toBe("failed")
-      if (error?.type !== "failed") return
+      expect(yield* updater.newer()).toBe("0.1.1")
+      const error = yield* updater.upgrade({ target: "0.1.1", automatic: true }).pipe(Effect.flip)
       expect(error.message).toStartWith("upgrade to 0.1.1 failed: the service of openforge 0.1.1 exited (code 3)")
       expect(error.message).toEndWith(`; still on 0.1.0. Log: ${test.switching.log}`)
       expect(yield* test.current).toBe("0.1.0")
       expect(yield* test.reported).toBe("0.1.0")
+      // Kept as an automatic failure, with the reason the TUIs show.
+      const bad = (yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))["0.1.1"]
+      expect(bad?.automatic).toBe(true)
+      expect(bad?.reason).toStartWith("the service of openforge 0.1.1 exited (code 3)")
 
-      // Neither the startup check nor /update tries it again.
-      test.states.length = 0
-      yield* updater.startup(test.notify)
-      expect(test.states).toEqual([])
+      // Neither the automatic check nor /update tries it again.
+      expect(yield* updater.newer()).toBeUndefined()
       const again = yield* updater.upgrade().pipe(Effect.flip)
       expect(again.message).toContain("failed to start before and was rolled back")
       expect(again.message).toContain('run "openforge upgrade 0.1.1" to try it again')
@@ -425,9 +474,23 @@ describe("upgrade", () => {
       // A newer release is tried on its own.
       yield* test.publish("0.1.2")
       test.server.latest("0.1.2")
-      yield* updater.startup(test.notify)
+      expect(yield* updater.newer()).toBe("0.1.2")
+      yield* updater.upgrade({ target: "0.1.2", automatic: true })
       expect(yield* test.current).toBe("0.1.2")
       expect(Object.keys(yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))).toEqual(["0.1.1"])
+    }),
+  )
+
+  it.live("an automatic update that fails before the switch is not tried again on its own either", () =>
+    Effect.gen(function* () {
+      const test = yield* install({ latest: "0.1.1" })
+      yield* test.publish("0.1.1")
+      test.releases["0.1.1"].SHA256SUMS = `${"0".repeat(64)}  openforge-linux-x64.tar.gz\n`
+      const updater = yield* test.make()
+      yield* updater.upgrade({ target: "0.1.1", automatic: true }).pipe(Effect.flip)
+      expect(yield* test.current).toBe("0.1.0")
+      expect((yield* ReleaseLayout.bad(test.switching.layout).pipe(test.provide))["0.1.1"]?.automatic).toBe(true)
+      expect(yield* updater.newer()).toBeUndefined()
     }),
   )
 })

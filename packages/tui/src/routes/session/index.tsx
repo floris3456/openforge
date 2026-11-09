@@ -45,6 +45,7 @@ import {
   type ModelInfo,
 } from "@opencode/client"
 import { useLocal } from "../../context/local"
+import { useAutoReply } from "../../context/attention"
 import { Locale } from "../../util/locale"
 import { FilePath } from "../../ui/file-path"
 import {
@@ -270,9 +271,15 @@ export function Session(props: {
   const restorePrompt = usePromptRestore()
   const client = useClient()
   const autoApproved = new Set<string>()
+  // openforge: the notifications read the same chats, so a permission accepted here raises none.
+  const autoReplied = createMemo(() =>
+    local.permission.mode === "autoaccept" && !session()?.parentID ? [route.sessionID, ...descendantSessionIDs()] : [],
+  )
+  useAutoReply().register(autoReplied)
   createEffect(() => {
-    if (local.permission.mode !== "autoaccept") return
+    const replied = autoReplied()
     permissions().forEach((request) => {
+      if (!replied.includes(request.sessionID)) return
       if (autoApproved.has(request.id)) return
       autoApproved.add(request.id)
       void data.session.permission

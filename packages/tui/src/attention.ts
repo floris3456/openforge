@@ -92,6 +92,8 @@ export function createTuiAttention(input: {
   audio?: Pick<typeof TuiAudio, "loadSoundFile" | "play">
   /** openforge: tells the service of each occurrence; its players then take the sound or the notification. */
   report?: Report
+  /** openforge: a reason this TUI raises nothing for a request (not its chat, or a permission it accepts itself). */
+  skip?: (request: AttentionNotifyOptions) => Promise<AttentionNotifySkipReason | undefined>
 }): AttentionHost {
   let focus: FocusState = "unknown"
   let disposed = false
@@ -136,6 +138,8 @@ export function createTuiAttention(input: {
       try {
         if (!input.config.attention.notifications && !input.config.attention.sound) return skipped("attention_disabled")
         if (disposed || input.renderer.isDestroyed) return skipped("renderer_destroyed")
+        const skip = await input.skip?.(request)
+        if (skip) return skipped(skip)
 
         const message = normalizeText(request.message, "", MESSAGE_LIMIT)
         if (!message) return skipped("empty_message")

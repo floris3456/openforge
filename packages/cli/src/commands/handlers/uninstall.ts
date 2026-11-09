@@ -7,6 +7,7 @@ import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { ServerConnection } from "../../services/server-connection"
 import { ReleaseLayout } from "../../upgrade/layout"
+import { Install } from "../../notify/install"
 import { Product } from "@opencode/schema/product"
 import { handlePromptErrors, prompt, requireInteractive } from "../../ui/prompt"
 import { errorMessage } from "../../util/error"
@@ -31,12 +32,16 @@ export default Runtime.handler(
       Option.filter((target) => target === path.join(layout.current, Product.binary)),
     )
     const current = yield* fs.readLink(layout.current).pipe(Effect.option)
+    // A player installed with `notify --install` would start again and again on the removed binary.
+    const machine = Install.machine(global)
+    const players = machine === undefined ? [] : yield* Effect.promise(() => Install.list(machine))
 
     log.message(`The following global files will be removed (shared by ${Product.name} versions and channels):`)
     if (yield* fs.exists(global.cache)) log.info(`  Cache: ${global.cache}`)
     services.forEach((name) =>
       log.info(`  Stop background service and persistent terminals: ${path.join(global.state, name)}`),
     )
+    players.forEach((file) => log.info(`  Stop and remove notification player: ${file}`))
     if (Option.isSome(commandLink)) log.info(`  Command: ${command}`)
     if (Option.isSome(current)) log.info(`  Release link: ${layout.current}`)
     binaries.forEach((file) => log.info(`  Binary: ${file}`))
@@ -75,6 +80,18 @@ export default Runtime.handler(
     }
 
     const errors: string[] = []
+    if (machine !== undefined && players.length) {
+      progress.start("Removing notification players...")
+      yield* Effect.tryPromise(() => Install.uninstallAll(machine)).pipe(
+        Effect.tap(() => Effect.sync(() => progress.stop("Removed notification players"))),
+        Effect.catch((error) =>
+          Effect.sync(() => {
+            progress.stop("Failed to remove notification players", 1)
+            errors.push(`Notification players: ${errorMessage(error)}`)
+          }),
+        ),
+      )
+    }
     progress.start("Removing Cache...")
     yield* fs.remove(global.cache, { recursive: true, force: true }).pipe(
       // Windows reports a terminated service as gone before it releases its file handles,

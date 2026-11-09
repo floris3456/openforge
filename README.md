@@ -25,7 +25,7 @@ interface, agents, tools and providers, and adds:
 - **One background service** for all your terminals, which the TUI starts when none runs (`openforge service`), or a
   private one with `--standalone`.
 - **Notifications over ssh.** `openforge notify` plays your chats' sounds on the machine you sit at, also while
-  openforge runs on another one.
+  openforge runs on another one; `openforge notify … --install` keeps it running as a service of that machine.
 
 Releases are early and frequent. openforge is built for **Linux x64** and **macOS on Apple silicon**.
 

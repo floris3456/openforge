@@ -91,8 +91,10 @@ export const Account = Schema.Struct({
   alias: Schema.String,
   /** CPP's provider of the account, such as `claude`, `codex` or `antigravity`. */
   provider: Schema.String,
-  /** Its plan, as the provider names it. */
+  /** CPP's ID of its plan, such as `default_claude_max_20x` or `g1-pro-tier`. */
   plan: Schema.String.pipe(optional),
+  /** The provider's own name of the plan, such as `Ultra` or `Google AI Pro` (CPP's `plan_name`). */
+  planName: Schema.String.pipe(optional),
   /** Its quota windows; those that don't apply to it are left out. */
   windows: Schema.Array(Window),
 }).annotate({ identifier: "Pacer.Account" })

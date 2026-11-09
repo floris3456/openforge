@@ -1,5 +1,12 @@
+import type { RGBA } from "@opentui/core"
 import { selectTheme } from "@opencode/theme/tui"
-import type { BackgroundDefinition, TextDefinition, ThemeDefinition, ThemeDocument } from "@opencode/theme/tui"
+import type {
+  BackgroundDefinition,
+  ResolvedTheme,
+  TextDefinition,
+  ThemeDefinition,
+  ThemeDocument,
+} from "@opencode/theme/tui"
 import { getOpenCodeTheme } from "../../../src/theme"
 
 const text = {
@@ -37,7 +44,14 @@ const background = {
     $selected: "$hue.interactive.600",
   },
   feedback: { error: { base: "$hue.red.100" } },
+  meter: { success: "$hue.green.300", alternate: { track: "$hue.neutral.200" } },
 } satisfies BackgroundDefinition
+
+// @ts-expect-error A meter's tones are its track and its fills: no info tone.
+export const meterInfo = { meter: { info: "$hue.cyan.200" } } satisfies BackgroundDefinition
+
+/** Resolved, every tone is present, set by the theme or not. */
+export const meterTrack = (theme: ResolvedTheme): RGBA => theme.background.meter.alternate.track
 
 const definition = {
   ...selectTheme(getOpenCodeTheme(), "light"),

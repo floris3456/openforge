@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { createSignal } from "solid-js"
 import { existsSync } from "node:fs"
 import path from "node:path"
+import { TextAttributes, type CapturedLine } from "@opentui/core"
 import type { PacerAccounts, PacerModels } from "@opencode/client"
 import { useRoute } from "../../src/context/route"
 import { PacerUsage } from "../../src/pacer/usage"
@@ -52,26 +53,85 @@ const lines = (frame: string) =>
     .map((line) => line.trimEnd())
     .filter(Boolean)
 
-// The fixture's accounts: max-2 of plan `max` with a 5h and a 7d window, max-1 without a plan or a reading.
-const HEAD = "Claude Max       5h                7d"
-const ROW = "████░░░  62%   1h ██████░  80%  ~3d"
+/**
+ * A line of the section as drawn: each cell's background as its meter tone (`S` a success fill, `W`, `E`, `M`, `T` the
+ * track; lower case for the alternate row's tones; `.` none), and each non-blank cell's ink (`b` text, `m` muted, `s`
+ * success, `i` info, `w` warning, `e` error; upper case in bold).
+ */
+function drawn(setup: Awaited<ReturnType<typeof sidebar>>, line: CapturedLine | undefined, width = 37) {
+  const theme = setup.theme
+  const meter = theme.background.meter
+  const tones = (["success", "warning", "error", "muted", "track"] as const).flatMap((tone) => [
+    [tone === "track" ? "T" : tone[0]!.toUpperCase(), meter[tone]] as const,
+    [tone === "track" ? "t" : tone[0]!, meter.alternate[tone]] as const,
+  ])
+  const inks = [
+    ["b", theme.text.base],
+    ["m", theme.text.muted],
+    ["s", theme.text.feedback.success.base],
+    ["i", theme.text.feedback.info.base],
+    ["w", theme.text.feedback.warning.base],
+    ["e", theme.text.feedback.error.base],
+  ] as const
+  const cells = (line?.spans ?? []).flatMap((span) => Array.from(span.text, (character) => ({ character, span })))
+  return {
+    bg: cells
+      .slice(0, width)
+      .map(({ span }) => tones.find(([, color]) => color.equals(span.bg))?.[0] ?? ".")
+      .join(""),
+    ink: cells
+      .slice(0, width)
+      .map(({ character, span }) => {
+        if (character === " ") return " "
+        const ink = inks.find(([, color]) => color.equals(span.fg))?.[0] ?? "?"
+        return (span.attributes & TextAttributes.BOLD) !== 0 ? ink.toUpperCase() : ink
+      })
+      .join("")
+      .trimEnd(),
+  }
+}
+const row = (setup: Awaited<ReturnType<typeof sidebar>>, index: number) =>
+  drawn(setup, setup.app.captureSpans().lines[index])
+
+// The fixture's accounts: max-2 of plan `max` with a 5h window (62% left, 1h 20m to its reset) and a 7d one (CPP's
+// estimate), max-1 without a plan or a reading.
+const TITLE = "Usage                     ● last used"
+const HEAD = "Claude Max      5h                7d"
+const ROW = "62%      1h 20m   80%      ~3d 4h"
 const PLAIN = "Claude"
+/** The row's backgrounds: 62% of 17 cells is 11 filled, 80.4% 14. */
+const FILLS = "..SSSSSSSSSSSTTTTTT.SSSSSSSSSSSSSSTTT"
 
 describe("the Usage section", () => {
   test("a group per plan, a row per account without its name, the chat's accounts marked, the legend", async () => {
     await using setup = await sidebar({ view: chat({ nextUse: { account: "max-1", reason: "cold_move" } }) })
-    const frame = await setup.frame((frame) => frame.includes("next use"))
-    expect(lines(frame)).toEqual(["Usage", HEAD, `● ${ROW}`, PLAIN, "› no reading yet", "● last used  › next use"])
+    const frame = await setup.frame((frame) => frame.includes("› next"))
+    expect(lines(frame)).toEqual([
+      "Usage             ● last used  › next",
+      HEAD,
+      `●  ${ROW}`,
+      PLAIN,
+      "› no reading yet",
+    ])
     const theme = setup.theme
-    expect(colorOf(setup.app, "Claude Max")).toEqual(theme.text.base.toInts())
     expect(styleOf(setup.app, "Claude Max")).toEqual({ fg: theme.text.base.toInts(), dim: false })
-    expect(colorOf(setup.app, "5h")).toEqual(theme.text.muted.toInts())
-    expect(colorOf(setup.app, "●")).toEqual(theme.text.feedback.info.base.toInts())
-    expect(colorOf(setup.app, "›")).toEqual(theme.text.feedback.info.base.toInts())
-    expect(colorOf(setup.app, "████")).toEqual(theme.text.feedback.success.base.toInts())
-    expect(colorOf(setup.app, "░░░")).toEqual(theme.text.muted.toInts())
-    expect(colorOf(setup.app, "62%")).toEqual(theme.text.base.toInts())
-    expect(colorOf(setup.app, "next use")).toEqual(theme.text.muted.toInts())
+    expect(row(setup, 0)).toEqual({ bg: ".".repeat(37), ink: "BBBBB             i mmmm mmmm  i mmmm" })
+    expect(row(setup, 1)).toEqual({ bg: ".".repeat(37), ink: "BBBBBB BBB      mm                mm" })
+    expect(row(setup, 2)).toEqual({ bg: FILLS, ink: "I  BBB      bb bbb   BBB      bbb bb" })
+    expect(row(setup, 4)).toEqual({ bg: ".".repeat(37), ink: "I mm mmmmmmm mmm" })
+    // The tones the theme derives for the sidebar (spec section 6), under the percent and the time alike.
+    expect(theme.background.meter.success.toInts()).toEqual([0x38, 0x57, 0x3e, 255])
+    expect(theme.background.meter.track.toInts()).toEqual([0x1f, 0x1f, 0x1f, 255])
+  })
+
+  test("every other account's row in the alternate tones", async () => {
+    const three = accounts()
+    const strip = three.items[0]!
+    three.items = ["max-2", "max-3", "max-4"].map((alias) => ({ ...strip, id: `login-${alias}`, alias }))
+    await using setup = await sidebar({ view: null, accounts: three })
+    await setup.frame((frame) => lines(frame).length === 5)
+    expect([2, 3, 4].map((index) => row(setup, index).bg)).toEqual([FILLS, FILLS.toLowerCase(), FILLS])
+    expect(setup.theme.background.meter.alternate.success.toInts()).toEqual([0x30, 0x47, 0x34, 255])
   })
 
   test("of two logins of one address, which CPP names alike, the one serving the chat by its ID", async () => {
@@ -101,18 +161,18 @@ describe("the Usage section", () => {
     })
     const frame = await setup.frame((frame) => frame.includes("last used") && frame.includes("now"))
     expect(lines(frame)).toEqual([
-      "Usage",
+      TITLE,
       HEAD,
-      `● ${ROW}`,
-      "Claude           5h",
+      `●  ${ROW}`,
+      "Claude          5h",
       "  no reading yet",
-      "  ███████ 100%  now",
-      "● last used",
+      "   100%        now",
     ])
-    expect(colorOf(setup.app, "███████")).toEqual(setup.theme.text.muted.toInts())
+    // The old login's reading: its reset passed, so muted, on the alternate row.
+    expect(row(setup, 5)).toEqual({ bg: `..${"m".repeat(17)}${".".repeat(18)}`, ink: "   BBBB        bbb" })
   })
 
-  test("a new reading changes a bar in one frame, the rest standing", async () => {
+  test("a new reading changes a strip in one frame, the rest standing", async () => {
     await using setup = await sidebar({})
     await setup.frame((frame) => frame.includes(ROW))
     await setup.settle()
@@ -120,23 +180,30 @@ describe("the Usage section", () => {
     const next = accounts()
     next.items[0]!.windows[0]!.left = 15
     setup.emit({ type: "pacer.accounts.updated", data: { accounts: next } })
-    const after = "█░░░░░░  15%   1h ██████░  80%  ~3d"
+    const after = "15%      1h 20m   80%      ~3d 4h"
     await setup.frame((frame) => frame.includes(after))
-    // The first bar's one filled cell.
-    expect(colorOf(setup.app, "█")).toEqual(setup.theme.text.feedback.warning.base.toInts())
+    // 15% left: 3 of 17 cells, in the warning tone, the percent in the warning color.
+    expect(row(setup, 2)).toEqual({
+      bg: "..WWWTTTTTTTTTTTTTT.SSSSSSSSSSSSSSTTT",
+      ink: "I  WWW      bb bbb   BBB      bbb bb",
+    })
     await setup.app.renderOnce()
     expect(recorder.missed).toBe(0)
     expect(recorder.frames.some((frame) => frame.text.includes(after))).toBe(true)
     for (const frame of recorder.frames) {
       expect(frame.text.includes(ROW) !== frame.text.includes(after)).toBe(true)
       expect(frame.text).toContain(HEAD)
+      // The strip's text and its backgrounds change in the same frame.
+      expect(drawn(setup, frame.lines[2]).bg).toBe(
+        frame.text.includes(after) ? "..WWWTTTTTTTTTTTTTT.SSSSSSSSSSSSSSTTT" : FILLS,
+      )
     }
   })
 
   test("a new chat, before CLIProxyPacer has served it: the accounts of the providers serving its model", async () => {
     await using setup = await sidebar({ view: null })
     const frame = await setup.frame((frame) => frame.includes(ROW))
-    expect(lines(frame)).toEqual(["Usage", HEAD, `  ${ROW}`, PLAIN, "  no reading yet"])
+    expect(lines(frame)).toEqual(["Usage", HEAD, `   ${ROW}`, PLAIN, "  no reading yet"])
   })
 
   test("switched to another model: its providers' accounts until CLIProxyPacer serves it", async () => {
@@ -148,7 +215,7 @@ describe("the Usage section", () => {
       accounts: codex,
     })
     const frame = await setup.frame((frame) => frame.includes(ROW))
-    expect(lines(frame)).toEqual(["Usage", HEAD, `  ${ROW}`, PLAIN, "  no reading yet"])
+    expect(lines(frame)).toEqual(["Usage", HEAD, `   ${ROW}`, PLAIN, "  no reading yet"])
   })
 
   test("a model several providers serve: a group for each provider and plan", async () => {
@@ -164,7 +231,7 @@ describe("the Usage section", () => {
     expect(lines(frame)).toEqual([
       "Usage",
       HEAD,
-      `  ${ROW}`,
+      `   ${ROW}`,
       PLAIN,
       "  no reading yet",
       "Codex Plus",
@@ -202,7 +269,7 @@ describe("the Usage section", () => {
       },
     })
     const frame = await setup.frame((frame) => frame.includes("Command Code"))
-    expect(lines(frame)).toEqual(["Usage", "Command Code     5h", "● ████░░░  62%   1h", "● last used"])
+    expect(lines(frame)).toEqual([TITLE, "Command Code    5h", "●  62%      1h 20m"])
   })
 
   // Found live on 2026-11-08 (run/evidence/cpp-usage-meters/live-1, issue 2): the section followed the chat's saved
@@ -228,7 +295,7 @@ describe("the Usage section", () => {
     await setup.app.renderOnce()
     expect(recorder.missed).toBe(0)
     const states = [
-      (frame: string) => frame.includes(`● ${ROW}`) && frame.includes("● last used") && !frame.includes("Codex"),
+      (frame: string) => frame.includes(`●  ${ROW}`) && frame.includes(TITLE) && !frame.includes("Codex"),
       (frame: string) => frame.includes("Codex") && !frame.includes("Claude"),
       (frame: string) => lines(frame).length === 0,
     ]
@@ -246,7 +313,7 @@ describe("the Usage section", () => {
       accounts: codex,
     })
     const frame = await setup.frame((frame) => frame.includes(ROW))
-    expect(lines(frame)).toEqual(["Usage", HEAD, `  ${ROW}`, PLAIN, "  no reading yet"])
+    expect(lines(frame)).toEqual(["Usage", HEAD, `   ${ROW}`, PLAIN, "  no reading yet"])
   })
 
   // Issue 3 of the same run: the account of a chat's first step was known only once the step ended.
@@ -280,7 +347,7 @@ describe("the Usage section", () => {
     await setup.settle()
     expect(reads()).toBe(before)
     started("req_first")
-    await setup.frame((frame) => frame.includes(`● ${ROW}`) && frame.includes("● in use"))
+    await setup.frame((frame) => frame.includes(`●  ${ROW}`) && frame.includes("● in use"))
     expect(reads()).toBe(before + 1)
     // Once an account is held, a step start reads nothing; the step's end does, as before.
     started("req_second")
@@ -296,52 +363,76 @@ describe("the Usage section", () => {
       durable: { aggregateID: CHAT, seq: 0, version: 1 },
       data: { sessionID: CHAT },
     })
-    await setup.frame((frame) => frame.includes("● in use"))
-    expect(colorOf(setup.app, "●")).toEqual(setup.theme.text.feedback.success.base.toInts())
+    const frame = await setup.frame((frame) => frame.includes("● in use"))
+    expect(lines(frame)[0]).toBe("Usage                        ● in use")
+    expect(row(setup, 0).ink).toBe("BBBBB                        s mm mmm")
+    expect(row(setup, 2).ink).toBe("S  BBB      bb bbb   BBB      bbb bb")
   })
 
-  test("a forced move's account, as a warning", async () => {
+  test("a forced move's account, marked » as a warning", async () => {
     await using setup = await sidebar({ view: chat({ forceUse: { account: "max-1", when: "now" } }) })
-    const frame = await setup.frame((frame) => frame.includes("force use"))
-    expect(lines(frame).slice(-2)).toEqual(["› no reading yet", "● last used  › force use"])
-    expect(colorOf(setup.app, "›")).toEqual(setup.theme.text.feedback.warning.base.toInts())
+    const frame = await setup.frame((frame) => frame.includes("» forced"))
+    expect(lines(frame)[0]).toBe("Usage           ● last used  » forced")
+    expect(lines(frame).at(-1)).toBe("» no reading yet")
+    expect(colorOf(setup.app, "»")).toEqual(setup.theme.text.feedback.warning.base.toInts())
   })
 
-  test("the time counts down once a minute; a reading turning stale mutes its bar", async () => {
+  test("a minute passing changes only the time's digits; a reading turning stale mutes its fill", async () => {
     await using setup = await sidebar({})
     await setup.frame((frame) => frame.includes(ROW))
-    // 1h 20m to the 5h window's reset: still `1h` 20 minutes on, `59m` a minute later.
-    setup.clock.advance(20 * 60_000)
+    await setup.settle()
+    using recorder = recordFrames(setup.app)
+    // 1h 20m to the 5h window's reset, minutes rounded up: still so 30 s on, 1h 19m at the minute.
+    setup.clock.advance(30_000)
     await setup.settle()
     expect(setup.app.captureCharFrame()).toContain(ROW)
-    setup.clock.advance(60_000)
-    await setup.frame((frame) => frame.includes("████░░░  62%  59m ██████░  80%  ~3d"))
-    // Both readings turn stale an hour after they were read: their times stand, their bars mute.
-    setup.clock.advance(39 * 60_000)
-    await setup.frame((frame) => frame.includes("████░░░  62%  20m ██████░  80%  ~3d"))
-    await until(() => colorOf(setup.app, "████")?.join() === setup.theme.text.muted.toInts().join(), 5_000)
-    expect(colorOf(setup.app, "62%")).toEqual(setup.theme.text.muted.toInts())
+    setup.clock.advance(30_000)
+    const later = "62%      1h 19m   80%      ~3d 3h"
+    await setup.frame((frame) => frame.includes(later))
+    await setup.app.renderOnce()
+    expect(recorder.missed).toBe(0)
+    const before = lines(recorder.frames[0]!.text)
+    for (const frame of recorder.frames) {
+      const now = lines(frame.text)
+      expect(now.filter((line, index) => line !== before[index])).toEqual(
+        now.includes(`●  ${later}`) ? [`●  ${later}`] : [],
+      )
+      expect(drawn(setup, frame.lines[2]).bg).toBe(FILLS)
+    }
+    // Both readings turn stale an hour after they were read: their times stand, their fills mute, the percent stays.
+    setup.clock.advance(59 * 60_000)
+    await setup.frame((frame) => frame.includes("62%         20m   80%      ~3d 3h"))
+    await until(() => row(setup, 2).bg === "..MMMMMMMMMMMTTTTTT.MMMMMMMMMMMMMMTTT", 5_000)
+    expect(row(setup, 2).ink).toBe("I  BBB         bbb   BBB      bbb bb")
   })
 
-  test("greyed with as of while CPP is unreachable, and back in one frame once it answers again", async () => {
+  test("greyed with as of on its title line while CPP is unreachable, and back in one frame once it answers", async () => {
     await using setup = await sidebar({})
     await setup.frame((frame) => frame.includes(ROW))
     setup.clock.advance(60_000)
     setup.emit({ type: "pacer.status", data: { status: status("unreachable", { asOf: NOW + 60_000 }) } })
     const greyed = await setup.frame((frame) => frame.includes("as of 14:03"))
     // As CPP last said, at 14:03: the clock no longer runs.
-    expect(lines(greyed)).toEqual(["Usage", HEAD, `● ${ROW}`, PLAIN, "  no reading yet", "● last used", "as of 14:03"])
-    for (const text of ["Claude Max", "●", "62%", "1h", "as of 14:03"])
-      expect(styleOf(setup.app, text)).toEqual({ fg: setup.theme.text.faint.toInts(), dim: true })
+    expect(lines(greyed)).toEqual([
+      "Usage                     as of 14:03",
+      HEAD,
+      "●  62%      1h 19m   80%      ~3d 3h",
+      PLAIN,
+      "  no reading yet",
+    ])
+    for (const text of ["Usage", "Claude Max", "●", "62%", "19m", "~3d", "as of 14:03"])
+      expect([text, styleOf(setup.app, text)]).toEqual([text, { fg: setup.theme.text.faint.toInts(), dim: true }])
+    expect(row(setup, 2).bg).toBe("..MMMMMMMMMMMTTTTTT.MMMMMMMMMMMMMMTTT")
     expect(setup.pacer.ticking()).toBe(false)
     // CPP comes back: the view is read again, and the section turns current when it is there.
     setup.fake.chats[CHAT] = chat({ account: "max-1" })
     setup.emit({ type: "pacer.status", data: { status: status("on", { since: NOW + 120_000 }) } })
     await setup.frame((frame) => frame.includes("● no reading yet") && !frame.includes("as of"))
     expect(styleOf(setup.app, "Claude Max")).toEqual({ fg: setup.theme.text.base.toInts(), dim: false })
+    expect(row(setup, 2).bg).toBe(FILLS)
   })
 
-  test("a narrower section: the cells narrow, the percent goes first", async () => {
+  test("a narrower section: the strips narrow, the times in one unit", async () => {
     const fake = pacerFake()
     fake.status = status("on")
     fake.chats[CHAT] = chat()
@@ -359,15 +450,20 @@ describe("the Usage section", () => {
       ),
     })
     // Laid out at the sidebar's 37 until the section has measured its 30.
-    const frame = await setup.frame((frame) => frame.includes("Claude Max   5h"))
-    expect(lines(frame).slice(1, 3)).toEqual(["Claude Max   5h            7d", "● █████░░░   1h ██████░░  ~3d"])
+    const frame = await setup.frame((frame) => frame.includes("Claude Max  5h"))
+    expect(lines(frame).slice(0, 3)).toEqual([
+      "Usage              ● last used",
+      "Claude Max  5h            7d",
+      "●  62%      1h   80%     ~3d",
+    ])
     expect(lines(frame).every((line) => line.length <= 30)).toBe(true)
   })
 
-  test("no pacer on a plain proxy", async () => {
+  test("no pacer at the title line's end on a plain proxy", async () => {
     await using setup = await sidebar({ state: "no-pacer", view: null, accounts: null, models: null })
     const frame = await setup.frame((frame) => frame.includes("no pacer"))
-    expect(lines(frame)).toEqual(["Usage", "no pacer"])
+    expect(lines(frame)).toEqual(["Usage                        no pacer"])
+    expect(colorOf(setup.app, "no pacer")).toEqual(setup.theme.text.muted.toInts())
   })
 
   test("hidden while another provider's model is picked for the chat, and when no CPP is set up", async () => {
@@ -402,7 +498,7 @@ test("the section reads the providers serving each model once CPP is set up, and
 })
 
 test("back on a chat, 20 accounts of 4 windows are on screen in full within 100 ms, on every frame", async () => {
-  // Four windows that limit the chat's model, so four cells a row.
+  // Four windows that limit the chat's model: three strips on an account's first line, the fourth on its second.
   const labels = ["5h", "7d", "30d", "7d opus"]
   const many: PacerAccounts = {
     asOf: NOW,
@@ -440,10 +536,15 @@ test("back on a chat, 20 accounts of 4 windows are on screen in full within 100 
       </box>
     ),
   })
-  // The title, the group's head, a row per account, the legend.
-  const full = (frame: string) => frame.includes("● last used") && lines(frame).length === 23
+  // The title with the legend, the group's name with three labels, the fourth label, two lines per account.
+  const full = (frame: string) => frame.includes("● last used") && lines(frame).length === 43
   const none = (frame: string) => lines(frame).length === 0
   await setup.frame(full)
+  expect(lines(setup.app.captureCharFrame()).slice(0, 3)).toEqual([
+    "Usage                     ● last used",
+    "Claude    5h          7d         30d",
+    "     opus 7d",
+  ])
   setup.route.navigate({ type: "session", sessionID: OTHER })
   await setup.frame(none)
   await setup.settle()
@@ -453,9 +554,9 @@ test("back on a chat, 20 accounts of 4 windows are on screen in full within 100 
   const start = performance.now()
   setup.route.navigate({ type: "session", sessionID: CHAT })
   await setup.frame(full)
-  const drawn = recorder.frames.find((frame) => full(frame.text))!
-  console.log(`Usage: 20 accounts of 4 windows on screen ${(drawn.at - start).toFixed(1)} ms after the switch`)
-  expect(drawn.at - start).toBeLessThan(100)
+  const drawnAt = recorder.frames.find((frame) => full(frame.text))!
+  console.log(`Usage: 20 accounts of 4 windows on screen ${(drawnAt.at - start).toFixed(1)} ms after the switch`)
+  expect(drawnAt.at - start).toBeLessThan(100)
   expect(recorder.missed).toBe(0)
   expect(recorder.frames.filter((frame) => !full(frame.text) && !none(frame.text)).map((frame) => frame.text)).toEqual(
     [],

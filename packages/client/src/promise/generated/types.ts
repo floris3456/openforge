@@ -2479,7 +2479,14 @@ export type PacerStatus2 = {
   data: { status: PacerStatus }
 }
 
-export type PacerAccount = { id?: string; alias: string; provider: string; plan?: string; windows: Array<PacerWindow> }
+export type PacerAccount = {
+  id?: string
+  alias: string
+  provider: string
+  plan?: string
+  planName?: string
+  windows: Array<PacerWindow>
+}
 
 export type PacerModelsUpdated = {
   id: EventID

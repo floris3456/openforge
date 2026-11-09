@@ -1,6 +1,7 @@
 import { RGBA } from "@opentui/core"
 import { Schema } from "effect"
 import { expandTheme, mergeTheme } from "./expand.js"
+import { meterTones } from "./meter.js"
 import {
   ActionState,
   ActionVariant,
@@ -156,6 +157,7 @@ function resolveView(
       ...resolved.background,
       action: statefulActions(resolved.background.action),
       formfield: statefulColor(resolved.background.formfield),
+      meter: meterTones(resolved.text, resolved.background),
     },
     ...hueSteps,
   }

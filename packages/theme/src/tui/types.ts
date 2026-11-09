@@ -5,6 +5,7 @@ import type {
   FeedbackKind,
   HueStep,
   MarkdownToken,
+  MeterTone,
   SemanticHue,
   SurfaceName,
   SyntaxToken,
@@ -21,6 +22,7 @@ export type StatefulColor = Readonly<Record<ResolvedActionState, RGBA>> & {
   readonly state: (states: ActionStates) => RGBA
 }
 export type FormfieldColor = StatefulColor
+export type MeterTones = Readonly<Record<MeterTone, RGBA>>
 
 export type ResolvedThemeTokens = {
   readonly hue: Hue
@@ -46,6 +48,8 @@ export type ResolvedThemeTokens = {
     readonly action: Readonly<Record<ActionVariant, StatefulColor>>
     readonly formfield: FormfieldColor
     readonly feedback: Readonly<Record<FeedbackKind, { readonly base: RGBA }>>
+    /** Meters drawn as strips; `alternate` for every other row, a step closer to `raised.base`. */
+    readonly meter: MeterTones & { readonly alternate: MeterTones }
   }
   readonly border: { readonly base: RGBA }
   readonly scrollbar: { readonly base: RGBA }

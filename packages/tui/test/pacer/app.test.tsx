@@ -105,9 +105,10 @@ test("on CPP: the cache item in the toolbar, Usage where Context was, and the Re
   const frame = await waitForHighlightedFrame(setup, (frame) => /\$1\.23 · warm \d+:\d\d/.test(frame), {
     maxPasses: 200,
   })
-  expect(frame).toMatch(/^\s*Usage\s*$/m)
-  expect(frame).toContain("Claude Max       5h                7d")
-  expect(frame).toContain("████░░░  62%   1h")
+  // The section's title with the legend at its end, then the strips with the percent and the time on them.
+  expect(frame).toContain("Usage                     ● last used")
+  expect(frame).toContain("Claude Max      5h                7d")
+  expect(frame).toContain("●  62%      1h 20m   80%      ~3d 4h")
   expect(frame).not.toMatch(/^\s*Context\s*$/m)
   expect(frame).not.toContain("spent")
   // A click on the cache item opens the footer at the Requests tab; Enter on the long step's row moves the
@@ -143,7 +144,7 @@ test("moved to another provider: the cache item and Usage go, the Requests tab s
   const frame = await waitForHighlightedFrame(setup, (frame) => frame.includes("$1.23") && !frame.includes("warm"), {
     maxPasses: 200,
   })
-  expect(frame).not.toMatch(/^\s*Usage\s*$/m)
+  expect(frame).not.toMatch(/(^| )Usage( {2,}\S.*)? *$/m)
   expect(frame).not.toContain("Claude Max")
   // Its requests went through CPP: they still show.
   setup.mockInput.pressArrow("down")
@@ -161,7 +162,7 @@ test("without CPP: no cache item, no Usage, no Requests tab, and no Context eith
     },
   )
   expect(frame).not.toContain("warm")
-  expect(frame).not.toMatch(/^\s*Usage\s*$/m)
+  expect(frame).not.toMatch(/(^| )Usage( {2,}\S.*)? *$/m)
   expect(frame).not.toMatch(/^\s*Context\s*$/m)
   setup.mockInput.pressArrow("down")
   await setup.waitForFrame((frame) => frame.includes("Subagents"), { maxPasses: 100 })

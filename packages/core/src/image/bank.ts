@@ -136,6 +136,45 @@ const bank = Effect.fnUntraced(function* (
   return { ...image, number, line: line(number, image.name, image) }
 })
 
+const LINE_NUMBER = /\[Image (\d+): /g
+
+/**
+ * A fork's bank: the parent's images its copied history names by their lines, under the same numbers, their originals
+ * kept for the fork too, so `image({ id })` works there as in the parent. `copied` is the fork's copied rows' data.
+ */
+export const fork = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  parentID: SessionSchema.ID,
+  sessionID: SessionSchema.ID,
+  copied: ReadonlyArray<unknown>,
+) {
+  const named = new Set(
+    copied.flatMap((data) => Array.from(JSON.stringify(data).matchAll(LINE_NUMBER), (match) => Number(match[1]))),
+  )
+  if (named.size === 0) return
+  const images = (yield* list(db, parentID)).filter((image) => named.has(image.number))
+  if (images.length === 0) return
+  yield* db
+    .insert(ImageTable)
+    .values(images.map((image) => ({ ...image, session_id: sessionID })))
+    .onConflictDoNothing()
+    .run()
+    .pipe(Effect.orDie)
+  yield* db
+    .insert(BlobRefTable)
+    .values(
+      [...new Set(images.map((image) => image.hash))].map((hash) => ({
+        session_id: sessionID,
+        message_id: ORIGINAL_REF,
+        hash,
+        seq: 0,
+      })),
+    )
+    .onConflictDoNothing()
+    .run()
+    .pipe(Effect.orDie)
+})
+
 /** The chat's images, in number order. */
 export const list = (db: DatabaseService, sessionID: SessionSchema.ID) =>
   db

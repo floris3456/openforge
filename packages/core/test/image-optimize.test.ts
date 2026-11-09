@@ -18,6 +18,7 @@ import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionCompaction } from "@opencode/core/session/compaction"
+import { SessionEvent } from "@opencode/core/session/event"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionProjector } from "@opencode/core/session/projector"
@@ -373,6 +374,25 @@ const loaded = (session: Session.Info, messages: readonly SessionMessage.Info[])
 const user = (text: string) =>
   SessionMessage.User.make({ id: SessionMessage.ID.create(), type: "user", text, time: { created: DateTime.makeUnsafe(0) } })
 
+/** An assistant step whose tool returned this content. */
+const toolResult = (content: ReadonlyArray<Tool.Content>) =>
+  Schema.decodeUnknownSync(SessionMessage.Assistant)({
+    id: SessionMessage.ID.create(),
+    type: "assistant",
+    agent: Agent.defaultID,
+    model: { id: "claude-opus-5-5", providerID: "anthropic" },
+    content: [
+      {
+        type: "tool",
+        id: `call_${SessionMessage.ID.create()}`,
+        name: "read",
+        state: { status: "completed", input: {}, content },
+        time: { created: 0 },
+      },
+    ],
+    time: { created: 0, completed: 0 },
+  })
+
 /** An assistant step whose tool returned these images, each after its line. */
 const toolImages = (images: ReadonlyArray<{ line: string; data: string }>) =>
   Schema.decodeUnknownSync(SessionMessage.Assistant)({
@@ -457,6 +477,38 @@ describe("arrival in a chat", () => {
       expect(numbers.toSorted()).toEqual([1, 2, 3, 4])
       const rows = yield* db.select().from(ImageTable).where(eq(ImageTable.session_id, session.id)).all().pipe(Effect.orDie)
       expect(rows.map((row) => row.number).toSorted()).toEqual([1, 2, 3, 4])
+    }),
+  )
+})
+
+describe("forks", () => {
+  it.effect("a fork carries the images its history names, under the same numbers, with their originals", () =>
+    Effect.gen(function* () {
+      const session = yield* insertSession(Session.ID.make("ses_image_fork_parent"))
+      const db = (yield* Database.Service).db
+      const bus = yield* Bus.Service
+      const sources = yield* Effect.promise(() => Promise.all([gradient(300, 200), gradient(400, 300)]))
+      const [first, second] = yield* Effect.forEach(sources, (source) =>
+        ImageBank.arriveContent(db, session.id, opus, "read", [
+          { type: "file", uri: `data:image/png;base64,${Buffer.from(source).toString("base64")}`, mime: "image/png" },
+        ]),
+      )
+      const named = toolResult(first)
+      const later = toolResult(second)
+      yield* storeMessages(session.id, [user("look"), named, later])
+      const childID = Session.ID.make("ses_image_fork_child")
+      yield* bus.publish(SessionEvent.Forked, {
+        sessionID: childID,
+        parentID: session.id,
+        boundary: { type: "through", messageID: named.id },
+      })
+      // Image 1 is in the fork's history; image 2 came after the boundary.
+      expect((yield* ImageBank.list(db, childID)).map((image) => image.number)).toEqual([1])
+      const found = yield* ImageBank.get(db, childID, 1)
+      expect(found?.original.data.equals(Buffer.from(sources[0]))).toBe(true)
+      // The fork keeps it with the parent gone.
+      yield* bus.publish(SessionEvent.Deleted, { sessionID: session.id })
+      expect((yield* ImageBank.get(db, childID, 1))?.original.data.equals(Buffer.from(sources[0]))).toBe(true)
     }),
   )
 })

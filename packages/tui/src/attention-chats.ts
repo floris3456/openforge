@@ -27,7 +27,8 @@ export function createChatFilter(input: {
   }
 }
 
-const soundName = (request: AttentionNotifyOptions) => (typeof request.sound === "object" ? request.sound.name : undefined)
+const soundName = (request: AttentionNotifyOptions) =>
+  typeof request.sound === "object" ? request.sound.name : undefined
 
 // The chat a session belongs to: up its parents, loading a session whose info this TUI doesn't have yet (a subagent
 // that started before the TUI did).

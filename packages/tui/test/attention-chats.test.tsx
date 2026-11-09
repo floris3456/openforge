@@ -136,7 +136,9 @@ test("a TUI raises only its own chats' events, its subagents' at any depth inclu
   tui.done("ses_other")
   tui.done("ses_grand")
   tui.done("ses_open")
-  await tui.until(() => tui.kinds().includes("done:ses_open") && tui.reported.some((item) => item.sessionID === "ses_grand"))
+  await tui.until(
+    () => tui.kinds().includes("done:ses_open") && tui.reported.some((item) => item.sessionID === "ses_grand"),
+  )
   expect(tui.kinds().toSorted()).toEqual(["done:ses_open", "subagent_done:ses_grand"])
 })
 

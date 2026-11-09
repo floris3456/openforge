@@ -83,11 +83,18 @@ const Response = Schema.Struct({
 export const make = (
   adapter: OpenResponses.ProviderAdapter,
   lowerTools: (request: LLMRequest) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, AIError>,
+  lowerConversation: (
+    request: LLMRequest,
+    adapter: OpenResponses.ProviderAdapter,
+  ) => Effect.Effect<
+    { readonly model: string; readonly input: ReadonlyArray<unknown>; readonly instructions?: string },
+    AIError
+  > = OpenResponses.lowerConversation,
 ): CompactOperation =>
   Effect.fn("ResponsesCompaction.execute")(function* (request, executor, options) {
     const route = request.model.route
     // The standalone compaction endpoint rejects histories containing configuration updates.
-    const native = yield* OpenResponses.lowerConversation(stripEffortUpdates(request), adapter)
+    const native = yield* lowerConversation(stripEffortUpdates(request), adapter)
     const generation = OpenResponses.lowerGeneration(request)
     const tools = request.tools.length === 0 ? undefined : yield* lowerTools(request)
     const body = yield* ProviderShared.validateWith(Schema.decodeUnknownEffect(Body))(

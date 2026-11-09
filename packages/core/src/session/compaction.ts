@@ -433,8 +433,7 @@ export const layer = Layer.effect(
      * Who writes the summary of a chat on CLIProxyPacer (spec cliproxypacer-server-summaries, section 2); undefined for
      * another provider's chat, and for one on CLIProxyPacer while it has no pacer (`PacerSummaries.plan`): openforge
      * writes it as for any provider, naming no writer. `writing` holds the model that would write it: a pick of
-     * CLIProxyPacer's, else the chat's own, never the compaction agent's; its route's format decides whether
-     * CLIProxyPacer can write it at all.
+     * CLIProxyPacer's, else the chat's own, never the compaction agent's.
      */
     const pacerWriter = (trigger: Trigger, writing: SessionContext.Loaded) => {
       const context = trigger.context
@@ -443,15 +442,14 @@ export const layer = Layer.effect(
         sessionID: context.session.id,
         ...(context.session.parentID ? { parentID: context.session.parentID } : {}),
         model: writing.model.ref.id,
-        protocol: writing.model.model.route.protocol,
       })
     }
 
     /**
-     * CLIProxyPacer writes the summary of a Responses chat (spec cliproxypacer-server-summaries, section 3):
-     * `POST /v1/responses/compact` with the request the chat's next step would send on `trigger.context`'s model, up to
-     * the recent messages kept by `keep` (a prefix of the step's, so its cache still reads), with a summary's headers
-     * (`X-Pacer-Session`, its parent, `X-Pacer-Kind: compaction`), as `PacerSummaries.responses`. The answer's summary is
+     * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
+     * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
+     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
+     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
      * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
      * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
      * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.

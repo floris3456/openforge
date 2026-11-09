@@ -3129,7 +3129,7 @@ export interface ConfigApi<E = never> {
 
 export type ExperimentalConfigUpdateInput = {
   readonly shell?: string | null | undefined
-  readonly media?: { readonly image: { readonly opus_5_5: boolean } } | undefined
+  readonly media?: { readonly image: { readonly optimize: boolean } } | undefined
 }
 export type ExperimentalConfigUpdateOutput = void
 export type ExperimentalConfigUpdateOperation<E = never> = (

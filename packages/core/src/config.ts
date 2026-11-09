@@ -471,7 +471,7 @@ export const layer = (options?: Options) =>
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
           const edits: Array<[JSONPath, unknown]> = [
             ...("shell" in patch ? [[["shell"], patch.shell ?? undefined] as [JSONPath, unknown]] : []),
-            ...(patch.media ? [[["media", "image", "opus_5_5"], patch.media.image.opus_5_5] as [JSONPath, unknown]] : []),
+            ...(patch.media ? [[["media", "image", "optimize"], patch.media.image.optimize] as [JSONPath, unknown]] : []),
           ]
           const updated = yield* Effect.try({
             try: () =>

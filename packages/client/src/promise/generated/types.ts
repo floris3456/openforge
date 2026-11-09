@@ -2738,7 +2738,7 @@ export type ConfigEntry =
             max_width?: number
             max_height?: number
             max_base64_bytes?: number
-            opus_5_5?: boolean
+            optimize?: boolean
           }
         }
         tool_output?: { max_lines?: number; max_bytes?: number }
@@ -5333,7 +5333,7 @@ export type ConfigShellsOutput = Array<ConfigShellOption>
 
 export type ExperimentalConfigUpdateInput = {
   readonly shell?: string | null | undefined
-  readonly media?: { readonly image: { readonly opus_5_5: boolean } } | undefined
+  readonly media?: { readonly image: { readonly optimize: boolean } } | undefined
 }
 
 export type ExperimentalConfigUpdateOutput = void

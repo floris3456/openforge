@@ -24,10 +24,14 @@ import type {
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Content } from "@opencode/schema/tool"
-import { Cause, Context, Effect, Layer, Result, Stream } from "effect"
+import { Cause, Context, Effect, Layer, Option, Result, Stream } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { App } from "../app.js"
+import { Database } from "../database/database.js"
+import { ImageBank } from "../image/bank.js"
+import { ImageBudget } from "../image/budget.js"
+import { ImageFit } from "../image/fit.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerOffer } from "../pacer/offer.js"
 import { PacerTools } from "../pacer/tools.js"
@@ -93,6 +97,8 @@ export interface Input {
   readonly inputTokens?: { readonly measured: number; readonly estimated: number }
   /** Whether the chat compacts automatically, which a step tells a proxy that asks for compactions. */
   readonly autoCompaction?: boolean
+  /** openforge: the model's entry when the chat gets optimized images (`ImageBank`). */
+  readonly images?: ImageFit.Model
 }
 
 /** The default output limit: the catalog limit, fitted to the room the prompt leaves in the context window. */
@@ -248,6 +254,24 @@ export const layer = Layer.effect(
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
     const pacerTools = yield* PacerTools.Service
+    const database = yield* Effect.serviceOption(Database.Service)
+    // openforge: the tool's images arrive whole in its result and are fitted once, here (ImageBank).
+    const bankImages = (
+      execution: Effect.Effect<Tool.NormalizedResult, Tool.Error>,
+      sessionID: SessionSchema.ID,
+      model: ImageFit.Model,
+      tool: string,
+    ) =>
+      Option.isNone(database)
+        ? execution
+        : execution.pipe(
+            Effect.flatMap((result) =>
+              ImageBank.arriveContent(database.value.db, sessionID, model, tool, result.content).pipe(
+                Effect.map((content) => ({ ...result, content })),
+              ),
+            ),
+            Effect.provideService(ImageBank.Current, { db: database.value.db, sessionID, model }),
+          )
     const prepare = Effect.fn("SessionModelRequest.prepare")(function* <
       S extends SessionRequest & { tools?: Definitions },
     >(kind: SessionRequestKind, input: Input, shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>) {
@@ -335,7 +359,9 @@ export const layer = Layer.effect(
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
         system: shaped.system,
-        messages: boundImages(unsupportedParts(shaped.messages, model.capabilities, model.model.provider)),
+        messages: (input.images ? (messages: LLMRequest["messages"]) => ImageBudget.bound(messages, ImageFit.requestLimits(input.images!)) : boundImages)(
+          unsupportedParts(shaped.messages, model.capabilities, model.model.provider),
+        ),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -439,6 +465,7 @@ export const layer = Layer.effect(
         // plugin tools do.
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
           tools.execute({ ...call, definitions: hooked }).pipe(
+            (execution) => (input.images ? bankImages(execution, session.id, input.images, call.call.name) : execution),
             Effect.catchCauseFilter(
               (cause) => {
                 const decline = cause.reasons
@@ -471,5 +498,5 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node, PacerTools.node],
+  deps: [PluginHooks.node, SessionModelTransport.node, App.node, PacerTools.node, Database.node],
 })

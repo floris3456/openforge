@@ -3,19 +3,21 @@ import { settings } from "../src/component/dialog-config"
 import { createAppFixture } from "./fixture/app"
 import { json } from "./fixture/tui-client"
 
-// openforge's images for Claude Opus 5.5 (spec images-opus-5-5): Settings › Session "Images for Opus 5.5", off by
-// default, read from the service's config and written to its global config, never to cli.json.
+// openforge's optimized images (spec images): Settings › Session "Optimize images", off by default, read from the
+// service's config and written to its global config, never to cli.json.
 
-test("Session has the row Images for Opus 5.5: off or on, off by default, kept by the service", () => {
-  const row = settings.find((setting) => setting.title === "Images for Opus 5.5")
+test("Session has the row Optimize images: off or on, off by default, kept by the service, with help", () => {
+  const row = settings.find((setting) => setting.title === "Optimize images")
   expect(row).toMatchObject({
     category: "Session",
-    path: ["media", "image", "opus_5_5"],
+    path: ["media", "image", "optimize"],
     default: false,
     values: [false, true],
     labels: ["off", "on"],
     service: true,
   })
+  expect(row?.help).toContain("claude-opus-5-5")
+  expect(row?.title + row!.description).not.toMatch(/opus/i)
 })
 
 test("the row shows the service's value and writes the service's global config, not cli.json", async () => {
@@ -23,7 +25,7 @@ test("the row shows the service's value and writes the service's global config, 
   const state = { value: undefined as boolean | undefined }
   const document = () => ({
     type: "document",
-    info: state.value === undefined ? {} : { media: { image: { opus_5_5: state.value } } },
+    info: state.value === undefined ? {} : { media: { image: { optimize: state.value } } },
   })
   await using setup = await createAppFixture({
     width: 120,
@@ -31,11 +33,11 @@ test("the row shows the service's value and writes the service's global config, 
     config: { animations: false, keybinds: { "opencode.settings": "f6" } },
     fetch: async (url, request) => {
       if (url.pathname === "/api/config" && request.method === "GET")
-        return json([{ type: "document", info: { media: { image: { opus_5_5: false } } } }, document()])
+        return json([{ type: "document", info: { media: { image: { optimize: false } } } }, document()])
       if (url.pathname !== "/api/experimental/config") return undefined
-      const body = (await request.json()) as { media: { image: { opus_5_5: boolean } } }
+      const body = (await request.json()) as { media: { image: { optimize: boolean } } }
       writes.push(body)
-      state.value = body.media.image.opus_5_5
+      state.value = body.media.image.optimize
       return new Response(null, { status: 204 })
     },
   })
@@ -43,13 +45,13 @@ test("the row shows the service's value and writes the service's global config, 
   await setup.waitForFrame((frame) => frame.includes("commands"))
   setup.mockInput.pressKey("F6")
   await setup.waitForFrame((frame) => frame.includes("Settings"))
-  await setup.mockInput.typeText("Images for Opus")
-  await setup.waitForFrame((frame) => /Images for Opus 5\.5\s+off/.test(frame))
+  await setup.mockInput.typeText("Optimize images")
+  await setup.waitForFrame((frame) => /Optimize images\s+off/.test(frame))
   setup.mockInput.pressArrow("right")
-  await setup.waitForFrame((frame) => /Images for Opus 5\.5\s+on/.test(frame))
-  expect(writes).toEqual([{ media: { image: { opus_5_5: true } } }])
+  await setup.waitForFrame((frame) => /Optimize images\s+on/.test(frame))
+  expect(writes).toEqual([{ media: { image: { optimize: true } } }])
   expect(setup.config()).not.toHaveProperty("media")
   setup.mockInput.pressArrow("right")
-  await setup.waitForFrame((frame) => /Images for Opus 5\.5\s+off/.test(frame))
-  expect(writes).toEqual([{ media: { image: { opus_5_5: true } } }, { media: { image: { opus_5_5: false } } }])
+  await setup.waitForFrame((frame) => /Optimize images\s+off/.test(frame))
+  expect(writes).toEqual([{ media: { image: { optimize: true } } }, { media: { image: { optimize: false } } }])
 })

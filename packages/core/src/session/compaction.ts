@@ -24,6 +24,8 @@ import { Agent } from "../agent.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { llmClient } from "../effect/app-node-platform.js"
+import { ImageBudget } from "../image/budget.js"
+import { ImageFit } from "../image/fit.js"
 import { Instructions } from "../instructions/index.js"
 import { Model } from "../model.js"
 import { PacerSummaries } from "../pacer/summaries.js"
@@ -59,8 +61,16 @@ export type Editor = {
 export type Estimate = { readonly measured: number; readonly estimated: number }
 
 export type Trigger =
-  /** `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`. */
-  | { readonly reason: "auto" | "overflow"; readonly context: SessionContext.Loaded; readonly estimate?: Estimate }
+  /**
+   * `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`. `images`
+   * (openforge, `ImageBudget`): an `auto` one whose next image would not fit, so it compacts whatever the estimate.
+   */
+  | {
+      readonly reason: "auto" | "overflow"
+      readonly context: SessionContext.Loaded
+      readonly estimate?: Estimate
+      readonly images?: boolean
+    }
   /**
    * `inputID` is the `/compact` inbox item, whose message shows the outcome. `models`, when the item names them, write
    * the summary as a move's do: CLIProxyPacer's `compact` notice names the chat's own model, the one whose prompt
@@ -355,6 +365,7 @@ export const layer = Layer.effect(
         return { status: "skipped" }
       if (
         trigger.reason === "auto" &&
+        !trigger.images &&
         !due(context, calculateCeiling(context.model.limit, settings.buffer), trigger.estimate)
       )
         return { status: "skipped" }
@@ -627,7 +638,10 @@ export const layer = Layer.effect(
       const keepID = background ? undefined : split.keepID
 
       const previous = previousCompaction(messages)
-      const prompt = buildPrompt(previous !== undefined, previous?.summary.includes(LEGACY_HEADING) ?? false)
+      const prompt = ImageBudget.summaryPrompt(
+        buildPrompt(previous !== undefined, previous?.summary.includes(LEGACY_HEADING) ?? false),
+        context.images !== undefined,
+      )
       const headings = SUMMARY_TEMPLATE.split("\n").filter((line) => line.startsWith("##"))
       const filled = (text: string) => text.split("\n").some((line) => headings.includes(line.trim()))
       // Size the unchanged request with the number that decided to compact: the last response's count plus an
@@ -1017,6 +1031,8 @@ export const layer = Layer.effect(
         messages: base.messages,
         webSocket,
         inputTokens: { measured: budget, estimated: 0 },
+        // The summary's model gets the chat's optimized images only when they fit it too.
+        images: context.images && ImageFit.forModel(context.model),
       })
     }
 
@@ -1302,22 +1318,24 @@ export const estimatePrompt = (context: SessionContext.Loaded): Estimate => {
   // TODO: Pass compaction history the runner has already shaped. This and `recentUserMessages` repeat the
   // runner's unsupported-media and image-budget passes; here the image budget only sees images since the anchor,
   // so image-heavy sessions can estimate high.
-  const sent = SessionModelRequest.boundImages(
-    SessionModelRequest.unsupportedParts(base.messages, context.model.capabilities),
-  )
+  const exact = context.images
+  const supported = SessionModelRequest.unsupportedParts(base.messages, context.model.capabilities)
+  const sent = exact
+    ? ImageBudget.bound(supported, ImageFit.requestLimits(exact))
+    : SessionModelRequest.boundImages(supported)
   // The anchor's usage covers its own output, but not its local tool results, which the provider never saw.
   const unmeasured = sent.filter((message) => message.role !== "assistant" || message.id !== anchor?.id)
 
   if (anchor?.type !== "assistant" || !anchor.tokens)
     return {
       measured: 0,
-      estimated: estimateRequest({ system: base.system, tools: context.tools.definitions, messages: unmeasured }),
+      estimated: estimateRequest({ system: base.system, tools: context.tools.definitions, messages: unmeasured }, exact),
     }
 
   const tokens = anchor.tokens
   return {
     measured: tokens.input + tokens.cache.read + tokens.cache.write + tokens.output + tokens.reasoning,
-    estimated: unmeasured.reduce((sum, message) => sum + estimateMessage(message), 0),
+    estimated: unmeasured.reduce((sum, message) => sum + estimateMessage(message, exact), 0),
   }
 }
 
@@ -1399,10 +1417,11 @@ const fitOutput = (request: LLMRequest, limit: SessionContext.Loaded["model"]["l
   return LLMRequest.update(request, { generation: { ...request.generation, maxTokens } })
 }
 
-const estimateRequest = (request: Pick<LLMRequest, "system" | "tools" | "messages">) =>
+// `exact`: images count the visual tokens that model reads them as (`ImageFit.visualTokens`).
+const estimateRequest = (request: Pick<LLMRequest, "system" | "tools" | "messages">, exact?: ImageFit.Model) =>
   request.system.reduce((sum, part) => sum + Token.estimate(part.text), 0) +
   request.tools.reduce((sum, tool) => sum + estimateTool(tool), 0) +
-  request.messages.reduce((sum, message) => sum + estimateMessage(message), 0)
+  request.messages.reduce((sum, message) => sum + estimateMessage(message, exact), 0)
 
 /** Only what providers receive; `metadata` and `native` stay local. */
 const estimateTool = (tool: ToolEntry): number => {
@@ -1413,28 +1432,40 @@ const estimateTool = (tool: ToolEntry): number => {
   )
 }
 
-const estimateMessage = (message: Message) => message.content.reduce((sum, part) => sum + estimatePart(part), 0)
+const estimateMessage = (message: Message, exact?: ImageFit.Model) =>
+  message.content.reduce((sum, part) => sum + estimatePart(part, exact), 0)
 
-const estimatePart = (part: ContentPart): number => {
+const estimatePart = (part: ContentPart, exact: ImageFit.Model | undefined): number => {
   // An encrypted native compaction has no locally measurable size.
   if (part.type === "compaction") return Token.estimate(part.text ?? "")
   if (part.type === "effort") return 0
   if (part.type === "text" || part.type === "reasoning") return Token.estimate(part.text)
-  if (part.type === "media") return estimateMedia(part.media.mediaType)
+  if (part.type === "media")
+    return estimateMedia(
+      part.media.mediaType,
+      exact && part.media.source.type === "base64" ? { model: exact, data: part.media.source.data } : undefined,
+    )
   if (part.type === "tool-call") return Token.estimate(part.name + (JSON.stringify(part.input) ?? ""))
 
   if (part.result.type === "content")
     return part.result.value.reduce(
-      (sum, content) => sum + (content.type === "text" ? Token.estimate(content.text) : estimateMedia(content.mime)),
+      (sum, content) =>
+        sum +
+        (content.type === "text"
+          ? Token.estimate(content.text)
+          : estimateMedia(
+              content.mime,
+              exact ? { model: exact, data: content.uri.slice(content.uri.indexOf(",") + 1) } : undefined,
+            )),
       0,
     )
   const value = part.result.value
   return Token.estimate(typeof value === "string" ? value : (JSON.stringify(value) ?? ""))
 }
 
-const estimateMedia = (mime: string) => {
+const estimateMedia = (mime: string, exact?: { readonly model: ImageFit.Model; readonly data: string }) => {
   const type = mime.toLowerCase()
-  if (type.startsWith("image/")) return IMAGE_TOKEN_ESTIMATE
+  if (type.startsWith("image/")) return (exact === undefined ? undefined : ImageFit.visualTokens(exact.data, exact.model)) ?? IMAGE_TOKEN_ESTIMATE
   if (type === "application/pdf") return PDF_TOKEN_ESTIMATE
   return 0
 }

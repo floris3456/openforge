@@ -11,6 +11,7 @@ import type { Agent } from "./agent.js"
 import { CodeModeCatalog } from "./codemode/catalog.js"
 import { CodeModeTool } from "./codemode/tool.js"
 import { Image } from "./image.js"
+import { ImageBank } from "./image/bank.js"
 import { Permission } from "./permission.js"
 import { PluginHooks } from "./plugin/hooks.js"
 import { SessionMessage } from "./session/message.js"
@@ -90,6 +91,8 @@ const layer = Layer.effect(
 
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
+      // openforge: optimized images arrive once, whole, where the request gets the tool's result (ImageBank).
+      if (yield* ImageBank.Current) return content
       const normalized = yield* Effect.forEach(content, (item): Effect.Effect<NormalizedItem> => {
         if (item.type !== "file" || !item.mime.startsWith("image/")) return Effect.succeed(item)
         const base64 = /^data:[^,]*;base64,(.*)$/s.exec(item.uri)?.[1]

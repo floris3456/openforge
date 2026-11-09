@@ -4,6 +4,9 @@ import { Model } from "../model.js"
 import { Permission } from "../permission.js"
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
+import { Config } from "../config.js"
+import { ImageBank } from "../image/bank.js"
+import type { ImageFit } from "../image/fit.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -39,6 +42,8 @@ export interface Loaded {
   readonly initial: ReadonlyArray<Instructions.Rendered>
   readonly messages: ReadonlyArray<SessionMessage.Info>
   readonly tools: Tool.Snapshot
+  /** openforge: the model's entry when the chat gets optimized images (`ImageBank.applies`). */
+  readonly images?: ImageFit.Model
 }
 
 /**
@@ -55,6 +60,8 @@ export interface Interface {
   readonly resolveModel: (
     session: SessionSchema.Info,
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
+  /** openforge: the model's entry when a chat on `model` gets optimized images (`ImageBank.applies`). */
+  readonly images: (model: SessionRunnerModel.Resolved) => Effect.Effect<ImageFit.Model | undefined>
   /** Selects auxiliary title capabilities without instruction or tool preflight. */
   readonly selectTitle: (session: SessionSchema.Info) => Effect.Effect<
     | {
@@ -88,6 +95,8 @@ const layer = Layer.effect(
     const skillInstructions = yield* SkillInstructions.Service
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
+    const config = yield* Effect.serviceOption(Config.Service)
+    const images = (model: SessionRunnerModel.Resolved) => ImageBank.applies(config, model)
 
     const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
 
@@ -180,10 +189,11 @@ const layer = Layer.effect(
         initial: history.initial,
         messages: history.entries.map((entry) => entry.message),
         tools: selection.tools,
+        images: yield* images(model),
       }
     })
 
-    return Service.of({ select, load, resolveModel, selectTitle, request })
+    return Service.of({ select, load, resolveModel, images, selectTitle, request })
   }),
 )
 
@@ -207,6 +217,7 @@ export const node = makeLocationNode({
   layer,
   deps: [
     Agent.node,
+    Config.node,
     Model.node,
     Database.node,
     InstructionBuiltIns.node,

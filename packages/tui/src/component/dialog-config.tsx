@@ -42,10 +42,12 @@ type Setting = {
    */
   update?: true
   /**
-   * openforge (spec images-opus-5-5): a key of the service's global config, which the service reads, instead of the
+   * openforge (spec images): a key of the service's global config, which the service reads, instead of the
    * TUI config: read from the service when Settings opens and written to it. Shown once the service answered.
    */
   service?: true
+  /** openforge: the longer explanation a row's help shows. */
+  help?: string
 }
 
 // openforge (notifications step 2): each event's notification switch and sound, and Subagent done's levels.
@@ -191,16 +193,21 @@ export const settings: Setting[] = [
     keywords: ["attachments", "images", "tool output"],
   },
   {
-    title: "Images for Opus 5.5",
+    title: "Optimize images",
     category: "Session",
-    path: ["media", "image", "opus_5_5"],
+    path: ["media", "image", "optimize"],
     service: true,
-    description:
-      "For chats on Claude Opus 5.5: images sent at the most it reads, numbered and never changed once sent, with a zoom tool; the chat compacts when the next image would not fit",
+    description: "Fit images to the model, keep the originals, and let the model zoom and recall them",
+    help: [
+      "Every image that reaches the chat (pasted, attached, or read by a tool) is converted once, on this machine, to the largest size the model reads without shrinking it itself, as WebP at the highest quality that keeps a full context of images within one request. The full-resolution original is kept with the chat.",
+      "Each image is numbered, with one line before it saying its name, original size and the size it is shown at. The model's image tool lists the chat's images, shows one again (also after a compaction), or zooms into a region of the original at full detail.",
+      "Images are never changed or cut once sent, so the model's prompt cache keeps working. When the images sent leave room for less than one more full-size image, the chat says so once; the next image that would not fit compacts the chat first, and the image goes out after the summary.",
+      "For now this works only for claude-opus-5-5 (through Anthropic's Messages API, from any provider); other models keep today's handling. Kept in the service's global config.",
+    ].join("\n\n"),
     default: false,
     values: [false, true],
     labels: ["off", "on"],
-    keywords: ["images", "opus", "zoom", "screenshots", "vision"],
+    keywords: ["images", "optimize", "zoom", "screenshots", "vision", "originals"],
   },
   {
     title: "TPS",
@@ -605,9 +612,9 @@ export function useShownSettings() {
     client?.api.config.get().then(
       (entries) =>
         setServiceConfig({
-          opus_5_5:
+          optimize:
             entries
-              .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.opus_5_5] : []))
+              .flatMap((entry) => (entry.type === "document" ? [entry.info.media?.image?.optimize] : []))
               .findLast((value) => value !== undefined) ?? false,
         }),
       () => undefined,
@@ -650,7 +657,7 @@ export function useShownSettings() {
   }
 }
 
-type ServiceConfig = { readonly opus_5_5: boolean }
+type ServiceConfig = { readonly optimize: boolean }
 
 export function DialogConfig(props: { current?: string }) {
   const config = useConfig()
@@ -675,7 +682,7 @@ export function DialogConfig(props: { current?: string }) {
   const value = (setting: Setting) => {
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
-    if (setting.service) return serviceConfig()?.opus_5_5 ?? setting.default
+    if (setting.service) return serviceConfig()?.optimize ?? setting.default
     const current = setting.path.reduce<unknown>((result, key) => {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
@@ -736,7 +743,7 @@ export function DialogConfig(props: { current?: string }) {
     }
     if (setting.service) {
       await client!.api.experimental.config
-        .update({ media: { image: { opus_5_5: next === true } } })
+        .update({ media: { image: { optimize: next === true } } })
         .then(readServiceConfig)
         .catch(toast.error)
         .finally(() => setSaving(false))

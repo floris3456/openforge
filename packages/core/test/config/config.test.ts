@@ -2262,8 +2262,8 @@ describe("Config", () => {
     ),
   )
 
-  // openforge (spec images-opus-5-5): Settings › Session "Images for Opus 5.5" writes the global config.
-  it.live("update writes media.image.opus_5_5 to the global config and leaves the shell alone", () =>
+  // openforge (spec images): Settings › Session "Optimize images" writes the global config.
+  it.live("update writes media.image.optimize to the global config and leaves the shell alone", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) => {
         const global = path.join(tmp.path, "global")
@@ -2275,15 +2275,15 @@ describe("Config", () => {
           Effect.andThen(
             Effect.gen(function* () {
               const config = yield* Config.Service
-              yield* config.update!({ media: { image: { opus_5_5: true } } })
+              yield* config.update!({ media: { image: { optimize: true } } })
               expect(JSON.parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual({
                 shell: "zsh",
-                media: { image: { opus_5_5: true } },
+                media: { image: { optimize: true } },
               })
-              yield* config.update!({ media: { image: { opus_5_5: false } } })
+              yield* config.update!({ media: { image: { optimize: false } } })
               expect(JSON.parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual({
                 shell: "zsh",
-                media: { image: { opus_5_5: false } },
+                media: { image: { optimize: false } },
               })
             }).pipe(Effect.provide(testLayer(tmp.path, global))),
           ),

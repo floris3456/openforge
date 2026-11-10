@@ -121,13 +121,12 @@ function GroupContent(props: GroupProps) {
           ? "search"
           : tool === "webfetch"
             ? "fetch"
-            : (webTool(tool)?.kind ?? tool)
+            : (webTool(tool)?.noun ?? tool)
       result[name] = (result[name] ?? 0) + 1
       return result
     }, {})
     const names = Object.entries(counts).map(
-      ([name, count]) =>
-        `${count} ${count === 1 ? name : name === "search" || name === "fetch" ? `${name}es` : `${name}s`}`,
+      ([name, count]) => `${count} ${count === 1 ? name : name.endsWith("ch") ? `${name}es` : `${name}s`}`,
     )
     return `${completed() ? "Explored" : "Exploring"}: ${names.join(", ")}`
   })

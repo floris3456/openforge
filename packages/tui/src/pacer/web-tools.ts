@@ -2,23 +2,23 @@ import { isRecord } from "../util/record"
 import { webSearchProviderName } from "../util/tool-display"
 
 // CLIProxyPacer's web tools in the chat (spec cliproxypacer-step-2, section 4). A call shows as upstream's search and
-// fetch rows do and is grouped with them: search and research as searches, extract and crawl as fetches. The row is
-// made of the call's input, CPP's arguments as the model wrote them, and its metadata: `provider`, the service's name
-// from CPP's answer, which a running call doesn't have yet; each of the four names it, as CPP may have chosen a paid
-// one. A job's next call names no subject, only its `job_id`; a call whose answer says its job still runs ends its row
-// with `· job running`.
+// fetch rows do and is grouped with them; the group counts each by its `noun`: searches (with upstream's), researches,
+// fetches (extracts, with upstream's) and crawls. The row is made of the call's input, CPP's arguments as the model
+// wrote them, and its metadata: `provider`, the service's name from CPP's answer, which a running call doesn't have
+// yet; each of the four names it, as CPP may have chosen a paid one. A job's next call names no subject, only its
+// `job_id`; a call whose answer says its job still runs ends its row with `· job running`.
 
 const tools = {
-  web_search: { kind: "search", icon: "◈", label: "Web Search", subject: "query", pending: "Searching web…" },
+  web_search: { noun: "search", icon: "◈", label: "Web Search", subject: "query", pending: "Searching web…" },
   web_research: {
-    kind: "search",
+    noun: "research",
     icon: "◈",
     label: "Web Research",
     subject: "question",
     pending: "Researching the web…",
   },
-  web_extract: { kind: "fetch", icon: "%", label: "Web Extract", subject: "urls", pending: "Fetching from the web…" },
-  web_crawl: { kind: "fetch", icon: "%", label: "Web Crawl", subject: "url", pending: "Crawling the web…" },
+  web_extract: { noun: "fetch", icon: "%", label: "Web Extract", subject: "urls", pending: "Fetching from the web…" },
+  web_crawl: { noun: "crawl", icon: "%", label: "Web Crawl", subject: "url", pending: "Crawling the web…" },
 } as const
 
 export type WebToolName = keyof typeof tools
@@ -48,7 +48,7 @@ export function webToolSubject(name: string, input: Record<string, unknown>) {
   }
   const value = input[tool.subject]
   if (typeof value !== "string" || !value) return undefined
-  return tool.kind === "search" ? `"${value}"` : value
+  return tool.subject === "url" ? value : `"${value}"`
 }
 
 /** The service the call names, once CPP's answer gave it. */

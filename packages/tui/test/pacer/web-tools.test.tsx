@@ -446,16 +446,19 @@ describe("grouped with upstream's search and fetch", () => {
     call("call_crawl", "web_crawl", completed({ url: SITE }, { provider: "Tavily" })),
   ]
 
-  test("searches and research count as searches, extracts and crawls as fetches; expanded, the rows in order", async () => {
+  // The owner, 2026-11-10: "It should also include "X crawls" or "x researches" or "1 research"".
+  test("searches count with upstream's searches, extracts with its fetches, researches and crawls as their own; expanded, the rows in order", async () => {
     await using setup = await transcript(chat(parts), { grouping: "auto" })
     const frame = await setup.frame((frame) => frame.includes("Explored:"))
-    expect(lines(frame).filter((line) => line.includes("Explored:"))).toEqual(["→ Explored: 3 searches, 3 fetches"])
+    expect(lines(frame).filter((line) => line.includes("Explored:"))).toEqual([
+      "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
+    ])
     expect(rows(frame).filter((line) => line.startsWith("◈") || line.startsWith("%"))).toEqual([])
     const row = frame.split("\n").findIndex((line) => line.includes("Explored:"))
     await setup.mockMouse.click(6, row)
     const expanded = await setup.frame((frame) => rows(frame).length === 7)
     expect(rows(expanded)).toEqual([
-      "→ Explored: 3 searches, 3 fetches",
+      "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
       `◈ Web Search via Exa "upstream"`,
       `◈ Web Search via ChatGPT "${QUERY}"`,
       `% WebFetch ${SITE}`,
@@ -463,6 +466,20 @@ describe("grouped with upstream's search and fetch", () => {
       `◈ Web Research via Exa "${QUESTION}"`,
       `% Web Crawl via Tavily ${SITE}`,
     ])
+  })
+
+  test("two researches and two crawls count as researches and crawls", async () => {
+    await using setup = await transcript(
+      chat([
+        call("call_research_1", "web_research", completed({ question: QUESTION }, { provider: "Exa" })),
+        call("call_crawl_1", "web_crawl", completed({ url: SITE }, { provider: "Tavily" })),
+        call("call_research_2", "web_research", completed({ question: QUERY }, { provider: "Exa" })),
+        call("call_crawl_2", "web_crawl", completed({ url: URLS[1] }, { provider: "Firecrawl" })),
+      ]),
+      { grouping: "auto" },
+    )
+    const frame = await setup.frame((frame) => frame.includes("Explored:"))
+    expect(lines(frame).filter((line) => line.includes("Explored:"))).toEqual(["→ Explored: 2 researches, 2 crawls"])
   })
 
   test("a call that runs joins the group, which counts it once it ends, on every frame", async () => {

@@ -29,6 +29,7 @@ cache goes cold if nothing more is sent, including the pings CLIProxyPacer still
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `warm 23:41`                                     | the cache is warm and CLIProxyPacer pings it                                                                                                                                      |
 | `warming off · warm 3:12`                        | warming is off for the chat; the cache is still warm                                                                                                                              |
+| `compacted`                                      | the chat was compacted and has had no step since: its next step starts a new cache, whatever happened to the old one                                                              |
 | `cache cold`                                     | the cache went cold, shown as a warning                                                                                                                                           |
 | `cache cold · compacts first`                    | the cache went cold, [compact cold chats first](/providers#compaction-asks) and automatic compaction are on for the chat, and the chat is large enough for it, shown as a warning |
 | `keep-alive stopped · warm 2:10`                 | CLIProxyPacer's pings stopped on a failure, shown as a warning                                                                                                                    |
@@ -300,8 +301,10 @@ Compact cold chats first on for this chat
 What the two compaction asks do, and their limits, is on [Compaction asks](/providers#compaction-asks).
 
 **Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
-asks CLIProxyPacer to keep pinging it for up to 4 hours, and stops when the wait ends. Commands in the background don't
-count.
+asks CLIProxyPacer to keep pinging it for up to 4 hours, and stops when the wait ends. While a command, subagent or image
+the chat started runs in the background, it asks for up to an hour instead, and goes back to CLIProxyPacer's default once
+the chat has answered the notice that it ended. Pings last that long after each reply, so a dev server left running in
+the background keeps its chat pinged for an hour after each reply.
 
 ## Summaries
 

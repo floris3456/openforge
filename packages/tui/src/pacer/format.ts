@@ -7,6 +7,7 @@ import type {
   PacerRequest,
   PacerWindow,
   SessionMessageCompactionWriter,
+  SessionMessageInfo,
 } from "@opencode/client"
 import { Pacer } from "@opencode/schema/pacer"
 import type { MeterTone } from "@opencode/theme/tui"
@@ -69,15 +70,19 @@ export interface CacheLabel {
 }
 
 /**
- * The cache item for a chat's view at `now`. In order: the account can't serve the next step; the cache is cold (and
- * the chat compacts first, when its switch is on, its newest step announced the cold ask, as openforge's do only with
- * automatic compaction on, and it is at least as large as CPP's threshold: spec cliproxypacer-cold-ask, section 3);
- * compact before cold is due; pings stopped on a failure; warming is off; the cache is warm (with pings running, it
- * counts down to `coldAt`, which holds through the pings).
+ * The cache item for a chat's view at `now`. In order: the account can't serve the next step; the chat was compacted
+ * and nothing has been cached since (`compacted`: its newest answer is a summary; or CPP ended its pings for a
+ * compaction and has started none since), so its next step writes a new cache whatever the old one did; the cache is
+ * cold (and the chat compacts first, when its switch is on, its newest step announced the cold ask, as openforge's do
+ * only with automatic compaction on, and it is at least as large as CPP's threshold: spec cliproxypacer-cold-ask,
+ * section 3); compact before cold is due; pings stopped on a failure; warming is off; the cache is warm (with pings
+ * running, it counts down to `coldAt`, which holds through the pings).
  */
-export function cacheLabel(chat: PacerChat, now: number): CacheLabel {
+export function cacheLabel(chat: PacerChat, now: number, compacted = false): CacheLabel {
   if (chat.forceUse?.when === "now")
     return { text: `account used up · next step moves to ${chat.forceUse.account}`, tone: "warning" }
+  if (compacted || (chat.pings.stopped === "compacted" && !chat.pings.active))
+    return { text: "compacted", tone: "muted" }
   const until = chat.coldAt ?? chat.warmUntil
   if (!chat.warm || (until !== undefined && until <= now)) {
     const first =
@@ -93,6 +98,18 @@ export function cacheLabel(chat: PacerChat, now: number): CacheLabel {
   if (chat.pings.failed) return { text: "keep-alive stopped · warm ", tone: "warning", until }
   if (!chat.switches.warming) return { text: "warming off · warm ", tone: "muted", until }
   return { text: "warm ", tone: "muted", until }
+}
+
+/**
+ * Whether a chat's newest answer, before a staged revert at `revert`, is a finished summary: it was compacted and no
+ * step has run since. Covers every compaction, also one through another provider, which CPP only hears of as an event.
+ */
+export function endsCompacted(messages: readonly SessionMessageInfo[], revert?: string) {
+  const end = revert === undefined ? -1 : messages.findIndex((message) => message.id === revert)
+  const last = (end === -1 ? messages : messages.slice(0, end)).findLast(
+    (message) => message.type === "assistant" || message.type === "compaction",
+  )
+  return last?.type === "compaction" && last.status === "completed"
 }
 
 /**

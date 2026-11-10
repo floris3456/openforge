@@ -8,6 +8,7 @@ import type { Model } from "@opencode/schema/model"
 import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 import { Bus } from "../bus.js"
+import { Job } from "../job.js"
 import { Session } from "../session.js"
 import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
@@ -112,6 +113,11 @@ export const SILENCE_MS = 60_000
 export const METERS_MS = 10_000
 /** `pings.duration_minutes` while a chat waits on a foreground command or a subagent. */
 export const WAIT_MINUTES = 240
+/**
+ * `pings.duration_minutes` while a chat has a background command, subagent or image still running, whose end comes
+ * back to it as a notice: "the ping timer should be an hour instead of the default 30 minutes" (the owner, 2026-11-10).
+ */
+export const JOB_MINUTES = 60
 /** Fibers that run the chats' work, and so the most reads and writes to CPP at once for them. */
 export const READERS = 4
 /** Chats held at most; the oldest without pending work go first. */
@@ -201,10 +207,14 @@ interface Chat {
   missing: boolean
   /** CPP's number for it, for the request reads. */
   storeID: number | undefined
-  /** Foreground shell and subagent calls by call ID, from their start until they end. */
+  /** Shell and subagent calls by call ID, from their start until they end. */
   readonly calls: Map<string, string>
-  /** The calls of `calls` being waited on. */
+  /** The calls of `calls` being waited on: those in the foreground. */
   readonly waits: Set<string>
+  /** Its background jobs still running (`Job.runningBackground`), as last counted. */
+  jobs: number
+  /** Its background jobs are to be counted again: a call ended, its run ended, or CPP holds a duration of ours. */
+  count: boolean
   /** `pings.duration_minutes` as CPP holds it, when known. */
   duration: number | null | undefined
   /** CPP's label for it, as last read or told. */
@@ -257,6 +267,7 @@ export const layer = Layer.effect(
     const models = yield* PacerModels.Service
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
+    const jobs = yield* Job.Service
     const notices = yield* PacerNotices.Service
     // Compaction reads the state there: it can't depend on this service.
     const shared = yield* PacerStatus.Service
@@ -365,16 +376,27 @@ export const layer = Layer.effect(
       Queue.offerUnsafe(ready, chat.sessionID)
     }
 
+    /** The duration the chat's waits and jobs want CPP to hold; null leaves CPP's own. */
+    const wanted = (chat: Chat) => (chat.waits.size > 0 ? WAIT_MINUTES : chat.jobs > 0 ? JOB_MINUTES : null)
+
+    /** CPP holds another duration than the one wanted; one set elsewhere stays unless a wait or job wants its own. */
+    const misheld = (chat: Chat) => {
+      const want = wanted(chat)
+      if (want !== null) return chat.duration !== want
+      return chat.duration === WAIT_MINUTES || chat.duration === JOB_MINUTES
+    }
+
     const pending = (chat: Chat) =>
       chat.requests ||
       chat.events.length > 0 ||
       chat.read ||
       chat.ended ||
       chat.compact !== undefined ||
-      (chat.waits.size > 0 ? chat.duration !== WAIT_MINUTES : chat.duration === WAIT_MINUTES)
+      chat.count ||
+      misheld(chat)
 
     const busy = (chat: Chat) =>
-      pending(chat) || chat.waits.size > 0 || queued.has(chat.sessionID) || running.has(chat.sessionID)
+      pending(chat) || chat.waits.size > 0 || chat.jobs > 0 || queued.has(chat.sessionID) || running.has(chat.sessionID)
 
     const forget = (chat: Chat) => {
       chats.delete(chat.sessionID)
@@ -409,6 +431,8 @@ export const layer = Layer.effect(
         storeID: undefined,
         calls: new Map(),
         waits: new Set(),
+        jobs: 0,
+        count: false,
         duration: undefined,
         label: undefined,
         model: undefined,
@@ -454,6 +478,8 @@ export const layer = Layer.effect(
       tell(chat, { type: "closed" })
       chat.waits.clear()
       chat.calls.clear()
+      chat.jobs = 0
+      chat.count = false
       chat.raw = undefined
       chat.view = undefined
     }
@@ -486,8 +512,11 @@ export const layer = Layer.effect(
       yield* setView(chat)
       const label = labelOf(chat)
       if (label && label !== chat.label) tell(chat, { type: "label", label })
-      // A wait this process never saw end (it started in an earlier one) is ended here.
-      if (chat.duration === WAIT_MINUTES && chat.waits.size === 0) mark(chat)
+      // A duration of ours this process didn't set (a wait or job of an earlier one) is checked against the jobs.
+      if (misheld(chat)) {
+        chat.count = true
+        mark(chat)
+      }
     })
 
     /**
@@ -695,9 +724,14 @@ export const layer = Layer.effect(
         chat.events = chat.events.slice(1)
       }
       if (chat.removed) return forget(chat)
-      const want = chat.waits.size > 0 ? WAIT_MINUTES : null
-      if (want === null ? chat.duration === WAIT_MINUTES : chat.duration !== WAIT_MINUTES) {
-        if (!(yield* patch(chat, { "pings.duration_minutes": want }))) return
+      if (chat.count) {
+        chat.count = false
+        chat.jobs = (yield* jobs.runningBackground).filter(
+          (job) => (job.kind === "subagent" ? job.parentSessionID : job.sessionID) === chat.sessionID,
+        ).length
+      }
+      if (misheld(chat)) {
+        if (!(yield* patch(chat, { "pings.duration_minutes": wanted(chat) }))) return
         // The answer is the view.
         chat.read = false
       }
@@ -1081,8 +1115,9 @@ export const layer = Layer.effect(
         case "session.tool.called": {
           const chat = chats.get(sessionID)
           if (!chat?.calls.has(event.data.id)) return
-          // A background shell or subagent does not hold the chat: a dev server would keep it warm for hours.
-          if (event.data.input.background === true) return void chat.calls.delete(event.data.id)
+          // A background shell or subagent is no wait: once its call has ended, its job counts, for an hour rather than a
+          // wait's 4 hours, since a dev server can run for days.
+          if (event.data.input.background === true) return
           chat.waits.add(event.data.id)
           if (chat.waits.size === 1) mark(chat)
           return
@@ -1091,8 +1126,10 @@ export const layer = Layer.effect(
         case "session.tool.failed": {
           const chat = chats.get(sessionID)
           if (!chat?.calls.delete(event.data.id)) return
-          if (chat.waits.delete(event.data.id) && chat.waits.size === 0) mark(chat)
-          return
+          // A background call, or a foreground one moved there, leaves a job running.
+          chat.waits.delete(event.data.id)
+          chat.count = true
+          return mark(chat)
         }
         case "session.execution.succeeded":
         case "session.execution.failed":
@@ -1105,12 +1142,12 @@ export const layer = Layer.effect(
             return
           const chat = chats.get(sessionID)
           if (!chat?.on) return
-          // A run that ended waits on nothing, also when it stopped before a call's end was published.
+          // A run that ended waits on nothing, also when it stopped before a call's end was published. A job that ended
+          // woke the chat with its notice, so its count goes at the end of that run.
           chat.calls.clear()
-          if (chat.waits.size > 0) {
-            chat.waits.clear()
-            mark(chat)
-          }
+          chat.waits.clear()
+          chat.count = true
+          mark(chat)
           // Only a subagent's run ending closes its chat on CPP.
           if (chat.info === undefined) {
             chat.ended = true
@@ -1438,6 +1475,7 @@ export const node = makeGlobalNode({
     PacerNotices.node,
     PacerStatus.node,
     Bus.node,
+    Job.node,
     Session.node,
   ],
 })

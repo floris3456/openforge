@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Clock, Context, Effect, Fiber, Layer, Stream, SubscriptionRef } from "effect"
+import { Clock, Context, Deferred, Effect, Fiber, Layer, Stream, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/schema/agent"
@@ -10,6 +10,7 @@ import type { SessionID } from "@opencode/schema/session-id"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
+import { Job } from "@opencode/core/job"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Location } from "@opencode/core/location"
 import { PacerConnection } from "@opencode/core/pacer/connection"
@@ -396,6 +397,8 @@ interface Harness {
   readonly catalog: SubscriptionRef.SubscriptionRef<PacerModels.Catalog | undefined>
   readonly refreshes: { count: number }
   readonly execution: { readonly active: Set<SessionID>; readonly woken: SessionID[] }
+  /** The real background jobs (`Job`), which the connection counts per chat. */
+  readonly jobs: Job.Interface
   /** Every `pacer.*` event published since the harness started. */
   readonly published: Array<{ readonly type: string; readonly data: unknown }>
   /** Every `Session.get` since the harness started: the session store's reads. */
@@ -427,6 +430,7 @@ const harness = Effect.fnUntraced(function* () {
       LayerNode.group([
         Database.node,
         Bus.node,
+        Job.node,
         SessionProjector.node,
         SessionStore.node,
         SessionInbox.node,
@@ -496,6 +500,7 @@ const harness = Effect.fnUntraced(function* () {
             }),
           ),
           Layer.succeed(Bus.Service, bus),
+          Layer.succeed(Job.Service, Context.get(context, Job.Service)),
           Layer.succeed(Session.Service, counted),
           Layer.succeed(PacerNotices.Service, notices),
         ),
@@ -509,6 +514,7 @@ const harness = Effect.fnUntraced(function* () {
     notices,
     bus,
     sessions,
+    jobs: Context.get(context, Job.Service),
     enqueue: (sessionID: SessionID) =>
       Context.get(context, SessionInbox.Service)
         .admit({
@@ -1863,53 +1869,144 @@ describe("PacerConnection chats", () => {
     }),
   )
 
-  it.effect("keeps a chat warm while it waits on a foreground command or a subagent, not a background one", () =>
-    Effect.gen(function* () {
-      const h = yield* harness()
-      yield* online(h)
-      const id = yield* chat(h)
-      h.cpp.views.set(PacerSessionID.make(id), chatView(PacerSessionID.make(id), h.cpp.time()))
-      const assistantMessageID = yield* step(h, id)
-      const call = (callID: string, name: string, input: Json) =>
-        Effect.gen(function* () {
-          yield* h.bus.publish(SessionEvent.Tool.Input.Started, { sessionID: id, assistantMessageID, id: callID, name })
-          yield* h.bus.publish(SessionEvent.Tool.Called, {
+  it.effect(
+    "keeps a chat warm 4 hours while it waits on a foreground command or subagent, and an hour while a background job of it runs",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const id = yield* chat(h)
+        h.cpp.views.set(PacerSessionID.make(id), chatView(PacerSessionID.make(id), h.cpp.time()))
+        const assistantMessageID = yield* step(h, id)
+        const call = (callID: string, name: string, input: Json) =>
+          Effect.gen(function* () {
+            yield* h.bus.publish(SessionEvent.Tool.Input.Started, {
+              sessionID: id,
+              assistantMessageID,
+              id: callID,
+              name,
+            })
+            yield* h.bus.publish(SessionEvent.Tool.Called, {
+              sessionID: id,
+              assistantMessageID,
+              id: callID,
+              input,
+              executed: false,
+            })
+          })
+        const done = (callID: string) =>
+          h.bus.publish(SessionEvent.Tool.Success, {
             sessionID: id,
             assistantMessageID,
             id: callID,
-            input,
+            content: [{ type: "text", text: "done" }],
             executed: false,
           })
-        })
-      const done = (callID: string) =>
-        h.bus.publish(SessionEvent.Tool.Success, {
+        const patches = () =>
+          seen(h, viewPath(id), "PATCH").map((item) => (item.body as Json)["pings.duration_minutes"])
+        // A job in the background, as the shell and subagent tools leave one: running until `end` is done.
+        const background = (jobID: string, recovery: Job.Recovery) =>
+          Effect.gen(function* () {
+            const end = yield* Deferred.make<string>()
+            yield* h.jobs.start({ id: jobID, type: recovery.kind, recovery, run: Deferred.await(end) })
+            yield* h.jobs.background(jobID)
+            return Deferred.succeed(end, "done").pipe(Effect.andThen(h.jobs.wait({ id: jobID })))
+          })
+
+        // A background call is no wait; once it has answered, its job counts: an hour.
+        yield* call("server", "shell", { command: "bun run dev", background: true })
+        yield* settle
+        expect(patches()).toEqual([])
+        const stopServer = yield* background("sh_server", {
+          kind: "shell",
           sessionID: id,
-          assistantMessageID,
-          id: callID,
-          content: [{ type: "text", text: "done" }],
-          executed: false,
+          shellID: "sh_server",
+          command: "bun run dev",
         })
-      const patches = () => seen(h, viewPath(id), "PATCH").map((item) => item.body)
+        yield* done("server")
+        yield* until("an hour", () => patches().length === 1)
+        // A foreground wait beside it: 4 hours while any wait lasts, then back to the hour, the job still running.
+        yield* call("sleep", "shell", { command: "sleep 600" })
+        yield* until("raised", () => patches().length === 2)
+        yield* call("agent", "subagent", { prompt: "look" })
+        yield* done("sleep")
+        yield* settle
+        expect(patches()).toEqual([60, 240])
+        yield* done("agent")
+        yield* until("back to the hour", () => patches().length === 3)
+        // The command ended: its notice wakes the chat, and the end of that run leaves CPP's own duration.
+        yield* stopServer
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("cleared", () => patches().length === 4)
+        expect(patches()).toEqual([60, 240, 60, null])
+        // A run that ends with no job of the chat running writes nothing.
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* settle
+        expect(patches()).toHaveLength(4)
 
-      yield* call("server", "shell", { command: "bun run dev", background: true })
-      yield* call("sleep", "shell", { command: "sleep 600" })
-      yield* until("raised", () => patches().length === 1)
-      yield* call("agent", "subagent", { prompt: "look" })
-      yield* done("sleep")
-      yield* settle
-      expect(patches()).toEqual([{ "pings.duration_minutes": 240 }])
-      yield* done("agent")
-      yield* until("cleared", () => patches().length === 2)
-      yield* done("server")
-      yield* settle
-      expect(patches()).toEqual([{ "pings.duration_minutes": 240 }, { "pings.duration_minutes": null }])
+        // A background subagent is its parent's job; another chat's job is not.
+        const child = yield* chat(h, id)
+        const other = yield* chat(h)
+        yield* background("sh_other", { kind: "shell", sessionID: other, shellID: "sh_other", command: "sleep 3600" })
+        const stopChild = yield* background(child, {
+          kind: "subagent",
+          parentSessionID: id,
+          childSessionID: child,
+          agent: "explore",
+          description: "look",
+        })
+        yield* call("helper", "subagent", { prompt: "look", background: true })
+        yield* done("helper")
+        yield* until("an hour for the subagent", () => patches().length === 5)
 
-      // A run stopped while it waited waits no more, though the call's end is published only at its next run.
-      yield* call("long", "shell", { command: "sleep 3600" })
-      yield* until("raised again", () => patches().length === 3)
-      yield* h.bus.publish(SessionEvent.Execution.Interrupted, { sessionID: id, reason: "user" })
-      yield* until("cleared again", () => patches().length === 4)
-      expect(patches().slice(2)).toEqual([{ "pings.duration_minutes": 240 }, { "pings.duration_minutes": null }])
+        // A run stopped while it waited waits no more, though the call's end is published only at its next run: back to
+        // the hour while the subagent runs.
+        yield* call("long", "shell", { command: "sleep 3600" })
+        yield* until("raised again", () => patches().length === 6)
+        yield* h.bus.publish(SessionEvent.Execution.Interrupted, { sessionID: id, reason: "user" })
+        yield* until("the hour again", () => patches().length === 7)
+        yield* stopChild
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("cleared again", () => patches().length === 8)
+        expect(patches().slice(4)).toEqual([60, 240, 60, null])
+      }),
+  )
+
+  it.effect("a duration of ours from an earlier process is checked against the chat's jobs when its view is read", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const [idle, working, own] = yield* Effect.forEach([0, 1, 2], () => chat(h))
+      const view = (sessionID: SessionID, minutes: number) =>
+        h.cpp.views.set(
+          PacerSessionID.make(sessionID),
+          chatView(PacerSessionID.make(sessionID), h.cpp.time(), {
+            settings: { "pings.enabled": null, "pings.duration_minutes": minutes, "cache.class": null, model: null },
+          }),
+        )
+      view(idle, 60)
+      view(working, 240)
+      // One set on CPP's own page stays.
+      view(own, 90)
+      const end = yield* Deferred.make<string>()
+      yield* h.jobs.start({
+        id: "sh_dev",
+        type: "shell",
+        recovery: { kind: "shell", sessionID: working, shellID: "sh_dev", command: "bun run dev" },
+        run: Deferred.await(end),
+      })
+      yield* h.jobs.background("sh_dev")
+      for (const sessionID of [idle, working, own]) yield* step(h, sessionID)
+      for (const sessionID of [idle, working, own]) yield* h.connection.chat(sessionID)
+      yield* until(
+        "both corrected",
+        () => seen(h, viewPath(idle), "PATCH").length + seen(h, viewPath(working), "PATCH").length === 2,
+      )
+      yield* settle
+      expect(seen(h, viewPath(idle), "PATCH").map((item) => item.body)).toEqual([{ "pings.duration_minutes": null }])
+      expect(seen(h, viewPath(working), "PATCH").map((item) => item.body)).toEqual([{ "pings.duration_minutes": 60 }])
+      expect(seen(h, viewPath(own), "PATCH")).toEqual([])
+      yield* Deferred.succeed(end, "done")
     }),
   )
 

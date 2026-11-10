@@ -7,6 +7,7 @@ import { useInteractivity } from "../../context/interactivity"
 import { stringWidth } from "../../util/string-width"
 import { createGoal, GoalStatus } from "./goal"
 import { PacerCacheItem, usePacerCache } from "../../pacer/cache-item"
+import { endsCompacted } from "../../pacer/format"
 
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -51,7 +52,16 @@ export function PromptFooter(props: {
     ].filter((item): item is string => Boolean(item))
   })
   const live = createMemo(() => Boolean(subagents() || shells()))
-  const cache = usePacerCache(() => props.sessionID)
+  const cache = usePacerCache(
+    () => props.sessionID,
+    () => {
+      if (!props.sessionID) return false
+      return endsCompacted(
+        props.context.data.session.message.list(props.sessionID),
+        props.context.data.session.get(props.sessionID)?.revert?.messageID,
+      )
+    },
+  )
   const goal = createGoal(props.context, () => props.sessionID)
   // Prompt hints read as disabled while the session does not own input, e.g. while a side panel is focused.
   const interactive = useInteractivity()

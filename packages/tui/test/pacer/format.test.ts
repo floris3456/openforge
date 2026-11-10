@@ -6,6 +6,7 @@ import {
   cacheLabel,
   cacheText,
   chatAccount,
+  endsCompacted,
   formatRemaining,
   formatTokens,
   noticeAge,
@@ -40,8 +41,8 @@ import { chat, miss, notice, NOW, promptChange, request, step, webCall } from ".
 // spec cliproxypacer-usage-meters, which replaced step 1's section 5.
 
 describe("the toolbar's cache item (section 4)", () => {
-  const text = (view: Parameters<typeof cacheLabel>[0], now = NOW) => {
-    const label = cacheLabel(view, now)
+  const text = (view: Parameters<typeof cacheLabel>[0], now = NOW, compacted = false) => {
+    const label = cacheLabel(view, now, compacted)
     return { text: cacheText(label, now), tone: label.tone }
   }
 
@@ -64,6 +65,49 @@ describe("the toolbar's cache item (section 4)", () => {
     expect(text(chat({ warm: false }))).toEqual({ text: "cache cold", tone: "warning" })
     // Also once the countdown reaches its end before CPP says so.
     expect(text(chat(), chat().coldAt! + 1)).toEqual({ text: "cache cold", tone: "warning" })
+  })
+
+  // The owner, 2026-11-10: "When compaction had happened it says cache cold in the bottom, it should say compacted."
+  test("compacted and nothing cached since: compacted, muted, whatever the old cache does", () => {
+    const ended = { active: false, left: 0, sent: 0, failed: false, stopped: "compacted" }
+    // The chat's newest answer is a summary: cold, still warm, or counted down.
+    expect(text(chat({ warm: false }), NOW, true)).toEqual({ text: "compacted", tone: "muted" })
+    expect(text(chat(), NOW, true)).toEqual({ text: "compacted", tone: "muted" })
+    expect(text(chat(), chat().coldAt! + 1, true)).toEqual({ text: "compacted", tone: "muted" })
+    // CPP ended the pings for a compaction through it and started none since: also while the next step runs, before
+    // its reply arms new ones.
+    expect(text(chat({ warm: false, pings: ended }))).toEqual({ text: "compacted", tone: "muted" })
+    expect(text(chat({ warmUntil: NOW + 60_000, coldAt: NOW + 60_000, pings: ended }))).toEqual({
+      text: "compacted",
+      tone: "muted",
+    })
+    // A reply since armed new pings: the countdown again.
+    expect(text(chat({ pings: { ...ended, active: true, left: 4, intervalMs: 270_000 } })).text).toBe("warm 23:41")
+    // Pings ended for any other reason: as before.
+    expect(text(chat({ warm: false, pings: { ...ended, stopped: "event" } })).text).toBe("cache cold")
+    // The account that can't serve the next step still says so first.
+    expect(text(chat({ forceUse: { account: "max-1", when: "now" } }), NOW, true).text).toBe(
+      "account used up · next step moves to max-1",
+    )
+  })
+
+  test("a chat ends compacted when its newest answer, before a staged revert, is a finished summary", () => {
+    const summary = (id: string, status: "completed" | "running" | "failed") =>
+      ({ id, type: "compaction", status, reason: "manual", summary: "the summary", time: { created: NOW } }) as never
+    const user = { id: "msg_user", type: "user", text: "next", time: { created: NOW } } as never
+    expect(endsCompacted([step("msg_1", { created: NOW - 60_000 }), summary("msg_2", "completed")])).toBe(true)
+    // Kept messages and a prompt after the summary are no answer.
+    expect(endsCompacted([summary("msg_2", "completed"), user])).toBe(true)
+    // A step since, a summary still being written or one that failed: not compacted.
+    expect(endsCompacted([summary("msg_2", "completed"), user, step("msg_3", { created: NOW })])).toBe(false)
+    expect(endsCompacted([step("msg_1", { created: NOW - 60_000 }), summary("msg_2", "running")])).toBe(false)
+    expect(endsCompacted([step("msg_1", { created: NOW - 60_000 }), summary("msg_2", "failed")])).toBe(false)
+    expect(endsCompacted([])).toBe(false)
+    // A revert staged to before the summary leaves the step before it the newest answer.
+    expect(endsCompacted([step("msg_1", { created: NOW - 60_000 }), summary("msg_2", "completed")], "msg_2")).toBe(
+      false,
+    )
+    expect(endsCompacted([summary("msg_2", "completed"), user, step("msg_3", { created: NOW })], "msg_3")).toBe(true)
   })
 
   test("pings stopped on a failure, as a warning", () => {

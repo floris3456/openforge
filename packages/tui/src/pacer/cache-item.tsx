@@ -14,8 +14,14 @@ export interface PacerCacheText {
   readonly tone: "muted" | "warning" | "faint"
 }
 
-/** The cache item of the prompt's chat as it is drawn, or undefined when it shows nothing. */
-export function usePacerCache(sessionID: Accessor<string | undefined>): Accessor<PacerCacheText | undefined> {
+/**
+ * The cache item of the prompt's chat as it is drawn, or undefined when it shows nothing. `compacted`: the chat's
+ * newest answer is a summary (`endsCompacted`).
+ */
+export function usePacerCache(
+  sessionID: Accessor<string | undefined>,
+  compacted: Accessor<boolean>,
+): Accessor<PacerCacheText | undefined> {
   const pacer = usePacer()
   if (!pacer) return () => undefined
   const view = createMemo(() => {
@@ -32,7 +38,7 @@ export function usePacerCache(sessionID: Accessor<string | undefined>): Accessor
   const at = () => asOf() ?? pacer.now()
   const label = createMemo(() => {
     const current = view()
-    return current && cacheLabel(current.value, at())
+    return current && cacheLabel(current.value, at(), compacted())
   })
   pacer.countdown(() => label()?.until !== undefined && asOf() === undefined)
   // A countdown keeps its form and the widest width it had for the same deadline, so each tick changes only its digits:

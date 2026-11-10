@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
+import type { SessionMessageInfo } from "@opencode/client"
 import { recordFrames } from "../fixture/frames"
 import { until } from "../fixture/wait"
 import { CHAT, chat, colorOf, NOW, OTHER, pacerFake, renderPacer, status, step, styleOf, Toolbar } from "./fixture"
@@ -172,6 +173,40 @@ describe("the cache item", () => {
     for (const [view, text, tone] of rows) {
       await using setup = await toolbar({ view, width: 120 })
       await setup.app.waitForFrame((frame) => frame.includes(text))
+      const color = tone === "warning" ? setup.theme.text.feedback.warning.base : setup.theme.text.muted
+      expect(colorOf(setup.app, text)).toEqual(color.toInts())
+    }
+  })
+
+  test("compacted, muted, while the chat's newest answer is a summary; cache cold again once a step came after it", async () => {
+    const summary = {
+      id: "msg_2",
+      type: "compaction",
+      status: "completed",
+      reason: "manual",
+      summary: "the summary",
+      time: { created: NOW - 30_000, completed: NOW - 20_000 },
+    } as unknown as SessionMessageInfo
+    for (const [messages, text, tone] of [
+      [[step("msg_1", { created: NOW - 60_000 }), summary], "compacted", "muted"],
+      [
+        [step("msg_1", { created: NOW - 60_000 }), summary, step("msg_3", { created: NOW - 10_000 })],
+        "cache cold",
+        "warning",
+      ],
+    ] as const) {
+      const fake = pacerFake()
+      fake.status = status("on")
+      fake.chats[CHAT] = chat({ warm: false })
+      await using setup = await renderPacer({
+        fake,
+        width: 100,
+        height: 3,
+        sessions: { [CHAT]: { providerID: "cliproxypacer", messages: [...messages] } },
+        content: () => <Toolbar sessionID={CHAT} />,
+      })
+      await setup.app.waitForFrame((frame) => frame.includes(text))
+      expect(line(setup)).toMatch(new RegExp(`~/project +${text} {2}ctrl\\+p commands`))
       const color = tone === "warning" ? setup.theme.text.feedback.warning.base : setup.theme.text.muted
       expect(colorOf(setup.app, text)).toEqual(color.toInts())
     }

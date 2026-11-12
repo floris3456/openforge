@@ -719,7 +719,7 @@ export function memoryContract(target: Target) {
       const memory = project("possessive")
       const term = word()
       const entry = (await memory.fact(`The check of ${term} took long.`)).body.entry
-      const answer = await memory.search({ query: `${term}'s check`, scopes: "all" })
+      const answer = await memory.search({ query: `${term}'s`, scopes: "all" })
       expect(answer.body.entries).toEqual([entry])
     })
 

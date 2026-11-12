@@ -24,7 +24,7 @@ import { Global } from "@opencode/util/global"
 import { Effect, Layer, Schedule, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
-import { codeModeListings, executeTool, toolIdentity } from "./lib/tool"
+import { codeModeListings, executeTool, toolIdentity, type ToolExecution } from "./lib/tool"
 import { makePluginTestLayer } from "./plugin/fixture"
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
@@ -153,12 +153,15 @@ const configuredModel = (providerID: string, model: string) => ({
 // openforge: image.generate is a Code Mode tool (spec image-tools). These tests call it as the direct tool it is when an
 // agent has no Code Mode, so its results read as they did; its place in the catalog is tested in image-tools.test.ts.
 const DIRECT = "image_generate"
-const direct = (registry: Tool.Interface, input: Parameters<Tool.Snapshot["execute"]>[0]) =>
+const direct = (
+  registry: Tool.Interface,
+  input: Parameters<Tool.Snapshot["execute"]>[0],
+): Effect.Effect<ToolExecution> =>
   registry.snapshot([{ action: "execute", resource: "*", effect: "deny" }]).pipe(
     Effect.flatMap((tools) => tools.execute(input)),
-    Effect.map((result) => ({ status: "completed" as const, ...result })),
+    Effect.map((result) => ({ status: "completed" as const, ...result }) satisfies ToolExecution),
     Effect.catchTag("Tool.Error", (error) =>
-      Effect.succeed({ status: "error" as const, error: toSessionError(error) }),
+      Effect.succeed({ status: "error" as const, error: toSessionError(error) } satisfies ToolExecution),
     ),
   )
 

@@ -700,9 +700,10 @@ export function memoryContract(target: Target) {
       const memory = project("ties")
       const term = word()
       const text = `The gate holds ${term}.`
-      const global = (await memory.fact(text)).body.entry
-      const role = (await memory.fact(text, { scope: "role" })).body.entry
+      // Written nearest scope first, so that "newer first" alone would give the opposite order.
       const task = (await memory.fact(text, { scope: "task", by: { ...by, task: "t1" } })).body.entry
+      const role = (await memory.fact(text, { scope: "role" })).body.entry
+      const global = (await memory.fact(text)).body.entry
       const scopes = { global: true, roles: ["build"], tasks: ["t1"] }
       const scoped = await memory.search({ query: term, scopes })
       expect(scoped.body.entries.map((entry) => entry.id)).toEqual([task.id, role.id, global.id])

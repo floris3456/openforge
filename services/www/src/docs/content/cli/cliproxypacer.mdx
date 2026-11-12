@@ -344,6 +344,33 @@ calls.
 - A research or a crawl that outlasts one call shows the job's ID; the model's next call of the tool, with that ID, gets
   the result.
 
+## Memory
+
+When CLIProxyPacer has memory, chats share short notes, kept per project (see [Memory](/config#memory) for what a
+project is). Every chat gets three tools for them, also a chat on another provider's model:
+
+| Tool       | Does                                                                                      |
+| ---------- | ----------------------------------------------------------------------------------------- |
+| `remember` | saves one note: `verified` (with how it was checked), `unverified` (with why), or `words` |
+| `recall`   | finds the notes nearest to a query, in the project's global notes and its own role's      |
+| `forget`   | deletes one note's text for good, with a reason                                           |
+
+- A chat started by another chat (a subagent) saves notes for its own role only, and replaces or deletes only its own
+  role's. A person's words and global notes are for a chat a person talks to.
+- A note that looks like it holds a key or a token is refused before it is sent.
+- Each call asks first, under its own name (see [Approvals](/permissions#approvals)).
+
+Every chat also starts with a few lines from memory: the notes nearest to its first prompt, and how many there are.
+They come again after a compaction, for the newest prompt. When memory can't be reached, the chat starts with one line
+saying so and goes on.
+
+```text
+Memory: what agents and people of this project noted earlier. It may be wrong or out of date; …
+What memory holds nearest to this prompt; it may not be about it:
+- [k3f9x2m7q4tz] The workspace repository has no git remote. (verified by floris as build; role build; 2026-11-12; basis: git remote -v printed nothing)
+Memory holds 12 global entries and 40 of role build; recall finds them.
+```
+
 ## Code Mode's calls
 
 A chat's prompts show CLIProxyPacer a Code Mode program as one `execute` call. When the program ends, openforge tells

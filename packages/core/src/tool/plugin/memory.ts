@@ -64,6 +64,11 @@ export const ForgetInput = Schema.Struct({
   reason: Schema.String.annotate({ description: "Why it goes, in a few words" }),
 })
 
+// How alike (the cosine of their vectors) an entry near the one written must be for `remember` to show it. Chosen on
+// `run/evidence/memory/near-1` of the workspace for granite-embedding-english-r2; it changes only with a run of the
+// behaviour set.
+const NEAR = 0.86
+
 const memory = "Memory holds short notes that agents and people of this project wrote earlier."
 
 export const descriptions = {
@@ -184,15 +189,57 @@ export const Plugin = {
                   by: who.by,
                 })
                 .pipe(Effect.mapError(fail))
+              const id = written.entry.id
               const what = `a ${written.entry.kind} entry, ${scopeOf(written.entry)}`
               if (written.existing)
                 return {
-                  content: `Memory holds this already as ${written.entry.id} (${what}); nothing new was saved.`,
-                  metadata: { id: written.entry.id, existing: true },
+                  content:
+                    replaced && id !== replaced.id && !replaced.superseded_by && !replaced.deleted
+                      ? `Memory holds this already as ${id} (${what}); it now replaces ${replaced.id}.`
+                      : `Memory holds this already as ${id} (${what}); nothing new was saved.`,
+                  metadata: { id, existing: true, near: [] },
                 }
+              // Saved first in its own scope, then sent again to replace an entry of another one: the server wrote it
+              // once more where the replaced entry belongs, so this chat's first writing would stay as a twin.
+              const removed = replaced
+                ? yield* Effect.forEach(
+                    written.near.filter(
+                      (entry) =>
+                        !entry.superseded_by &&
+                        !entry.deleted &&
+                        entry.text === written.entry.text &&
+                        entry.by.chat === who.by.chat,
+                    ),
+                    (twin) =>
+                      client
+                        .forget(who.project, twin.id, {
+                          reason: `written again as ${id}, which replaces ${replaced.id}`,
+                          by: who.by,
+                        })
+                        .pipe(
+                          Effect.as([twin.id]),
+                          Effect.orElseSucceed(() => []),
+                        ),
+                  ).pipe(Effect.map((ids) => ids.flat()))
+                : []
+              const shown = written.near.filter((entry) => entry.score >= NEAR && !removed.includes(entry.id))
+              const saved = `Saved as ${id}${replaced ? `, replacing ${replaced.id}` : ""}: ${what}${removed.length ? `; the first writing ${removed.join(", ")} is removed` : ""}.`
+              const metadata = { id, near: shown.map((entry) => entry.id) }
+              if (!shown.length) return { content: saved, metadata }
               return {
-                content: `Saved as ${written.entry.id}${replaced ? `, replacing ${replaced.id}` : ""}: ${what}.`,
-                metadata: { id: written.entry.id },
+                content: [
+                  saved,
+                  "Memory holds entries close to it:",
+                  ...shown.map((entry) =>
+                    mayChange(who, entry)
+                      ? `${MemoryText.entry(entry).slice(0, -1)}; not yours to replace)`
+                      : MemoryText.entry(entry),
+                  ),
+                  shown.some((entry) => !mayChange(who, entry))
+                    ? `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`
+                    : "They are not yours to replace: if yours contradicts one, say so in your answer.",
+                ].join("\n"),
+                metadata,
               }
             }),
         })

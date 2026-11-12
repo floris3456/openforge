@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { search, tokenizer, waiting, type Scopes } from "./memory-search"
+import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-search"
 
 /**
  * The small memory server: the memory API (the workspace's `docs/reference/memory-api.md`) on `Bun.serve` and
@@ -24,6 +24,8 @@ const ENTRY_MS = 2000
 const QUERY_MS = 1000
 /** How many waiting entries one background call embeds. */
 const BATCH = 16
+/** How many of the nearest entries a write answers. */
+const NEAR = 3
 const SCOPES = ["global", "role", "task"]
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
@@ -232,14 +234,22 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           const target = replaced
             ? { scope: replaced.scope, role: replaced.role, task: replaced.task, subtask: replaced.subtask }
             : homeOf(body.scope, by)
-          // An exact copy is looked for before the replaced entry's state, so a retried replacement answers the entry it made.
+          // An exact copy is looked for before the replaced entry's state, so a retried replacement answers the entry it
+          // made. The replaced entry is never its own copy: the same text with another kind or basis replaces it.
           const copy = db
             .query<
               Row,
               (string | null)[]
-            >(`select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live}`)
-            .get(project, target.scope, target.role, target.task, text)
-          if (copy) return { row: copy, existing: true }
+            >(`select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live} and id is not ?`)
+            .get(project, target.scope, target.role, target.task, text, replaced?.id ?? null)
+          if (copy) {
+            // The text that was to take the replaced entry's place is there already: the copy replaces it.
+            if (replaced && replaced.superseded_by === null && replaced.deleted === null) {
+              db.run("update entry set superseded_by = ? where seq = ?", [copy.id, replaced.seq])
+              db.run("delete from entry_fts where rowid = ?", [replaced.seq])
+            }
+            return { row: copy, existing: true }
+          }
           if (replaced?.superseded_by)
             refuse(`supersedes: entry ${replaced.id} is already replaced by ${replaced.superseded_by}`, 409, "conflict")
           if (replaced?.deleted) refuse(`supersedes: entry ${replaced.id} is deleted`, 409, "conflict")
@@ -273,9 +283,15 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       // An exact copy makes no call; a new entry waits for its vector, and is stored without one when the call fails.
       const vector = written.existing ? undefined : (await embed([source(written.row)], ENTRY_MS))?.[0]
       if (vector) stored(written.row.seq, vector)
+      const near =
+        vector && embedding && !stopped
+          ? nearest<Row>(db, { project, id: written.row.id, vector, model: embedding.model, limit: NEAR }).map(
+              (row) => ({ ...entryOf(row), score: row.score }),
+            )
+          : []
       catchUp()
-      if (written.existing) return Response.json({ entry: entryOf(written.row), existing: true })
-      return Response.json({ entry: entryOf(written.row) }, { status: 201 })
+      if (written.existing) return Response.json({ entry: entryOf(written.row), existing: true, near: [] })
+      return Response.json({ entry: entryOf(written.row), near }, { status: 201 })
     },
 
     read(project: string, id: string) {

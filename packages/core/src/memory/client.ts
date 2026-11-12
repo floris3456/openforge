@@ -35,7 +35,17 @@ export const Entry = Schema.Struct({
 })
 export interface Entry extends Schema.Schema.Type<typeof Entry> {}
 
-const EntryAnswer = Schema.Struct({ entry: Entry, existing: Schema.optional(Schema.Boolean) })
+/** An entry near the one a write wrote; `score` is the cosine of their vectors. */
+export const Near = Schema.Struct({ ...Entry.fields, score: Schema.Number })
+export interface Near extends Schema.Schema.Type<typeof Near> {}
+
+const EntryAnswer = Schema.Struct({ entry: Entry })
+// An older server answers no `near`.
+const Written = Schema.Struct({
+  entry: Entry,
+  existing: Schema.optional(Schema.Boolean),
+  near: Schema.optional(Schema.Array(Near)),
+})
 const Found = Schema.Struct({ recall: Schema.String, entries: Schema.Array(Entry), meaning: Schema.Boolean })
 export interface Found extends Schema.Schema.Type<typeof Found> {}
 const Started = Schema.Struct({
@@ -107,11 +117,15 @@ export class Missing extends Schema.TaggedError<Missing>()("MemoryClient.Missing
 export type Error = Unavailable | Refused | Missing
 
 export interface Interface {
-  /** Writes one entry, or replaces the one `supersedes` names; `existing` when a live exact copy answered instead. */
+  /**
+   * Writes one entry, or replaces the one `supersedes` names; `existing` when a live exact copy answered instead.
+   * `near`: the at most 3 live entries of the project nearest to the one written, best first; empty when nothing was
+   * written or the server made no vector for it.
+   */
   readonly write: (
     project: string,
     input: WriteInput,
-  ) => Effect.Effect<{ readonly entry: Entry; readonly existing: boolean }, Error>
+  ) => Effect.Effect<{ readonly entry: Entry; readonly existing: boolean; readonly near: ReadonlyArray<Near> }, Error>
   /** Reads one entry of the project, live or not. */
   readonly read: (project: string, id: string) => Effect.Effect<Entry, Error>
   /** Deletes one entry's text for good. */
@@ -151,10 +165,14 @@ export const layer = Layer.effect(
               by: input.by,
               supersedes: input.supersedes ?? null,
             },
-            EntryAnswer,
+            Written,
           )
           .pipe(
-            Effect.map((answer) => ({ entry: answer.body.entry, existing: answer.body.existing === true })),
+            Effect.map((answer) => ({
+              entry: answer.body.entry,
+              existing: answer.body.existing === true,
+              near: answer.body.near ?? [],
+            })),
             Effect.mapError(failure(input.supersedes)),
           ),
       read: (project, id) =>

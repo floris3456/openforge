@@ -7,7 +7,7 @@ import { Document, Info } from "@opencode/schema/config"
 import { ConfigMemory } from "@opencode/schema/config/memory"
 import { testEffect } from "../lib/effect"
 import { until } from "../pacer/fake-tools"
-import { endpointAt, memoryServer, startClient } from "./fixture"
+import { endpointAt, key, memoryServer, nearServer, startClient } from "./fixture"
 
 const it = testEffect(Layer.empty)
 const project = "client-project"
@@ -55,6 +55,40 @@ describe("MemoryClient", () => {
         "MemoryClient.Missing",
       )
     }),
+  )
+
+  it.live(
+    "answers a write's near entries with their scores, none for a copy, and none from a server without near",
+    () =>
+      Effect.gen(function* () {
+        const server = yield* nearServer
+        const client = (yield* startClient(endpointAt(server.origin))).client
+        const photo = yield* client.write(project, {
+          kind: "verified",
+          text: "A photo.",
+          basis: "seen",
+          scope: "role",
+          by,
+        })
+        expect(photo.near).toEqual([])
+        const picture = { kind: "verified", text: "A picture.", basis: "seen", scope: "role", by } as const
+        const written = yield* client.write(project, picture)
+        expect(written.near).toEqual([{ ...photo.entry, score: expect.closeTo(1, 4) }])
+        expect((yield* client.write(project, picture)).near).toEqual([])
+
+        // An older server answers no near.
+        server.control.answer = async (request) => {
+          const answer = await fetch(`${server.store.url}${request.path}`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            body: JSON.stringify(request.body),
+          })
+          const body = (await answer.json()) as { entry: unknown }
+          return Response.json({ entry: body.entry }, { status: answer.status })
+        }
+        const older = yield* client.write(project, { ...picture, text: "An image." })
+        expect(older).toEqual({ entry: expect.objectContaining({ text: "An image." }), existing: false, near: [] })
+      }),
   )
 
   it.live("passes the server's 400 and 409 messages on as they are, and reads a 404 on an entry as missing", () =>

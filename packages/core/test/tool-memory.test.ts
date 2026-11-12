@@ -29,7 +29,7 @@ import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
 import { until } from "./pacer/fake-tools"
-import { catalogOf, endpointAt, memoryServer, startClient, type MemoryServer } from "./memory/fixture"
+import { catalogOf, endpointAt, memoryServer, nearServer, startClient, type MemoryServer } from "./memory/fixture"
 
 // The memory tools against the small memory server (the contract in code), through a proxy that keeps what it was
 // sent. Sessions are the store's answers: a lead, a child of it, and a lead of another project.
@@ -618,6 +618,172 @@ describe("MemoryTools answers", () => {
       yield* TestClock.adjust("10 seconds")
       expect(yield* Fiber.join(fiber)).toBe("error: Memory is unavailable right now, so the work goes on without it.")
       release()
+    }),
+  )
+})
+
+describe("MemoryTools near", () => {
+  // The fake endpoint gives each concept an axis (memory-embedding.ts): screenshot, picture, image and photo are one,
+  // console another, so these texts are about 1 alike among themselves and about 0.01 with the console one.
+  const prepare = Effect.fnUntraced(function* () {
+    const h = yield* setup({ server: yield* nearServer })
+    const global = yield* h.save({
+      text: "A screenshot of the login page.",
+      kind: "verified",
+      basis: "looked",
+      scope: "global",
+    })
+    const far = yield* h.save({ text: "The console prints a warning.", kind: "verified", basis: "ran it" })
+    const day = new Date((yield* h.started.client.read(projectID, global)).at).toISOString().slice(0, 10)
+    return { h, global, far, day }
+  })
+  const saved = (text: string) => text.match(/^Saved as ([0-9a-z]{12})/)?.[1] ?? "none"
+  const write = { text: "A picture of the login page is stale.", kind: "unverified", basis: "saw it" }
+
+  it.live("shows only the entries at least 0.86 alike, and nothing more when there are none", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      // The server answers both entries as near, each about 0.01 alike: under the floor.
+      const result = yield* p.h.run("remember", { text: "A database table.", kind: "verified", basis: "ran it" })
+      expect(result.content?.map((part) => (part.type === "text" ? part.text : "")).join("")).toBe(
+        `Saved as ${result.metadata?.id}: a verified entry, role build.`,
+      )
+      expect(result.metadata?.near).toEqual([])
+    }),
+  )
+
+  it.live("the lead sees the near entries with the line to replace one", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const result = yield* p.h.run("remember", write)
+      const text = result.content?.map((part) => (part.type === "text" ? part.text : "")).join("") ?? ""
+      const id = saved(text)
+      expect(text).toBe(
+        [
+          `Saved as ${id}: a unverified entry, role build.`,
+          "Memory holds entries close to it:",
+          `- [${p.global}] A screenshot of the login page. (verified by floris as build; global; ${p.day}; basis: looked)`,
+          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+        ].join("\n"),
+      )
+      expect(result.metadata).toEqual({ id, near: [p.global] })
+    }),
+  )
+
+  it.live("a child sees the same write's global entry as not its to replace", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const text = yield* p.h.read("remember", write, child, "general")
+      const id = saved(text)
+      expect(text).toBe(
+        [
+          `Saved as ${id}: a unverified entry, role general.`,
+          "Memory holds entries close to it:",
+          `- [${p.global}] A screenshot of the login page. (verified by floris as build; global; ${p.day}; basis: looked; not yours to replace)`,
+          "They are not yours to replace: if yours contradicts one, say so in your answer.",
+        ].join("\n"),
+      )
+    }),
+  )
+
+  it.live("with one of them its own, a child gets the line to replace one", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const own = yield* p.h.save(write, child, "general")
+      const text = yield* p.h.read(
+        "remember",
+        { text: "An image of the login page loads.", kind: "verified", basis: "opened it" },
+        child,
+        "general",
+      )
+      const id = saved(text)
+      // Equally alike: the nearer scope first.
+      expect(text).toBe(
+        [
+          `Saved as ${id}: a verified entry, role general.`,
+          "Memory holds entries close to it:",
+          `- [${own}] A picture of the login page is stale. (unverified by floris as general; role general; ${p.day}; basis: saw it)`,
+          `- [${p.global}] A screenshot of the login page. (verified by floris as build; global; ${p.day}; basis: looked; not yours to replace)`,
+          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+        ].join("\n"),
+      )
+    }),
+  )
+
+  it.live("an existing copy with supersedes says that it now replaces the named entry, once", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const copy = yield* p.h.save(write)
+      const named = yield* p.h.save({ text: "The login page is fresh.", kind: "verified", basis: "looked" })
+      const again = { ...write, supersedes: named }
+      expect(yield* p.h.read("remember", again)).toBe(
+        `Memory holds this already as ${copy} (a unverified entry, role build); it now replaces ${named}.`,
+      )
+      expect((yield* p.h.started.client.read(projectID, named)).superseded_by).toBe(copy)
+      expect(yield* p.h.read("remember", again)).toBe(
+        `Memory holds this already as ${copy} (a unverified entry, role build); nothing new was saved.`,
+      )
+      expect(yield* p.h.read("remember", write)).toBe(
+        `Memory holds this already as ${copy} (a unverified entry, role build); nothing new was saved.`,
+      )
+    }),
+  )
+
+  it.live("the first writing in another place is removed once the entry is written again to replace one", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const first = yield* p.h.save(write)
+      const result = yield* p.h.run("remember", { ...write, supersedes: p.global })
+      const text = result.content?.map((part) => (part.type === "text" ? part.text : "")).join("") ?? ""
+      const id = saved(text)
+      expect(text).toBe(
+        `Saved as ${id}, replacing ${p.global}: a unverified entry, global; the first writing ${first} is removed.`,
+      )
+      expect(result.metadata).toEqual({ id, near: [] })
+      expect(yield* p.h.started.client.read(projectID, first)).toMatchObject({
+        text: null,
+        deleted: { reason: `written again as ${id}, which replaces ${p.global}` },
+      })
+    }),
+  )
+
+  it.live("the first writing of another chat stays, and a failed removal is not mentioned", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const others = yield* p.h.save(write, child, "build")
+      const theirs = yield* p.h.read("remember", { ...write, supersedes: p.global })
+      const id = saved(theirs)
+      expect(theirs).toBe(
+        [
+          `Saved as ${id}, replacing ${p.global}: a unverified entry, global.`,
+          "Memory holds entries close to it:",
+          `- [${others}] A picture of the login page is stale. (unverified by floris as build; role build; ${p.day}; basis: saw it)`,
+          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+        ].join("\n"),
+      )
+
+      const q = yield* prepare()
+      const first = yield* q.h.save(write)
+      q.h.server.control.answer = (request) =>
+        request.path.endsWith("/forget")
+          ? Response.json({ error: { type: "busy", message: "no free turn" } }, { status: 503 })
+          : fetch(`${q.h.server.store.url}${request.path}`, {
+              method: request.method,
+              headers: { authorization: "Bearer memory-client-key-f1", "content-type": "application/json" },
+              body: JSON.stringify(request.body),
+            })
+      const failed = yield* q.h.read("remember", { ...write, supersedes: q.global })
+      const next = saved(failed)
+      expect(failed).toBe(
+        [
+          `Saved as ${next}, replacing ${q.global}: a unverified entry, global.`,
+          "Memory holds entries close to it:",
+          `- [${first}] A picture of the login page is stale. (unverified by floris as build; role build; ${q.day}; basis: saw it)`,
+          `If ${next} replaces one of them or says the same as one, remember it again with supersedes.`,
+        ].join("\n"),
+      )
+      expect(q.h.server.calls().filter((call) => call.path.endsWith("/forget"))).toHaveLength(1)
+      expect((yield* q.h.started.client.read(projectID, first)).deleted).toBeNull()
     }),
   )
 })

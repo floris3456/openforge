@@ -134,6 +134,8 @@ const Route = Schema.Struct({
   accounts: maybe(Schema.Number),
   /** How `/v1/responses/compact` is served for the key: `native`, `forwarded`, `emulated` or `unsupported`. */
   remote_compaction: maybe(Schema.String),
+  /** Whether CPP writes the route's summary itself for a chat whose `compaction.writer` is `server`. */
+  server_writes: maybe(Schema.Boolean),
   context_length: maybe(Schema.Number),
   max_output: maybe(Schema.Number),
   input: maybe(Schema.Array(Schema.String)),
@@ -354,7 +356,9 @@ function model(
   const context = facts.context ?? positive(listed.context_length)
   const maxOutput = facts.maxOutput ?? positive(setting?.max_output) ?? positive(listed.max_completion_tokens)
   const price = prices && lookup(prices, lower, pinned, routes[0]?.provider.toLowerCase())
-  const summaries = routes.some((route) => typeof route.remote_compaction === "string")
+  const summaries = routes.some(
+    (route) => typeof route.server_writes === "boolean" || typeof route.remote_compaction === "string",
+  )
     ? routes.map((route) => ({ provider: route.provider, writes: routeWrites(route) }))
     : undefined
   const providers = Array.from(new Set(routes.map((route) => route.provider.toLowerCase())))
@@ -405,36 +409,13 @@ export function served(catalog: Catalog | undefined): Shapes.Models | undefined 
 }
 
 /**
- * Providers on whose logins CPP refuses a remote compaction today (`unsupported`) yet writes the summary itself with
- * `compaction.writer = server` (`cpa_exec::capability::server_writes`, head/2026-10-28): Codex on chatgpt.com, Gemini,
- * Vertex, AI Studio, Kimi and Meta. Claude and Antigravity always emulate, so only a key's `client` makes them
- * `unsupported`, and `server` writes there too. A routed provider's `unsupported` (CommandCode outside its provider
- * API, a model without `/responses`) and Devin's stay unwritten.
- */
-const writtenWhenUnsupported = new Set([
-  "codex",
-  "gemini",
-  "gemini-interactions",
-  "vertex",
-  "aistudio",
-  "kimi",
-  "kimi-ai",
-  "kimi.ai",
-  "kimi.com",
-  "meta",
-  "claude",
-  "antigravity",
-])
-
-/**
- * Whether CPP writes a summary of a route's model itself for a chat whose `compaction.writer` is `server`, from the
- * route's `remote_compaction` as capabilities give it for the key (`compaction_plan::remote_compaction`): `emulated`
- * (CPP writes, or would with the key's writer unset); `unsupported` on {@link writtenWhenUnsupported}; never
- * `forwarded` or `native`, which go to the upstream's own compaction, nor a route that doesn't say.
+ * Whether CPP writes a summary of a route's model itself for a chat whose `compaction.writer` is `server`: the route's
+ * `server_writes` (`cpa_exec::capability::server_writes`, CPP from c1ac59ed, 2026-11-10), whatever the key's own
+ * writer; it may say `true` beside `unsupported`, as for a CommandCode API key's chat models. A route without it (an
+ * older CPP) is written only where it says `emulated`, which CPP always writes.
  */
 function routeWrites(route: Route) {
-  const kind = route.remote_compaction
-  return kind === "emulated" || (kind === "unsupported" && writtenWhenUnsupported.has(route.provider.toLowerCase()))
+  return route.server_writes ?? route.remote_compaction === "emulated"
 }
 
 /**

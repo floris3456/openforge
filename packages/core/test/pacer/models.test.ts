@@ -371,32 +371,50 @@ describe("PacerModels", () => {
 
   it.live("says per route whether CLIProxyPacer writes a model's summaries itself, as its server_writes decides", () =>
     Effect.gen(function* () {
-      // `remote_compaction` as capabilities give it for the key (`compaction_plan::remote_compaction`): `emulated`
-      // where CPP writes with `compaction.writer = server` (or would, with the key's writer unset); `unsupported` on a
-      // login CPP refuses today but writes for with `server` (`cpa_exec::capability::server_writes`: Codex on
-      // chatgpt.com, Gemini, Vertex, AI Studio, Kimi, Meta; Claude and Antigravity, whose `unsupported` only a key's
-      // `client` gives); `forwarded` and `native` go to the upstream's own compaction.
-      const route = (provider: string, remote_compaction?: string | null) => ({
+      // The routes as the owner's CPP gave them for a key whose writer is unset (2026-11-12): `server_writes` says
+      // whether CPP writes the route's summary with `compaction.writer = server`, whatever `remote_compaction` the key
+      // gets; a CommandCode API key's chat model is `unsupported` and written. A route without it (CPP before
+      // c1ac59ed) is written only where it says `emulated`.
+      const route = (provider: string, remote_compaction?: string | null, server_writes?: boolean | null) => ({
         provider,
         ...(remote_compaction !== undefined ? { remote_compaction } : {}),
+        ...(server_writes !== undefined ? { server_writes } : {}),
       })
       const server = yield* serve({
         ...cpp(),
         "/v1/models": () =>
           Response.json({
             object: "list",
-            data: ["claude-w", "kimi-w", "gpt-w", "codex/gpt-w", "other-w", "plain-w"].map((id) => ({ id })),
+            data: [
+              "deepseek/deepseek-w",
+              "decision-w",
+              "claude-w",
+              "gpt-w",
+              "codex/gpt-w",
+              "said-w",
+              "old-w",
+              "plain-w",
+            ].map((id) => ({ id })),
           }),
         "/pacer/v1/capabilities": () =>
           Response.json({
             ...capabilities,
             models: [
-              { id: "claude-w", routes: [route("claude", "emulated"), route("antigravity", "unsupported")] },
-              { id: "kimi-w", routes: [route("kimi", "unsupported")] },
-              { id: "gpt-w", routes: [route("codex", "unsupported"), route("opencode-go", "forwarded")] },
+              { id: "deepseek/deepseek-w", routes: [route("commandcode", "unsupported", true)] },
+              { id: "decision-w", routes: [route("commandcode", "unsupported", false)] },
+              { id: "claude-w", routes: [route("claude", "emulated", true), route("antigravity", "emulated", true)] },
+              { id: "gpt-w", routes: [route("codex", "unsupported", true), route("opencode-go", "forwarded", false)] },
+              // `server_writes` decides, also against `remote_compaction` or without it.
+              { id: "said-w", routes: [route("plug", "emulated", false), route("other", undefined, true)] },
               {
-                id: "other-w",
-                routes: [route("devin", "unsupported"), route("openai-compatibility", "native"), route("plug", null)],
+                id: "old-w",
+                routes: [
+                  route("claude", "emulated"),
+                  route("codex", "unsupported"),
+                  route("opencode-go", "forwarded"),
+                  route("openai-compatibility", "native"),
+                  route("plug", null, null),
+                ],
               },
               { id: "plain-w", routes: [route("plug")] },
             ],
@@ -406,19 +424,26 @@ describe("PacerModels", () => {
       const catalog = yield* until(models, loaded)
       const summaries = Object.fromEntries((catalog?.models ?? []).map((model) => [model.id, model.summaries]))
       expect(summaries).toEqual({
+        "deepseek/deepseek-w": [{ provider: "commandcode", writes: true }],
+        "decision-w": [{ provider: "commandcode", writes: false }],
         "claude-w": [
           { provider: "claude", writes: true },
           { provider: "antigravity", writes: true },
         ],
-        "kimi-w": [{ provider: "kimi", writes: true }],
         "gpt-w": [
           { provider: "codex", writes: true },
           { provider: "opencode-go", writes: false },
         ],
         // The provider the ID names: its routes only.
         "codex/gpt-w": [{ provider: "codex", writes: true }],
-        "other-w": [
-          { provider: "devin", writes: false },
+        "said-w": [
+          { provider: "plug", writes: false },
+          { provider: "other", writes: true },
+        ],
+        "old-w": [
+          { provider: "claude", writes: true },
+          { provider: "codex", writes: false },
+          { provider: "opencode-go", writes: false },
           { provider: "openai-compatibility", writes: false },
           { provider: "plug", writes: false },
         ],
@@ -433,14 +458,19 @@ describe("PacerModels", () => {
           catalog?.models.find((model) => model.id === id),
           provider,
         )
+      // A Claude chat's summary on CommandCode's DeepSeek, as the cold ask names it first.
+      expect(writes("deepseek/deepseek-w", "claude")).toBe(true)
+      expect(writes("decision-w")).toBe(false)
       expect(writes("claude-w")).toBe(true)
       expect(writes("gpt-w", "codex")).toBe(true)
       expect(writes("gpt-w", "Codex")).toBe(true)
       expect(writes("gpt-w", "opencode-go")).toBe(false)
       expect(writes("gpt-w")).toBe(false)
       expect(writes("gpt-w", "claude")).toBe(false)
-      expect(writes("kimi-w", "claude")).toBe(true)
-      expect(writes("other-w")).toBe(false)
+      expect(writes("said-w", "other")).toBe(true)
+      expect(writes("said-w")).toBe(false)
+      expect(writes("old-w", "claude")).toBe(true)
+      expect(writes("old-w", "codex")).toBe(false)
       expect(writes("plain-w")).toBe(false)
       expect(writes("missing-w")).toBe(false)
     }),

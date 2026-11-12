@@ -1,15 +1,21 @@
-import { beforeAll, describe, expect, test } from "bun:test"
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import type { FakeEmbedding } from "./memory-embedding"
 
 /**
  * The memory API's contract tests (the workspace's `docs/reference/memory-api.md`), as plain HTTP against a base URL,
  * so that the same cases run against the small server and against CLIProxyPacer. Every test works in projects of its
  * own with a random part, so a server that already holds data needs no reset and the tests run in any order.
+ *
+ * The server calls `embedding.fake` with the model `test-embedding` (and `embedding.key`, when it is set); `bare` is a
+ * server without an embedding endpoint, for the cases that need one.
  */
 export type Target = {
   readonly url: string
   readonly key: string
   readonly person: string
   readonly second?: { readonly key: string; readonly person: string }
+  readonly embedding: { readonly fake: FakeEmbedding; readonly key?: string }
+  readonly bare?: string
 }
 
 type Entry = {
@@ -17,7 +23,6 @@ type Entry = {
   kind: string
   text: string | null
   basis: string | null
-  keys: string | null
   scope: string
   role: string | null
   task: string | null
@@ -37,9 +42,12 @@ type Body = {
   existing?: boolean
   recall: string
   entries: Found[]
+  meaning: boolean
+  waiting: number
   task: null
   counts: { global: number; role: number; task: number }
   error: { type: string; message: string }
+  pacer: { memory: Record<string, unknown> }
 }
 
 const ID = /^[0-9abcdefghjkmnpqrstvwxyz]{12}$/
@@ -57,8 +65,15 @@ const REFUSED = [
 ]
 
 export function memoryContract(target: Target) {
-  const send = async (method: string, path: string, body?: unknown, key: string | null = target.key) => {
-    const response = await fetch(`${target.url}${path}`, {
+  const fake = target.embedding.fake
+  const send = async (
+    method: string,
+    path: string,
+    body?: unknown,
+    key: string | null = target.key,
+    url = target.url,
+  ) => {
+    const response = await fetch(`${url}${path}`, {
       method,
       headers: {
         ...(key === null ? {} : { authorization: `Bearer ${key}` }),
@@ -76,27 +91,30 @@ export function memoryContract(target: Target) {
     }
   }
 
-  /** One fresh project and its routes. */
-  const project = (name: string) => {
+  /** One fresh project and its routes, on the target or on another server (`url`). */
+  const project = (name: string, url = target.url) => {
     const id = `contract-${name}-${random()}`
     const base = `/pacer/v1/memory/${id}`
     return {
       id,
-      write: (body: Record<string, unknown>, key?: string) => send("POST", `${base}/entries`, body, key),
-      fact: (text: string, extra: Record<string, unknown> = {}, key?: string) =>
+      write: (body: Record<string, unknown>, key?: string) => send("POST", `${base}/entries`, body, key, url),
+      verified: (text: string, extra: Record<string, unknown> = {}, key?: string) =>
         send(
           "POST",
           `${base}/entries`,
-          { kind: "fact", text, basis: "checked by a test", scope: "global", by, ...extra },
+          { kind: "verified", text, basis: "checked by a test", scope: "global", by, ...extra },
           key,
+          url,
         ),
-      read: (entry: string, key?: string) => send("GET", `${base}/entries/${entry}`, undefined, key),
+      read: (entry: string, key?: string) => send("GET", `${base}/entries/${entry}`, undefined, key, url),
       forget: (entry: string, body: Record<string, unknown> = { reason: "a test forgets it", by }) =>
-        send("POST", `${base}/entries/${entry}/forget`, body),
-      search: (body: Record<string, unknown>, key?: string) => send("POST", `${base}/search`, { by, ...body }, key),
-      start: (body: Record<string, unknown>) => send("POST", `${base}/start`, { by, task: null, ...body }),
+        send("POST", `${base}/entries/${entry}/forget`, body, undefined, url),
+      search: (body: Record<string, unknown>, key?: string) =>
+        send("POST", `${base}/search`, { by, ...body }, key, url),
+      start: (body: Record<string, unknown>) =>
+        send("POST", `${base}/start`, { by, task: null, ...body }, undefined, url),
       export: async () => {
-        const answer = await send("GET", `${base}/export`)
+        const answer = await send("GET", `${base}/export`, undefined, undefined, url)
         return {
           ...answer,
           lines: answer.text
@@ -120,6 +138,27 @@ export function memoryContract(target: Target) {
     expect(answer.status).toBe(404)
     expect(answer.body.error.type).toBe("not_found")
   }
+  /** With the endpoint failing, a search has no meaning and answers by keyword alone. */
+  const keywordOnly = () => {
+    beforeEach(() => {
+      fake.fail = true
+    })
+    afterEach(() => {
+      fake.fail = false
+    })
+  }
+
+  beforeAll(async () => {
+    const memory = (await send("GET", "/pacer/v1/capabilities")).body.pacer?.memory
+    if (memory?.embedding !== "test-embedding")
+      throw new Error(
+        `the server at ${target.url} must call the embedding endpoint ${fake.url} with the model test-embedding; its capabilities say embedding: ${JSON.stringify(memory?.embedding)}`,
+      )
+  })
+  afterEach(() => {
+    fake.fail = false
+    fake.delay = 0
+  })
 
   describe("auth", () => {
     test("a request without a key is 401", async () => {
@@ -145,7 +184,7 @@ export function memoryContract(target: Target) {
     })
 
     test("an entry shows the key's person", async () => {
-      const answer = await project("auth").fact("The person comes from the key.")
+      const answer = await project("auth").verified("The person comes from the key.")
       expect(answer.status).toBe(201)
       expect(answer.body.entry.by.person).toBe(target.person)
     })
@@ -154,8 +193,8 @@ export function memoryContract(target: Target) {
       const second = target.second!
       const memory = project("auth")
       const term = word()
-      const first = await memory.fact(`First person's entry ${term}.`)
-      const other = await memory.fact(`Second person's entry ${term}.`, {}, second.key)
+      const first = await memory.verified(`First person's entry ${term}.`)
+      const other = await memory.verified(`Second person's entry ${term}.`, {}, second.key)
       expect(other.status).toBe(201)
       expect(other.body.entry.by.person).toBe(second.person)
       expect((await memory.read(other.body.entry.id)).body.entry).toEqual(other.body.entry)
@@ -194,30 +233,30 @@ export function memoryContract(target: Target) {
     test("each kind is written", async () => {
       const memory = project("kinds")
       const words = await memory.write({ kind: "words", text: "Keep it short.", scope: "global", by })
-      const conclusion = await memory.write({
-        kind: "conclusion",
+      const unverified = await memory.write({
+        kind: "unverified",
         text: "It is cached.",
         basis: "the second call was fast",
         scope: "global",
         by,
       })
-      const fact = await memory.write({
-        kind: "fact",
+      const verified = await memory.write({
+        kind: "verified",
         text: "The port is 3674.",
         basis: "ss -ltn",
         scope: "global",
         by,
       })
-      expect([words.status, conclusion.status, fact.status]).toEqual([201, 201, 201])
+      expect([words.status, unverified.status, verified.status]).toEqual([201, 201, 201])
       expect(words.body.entry).toMatchObject({ kind: "words", text: "Keep it short.", basis: "" })
-      expect(conclusion.body.entry).toMatchObject({ kind: "conclusion", basis: "the second call was fast" })
-      expect(fact.body.entry).toMatchObject({ kind: "fact", basis: "ss -ltn" })
+      expect(unverified.body.entry).toMatchObject({ kind: "unverified", basis: "the second call was fast" })
+      expect(verified.body.entry).toMatchObject({ kind: "verified", basis: "ss -ltn" })
     })
 
     test("every field of a written entry, and the same read back", async () => {
       const memory = project("fields")
       const written = await memory.write({
-        kind: "fact",
+        kind: "verified",
         text: "The workspace repository has no git remote.",
         basis: "git remote -v printed nothing",
         scope: "global",
@@ -230,10 +269,9 @@ export function memoryContract(target: Target) {
       expect(Math.abs(entry.at - Date.now())).toBeLessThan(60_000)
       expect(entry).toEqual({
         id: entry.id,
-        kind: "fact",
+        kind: "verified",
         text: "The workspace repository has no git remote.",
         basis: "git remote -v printed nothing",
-        keys: "",
         scope: "global",
         role: null,
         task: null,
@@ -250,7 +288,7 @@ export function memoryContract(target: Target) {
     })
 
     test("scope role belongs to by.role", async () => {
-      const answer = await project("role").fact("A role entry.", {
+      const answer = await project("role").verified("A role entry.", {
         scope: "role",
         by: { role: "explore", chat: "ses_r" },
       })
@@ -260,7 +298,7 @@ export function memoryContract(target: Target) {
 
     test("scope task belongs to by.task and by.subtask", async () => {
       const memory = project("task")
-      const answer = await memory.fact("A task entry.", {
+      const answer = await memory.verified("A task entry.", {
         scope: "task",
         by: { role: "general", chat: "ses_t", task: "t8n2task0001", subtask: "s8n2task0002" },
       })
@@ -272,7 +310,7 @@ export function memoryContract(target: Target) {
         subtask: "s8n2task0002",
         by: { person: target.person, role: "general", chat: "ses_t", task: "t8n2task0001", subtask: "s8n2task0002" },
       })
-      const plain = await memory.fact("A task entry outside a subtask.", {
+      const plain = await memory.verified("A task entry outside a subtask.", {
         scope: "task",
         by: { ...by, task: "t8n2task0001" },
       })
@@ -280,32 +318,38 @@ export function memoryContract(target: Target) {
     })
 
     test("scope task without by.task is 400", async () => {
-      expectInvalid(await project("task").fact("A task entry without a task.", { scope: "task" }), "by.task")
+      expectInvalid(await project("task").verified("A task entry without a task.", { scope: "task" }), "by.task")
     })
   })
 
   describe("checks", () => {
-    test("an unknown kind is 400", async () => {
-      expectInvalid(await project("checks").fact("An entry.", { kind: "rumour" }), "kind")
+    test("an unknown kind is 400, the old names fact and conclusion too", async () => {
+      const memory = project("checks")
+      expectInvalid(await memory.verified("An entry.", { kind: "rumour" }), "kind")
+      expectInvalid(await memory.verified("A fact.", { kind: "fact" }), "kind")
+      expectInvalid(await memory.verified("A conclusion.", { kind: "conclusion" }), "kind")
     })
 
     test("an empty text and a text of white space only are 400", async () => {
       const memory = project("checks")
-      expectInvalid(await memory.fact(""), "text")
-      expectInvalid(await memory.fact("   "), "text")
+      expectInvalid(await memory.verified(""), "text")
+      expectInvalid(await memory.verified("   "), "text")
     })
 
     test("text is stored trimmed", async () => {
-      const answer = await project("checks").fact("   Trimmed on both ends.  ")
+      const answer = await project("checks").verified("   Trimmed on both ends.  ")
       expect(answer.status).toBe(201)
       expect(answer.body.entry.text).toBe("Trimmed on both ends.")
     })
 
-    test("a conclusion and a fact without a basis are 400", async () => {
+    test("an unverified and a verified entry without a basis are 400", async () => {
       const memory = project("checks")
-      expectInvalid(await memory.write({ kind: "conclusion", text: "No basis.", scope: "global", by }), "basis")
-      expectInvalid(await memory.write({ kind: "fact", text: "No basis.", scope: "global", by }), "basis")
-      expectInvalid(await memory.write({ kind: "fact", text: "Empty basis.", basis: "", scope: "global", by }), "basis")
+      expectInvalid(await memory.write({ kind: "unverified", text: "No basis.", scope: "global", by }), "basis")
+      expectInvalid(await memory.write({ kind: "verified", text: "No basis.", scope: "global", by }), "basis")
+      expectInvalid(
+        await memory.write({ kind: "verified", text: "Empty basis.", basis: "", scope: "global", by }),
+        "basis",
+      )
     })
 
     test("words with a basis are 400", async () => {
@@ -317,21 +361,20 @@ export function memoryContract(target: Target) {
 
     test("800 code points over text and basis are accepted, 801 refused, one outside the BMP counting as one", async () => {
       const memory = project("size")
-      const exact = await memory.fact("😀".repeat(400), { basis: "b".repeat(400) })
+      const exact = await memory.verified("😀".repeat(400), { basis: "b".repeat(400) })
       expect(exact.status).toBe(201)
       expect(exact.body.entry.text).toBe("😀".repeat(400))
-      expectInvalid(await memory.fact("😀".repeat(400), { basis: "b".repeat(401) }), "text")
+      expectInvalid(await memory.verified("😀".repeat(400), { basis: "b".repeat(401) }), "text")
       expectInvalid(await memory.write({ kind: "words", text: "w".repeat(801), scope: "global", by }), "text")
       expect((await memory.write({ kind: "words", text: "w".repeat(800), scope: "global", by })).status).toBe(201)
     })
 
     const refusedIn = {
-      text: (memory: ReturnType<typeof project>, char: string) => memory.fact(`Before${char}after.`),
+      text: (memory: ReturnType<typeof project>, char: string) => memory.verified(`Before${char}after.`),
       basis: (memory: ReturnType<typeof project>, char: string) =>
-        memory.fact("A fact.", { basis: `seen${char}there` }),
-      keys: (memory: ReturnType<typeof project>, char: string) => memory.fact("A fact.", { keys: `seen${char}there` }),
+        memory.verified("A verified entry.", { basis: `seen${char}there` }),
       "by.role": (memory: ReturnType<typeof project>, char: string) =>
-        memory.fact("A fact.", { by: { role: `bu${char}ild`, chat: "ses_c" } }),
+        memory.verified("A verified entry.", { by: { role: `bu${char}ild`, chat: "ses_c" } }),
     }
     test.each(Object.keys(refusedIn) as (keyof typeof refusedIn)[])(
       "a refused character in %s is 400 and the message names the field",
@@ -345,7 +388,7 @@ export function memoryContract(target: Target) {
 
     test("a refused character in a forget reason is 400 and the message names the field", async () => {
       const memory = project("refused")
-      const entry = (await memory.fact("An entry to keep.")).body.entry
+      const entry = (await memory.verified("An entry to keep.")).body.entry
       const answers = await Promise.all(
         REFUSED.map((point) => memory.forget(entry.id, { reason: `held${String.fromCodePoint(point)}it`, by })),
       )
@@ -358,26 +401,26 @@ export function memoryContract(target: Target) {
       const answers = await Promise.all(
         [
           0x0020, 0x00a0, 0x00ae, 0x2010, 0x2030, 0x3165, 0xfe10, 0xfffc, 0x1bca4, 0x1d17b, 0x1f600, 0xe1000, 0xf900,
-        ].map((point, index) => memory.fact(`Visible ${index}: a${String.fromCodePoint(point)}b.`)),
+        ].map((point, index) => memory.verified(`Visible ${index}: a${String.fromCodePoint(point)}b.`)),
       )
       answers.forEach((answer) => expect(answer.status).toBe(201))
     })
 
     test("a body over 64 KB is 400", async () => {
-      expectInvalid(await project("body").fact("A large body.", { padding: "x".repeat(64 * 1024) }), "")
+      expectInvalid(await project("body").verified("A large body.", { padding: "x".repeat(64 * 1024) }), "")
     })
 
     test("malformed JSON is 400", async () => {
-      expectInvalid(await send("POST", `/pacer/v1/memory/${project("body").id}/entries`, '{"kind": "fact",'), "")
+      expectInvalid(await send("POST", `/pacer/v1/memory/${project("body").id}/entries`, '{"kind": "verified",'), "")
     })
   })
 
   describe("exact copy", () => {
     test("the same text where it belongs to the same thing answers the first entry and stores nothing", async () => {
       const memory = project("copy")
-      const first = await memory.fact("The same text.")
+      const first = await memory.verified("The same text.")
       const again = await memory.write({
-        kind: "conclusion",
+        kind: "unverified",
         text: "  The same text. ",
         basis: "another basis",
         scope: "global",
@@ -392,11 +435,11 @@ export function memoryContract(target: Target) {
       const memory = project("copy")
       const text = "The same text everywhere."
       const answers = [
-        await memory.fact(text),
-        await memory.fact(text, { scope: "role", by: { role: "build", chat: "ses_c" } }),
-        await memory.fact(text, { scope: "role", by: { role: "explore", chat: "ses_c" } }),
-        await memory.fact(text, { scope: "task", by: { ...by, task: "t1copy" } }),
-        await memory.fact(text, { scope: "task", by: { ...by, task: "t2copy" } }),
+        await memory.verified(text),
+        await memory.verified(text, { scope: "role", by: { role: "build", chat: "ses_c" } }),
+        await memory.verified(text, { scope: "role", by: { role: "explore", chat: "ses_c" } }),
+        await memory.verified(text, { scope: "task", by: { ...by, task: "t1copy" } }),
+        await memory.verified(text, { scope: "task", by: { ...by, task: "t2copy" } }),
       ]
       expect(answers.map((answer) => answer.status)).toEqual([201, 201, 201, 201, 201])
       expect(new Set(answers.map((answer) => answer.body.entry.id)).size).toBe(5)
@@ -407,20 +450,20 @@ export function memoryContract(target: Target) {
   describe("replace", () => {
     test("a replacement belongs to what the replaced entry belonged to, and by is the replacer", async () => {
       const memory = project("replace")
-      const role = (await memory.fact("Old role entry.", { scope: "role", by: { role: "build", chat: "ses_a" } })).body
-        .entry
+      const role = (await memory.verified("Old role entry.", { scope: "role", by: { role: "build", chat: "ses_a" } }))
+        .body.entry
       const task = (
-        await memory.fact("Old task entry.", {
+        await memory.verified("Old task entry.", {
           scope: "task",
           by: { role: "general", chat: "ses_a", task: "t1", subtask: "s1" },
         })
       ).body.entry
-      const roleNew = await memory.fact("New role entry.", {
+      const roleNew = await memory.verified("New role entry.", {
         scope: "global",
         supersedes: role.id,
         by: { role: "general", chat: "ses_b" },
       })
-      const taskNew = await memory.fact("New task entry.", {
+      const taskNew = await memory.verified("New task entry.", {
         scope: "role",
         supersedes: task.id,
         by: { role: "explore", chat: "ses_b", task: "t9", subtask: "s9" },
@@ -449,9 +492,9 @@ export function memoryContract(target: Target) {
 
     test("a replacement can be replaced: a chain of three", async () => {
       const memory = project("replace")
-      const one = (await memory.fact("Version one.")).body.entry
-      const two = (await memory.fact("Version two.", { supersedes: one.id })).body.entry
-      const three = await memory.fact("Version three.", { supersedes: two.id })
+      const one = (await memory.verified("Version one.")).body.entry
+      const two = (await memory.verified("Version two.", { supersedes: one.id })).body.entry
+      const three = await memory.verified("Version three.", { supersedes: two.id })
       expect(three.status).toBe(201)
       expect(three.body.entry.supersedes).toBe(two.id)
       expect((await memory.read(one.id)).body.entry.superseded_by).toBe(two.id)
@@ -463,9 +506,9 @@ export function memoryContract(target: Target) {
 
     test("replacing an already replaced entry is 409 and names the entry that replaced it", async () => {
       const memory = project("replace")
-      const one = (await memory.fact("Replaced once.")).body.entry
-      const two = (await memory.fact("The replacement.", { supersedes: one.id })).body.entry
-      const again = await memory.fact("A second replacement.", { supersedes: one.id })
+      const one = (await memory.verified("Replaced once.")).body.entry
+      const two = (await memory.verified("The replacement.", { supersedes: one.id })).body.entry
+      const again = await memory.verified("A second replacement.", { supersedes: one.id })
       expect(again.status).toBe(409)
       expect(again.body.error.type).toBe("conflict")
       expect(again.body.error.message).toContain(two.id)
@@ -473,22 +516,22 @@ export function memoryContract(target: Target) {
 
     test("replacing a deleted entry is 409", async () => {
       const memory = project("replace")
-      const one = (await memory.fact("Deleted, then replaced.")).body.entry
+      const one = (await memory.verified("Deleted, then replaced.")).body.entry
       await memory.forget(one.id)
-      const answer = await memory.fact("The replacement.", { supersedes: one.id })
+      const answer = await memory.verified("The replacement.", { supersedes: one.id })
       expect(answer.status).toBe(409)
       expect(answer.body.error.type).toBe("conflict")
     })
 
     test("replacing an unknown id is 404", async () => {
-      expectNotFound(await project("replace").fact("Replaces nothing.", { supersedes: "000000000000" }))
+      expectNotFound(await project("replace").verified("Replaces nothing.", { supersedes: "000000000000" }))
     })
   })
 
   describe("forget", () => {
     test("text and basis go, and deleted says who, when and why", async () => {
       const memory = project("forget")
-      const entry = (await memory.fact("Held a token.", { basis: "printed it" })).body.entry
+      const entry = (await memory.verified("Held a token.", { basis: "printed it" })).body.entry
       const answer = await memory.forget(entry.id, { reason: "held a token", by: { role: "general", chat: "ses_f" } })
       expect(answer.status).toBe(200)
       const deleted = answer.body.entry.deleted!
@@ -497,7 +540,6 @@ export function memoryContract(target: Target) {
         ...entry,
         text: null,
         basis: null,
-        keys: null,
         deleted: {
           at: deleted.at,
           by: { person: target.person, role: "general", chat: "ses_f" },
@@ -509,7 +551,7 @@ export function memoryContract(target: Target) {
 
     test("a reason missing, empty or of 201 characters is 400; 200 is accepted", async () => {
       const memory = project("forget")
-      const entry = (await memory.fact("Forget me.")).body.entry
+      const entry = (await memory.verified("Forget me.")).body.entry
       expectInvalid(await memory.forget(entry.id, { by }), "reason")
       expectInvalid(await memory.forget(entry.id, { reason: "", by }), "reason")
       expectInvalid(await memory.forget(entry.id, { reason: "r".repeat(201), by }), "reason")
@@ -520,7 +562,7 @@ export function memoryContract(target: Target) {
 
     test("forgetting again answers 200 and the same deletion", async () => {
       const memory = project("forget")
-      const entry = (await memory.fact("Forget me twice.")).body.entry
+      const entry = (await memory.verified("Forget me twice.")).body.entry
       const first = await memory.forget(entry.id)
       const again = await memory.forget(entry.id, { reason: "another reason", by: { role: "general", chat: "ses_g" } })
       expect(again.status).toBe(200)
@@ -530,8 +572,8 @@ export function memoryContract(target: Target) {
     test("forgetting a replacement leaves the entry it replaced replaced", async () => {
       const memory = project("forget")
       const term = word()
-      const one = (await memory.fact(`Old ${term}.`)).body.entry
-      const two = (await memory.fact(`New ${term}.`, { supersedes: one.id })).body.entry
+      const one = (await memory.verified(`Old ${term}.`)).body.entry
+      const two = (await memory.verified(`New ${term}.`, { supersedes: one.id })).body.entry
       expect((await memory.forget(two.id)).status).toBe(200)
       expect((await memory.read(one.id)).body.entry).toMatchObject({
         text: `Old ${term}.`,
@@ -544,8 +586,8 @@ export function memoryContract(target: Target) {
     test("forgetting a replaced entry works and leaves its replacement live", async () => {
       const memory = project("forget")
       const term = word()
-      const one = (await memory.fact(`Old ${term}.`)).body.entry
-      const two = (await memory.fact(`New ${term}.`, { supersedes: one.id })).body.entry
+      const one = (await memory.verified(`Old ${term}.`)).body.entry
+      const two = (await memory.verified(`New ${term}.`, { supersedes: one.id })).body.entry
       const answer = await memory.forget(one.id)
       expect(answer.status).toBe(200)
       expect(answer.body.entry).toMatchObject({ text: null, basis: null, superseded_by: two.id })
@@ -561,10 +603,10 @@ export function memoryContract(target: Target) {
     test("an entry of one project is unknown in another for read, forget and replace", async () => {
       const a = project("across")
       const b = project("across")
-      const entry = (await a.fact("Project A's entry.")).body.entry
+      const entry = (await a.verified("Project A's entry.")).body.entry
       expectNotFound(await b.read(entry.id))
       expectNotFound(await b.forget(entry.id))
-      expectNotFound(await b.fact("Replaces A's entry from B.", { supersedes: entry.id }))
+      expectNotFound(await b.verified("Replaces A's entry from B.", { supersedes: entry.id }))
       expect((await a.read(entry.id)).body.entry).toEqual(entry)
     })
 
@@ -572,9 +614,9 @@ export function memoryContract(target: Target) {
       const a = project("across")
       const b = project("across")
       const term = word()
-      await a.fact(`Project A holds ${term}.`)
-      await a.fact(`Project A's role holds ${term}.`, { scope: "role" })
-      const own = (await b.fact(`Project B holds ${term}.`)).body.entry
+      await a.verified(`Project A holds ${term}.`)
+      await a.verified(`Project A's role holds ${term}.`, { scope: "role" })
+      const own = (await b.verified(`Project B holds ${term}.`)).body.entry
       const scopes = { global: true, roles: ["build"], tasks: [] }
       expect(ids((await b.search({ query: term, scopes: "all" })).body.entries)).toEqual([own.id])
       const start = await b.start({ prompt: term, scopes })
@@ -584,15 +626,19 @@ export function memoryContract(target: Target) {
     })
   })
 
-  describe("search", () => {
+  describe("search by keyword", () => {
+    keywordOnly()
+
     test("finds an entry by a word in its text and by one in its basis", async () => {
       const memory = project("search")
       const inText = word()
       const inBasis = word()
-      const entry = (await memory.fact(`The service holds ${inText}.`, { basis: `read it in ${inBasis}` })).body.entry
-      await memory.fact("Another entry without the words.")
+      const entry = (await memory.verified(`The service holds ${inText}.`, { basis: `read it in ${inBasis}` })).body
+        .entry
+      await memory.verified("Another entry without the words.")
       const byText = await memory.search({ query: `where is ${inText}`, scopes: "all" })
       expect(byText.status).toBe(200)
+      expect(byText.body.meaning).toBe(false)
       expect(byText.body.entries).toEqual([scored(entry)])
       expect((await memory.search({ query: inBasis, scopes: "all" })).body.entries).toEqual([scored(entry)])
     })
@@ -600,9 +646,9 @@ export function memoryContract(target: Target) {
     test("a replaced and a deleted entry are never returned, the replacement is", async () => {
       const memory = project("search")
       const term = word()
-      const replaced = (await memory.fact(`Old ${term}.`)).body.entry
-      const replacement = (await memory.fact(`New ${term}.`, { supersedes: replaced.id })).body.entry
-      const deleted = (await memory.fact(`Gone ${term}.`, { basis: `basis ${term}` })).body.entry
+      const replaced = (await memory.verified(`Old ${term}.`)).body.entry
+      const replacement = (await memory.verified(`New ${term}.`, { supersedes: replaced.id })).body.entry
+      const deleted = (await memory.verified(`Gone ${term}.`, { basis: `basis ${term}` })).body.entry
       await memory.forget(deleted.id)
       const answer = await memory.search({ query: `${term} old gone`, scopes: "all", limit: 20 })
       expect(ids(answer.body.entries)).toEqual([replacement.id])
@@ -622,7 +668,7 @@ export function memoryContract(target: Target) {
           t2: { scope: "task", by: { role: "general", chat: "ses_s", task: "t2" } },
         }
         for (const [name, extra] of Object.entries(rows))
-          written[name] = (await memory.fact(`Entry ${name} holds ${term}.`, extra)).body.entry
+          written[name] = (await memory.verified(`Entry ${name} holds ${term}.`, extra)).body.entry
       })
       const found = async (scopes: unknown) => {
         const answer = await memory.search({ query: term, scopes, limit: 20 })
@@ -667,7 +713,8 @@ export function memoryContract(target: Target) {
     test("limit defaults to 5 and 20 is accepted; 0 and 21 are 400", async () => {
       const memory = project("limit")
       const term = word()
-      for (const index of Array.from({ length: 7 }, (_, index) => index)) await memory.fact(`Entry ${index} ${term}.`)
+      for (const index of Array.from({ length: 7 }, (_, index) => index))
+        await memory.verified(`Entry ${index} ${term}.`)
       expect((await memory.search({ query: term, scopes: "all" })).body.entries.length).toBe(5)
       const twenty = await memory.search({ query: term, scopes: "all", limit: 20 })
       expect(twenty.status).toBe(200)
@@ -686,26 +733,27 @@ export function memoryContract(target: Target) {
 
     test("a query whose words no entry holds answers no entries", async () => {
       const memory = project("search")
-      await memory.fact("An entry about something else.")
+      await memory.verified("An entry about something else.")
       const answer = await memory.search({ query: `${word()} ${word()}`, scopes: "all" })
       expect(answer.status).toBe(200)
       expect(answer.body.entries).toEqual([])
       expect(answer.body.recall).toMatch(ID)
     })
 
-    test("more of the query's words come first, with scores above 0 that fall along the list", async () => {
+    test("more of the query's words come first, and an entry under 0.6 of the best score is cut", async () => {
       const memory = project("rank")
       // Each word is in one entry only, and ten other entries keep the word statistics away from a tiny store's.
       const terms = Array.from({ length: 8 }, word)
-      for (const index of Array.from({ length: 10 }, (_, index) => index)) await memory.fact(`Other entry ${index}.`)
-      const four = (await memory.fact(`${terms.slice(0, 4).join(" ")}.`)).body.entry
-      const three = (await memory.fact(`${terms.slice(4, 7).join(" ")} plain.`)).body.entry
-      const one = (await memory.fact(`${terms[7]} plain text here.`)).body.entry
+      for (const index of Array.from({ length: 10 }, (_, index) => index))
+        await memory.verified(`Other entry ${index}.`)
+      const four = (await memory.verified(`${terms.slice(0, 4).join(" ")}.`)).body.entry
+      const three = (await memory.verified(`${terms.slice(4, 7).join(" ")} plain.`)).body.entry
+      await memory.verified(`${terms[7]} plain text here.`)
       const answer = await memory.search({ query: terms.join(" "), scopes: "all", limit: 20 })
-      expect(answer.body.entries.map((entry) => entry.id)).toEqual([four.id, three.id, one.id])
+      expect(answer.body.meaning).toBe(false)
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([four.id, three.id])
       const scores = answer.body.entries.map((entry) => entry.score)
-      expect(scores[2]).toBeGreaterThan(0)
-      expect(scores[1]).toBeGreaterThan(scores[2])
+      expect(scores[1]).toBeGreaterThan(0)
       expect(scores[0]).toBeGreaterThan(scores[1])
     })
 
@@ -714,27 +762,29 @@ export function memoryContract(target: Target) {
       const term = word()
       const text = `The gate holds ${term}.`
       // Written nearest scope first, so that "newer first" alone would give the opposite order.
-      const task = (await memory.fact(text, { scope: "task", by: { ...by, task: "t1" } })).body.entry
-      const role = (await memory.fact(text, { scope: "role" })).body.entry
-      const global = (await memory.fact(text)).body.entry
+      const task = (await memory.verified(text, { scope: "task", by: { ...by, task: "t1" } })).body.entry
+      const role = (await memory.verified(text, { scope: "role" })).body.entry
+      const global = (await memory.verified(text)).body.entry
       const scopes = { global: true, roles: ["build"], tasks: ["t1"] }
       const scoped = await memory.search({ query: term, scopes })
+      expect(scoped.body.meaning).toBe(false)
       expect(scoped.body.entries.map((entry) => entry.id)).toEqual([task.id, role.id, global.id])
 
       const other = word()
-      const older = (await memory.fact(`Left ${other} right.`)).body.entry
-      const newer = (await memory.fact(`Right ${other} left.`)).body.entry
+      const older = (await memory.verified(`Left ${other} right.`)).body.entry
+      const newer = (await memory.verified(`Right ${other} left.`)).body.entry
       const dated = await memory.search({ query: other, scopes: "all" })
       expect(dated.body.entries.map((entry) => entry.id)).toEqual([newer.id, older.id])
     })
 
-    test("an entry whose text the query contains is left out", async () => {
+    test("an entry whose text the query contains is left out, and the cut starts from the best one left", async () => {
       const memory = project("contained")
       const term = word()
-      const quoted = (await memory.fact(`Remember ${term} for later.`)).body.entry
-      const other = (await memory.fact(`${term} matters here.`)).body.entry
+      const quoted = (await memory.verified(`Remember ${term} for later.`)).body.entry
+      const other = (await memory.verified(`${term} matters here.`)).body.entry
       const alone = await memory.search({ query: `remember ${term} later`, scopes: "all" })
-      expect(alone.body.entries.map((entry) => entry.id)).toEqual([quoted.id, other.id])
+      expect(alone.body.meaning).toBe(false)
+      expect(alone.body.entries.map((entry) => entry.id)).toEqual([quoted.id])
       const answer = await memory.search({ query: `Please note: REMEMBER   ${term} for later. Thanks`, scopes: "all" })
       expect(answer.body.entries.map((entry) => entry.id)).toEqual([other.id])
     })
@@ -742,7 +792,7 @@ export function memoryContract(target: Target) {
     test("a word with 's finds the word", async () => {
       const memory = project("possessive")
       const term = word()
-      const entry = (await memory.fact(`The check of ${term} took long.`)).body.entry
+      const entry = (await memory.verified(`The check of ${term} took long.`)).body.entry
       const answer = await memory.search({ query: `${term}'s`, scopes: "all" })
       expect(answer.body.entries).toEqual([scored(entry)])
     })
@@ -760,8 +810,11 @@ export function memoryContract(target: Target) {
       const memory = project("start")
       const term = word()
       for (const index of Array.from({ length: 7 }, (_, index) => index))
-        await memory.fact(`Start entry ${index} holds ${term}.`, index % 3 ? {} : { scope: "role" })
-      await memory.fact(`An explore entry holds ${term}.`, { scope: "role", by: { role: "explore", chat: "ses_e" } })
+        await memory.verified(`Start entry ${index} holds ${term}.`, index % 3 ? {} : { scope: "role" })
+      await memory.verified(`An explore entry holds ${term}.`, {
+        scope: "role",
+        by: { role: "explore", chat: "ses_e" },
+      })
       const scopes = { global: true, roles: ["build"], tasks: [] }
       const prompt = `Which entry holds ${term}?`
       const start = await memory.start({ prompt, scopes })
@@ -778,7 +831,7 @@ export function memoryContract(target: Target) {
       const memory = project("start-limit")
       const term = word()
       for (const index of Array.from({ length: 22 }, (_, index) => index))
-        await memory.fact(`Entry ${index} holds ${term}${" again".repeat(index % 4)}.`)
+        await memory.verified(`Entry ${index} holds ${term}${" again".repeat(index % 4)}.`)
       expect((await memory.start({ prompt: term, scopes: "all" })).body.entries.length).toBe(5)
       const start = await memory.start({ prompt: term, scopes: "all", limit: 20 })
       expect(start.status).toBe(200)
@@ -794,19 +847,19 @@ export function memoryContract(target: Target) {
 
     test("counts count live entries of global, of the listed roles and of the listed tasks", async () => {
       const memory = project("counts")
-      const replaced = (await memory.fact("Global one.")).body.entry
-      await memory.fact("Global one, corrected.", { supersedes: replaced.id })
-      await memory.fact("Global two.")
-      await memory.fact("Build one.", { scope: "role", by: { role: "build", chat: "ses_c" } })
-      const deleted = (await memory.fact("Build two.", { scope: "role", by: { role: "build", chat: "ses_c" } })).body
-        .entry
+      const replaced = (await memory.verified("Global one.")).body.entry
+      await memory.verified("Global one, corrected.", { supersedes: replaced.id })
+      await memory.verified("Global two.")
+      await memory.verified("Build one.", { scope: "role", by: { role: "build", chat: "ses_c" } })
+      const deleted = (await memory.verified("Build two.", { scope: "role", by: { role: "build", chat: "ses_c" } }))
+        .body.entry
       await memory.forget(deleted.id)
-      await memory.fact("Explore one.", { scope: "role", by: { role: "explore", chat: "ses_c" } })
-      await memory.fact("Review one.", { scope: "role", by: { role: "review", chat: "ses_c" } })
-      await memory.fact("Task one, first subtask.", { scope: "task", by: { ...by, task: "t1", subtask: "s1" } })
-      await memory.fact("Task one, second subtask.", { scope: "task", by: { ...by, task: "t1", subtask: "s2" } })
-      await memory.fact("Task two.", { scope: "task", by: { ...by, task: "t2" } })
-      await memory.fact("Task three.", { scope: "task", by: { ...by, task: "t3" } })
+      await memory.verified("Explore one.", { scope: "role", by: { role: "explore", chat: "ses_c" } })
+      await memory.verified("Review one.", { scope: "role", by: { role: "review", chat: "ses_c" } })
+      await memory.verified("Task one, first subtask.", { scope: "task", by: { ...by, task: "t1", subtask: "s1" } })
+      await memory.verified("Task one, second subtask.", { scope: "task", by: { ...by, task: "t1", subtask: "s2" } })
+      await memory.verified("Task two.", { scope: "task", by: { ...by, task: "t2" } })
+      await memory.verified("Task three.", { scope: "task", by: { ...by, task: "t3" } })
       const start = await memory.start({
         prompt: "counts",
         scopes: { global: true, roles: ["build", "explore"], tasks: ["t1", "t2"] },
@@ -822,83 +875,256 @@ export function memoryContract(target: Target) {
   })
 
   describe("keys", () => {
-    test("keys are written and read back", async () => {
+    keywordOnly()
+
+    test("keys are no field: sent with a write they change nothing and no answer has them", async () => {
       const memory = project("keys")
-      const written = await memory.fact("The meter table.", { keys: "pings duration_minutes billing" })
+      const term = word()
+      const written = await memory.verified("The meter table.", { keys: `meters ${term}` })
       expect(written.status).toBe(201)
-      expect(written.body.entry.keys).toBe("pings duration_minutes billing")
-      expect((await memory.read(written.body.entry.id)).body.entry).toEqual(written.body.entry)
-    })
-
-    test("absent keys are empty", async () => {
-      const answer = await project("keys").fact("No keys.")
-      expect(answer.status).toBe(201)
-      expect(answer.body.entry.keys).toBe("")
-    })
-
-    test("keys are stored trimmed", async () => {
-      expect((await project("keys").fact("Trimmed keys.", { keys: "  one two  " })).body.entry.keys).toBe("one two")
-    })
-
-    test("600 code points of keys are accepted, 601 refused, one outside the BMP counting as one", async () => {
-      const memory = project("keys")
-      const exact = await memory.fact("Long keys.", { keys: "😀".repeat(300) + "k".repeat(300) })
-      expect(exact.status).toBe(201)
-      expectInvalid(await memory.fact("Too long keys.", { keys: "😀".repeat(300) + "k".repeat(301) }), "keys")
-    })
-
-    test("keys do not count towards the 800 characters of text and basis", async () => {
-      const answer = await project("keys").fact("t".repeat(400), { basis: "b".repeat(400), keys: "k".repeat(600) })
-      expect(answer.status).toBe(201)
-    })
-
-    test("an entry is found by a word only its keys hold", async () => {
-      const memory = project("keys")
-      const term = word()
-      const entry = (await memory.fact("The meter table.", { keys: `meters ${term}` })).body.entry
-      await memory.fact("Another entry.")
-      expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([scored(entry)])
-    })
-
-    test("the same text with other keys is an exact copy and the first entry's keys stay", async () => {
-      const memory = project("keys")
-      const first = (await memory.fact("Same text, other keys.", { keys: "first keys" })).body.entry
-      const again = await memory.fact("Same text, other keys.", { keys: "second keys" })
-      expect(again.status).toBe(200)
-      expect(JSON.parse(again.text)).toEqual({ entry: first, existing: true })
-      expect((await memory.read(first.id)).body.entry.keys).toBe("first keys")
-    })
-
-    test("a replacement's keys are its own", async () => {
-      const memory = project("keys")
-      const term = word()
-      const one = (await memory.fact("Version one.", { keys: `old ${term}` })).body.entry
-      const two = await memory.fact("Version two.", { supersedes: one.id })
-      expect(two.body.entry.keys).toBe("")
-      const three = await memory.fact("Version three.", { supersedes: two.body.entry.id, keys: "new keys" })
-      expect(three.body.entry.keys).toBe("new keys")
-      expect((await memory.read(one.id)).body.entry.keys).toBe(`old ${term}`)
+      expect(written.body.entry).not.toHaveProperty("keys")
+      expect((await memory.read(written.body.entry.id)).body.entry).not.toHaveProperty("keys")
       expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([])
+      const found = await memory.search({ query: "meter", scopes: "all" })
+      expect(found.body.entries).toEqual([scored(written.body.entry)])
+      expect(found.body.entries[0]).not.toHaveProperty("keys")
+      expect((await memory.export()).lines[0]).not.toHaveProperty("keys")
     })
+  })
 
-    test("after forget keys are null and a word of the old keys finds nothing", async () => {
-      const memory = project("keys")
+  describe("meaning", () => {
+    /** Polls `search` until no entry of the selection waits for a vector, for at most 5 seconds. */
+    const settled = async (search: () => ReturnType<ReturnType<typeof project>["search"]>, deadline: number) => {
+      const answer = await search()
+      if (answer.body.waiting === 0 || Date.now() > deadline) return answer
+      return settled(search, deadline)
+    }
+
+    test("the endpoint gets the model, the key, an entry's text and basis, and the query as it is", async () => {
+      const memory = project("embed")
       const term = word()
-      const entry = (await memory.fact("Forget my keys.", { keys: `secret ${term}` })).body.entry
-      expect((await memory.forget(entry.id)).body.entry.keys).toBeNull()
-      expect((await memory.read(entry.id)).body.entry.keys).toBeNull()
-      expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([])
+      await memory.verified(`The meter ${term} is read.`, { basis: `seen in ${term}.log` })
+      await memory.write({ kind: "words", text: `Say ${term} twice.`, scope: "global", by })
+      const query = `  Where is ${term}?  `
+      expect((await memory.search({ query, scopes: "all" })).body.meaning).toBe(true)
+      const sent = fake.calls.flatMap((call) => call.input).filter((text) => text.includes(term))
+      expect(new Set(sent)).toEqual(
+        new Set([`The meter ${term} is read.\nseen in ${term}.log`, `Say ${term} twice.`, query]),
+      )
+      fake.calls.forEach((call) => {
+        expect(call.model).toBe("test-embedding")
+        expect(call.authorization).toBe(target.embedding.key === undefined ? null : `Bearer ${target.embedding.key}`)
+      })
     })
 
-    test("the export has keys, null for a deleted entry", async () => {
-      const memory = project("keys")
-      const kept = (await memory.fact("Kept.", { keys: "kept keys" })).body.entry
-      const gone = (await memory.fact("Gone.", { keys: "gone keys" })).body.entry
+    test("an entry is found by a query that shares a concept and no word with it", async () => {
+      const memory = project("concept")
+      const near = (await memory.verified("A screenshot of the login page.")).body.entry
+      await memory.verified("The console prints nothing.")
+      const answer = await memory.search({ query: "Show me the picture", scopes: "all" })
+      expect(answer.body.meaning).toBe(true)
+      expect(answer.body.waiting).toBe(0)
+      expect(answer.body.entries).toEqual([scored(near)])
+    })
+
+    test("the merged order and scores", async () => {
+      const memory = project("merged")
+      const one = word()
+      const two = word()
+      // The query is about pictures (concept 1). Cosine with it, each text with the basis "checked by a test":
+      //   p "<one> <two> terminal"  0.01 / 1.01                     = 0.009901
+      //   q "<one> picture"         1.01 / 1.01                     = 1
+      //   r "image photo"           2.01 / √(4.01 × 1.01)           = 0.998765
+      //   s "console shell"         0.01 / √(4.01 × 1.01)           = 0.004969
+      // Meaning brought to 0..1 (low s, high q): q 1, r 0.998759, p 0.004957, s 0.
+      // Keyword list: p holds both words, q one; brought to 0..1: p 1, q 0; r and s are not in it.
+      // Merged 0.4 × keyword + 0.6 × meaning: q 0.6, r 0.599255, p 0.402974, s 0.
+      // The cut keeps what is at least 0.5 × 0.6 = 0.3: q, r, p.
+      const p = (await memory.verified(`${one} ${two} terminal`)).body.entry
+      const q = (await memory.verified(`${one} picture`)).body.entry
+      const r = (await memory.verified("image photo")).body.entry
+      await memory.verified("console shell")
+      const answer = await memory.search({ query: `${one} ${two} screenshot`, scopes: "all", limit: 20 })
+      expect(answer.body.meaning).toBe(true)
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([q.id, r.id, p.id])
+      const scores = answer.body.entries.map((entry) => entry.score)
+      expect(scores[0]).toBeCloseTo(0.6, 4)
+      expect(scores[1]).toBeCloseTo(0.599255, 4)
+      expect(scores[2]).toBeCloseTo(0.402974, 4)
+      expect(scores[0]).toBeLessThanOrEqual(1)
+      expect(scores[0]).toBeGreaterThan(scores[1]!)
+      expect(scores[1]).toBeGreaterThan(scores[2]!)
+    })
+
+    test("an entry in one list only comes back within the cut, and one under 0.5 of the best does not", async () => {
+      const memory = project("cut")
+      const one = word()
+      // Query about pictures; meaning brought to 0..1: q 1, r 0.998759, u 0.446244, s 0; keyword list: q alone, 1.
+      // Merged: q 1, r 0.599255 (meaning only), u 0.267746, s 0. The cut keeps what is at least 0.5: q and r.
+      const q = (await memory.verified(`${one} picture`)).body.entry
+      const r = (await memory.verified("image photo")).body.entry
+      await memory.verified("terminal picture console")
+      await memory.verified("console shell")
+      const answer = await memory.search({ query: `${one} screenshot`, scopes: "all", limit: 20 })
+      expect(answer.body.meaning).toBe(true)
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([q.id, r.id])
+      expect(answer.body.entries[1]!.score).toBeCloseTo(0.599255, 4)
+    })
+
+    test("a query of stop words only still answers by meaning", async () => {
+      const memory = project("stop")
+      const plain = (await memory.verified("Keep it short.")).body.entry
+      await memory.verified("console shell terminal")
+      const answer = await memory.search({ query: "what is it about", scopes: "all" })
+      expect(answer.body.meaning).toBe(true)
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([plain.id])
+    })
+
+    test("kinds: only the listed kinds come back", async () => {
+      const memory = project("kinds")
+      const term = word()
+      const words = (await memory.write({ kind: "words", text: `Words ${term}.`, scope: "global", by })).body.entry
+      await memory.write({ kind: "unverified", text: `Unverified ${term}.`, basis: "a guess", scope: "global", by })
+      const verified = (await memory.verified(`Verified ${term}.`)).body.entry
+      const answer = await memory.search({ query: term, scopes: "all", kinds: ["words", "verified"] })
+      expect(ids(answer.body.entries)).toEqual(ids([words, verified]))
+      expect((await memory.search({ query: term, scopes: "all", kinds: null })).body.entries.length).toBe(3)
+    })
+
+    test("kinds: an empty list, an unknown kind, a repeated kind and a string are 400", async () => {
+      const memory = project("kinds")
+      const answers = await Promise.all(
+        [[], ["fact"], ["verified", "verified"], "verified", ["words", "unverified", "verified", "words"]].map(
+          (kinds) => memory.search({ query: "anything", scopes: "all", kinds }),
+        ),
+      )
+      answers.forEach((answer) => expectInvalid(answer, "kinds"))
+      expectInvalid(await memory.start({ prompt: "anything", scopes: "all", kinds: [] }), "kinds")
+    })
+
+    test("kinds select before anything is ranked", async () => {
+      const memory = project("kinds")
+      const one = word()
+      const two = word()
+      // Each of 51 unverified entries holds both words and is about pictures, the verified one holds one word and is
+      // about terminals: the unverified ones fill the first 50 of both lists.
+      await Promise.all(
+        Array.from({ length: 51 }, (_, index) =>
+          memory.write({
+            kind: "unverified",
+            text: `Note ${index}: ${one} ${two} picture`,
+            basis: "a guess",
+            scope: "global",
+            by,
+          }),
+        ),
+      )
+      const verified = (await memory.verified(`${one} terminal`)).body.entry
+      const answer = await memory.search({ query: `${one} ${two} screenshot`, scopes: "all", kinds: ["verified"] })
+      expect(answer.body.meaning).toBe(true)
+      expect(ids(answer.body.entries)).toEqual([verified.id])
+    })
+
+    test("an entry written while the endpoint fails is found by keyword, waits, and gets its vector later", async () => {
+      const memory = project("later")
+      const term = word()
+      fake.fail = true
+      const written = await memory.verified(`The ${term} screenshot is kept.`)
+      expect(written.status).toBe(201)
+      const keyword = await memory.search({ query: term, scopes: "all" })
+      expect(keyword.body.meaning).toBe(false)
+      expect(keyword.body.waiting).toBe(1)
+      expect(keyword.body.entries).toEqual([scored(written.body.entry)])
+      fake.fail = false
+      const answer = await settled(() => memory.search({ query: "picture", scopes: "all" }), Date.now() + 5000)
+      expect(answer.body.waiting).toBe(0)
+      expect(answer.body.meaning).toBe(true)
+      expect(answer.body.entries).toEqual([scored(written.body.entry)])
+    })
+
+    test("the endpoint failing during a search gives the keyword answer", async () => {
+      const memory = project("down")
+      const term = word()
+      const entry = (await memory.verified(`The ${term} picture.`)).body.entry
+      await memory.verified("console shell")
+      fake.fail = true
+      const started = Date.now()
+      const answer = await memory.search({ query: `${term} screenshot`, scopes: "all" })
+      expect(Date.now() - started).toBeLessThan(2000)
+      expect(answer.body.meaning).toBe(false)
+      expect(answer.body.entries).toEqual([scored(entry)])
+    })
+
+    test("the endpoint slower than 1 second during a search gives the keyword answer within 2 seconds", async () => {
+      const memory = project("slow")
+      const term = word()
+      const entry = (await memory.verified(`The ${term} picture.`)).body.entry
+      await memory.verified("console shell")
+      fake.delay = 3000
+      const started = Date.now()
+      const answer = await memory.search({ query: `${term} screenshot`, scopes: "all" })
+      expect(Date.now() - started).toBeLessThan(2000)
+      expect(answer.body.meaning).toBe(false)
+      expect(answer.body.entries).toEqual([scored(entry)])
+    })
+
+    test("a replacement has its own vector", async () => {
+      const memory = project("replaced")
+      const old = (await memory.verified("A picture of the gate.")).body.entry
+      const replacement = (await memory.verified("The console of the gate.", { supersedes: old.id })).body.entry
+      const other = (await memory.verified("A photo of the door.")).body.entry
+      expect(ids((await memory.search({ query: "screenshot", scopes: "all" })).body.entries)).toEqual([other.id])
+      expect(ids((await memory.search({ query: "shell", scopes: "all" })).body.entries)).toEqual([replacement.id])
+    })
+
+    test("after forget an entry is found neither by word nor by meaning", async () => {
+      const memory = project("forgotten")
+      const term = word()
+      const gone = (await memory.verified(`The ${term} picture.`)).body.entry
+      const other = (await memory.verified("The console is quiet.")).body.entry
       await memory.forget(gone.id)
-      expect((await memory.export()).lines.map((line) => [line.id, line.keys])).toEqual([
-        [kept.id, "kept keys"],
-        [gone.id, null],
-      ])
+      const byWord = await memory.search({ query: term, scopes: "all" })
+      const byMeaning = await memory.search({ query: "screenshot", scopes: "all" })
+      expect([byWord.body.meaning, byMeaning.body.meaning]).toEqual([true, true])
+      expect(ids(byWord.body.entries)).toEqual([other.id])
+      expect(ids(byMeaning.body.entries)).toEqual([other.id])
+    })
+
+    test.if(target.bare !== undefined)("a server without an endpoint has no meaning and nothing waiting", async () => {
+      const capabilities = await send("GET", "/pacer/v1/capabilities", undefined, target.key, target.bare)
+      expect(capabilities.body.pacer.memory.embedding).toBeNull()
+      const memory = project("bare", target.bare)
+      const term = word()
+      const entry = (await memory.verified(`The ${term} picture.`)).body.entry
+      const answer = await memory.search({ query: term, scopes: "all" })
+      expect(answer.body.meaning).toBe(false)
+      expect(answer.body.waiting).toBe(0)
+      expect(answer.body.entries).toEqual([scored(entry)])
+      const start = await memory.start({ prompt: term, scopes: "all" })
+      expect([start.body.meaning, start.body.waiting]).toEqual([false, 0])
+    })
+
+    test("start answers what search answers: ids, order, scores, meaning and waiting, with kinds too", async () => {
+      const memory = project("start-search")
+      const term = word()
+      await memory.verified(`The ${term} picture.`)
+      await memory.verified(`An image of ${term}.`, { scope: "role" })
+      await memory.write({ kind: "words", text: `Show the photo of ${term}.`, scope: "global", by })
+      await memory.write({
+        kind: "unverified",
+        text: `${term} has a screenshot.`,
+        basis: "a guess",
+        scope: "global",
+        by,
+      })
+      await memory.verified("console shell")
+      const pick = (body: Body) => ({ entries: body.entries, meaning: body.meaning, waiting: body.waiting })
+      const asked = { scopes: { global: true, roles: ["build"], tasks: [] }, kinds: ["verified", "words"], limit: 3 }
+      const start = await memory.start({ prompt: `${term} screenshot`, ...asked })
+      const search = await memory.search({ query: `${term} screenshot`, ...asked })
+      expect(start.body.meaning).toBe(true)
+      expect(start.body.entries.length).toBe(3)
+      expect(pick(start.body)).toEqual(pick(search.body))
     })
   })
 
@@ -907,7 +1133,7 @@ export function memoryContract(target: Target) {
       const memory = project("score")
       const term = word()
       for (const index of Array.from({ length: 4 }, (_, index) => index))
-        await memory.fact(`Scored ${index} ${term}${" twice".repeat(index)}.`)
+        await memory.verified(`Scored ${index} ${term}${" twice".repeat(index)}.`)
       const search = await memory.search({ query: `${term} twice`, scopes: "all" })
       const start = await memory.start({ prompt: `${term} twice`, scopes: "all" })
       expect(search.body.entries.length).toBe(4)
@@ -917,7 +1143,7 @@ export function memoryContract(target: Target) {
 
     test("a written, read, forgotten and exported entry has no score", async () => {
       const memory = project("score")
-      const written = (await memory.fact("No score here.")).body.entry
+      const written = (await memory.verified("No score here.")).body.entry
       const read = (await memory.read(written.id)).body.entry
       const forgotten = (await memory.forget(written.id)).body.entry
       const exported = (await memory.export()).lines[0]
@@ -927,9 +1153,9 @@ export function memoryContract(target: Target) {
 
   test("export: one line per entry in the order stored, replaced entries in full, deleted ones without text", async () => {
     const memory = project("export")
-    const one = (await memory.fact("Export one.")).body.entry
-    const two = (await memory.fact("Export two.", { scope: "role" })).body.entry
-    const three = (await memory.fact("Export three.", { supersedes: one.id })).body.entry
+    const one = (await memory.verified("Export one.")).body.entry
+    const two = (await memory.verified("Export two.", { scope: "role" })).body.entry
+    const three = (await memory.verified("Export three.", { supersedes: one.id })).body.entry
     await memory.forget(two.id)
     const answer = await memory.export()
     expect(answer.status).toBe(200)
@@ -938,14 +1164,14 @@ export function memoryContract(target: Target) {
     expect(answer.lines.map((line) => line.id)).toEqual([one.id, two.id, three.id])
     expect(answer.lines[0]).toEqual({ type: "entry", ...one, superseded_by: three.id })
     expect(answer.lines[1]).toEqual({ type: "entry", ...(await memory.read(two.id)).body.entry })
-    expect(answer.lines[1]).toMatchObject({ text: null, basis: null, keys: null })
+    expect(answer.lines[1]).toMatchObject({ text: null, basis: null })
     expect(answer.lines[2]).toEqual({ type: "entry", ...three })
   })
 
   describe("concurrent writers", () => {
     test("20 writes of different texts at once make 20 entries", async () => {
       const memory = project("writers")
-      const answers = await Promise.all(Array.from({ length: 20 }, (_, index) => memory.fact(`Writer ${index}.`)))
+      const answers = await Promise.all(Array.from({ length: 20 }, (_, index) => memory.verified(`Writer ${index}.`)))
       expect(answers.map((answer) => answer.status)).toEqual(Array.from({ length: 20 }, () => 201))
       expect(new Set(answers.map((answer) => answer.body.entry.id)).size).toBe(20)
       expect((await memory.export()).lines.length).toBe(20)
@@ -953,7 +1179,7 @@ export function memoryContract(target: Target) {
 
     test("20 writes of the same text at once make one entry", async () => {
       const memory = project("writers")
-      const answers = await Promise.all(Array.from({ length: 20 }, () => memory.fact("The same writer.")))
+      const answers = await Promise.all(Array.from({ length: 20 }, () => memory.verified("The same writer.")))
       expect(answers.filter((answer) => answer.status === 201).length).toBe(1)
       expect(answers.filter((answer) => answer.status === 200 && answer.body.existing === true).length).toBe(19)
       expect(new Set(answers.map((answer) => answer.body.entry.id)).size).toBe(1)
@@ -964,10 +1190,12 @@ export function memoryContract(target: Target) {
   test("capabilities say that the server has memory, with its limits", async () => {
     const answer = await send("GET", "/pacer/v1/capabilities")
     expect(answer.status).toBe(200)
-    expect(answer.body).toMatchObject({
-      pacer: {
-        memory: { version: 1, entry_characters: 800, keys_characters: 600, query_characters: 2000, search_limit: 20 },
-      },
+    expect(answer.body.pacer.memory).toEqual({
+      version: 1,
+      entry_characters: 800,
+      query_characters: 2000,
+      search_limit: 20,
+      embedding: "test-embedding",
     })
   })
 

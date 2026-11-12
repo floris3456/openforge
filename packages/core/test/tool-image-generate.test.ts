@@ -14,6 +14,7 @@ import { Provider } from "@opencode/core/provider"
 import { Session } from "@opencode/core/session"
 import { SessionEvent } from "@opencode/core/session/event"
 import { Tool } from "@opencode/core/tool"
+import { toSessionError } from "@opencode/core/session/to-session-error"
 import { ImageGenerateTool } from "@opencode/core/tool/plugin/image-generate"
 import { OpenCodeTools } from "@opencode/core/tool/plugin/opencode"
 import { Document, Event, Info } from "@opencode/schema/config"
@@ -23,7 +24,7 @@ import { Global } from "@opencode/util/global"
 import { Effect, Layer, Schedule, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
-import { executeTool, toolDefinitions, toolIdentity } from "./lib/tool"
+import { codeModeListings, executeTool, toolIdentity } from "./lib/tool"
 import { makePluginTestLayer } from "./plugin/fixture"
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
@@ -105,10 +106,10 @@ const setup = (providerID = "test") =>
     })
     const registry = yield* Tool.Service
     const run = (input: Record<string, unknown>) =>
-      executeTool(registry, {
+      direct(registry, {
         sessionID: session.id,
         ...toolIdentity,
-        call: { type: "tool-call", id: `call-${JSON.stringify(input)}`, name: ImageGenerateTool.name, input },
+        call: { type: "tool-call", id: `call-${JSON.stringify(input)}`, name: DIRECT, input },
       })
     // Completion notices arrive as synthetic messages posted by the background job.
     const notices: { text: string; metadata?: Record<string, unknown> }[] = []
@@ -149,8 +150,24 @@ const configuredModel = (providerID: string, model: string) => ({
   model: Model.ID.make(model),
 })
 
-const registered = Tool.Service.use((registry) => toolDefinitions(registry)).pipe(
-  Effect.map((tools) => tools.some((tool) => tool.name === ImageGenerateTool.name)),
+// openforge: image.generate is a Code Mode tool (spec image-tools). These tests call it as the direct tool it is when an
+// agent has no Code Mode, so its results read as they did; its place in the catalog is tested in image-tools.test.ts.
+const DIRECT = "image_generate"
+const direct = (registry: Tool.Interface, input: Parameters<Tool.Snapshot["execute"]>[0]) =>
+  registry.snapshot([{ action: "execute", resource: "*", effect: "deny" }]).pipe(
+    Effect.flatMap((tools) => tools.execute(input)),
+    Effect.map((result) => ({ status: "completed" as const, ...result })),
+    Effect.catchTag("Tool.Error", (error) =>
+      Effect.succeed({ status: "error" as const, error: toSessionError(error) }),
+    ),
+  )
+
+const registered = Tool.Service.use((registry) => registry.snapshot()).pipe(
+  Effect.map(
+    (tools) =>
+      tools.codeModeCatalog !== undefined &&
+      codeModeListings(tools.codeModeCatalog).some((tool) => tool.path === "image.generate"),
+  ),
 )
 // Catalog and config changes reach the tool through events, so wait for them instead of a fixed delay.
 const until = (expected: boolean) =>
@@ -499,6 +516,65 @@ describe("experimental_image_generate", () => {
       expect(yield* models({ type: "image" })).toEqual(["test/painter"])
       expect(yield* models({})).not.toContain("test/painter")
       expect(yield* models({})).toContain("test/chat")
+    }),
+  )
+})
+
+// openforge (spec image-tools): image.generate in Code Mode, beside image.show.
+describe("image.generate", () => {
+  it.live("is listed in Code Mode's image group, its first line carrying when to call it and how it answers", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      yield* setup()
+      expect(yield* until(true)).toBe(true)
+      const tools = yield* Tool.Service.use((registry) => registry.snapshot())
+      const listing = codeModeListings(tools.codeModeCatalog!).find((tool) => tool.path === "image.generate")
+      expect(listing?.line).toContain(
+        "// Makes or edits one image, only when the user asks for it; runs in the background, the chat is told once it's saved.",
+      )
+      expect(ImageGenerateTool.description.split("\n")[0]!.length).toBeLessThanOrEqual(120)
+      // Not a direct tool while Code Mode is on.
+      expect(tools.definitions.map((tool) => tool.name)).not.toContain(DIRECT)
+    }),
+  )
+
+  it.live("called from a program, asks permission under opencode's action, starts the job and tells the chat", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      const { session, notice } = yield* setup()
+      const registry = yield* Tool.Service
+      const result = yield* executeTool(registry, {
+        sessionID: session.id,
+        ...toolIdentity,
+        call: {
+          type: "tool-call",
+          id: "program-1",
+          name: "execute",
+          input: { code: `return await tools.image.generate({ prompt: "a red square" })` },
+        },
+      })
+      expect(result.status).toBe("completed")
+      const output = JSON.parse(text(result) ?? "") as { id: string; path: string; model: string }
+      expect(output.model).toBe("test/painter")
+      expect(output.id).toStartWith("image_")
+      expect(fixture.assertions.map((item) => [item.action, item.resources])).toEqual([
+        ["experimental_image_generate", ["test/painter"]],
+      ])
+      expect(fixture.assertions[0]?.metadata).toMatchObject({ prompt: "a red square", model: "test/painter" })
+      expect(yield* notice({ metadata: { jobID: output.id } })).toContain("Image request finished. Saved image: ")
+      expect(fixture.requests.map((item) => item.prompt)).toEqual(["a red square"])
+    }),
+  )
+
+  it.live("leaves the catalog when a rule denies opencode's action outright", () =>
+    Effect.gen(function* () {
+      yield* imageModel("test", "painter")
+      yield* setup()
+      expect(yield* until(true)).toBe(true)
+      const tools = yield* Tool.Service.use((registry) =>
+        registry.snapshot([{ action: "experimental_image_generate", resource: "*", effect: "deny" }]),
+      )
+      expect(codeModeListings(tools.codeModeCatalog!).map((tool) => tool.path)).not.toContain("image.generate")
     }),
   )
 })

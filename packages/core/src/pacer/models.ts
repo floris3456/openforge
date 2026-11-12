@@ -19,6 +19,18 @@ export interface Pacer {
   readonly compactTokens: ReadonlyArray<string>
   /** Whether the server has the web tools: `pacer.web_tools` names their list's path (`tools`). */
   readonly webTools: boolean
+  /** `pacer.memory`, when the server has memory in a version this one reads; absent otherwise. */
+  readonly memory?: Memory
+}
+
+/** The limits of the server's memory store (the memory API's capabilities). */
+export interface Memory {
+  readonly version: 1
+  readonly entryCharacters: number
+  readonly queryCharacters: number
+  readonly searchLimit: number
+  /** The embedding model the server asks for vectors; null when it searches by word only. */
+  readonly embedding: string | null
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -151,16 +163,30 @@ const Capable = Schema.Struct({
 /** One kind of login of a provider, with how many accounts the key has of it (capabilities' `providers[]`). */
 const Login = Schema.Struct({ provider: Schema.String, login: maybe(Schema.String), accounts: maybe(Schema.Number) })
 type Login = typeof Login.Type
-// `web_tools` is read on its own (`webTools`), so a block this version does not understand leaves the rest alone.
+// `web_tools` and `memory` are read on their own (`webTools`, `memory`), so a block this version does not understand
+// leaves the rest alone.
 const CapabilitiesAnswer = Schema.Struct({
   pacer: Schema.NullOr(
-    Schema.Struct({ compact_tokens: maybe(Schema.Array(Schema.String)), web_tools: Schema.optional(Schema.Unknown) }),
+    Schema.Struct({
+      compact_tokens: maybe(Schema.Array(Schema.String)),
+      web_tools: Schema.optional(Schema.Unknown),
+      memory: Schema.optional(Schema.Unknown),
+    }),
   ),
   providers: Items,
   models: Items,
 })
 const WebTools = Schema.Struct({ tools: Schema.String })
 const decodeWebTools = Schema.decodeUnknownOption(WebTools)
+const Limit = Schema.Int.check(Schema.isGreaterThan(0))
+const MemoryBlock = Schema.Struct({
+  version: Schema.Literal(1),
+  entry_characters: Limit,
+  query_characters: Limit,
+  search_limit: Limit,
+  embedding: Schema.NullOr(Schema.String),
+})
+const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
 const RatesAnswer = Schema.Struct({
   input: maybe(Schema.Number),
@@ -258,6 +284,18 @@ export const layer = Layer.effect(
         pacer && {
           compactTokens: pacer.compact_tokens ?? [],
           webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
+          ...Option.match(decodeMemory(pacer.memory), {
+            onNone: () => ({}),
+            onSome: (memory) => ({
+              memory: {
+                version: memory.version,
+                entryCharacters: memory.entry_characters,
+                queryCharacters: memory.query_characters,
+                searchLimit: memory.search_limit,
+                embedding: memory.embedding,
+              },
+            }),
+          }),
         },
         prices,
       )

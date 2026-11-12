@@ -9,9 +9,10 @@ import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import { ImageBank } from "../../image/bank.js"
 import { ImageFit } from "../../image/fit.js"
 
-// The image bank's tool (spec images): `image` lists a chat's images, shows one again whole, or zooms into a region of
-// its full-resolution original. Registered only while Settings › Session "Optimize images" is on; a Code Mode tool.
-// What it shows is an image arriving like any other: numbered with its line, counted toward the limits.
+// The image bank's tool (spec images): `image.show` lists a chat's images, shows one again whole, or zooms into a region
+// of its full-resolution original. Registered only while Settings › Session "Optimize images" is on; a Code Mode tool in
+// the `image` group, beside opencode's `image.generate` (spec image-tools). What it shows is an image arriving like any
+// other: numbered with its line, counted toward the limits.
 
 const Pixels = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -42,11 +43,14 @@ export const Input = Schema.Struct({
 // The catalog shows the first line; the zoom's limits are in its signature, where `zoom` is described.
 export const DESCRIPTION = [
   "See this chat's images again, zoom into them, or list them; each result says the scale it is shown at.",
-  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image({ id })` shows image `id` again, whole, such as after a compaction. `image({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image({})` lists the images.",
+  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image.show({ id })` shows image `id` again, whole, such as after a compaction. `image.show({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image.show({})` lists the images.",
 ].join("\n")
 
+/** The Code Mode group of the image tools: `image.show` here, `image.generate` in image-generate.ts. */
+export const GROUP = "image"
+
 const NOT_HERE =
-  "The image tool works only in chats whose model has optimized images (Settings › Session › Optimize images); this chat's model has none."
+  "image.show works only in chats whose model has optimized images (Settings › Session › Optimize images); this chat's model has none."
 
 export const Plugin = {
   id: "openforge.tool.image",
@@ -57,11 +61,16 @@ export const Plugin = {
 
     yield* ctx.tool
       .transform((editor) => {
+        editor.namespace({
+          name: GROUP,
+          description: "See this chat's images again and zoom into them, or make new ones.",
+        })
         if (!ImageBank.setting(loaded.entries)) return
         editor.add({
-          name: "image",
+          name: "show",
           description: DESCRIPTION,
           input: Input,
+          options: { namespace: GROUP },
           execute: (input) =>
             Effect.gen(function* () {
               const chat = yield* ImageBank.Current

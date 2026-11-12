@@ -14,6 +14,8 @@ const name = "CLIProxyPacer"
 // Claude speaks Anthropic Messages, every other model OpenAI Responses; both packages are HTTP only.
 const RESPONSES = "@opencode/ai/providers/openai-compatible-responses"
 const MESSAGES = "@opencode/ai/providers/anthropic-compatible"
+// A model that answers only images goes to CPP's /v1/images/generations and /v1/images/edits (spec image-tools).
+const IMAGES = "@opencode/ai/providers/openai-compatible/images"
 
 /**
  * CPP as a built-in provider. Its address and key come from PacerEndpoint alone, which reads global config and the
@@ -128,7 +130,8 @@ function models(catalog: PacerModels.Catalog | undefined, endpoint: PacerEndpoin
 }
 
 function info(model: PacerModels.Model, endpoint: PacerEndpoint.Endpoint): Model.Info[] {
-  if (model.output && !model.output.includes("text")) return []
+  if (model.output && !model.output.includes("text"))
+    return model.output.includes("image") ? [image(model, endpoint)] : []
   const claude = isClaude(model)
   const id = Model.ID.make(model.id)
   const defaults = Model.Capabilities.default()
@@ -152,6 +155,31 @@ function info(model: PacerModels.Model, endpoint: PacerEndpoint.Endpoint): Model
     limit: { context: model.context ?? 0, output: model.maxOutput ?? 0 },
   }
   return [{ ...base, variants: Variant.resolve({ ...base, package: claude ? MESSAGES : RESPONSES }, supports(model)) }]
+}
+
+/** A model CPP says answers images and no text: an image model, offered to image.generate, never as a chat's model. */
+function image(model: PacerModels.Model, endpoint: PacerEndpoint.Endpoint): Model.Info {
+  const id = Model.ID.make(model.id)
+  return {
+    id,
+    modelID: id,
+    providerID,
+    type: "image",
+    name: model.name ?? model.id,
+    package: IMAGES,
+    settings: pinned(endpoint, false),
+    capabilities: {
+      tools: false,
+      input: model.input ? [...model.input] : Model.Capabilities.default().input,
+      output: [...(model.output ?? [])],
+    },
+    variants: [],
+    time: { released: 0 },
+    cost: cost(model.price),
+    status: "active",
+    enabled: true,
+    limit: { context: model.context ?? 0, output: model.maxOutput ?? 0 },
+  }
 }
 
 /** As CPP and OpenCodePlus tell Claude apart: owned by Anthropic, or the ID's last segment starts with `claude-`. */

@@ -161,9 +161,11 @@ for providers, selection, rate limits, and disabling the tool.
 
 ### Image generate
 
-`experimental_image_generate` creates a new image from a prompt, or edits
-existing ones. It is experimental and appears while a connected provider has an
-image model. To choose its default model, see
+`image.generate` creates a new image from a prompt, or edits existing ones. It
+is a Code Mode tool in the `image` group, beside `image.show`
+([optimized images](/attachments#optimized-images)), and appears while a
+connected provider has an image model, whatever the chat's model. Agents call it
+only when the user asks for an image. To choose its default model, see
 [`experimental.image_generate`](/config#image-generation).
 
 ```text
@@ -172,9 +174,28 @@ Generate a flat app icon of a paper plane on a blue background and save it to as
 
 Give it a `prompt`, and optionally `images` to edit or use as references, a
 specific `model`, or a `path` to save to. It runs in the background and
-notifies the session with the saved path when the image is ready.
+notifies the session with the saved path when the image is ready; reading that
+file shows the image to the model.
 
-Permission: `experimental_image_generate` with the selected model as its resource.
+Permission: `experimental_image_generate` (the tool's earlier name, so rules
+written for it still apply) with the selected model as its resource.
+
+Through [CLIProxyPacer](/providers#cliproxypacer), a model it says answers only
+images is an image model here, sent to its `/v1/images/generations` and
+`/v1/images/edits`, and is not offered as a chat's model. Config can make one of
+its models an image model too:
+
+```jsonc
+{
+  "providers": {
+    "cliproxypacer": {
+      "models": {
+        "gpt-image-2": { "type": "image", "package": "@opencode/ai/providers/openai-compatible/images" },
+      },
+    },
+  },
+}
+```
 
 ## Interaction
 

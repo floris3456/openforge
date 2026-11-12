@@ -5,6 +5,9 @@ import { webToolPermission } from "../pacer/web-tools"
 
 type Dict = Record<string, unknown>
 
+/** The permission action of image.generate: opencode's tool name. */
+const IMAGE_GENERATE = "experimental_image_generate"
+
 export type PermissionPresentation = {
   icon: string
   title: string
@@ -136,6 +139,25 @@ export function permissionPresentation(
     }
   }
 
+  // image.generate asks under opencode's action name, kept so permission rules written for it still apply (spec
+  // image-tools); a Code Mode call's input is its program, so what it asks for is in the request's metadata.
+  if (action === IMAGE_GENERATE) {
+    const prompt = text(metadata.prompt)
+    const model = text(metadata.model) || resources[0] || ""
+    const images = Array.isArray(metadata.images) ? metadata.images.length : 0
+    const path = text(metadata.path)
+    return {
+      icon: "◇",
+      title: "Generate an image",
+      lines: [
+        ...(prompt ? [`Prompt: ${prompt}`] : []),
+        ...(model ? [`Model: ${model}`] : []),
+        ...(images ? [`From ${images === 1 ? "1 image" : `${images} images`}`] : []),
+        ...(path ? [`Saved to ${formatPath(path)}`] : []),
+      ],
+    }
+  }
+
   if (action === "doom_loop") {
     return {
       icon: "⟳",
@@ -162,7 +184,8 @@ function wildcardDirectory(value: string) {
 export function permissionAlwaysLines(input: { action: string; save?: ReadonlyArray<string> }): string[] {
   const save = input.save ?? []
   if (save.length === 1 && save[0] === "*") {
-    return [`This will always allow ${input.action} for this project.`]
+    const what = input.action === IMAGE_GENERATE ? "image generation" : input.action
+    return [`This will always allow ${what} for this project.`]
   }
   return ["This will always allow the following patterns for this project.", ...save.map((item) => `- ${item}`)]
 }

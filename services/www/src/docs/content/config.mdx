@@ -347,7 +347,7 @@ before they are sent to a model.
 ```
 
 `"optimize": true` (Settings › Session › Optimize images, off by default) fits images to models that have image limits
-on record, keeps the originals and gives the model the `image` tool; see
+on record, keeps the originals and gives the model the `image.show` tool; see
 [optimized images](/attachments#optimized-images). See the [attachments guide](/attachments) for image processing and
 limits.
 
@@ -723,7 +723,7 @@ automatic compaction doesn't pause the session. Defaults to `false`. See
 
 ### Image generation
 
-`image_generate` sets the default model for the [`experimental_image_generate`](/tools#image-generate) tool, as
+`image_generate` sets the default model for the [`image.generate`](/tools#image-generate) tool, as
 `providerID/modelID`, optionally with `#variant`. When that model isn't available or can't handle a request, OpenCode
 picks another image model automatically.
 

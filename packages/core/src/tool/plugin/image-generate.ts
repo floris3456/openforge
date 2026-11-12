@@ -35,8 +35,10 @@ const EXTENSIONS: Record<string, string> = {
   "image/gif": ".gif",
 }
 
+// openforge: a Code Mode tool, `image.generate` beside `image.show` (spec image-tools). Code Mode's catalog shows only
+// the first line, so it carries the rules the rest spells out.
 export const description = [
-  "Generates a new image, or edits existing ones.",
+  "Makes or edits one image, only when the user asks for it; runs in the background, the chat is told once it's saved.",
   "Only call this when the user asks you to create or edit an image. If you think an image would help but the user didn't ask for one, ask them first instead of generating it.",
   "Images you pass are used as the source to edit, or as references for style and subject.",
   "Each call makes one image. For several images, call it once per image.",
@@ -250,8 +252,9 @@ export const Plugin = {
       .transform((editor) => {
         if (!enabled || imageGenerate(loaded.entries) === false) return
         editor.add({
-          name,
-          options: { codemode: false },
+          name: "generate",
+          // The permission keeps opencode's tool name, so rules written for it still apply.
+          options: { namespace: "image", permission: name },
           description,
           input: Input,
           output: Output,

@@ -17,7 +17,7 @@ import { ImageTable } from "./sql.js"
 
 // A chat's image bank (spec images): while Settings › Session "Optimize images" is on and the chat's model has an entry
 // in `ImageFit.MODELS`, each image arriving in it is fitted to the model once, numbered with one line before it, and its
-// full-resolution original kept with the chat, for the `image` tool to show again or zoom into.
+// full-resolution original kept with the chat, for `image.show` to show again or zoom into.
 
 type DatabaseService = Database.Interface["db"]
 
@@ -36,7 +36,7 @@ export const applies = (config: Option.Option<Config.Interface>, model: Pick<Ses
 
 /**
  * The chat a tool runs for, set by its request when the chat gets optimized images: its images then arrive once,
- * whole, at the tool's result, and the `image` tool reads the chat's bank.
+ * whole, at the tool's result, and `image.show` reads the chat's bank.
  */
 export const Current = Context.Reference<
   { readonly db: DatabaseService; readonly sessionID: SessionSchema.ID; readonly model: ImageFit.Model } | undefined
@@ -140,7 +140,7 @@ const LINE_NUMBER = /\[Image (\d+): /g
 
 /**
  * A fork's bank: the parent's images its copied history names by their lines, under the same numbers, their originals
- * kept for the fork too, so `image({ id })` works there as in the parent. `copied` is the fork's copied rows' data.
+ * kept for the fork too, so `image.show({ id })` works there as in the parent. `copied` is the fork's copied rows' data.
  */
 export const fork = Effect.fnUntraced(function* (
   db: DatabaseService,

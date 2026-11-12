@@ -29,7 +29,7 @@ const NOT_SHOWN =
 const CARRIED =
   "[These images arrived while this chat was compacted; they were not in the summary and are shown here for the first time.]"
 const SUMMARY_IMAGES =
-  "The conversation's images are numbered, each with a line such as `[Image 7: photo.jpg, …]` before it. Under Important Context, list every image as `Image <number>: <one line on what it showed>`, keeping its number, so the next agent can see any of them again with the image tool."
+  "The conversation's images are numbered, each with a line such as `[Image 7: photo.jpg, …]` before it. Under Important Context, list every image as `Image <number>: <one line on what it showed>`, keeping its number, so the next agent can see any of them again with image.show."
 
 const isImage = (mime: string) => mime.toLowerCase().startsWith("image/")
 

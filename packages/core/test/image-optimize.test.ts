@@ -157,7 +157,7 @@ describe("conversion on arrival", () => {
 
   test("the line before an image", () => {
     expect(ImageBank.line(7, "photo.jpg", { width: 4000, height: 3000, shown: { width: 2212, height: 1659 } })).toBe(
-      "[Image 7: photo.jpg, 4000×3000, shown at 2212×1659; see it again or zoom with image]",
+      "[Image 7: photo.jpg, 4000×3000, shown at 2212×1659; see it again or zoom with image.show]",
     )
   })
 })
@@ -435,9 +435,9 @@ describe("arrival in a chat", () => {
       ])
       expect(content.map(textOf)).toEqual([
         "Read two images",
-        "[Image 1: photo.png, 4000×3000, shown at 2212×1659; see it again or zoom with image]",
+        "[Image 1: photo.png, 4000×3000, shown at 2212×1659; see it again or zoom with image.show]",
         "image/webp",
-        "[Image 2: image from read, 300×200, shown at 300×200; see it again or zoom with image]",
+        "[Image 2: image from read, 300×200, shown at 300×200; see it again with image.show]",
         expect.stringMatching(/^image\/(png|webp)$/),
       ])
       const blob = yield* db

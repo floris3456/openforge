@@ -257,11 +257,16 @@ export function Session(props: {
   const groupedKind = (kind: GroupKind) =>
     kind === "reasoning" ? thinkingMode() === "hide" : kind === "exploration" ? groupExploration() : true
 
-  Keymap.createLayer(() => ({
+  // openforge: the sidebar lies over a narrow window's chat, so Escape closes it first, also while the composer is open
+  // (always in a subagent's chat, where the composer's Escape leaves for the parent's chat).
+  const closeSidebar = (mode?: string) => () => ({
+    mode,
     priority: 10,
     enabled: () => props.sidebarVisible && dimensions().width - props.verticalTabsWidth <= 120 && !disabled(),
     commands: [{ bind: "escape,ctrl+c", title: "Close sidebar", group: "Session", run: props.onToggleSidebar }],
-  }))
+  })
+  Keymap.createLayer(closeSidebar())
+  Keymap.createLayer(closeSidebar("composer"))
   const contentWidth = createMemo(() => (props.width ?? dimensions().width - props.verticalTabsWidth) - 4)
   const models = createMemo(() => data.location.model.list(location()) ?? [])
 

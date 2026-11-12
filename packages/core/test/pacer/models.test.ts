@@ -369,45 +369,48 @@ describe("PacerModels", () => {
     }),
   )
 
-  it.live("says the server has memory, with its limits, while capabilities' pacer block holds memory of version 1", () =>
-    Effect.gen(function* () {
-      const told = (memory: unknown) =>
-        Effect.gen(function* () {
-          const server = yield* serve({
-            ...cpp(),
-            "/pacer/v1/capabilities": () => Response.json({ ...capabilities, pacer: { ...capabilities.pacer, memory } }),
+  it.live(
+    "says the server has memory, with its limits, while capabilities' pacer block holds memory of version 1",
+    () =>
+      Effect.gen(function* () {
+        const told = (memory: unknown) =>
+          Effect.gen(function* () {
+            const server = yield* serve({
+              ...cpp(),
+              "/pacer/v1/capabilities": () =>
+                Response.json({ ...capabilities, pacer: { ...capabilities.pacer, memory } }),
+            })
+            const { models } = yield* start(endpoint(server.origin))
+            return yield* until(models, loaded)
           })
-          const { models } = yield* start(endpoint(server.origin))
-          return yield* until(models, loaded)
+        const block = { version: 1, entry_characters: 800, query_characters: 2000, search_limit: 20 }
+        expect((yield* told({ ...block, embedding: "granite-embedding-english-r2" }))?.pacer).toEqual({
+          compactTokens: ["auto", "before-cold", "cold"],
+          webTools: false,
+          memory: {
+            version: 1,
+            entryCharacters: 800,
+            queryCharacters: 2000,
+            searchLimit: 20,
+            embedding: "granite-embedding-english-r2",
+          },
         })
-      const block = { version: 1, entry_characters: 800, query_characters: 2000, search_limit: 20 }
-      expect((yield* told({ ...block, embedding: "granite-embedding-english-r2" }))?.pacer).toEqual({
-        compactTokens: ["auto", "before-cold", "cold"],
-        webTools: false,
-        memory: {
-          version: 1,
-          entryCharacters: 800,
-          queryCharacters: 2000,
-          searchLimit: 20,
-          embedding: "granite-embedding-english-r2",
-        },
-      })
-      expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory?.embedding).toBeNull()
-      // Left out, or in a version or shape this one cannot read: no memory, and the rest stands.
-      for (const unread of [
-        undefined,
-        null,
-        { ...block, version: 2, embedding: null },
-        { ...block, embedding: 7 },
-        { ...block },
-        { ...block, search_limit: 0, embedding: null },
-        "yes",
-      ]) {
-        const catalog = yield* told(unread)
-        expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
-        expect(catalog?.models).toHaveLength(5)
-      }
-    }),
+        expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory?.embedding).toBeNull()
+        // Left out, or in a version or shape this one cannot read: no memory, and the rest stands.
+        for (const unread of [
+          undefined,
+          null,
+          { ...block, version: 2, embedding: null },
+          { ...block, embedding: 7 },
+          { ...block },
+          { ...block, search_limit: 0, embedding: null },
+          "yes",
+        ]) {
+          const catalog = yield* told(unread)
+          expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
+          expect(catalog?.models).toHaveLength(5)
+        }
+      }),
   )
 
   it.live("says per route whether CLIProxyPacer writes a model's summaries itself, as its server_writes decides", () =>

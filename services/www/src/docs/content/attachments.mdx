@@ -161,12 +161,15 @@ off by default), a chat whose model has image limits on record handles images it
   and 4,784 visual tokens, ⌈w/28⌉ × ⌈h/28⌉; never enlarged), as WebP at the highest quality within 120 Base64 bytes
   per visual token, or kept as it came when that is smaller. The same image always gives the same bytes.
 - **Numbered, original kept.** Each image gets a number in its chat and one line before it, such as
-  `[Image 7: photo.jpg, 4000×3000, shown at 2212×1659; see it again or zoom with image]`. Its full-resolution
-  original is kept with the chat.
-- **The `image` tool** (in Code Mode): `image({ id })` shows an image again, also after a compaction;
-  `image({ id, zoom: { x, y, width, height } })` cuts a region, in pixels of the image as shown, from the original and
-  shows it at its own resolution up to the model's limits; `image({})` lists the chat's images. Each result says the
-  scale it is shown at.
+  `[Image 7: photo.jpg, 4000×3000, shown at 2212×1659; see it again or zoom with image.show]`. An image shown at its
+  own size has nothing more to show in a zoom, so its line offers none:
+  `[Image 2: sun.png, 1200×750, shown at 1200×750; see it again with image.show]`. Its full-resolution original is
+  kept with the chat.
+- **`image.show`** (in Code Mode, in the `image` group beside [`image.generate`](/tools#image-generate)):
+  `image.show({ id })` shows an image again, also after a compaction;
+  `image.show({ id, zoom: { x, y, width, height } })` cuts a region, in pixels of the image as shown, from the
+  original and shows it at its own resolution up to the model's limits; `image.show({})` lists the chat's images.
+  Each result says the scale it is shown at.
 - **Never changed once sent.** Images are not cut or replaced in later requests, so the prompt cache keeps working.
   Each request carries at most 600 images and 120 MB of them. When what was sent leaves less room than one more
   full-size image, the chat says once: "The next image will compact this chat first." An image that would not fit

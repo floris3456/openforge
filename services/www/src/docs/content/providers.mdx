@@ -114,6 +114,8 @@ steps cost nothing unless CLIProxyPacer's answer says what they cost.
 
 - Claude models speak Anthropic Messages (`/v1/messages`); every other model speaks OpenAI Responses (`/v1/responses`).
 - Both go over HTTP, never a WebSocket.
+- A model CLIProxyPacer says answers only images is an image model, for [`image.generate`](/tools#image-generate),
+  sent to `/v1/images/generations` and `/v1/images/edits`; it is not in the model picker.
 - The list is read when the service connects and when CLIProxyPacer announces a change. Opening the model picker reads
   CLIProxyPacer's model list again.
 

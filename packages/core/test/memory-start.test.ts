@@ -201,7 +201,7 @@ const by = (role: string) => ({ role, chat: "ses_memory_preparing" })
 const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; readonly child?: boolean } = {}) {
   pacer.endpoint = endpointAt(server.origin)
   pacer.catalog = catalogOf(true)
-  server.control.answer = undefined
+  server.reset()
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
@@ -420,13 +420,13 @@ describe("MemoryStart through the runner", () => {
   it.effect("waits at most 2 seconds for the server, then the chat goes on with the one line", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const release = server.hold()
+      // Released however the test ends, so a failure here holds up no other test of the file's one server.
+      yield* Effect.acquireRelease(Effect.sync(server.hold), (release) => Effect.sync(release))
       const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
       yield* until("the start request arrived", () => h.starts().length === 1)
       expect(h.requests()).toHaveLength(0)
       yield* TestClock.adjust("2 seconds")
       yield* Fiber.join(run)
-      release()
       expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
     }),
   )

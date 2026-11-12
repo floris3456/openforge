@@ -48,6 +48,7 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
 export function startProxied() {
   const store = startMemoryServer({ keys: [{ key, label: person }] })
   const received: Received[] = []
+  const releases: Array<() => void> = []
   const control = {
     answer: undefined as ((request: Received) => Response | Promise<Response>) | undefined,
     held: undefined as Promise<void> | undefined,
@@ -73,10 +74,17 @@ export function startProxied() {
   const hold = () => {
     const gate = Promise.withResolvers<void>()
     control.held = gate.promise
-    return () => {
-      control.held = undefined
+    const release = () => {
+      if (control.held === gate.promise) control.held = undefined
       gate.resolve()
     }
+    releases.push(release)
+    return release
+  }
+  /** Lets every held answer go and forgets any stand-in, as a test that shares the server starts. */
+  const reset = () => {
+    releases.splice(0).forEach((release) => release())
+    control.answer = undefined
   }
   return {
     origin: `http://127.0.0.1:${proxy.port}`,
@@ -85,10 +93,11 @@ export function startProxied() {
     received,
     control,
     hold,
+    reset,
     /** The requests under `/pacer/v1/memory/`. */
     calls: () => received.filter((item) => item.path.startsWith("/pacer/v1/memory/")),
     stop: async () => {
-      control.held = undefined
+      reset()
       await proxy.stop(true)
       await store.stop()
     },

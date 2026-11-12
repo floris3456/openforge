@@ -1,20 +1,17 @@
 import type { Database } from "bun:sqlite"
 
 /**
- * How the small memory server matches, orders and cuts entries: the contract's "Search order", kept apart from the
+ * How the small memory server matches and orders entries: the contract's "Search order", kept apart from the
  * server so that it can change on its own. An entry matches when it holds one of the query's words; the order is BM25
- * over text and basis with equal weights, then the nearer scope, then the newer entry; an entry whose score is under
- * `CUT` of the best one's is left out. Reads the server's `entry` table and its FTS5 table `entry_fts`
- * (rowid = `entry.seq`), which holds live entries only.
+ * over text, basis and keys with equal weights, then the nearer scope, then the newer entry. The server cuts nothing:
+ * each entry carries its score for the client to judge. Reads the server's `entry` table and its FTS5 table
+ * `entry_fts` (rowid = `entry.seq`), which holds live entries only.
  */
 
 /** The FTS5 tokenizer of `entry_fts`. */
 export const tokenizer = "porter unicode61"
 
-/** A result is returned only when its BM25 score is at least this share of the best result's. */
-export const CUT = 0.6
-
-/** How many of the best matches are looked at before the query's own text and the cut take some out. */
+/** How many of the best matches are looked at before the query's own text takes some out. */
 export const CANDIDATES = 50
 
 export const STOP = new Set(
@@ -54,8 +51,9 @@ export function words(query: string) {
 export const plain = (text: string) => text.toLowerCase().split(/\s+/).filter(Boolean).join(" ")
 
 /**
- * The live entries of `project` within `scopes` that hold a word of `query`, best first: at most `limit`, none whose
- * text the query itself contains (the asker has it already), and none that scores under `CUT` of the best one left.
+ * The live entries of `project` within `scopes` that hold a word of `query`, best first, each with its `score` (the
+ * negated `bm25()`, above 0, higher is better): at most `limit`, none whose text the query itself contains (the asker
+ * has it already).
  */
 export function search<Row extends { readonly text: string | null }>(
   db: Database,
@@ -65,12 +63,12 @@ export function search<Row extends { readonly text: string | null }>(
   if (!list.length) return []
   const rows = db
     .query<Row & { score: number }, (string | number)[]>(
-      `select entry.*, bm25(entry_fts) as score from entry_fts join entry on entry.seq = entry_fts.rowid
+      `select entry.*, -bm25(entry_fts) as score from entry_fts join entry on entry.seq = entry_fts.rowid
        where entry_fts match ? and entry.project = ? and entry.superseded_by is null and entry.deleted is null
          and (? or (entry.scope = 'global' and ?)
            or (entry.scope = 'role' and entry.role in (select value from json_each(?)))
            or (entry.scope = 'task' and entry.task in (select value from json_each(?))))
-       order by score, case entry.scope when 'task' then 0 when 'role' then 1 else 2 end, entry.at desc, entry.seq desc
+       order by score desc, case entry.scope when 'task' then 0 when 'role' then 1 else 2 end, entry.at desc, entry.seq desc
        limit ?`,
     )
     .all(
@@ -83,7 +81,5 @@ export function search<Row extends { readonly text: string | null }>(
       CANDIDATES,
     )
   const asked = plain(input.query)
-  const kept = rows.filter((row) => !asked.includes(plain(row.text ?? "")))
-  // bm25() is negative and lower is better, so the best row is the first.
-  return kept.filter((row) => row.score <= kept[0]!.score * CUT).slice(0, input.limit)
+  return rows.filter((row) => !asked.includes(plain(row.text ?? ""))).slice(0, input.limit)
 }

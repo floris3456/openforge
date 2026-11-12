@@ -17,6 +17,7 @@ type Entry = {
   kind: string
   text: string | null
   basis: string | null
+  keys: string | null
   scope: string
   role: string | null
   task: string | null
@@ -28,11 +29,14 @@ type Entry = {
   deleted: null | { at: number; by: { person: string; role: string; chat: string }; reason: string }
 }
 
+/** An entry as `search` and `start` answer it. */
+type Found = Entry & { score: number }
+
 type Body = {
   entry: Entry
   existing?: boolean
   recall: string
-  entries: Entry[]
+  entries: Found[]
   task: null
   counts: { global: number; role: number; task: number }
   error: { type: string; message: string }
@@ -105,6 +109,8 @@ export function memoryContract(target: Target) {
   }
 
   const ids = (entries: Entry[]) => entries.map((entry) => entry.id).toSorted()
+  /** A written entry as a search answers it: the same, with a score. */
+  const scored = (entry: Entry) => ({ ...entry, score: expect.any(Number) })
   const expectInvalid = (answer: { status: number; body: Body }, field: string) => {
     expect(answer.status).toBe(400)
     expect(answer.body.error.type).toBe("invalid_request")
@@ -227,6 +233,7 @@ export function memoryContract(target: Target) {
         kind: "fact",
         text: "The workspace repository has no git remote.",
         basis: "git remote -v printed nothing",
+        keys: "",
         scope: "global",
         role: null,
         task: null,
@@ -322,6 +329,7 @@ export function memoryContract(target: Target) {
       text: (memory: ReturnType<typeof project>, char: string) => memory.fact(`Before${char}after.`),
       basis: (memory: ReturnType<typeof project>, char: string) =>
         memory.fact("A fact.", { basis: `seen${char}there` }),
+      keys: (memory: ReturnType<typeof project>, char: string) => memory.fact("A fact.", { keys: `seen${char}there` }),
       "by.role": (memory: ReturnType<typeof project>, char: string) =>
         memory.fact("A fact.", { by: { role: `bu${char}ild`, chat: "ses_c" } }),
     }
@@ -489,6 +497,7 @@ export function memoryContract(target: Target) {
         ...entry,
         text: null,
         basis: null,
+        keys: null,
         deleted: {
           at: deleted.at,
           by: { person: target.person, role: "general", chat: "ses_f" },
@@ -584,8 +593,8 @@ export function memoryContract(target: Target) {
       await memory.fact("Another entry without the words.")
       const byText = await memory.search({ query: `where is ${inText}`, scopes: "all" })
       expect(byText.status).toBe(200)
-      expect(byText.body.entries).toEqual([entry])
-      expect((await memory.search({ query: inBasis, scopes: "all" })).body.entries).toEqual([entry])
+      expect(byText.body.entries).toEqual([scored(entry)])
+      expect((await memory.search({ query: inBasis, scopes: "all" })).body.entries).toEqual([scored(entry)])
     })
 
     test("a replaced and a deleted entry are never returned, the replacement is", async () => {
@@ -684,16 +693,20 @@ export function memoryContract(target: Target) {
       expect(answer.body.recall).toMatch(ID)
     })
 
-    test("more of the query's words come first, and an entry far under the best one is cut", async () => {
+    test("more of the query's words come first, with scores above 0 that fall along the list", async () => {
       const memory = project("rank")
       // Each word is in one entry only, and ten other entries keep the word statistics away from a tiny store's.
       const terms = Array.from({ length: 8 }, word)
       for (const index of Array.from({ length: 10 }, (_, index) => index)) await memory.fact(`Other entry ${index}.`)
       const four = (await memory.fact(`${terms.slice(0, 4).join(" ")}.`)).body.entry
       const three = (await memory.fact(`${terms.slice(4, 7).join(" ")} plain.`)).body.entry
-      await memory.fact(`${terms[7]} plain text here.`)
+      const one = (await memory.fact(`${terms[7]} plain text here.`)).body.entry
       const answer = await memory.search({ query: terms.join(" "), scopes: "all", limit: 20 })
-      expect(answer.body.entries.map((entry) => entry.id)).toEqual([four.id, three.id])
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([four.id, three.id, one.id])
+      const scores = answer.body.entries.map((entry) => entry.score)
+      expect(scores[2]).toBeGreaterThan(0)
+      expect(scores[1]).toBeGreaterThan(scores[2])
+      expect(scores[0]).toBeGreaterThan(scores[1])
     })
 
     test("with equal scores the nearer scope comes first, then the newer entry", async () => {
@@ -715,13 +728,13 @@ export function memoryContract(target: Target) {
       expect(dated.body.entries.map((entry) => entry.id)).toEqual([newer.id, older.id])
     })
 
-    test("an entry whose text the query contains is left out, and the cut starts from the best one left", async () => {
+    test("an entry whose text the query contains is left out", async () => {
       const memory = project("contained")
       const term = word()
       const quoted = (await memory.fact(`Remember ${term} for later.`)).body.entry
       const other = (await memory.fact(`${term} matters here.`)).body.entry
       const alone = await memory.search({ query: `remember ${term} later`, scopes: "all" })
-      expect(alone.body.entries.map((entry) => entry.id)).toEqual([quoted.id])
+      expect(alone.body.entries.map((entry) => entry.id)).toEqual([quoted.id, other.id])
       const answer = await memory.search({ query: `Please note: REMEMBER   ${term} for later. Thanks`, scopes: "all" })
       expect(answer.body.entries.map((entry) => entry.id)).toEqual([other.id])
     })
@@ -731,7 +744,7 @@ export function memoryContract(target: Target) {
       const term = word()
       const entry = (await memory.fact(`The check of ${term} took long.`)).body.entry
       const answer = await memory.search({ query: `${term}'s`, scopes: "all" })
-      expect(answer.body.entries).toEqual([entry])
+      expect(answer.body.entries).toEqual([scored(entry)])
     })
 
     test("every search answers a new recall id", async () => {
@@ -759,6 +772,24 @@ export function memoryContract(target: Target) {
       expect(start.body.task).toBeNull()
       expect(start.body.recall).toMatch(ID)
       expect(start.body.recall).not.toBe(search.body.recall)
+    })
+
+    test("limit defaults to 5 and 20 is accepted; 0 and 21 are 400; entries equal search's with the same limit", async () => {
+      const memory = project("start-limit")
+      const term = word()
+      for (const index of Array.from({ length: 22 }, (_, index) => index))
+        await memory.fact(`Entry ${index} holds ${term}${" again".repeat(index % 4)}.`)
+      expect((await memory.start({ prompt: term, scopes: "all" })).body.entries.length).toBe(5)
+      const start = await memory.start({ prompt: term, scopes: "all", limit: 20 })
+      expect(start.status).toBe(200)
+      expect(start.body.entries.length).toBe(20)
+      expect(start.body.entries).toEqual((await memory.search({ query: term, scopes: "all", limit: 20 })).body.entries)
+      const three = await memory.start({ prompt: `${term} again`, scopes: "all", limit: 3 })
+      expect(three.body.entries).toEqual(
+        (await memory.search({ query: `${term} again`, scopes: "all", limit: 3 })).body.entries,
+      )
+      expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: 0 }), "limit")
+      expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: 21 }), "limit")
     })
 
     test("counts count live entries of global, of the listed roles and of the listed tasks", async () => {
@@ -790,6 +821,110 @@ export function memoryContract(target: Target) {
     })
   })
 
+  describe("keys", () => {
+    test("keys are written and read back", async () => {
+      const memory = project("keys")
+      const written = await memory.fact("The meter table.", { keys: "pings duration_minutes billing" })
+      expect(written.status).toBe(201)
+      expect(written.body.entry.keys).toBe("pings duration_minutes billing")
+      expect((await memory.read(written.body.entry.id)).body.entry).toEqual(written.body.entry)
+    })
+
+    test("absent keys are empty", async () => {
+      const answer = await project("keys").fact("No keys.")
+      expect(answer.status).toBe(201)
+      expect(answer.body.entry.keys).toBe("")
+    })
+
+    test("keys are stored trimmed", async () => {
+      expect((await project("keys").fact("Trimmed keys.", { keys: "  one two  " })).body.entry.keys).toBe("one two")
+    })
+
+    test("600 code points of keys are accepted, 601 refused, one outside the BMP counting as one", async () => {
+      const memory = project("keys")
+      const exact = await memory.fact("Long keys.", { keys: "😀".repeat(300) + "k".repeat(300) })
+      expect(exact.status).toBe(201)
+      expectInvalid(await memory.fact("Too long keys.", { keys: "😀".repeat(300) + "k".repeat(301) }), "keys")
+    })
+
+    test("keys do not count towards the 800 characters of text and basis", async () => {
+      const answer = await project("keys").fact("t".repeat(400), { basis: "b".repeat(400), keys: "k".repeat(600) })
+      expect(answer.status).toBe(201)
+    })
+
+    test("an entry is found by a word only its keys hold", async () => {
+      const memory = project("keys")
+      const term = word()
+      const entry = (await memory.fact("The meter table.", { keys: `meters ${term}` })).body.entry
+      await memory.fact("Another entry.")
+      expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([scored(entry)])
+    })
+
+    test("the same text with other keys is an exact copy and the first entry's keys stay", async () => {
+      const memory = project("keys")
+      const first = (await memory.fact("Same text, other keys.", { keys: "first keys" })).body.entry
+      const again = await memory.fact("Same text, other keys.", { keys: "second keys" })
+      expect(again.status).toBe(200)
+      expect(JSON.parse(again.text)).toEqual({ entry: first, existing: true })
+      expect((await memory.read(first.id)).body.entry.keys).toBe("first keys")
+    })
+
+    test("a replacement's keys are its own", async () => {
+      const memory = project("keys")
+      const term = word()
+      const one = (await memory.fact("Version one.", { keys: `old ${term}` })).body.entry
+      const two = await memory.fact("Version two.", { supersedes: one.id })
+      expect(two.body.entry.keys).toBe("")
+      const three = await memory.fact("Version three.", { supersedes: two.body.entry.id, keys: "new keys" })
+      expect(three.body.entry.keys).toBe("new keys")
+      expect((await memory.read(one.id)).body.entry.keys).toBe(`old ${term}`)
+      expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([])
+    })
+
+    test("after forget keys are null and a word of the old keys finds nothing", async () => {
+      const memory = project("keys")
+      const term = word()
+      const entry = (await memory.fact("Forget my keys.", { keys: `secret ${term}` })).body.entry
+      expect((await memory.forget(entry.id)).body.entry.keys).toBeNull()
+      expect((await memory.read(entry.id)).body.entry.keys).toBeNull()
+      expect((await memory.search({ query: term, scopes: "all" })).body.entries).toEqual([])
+    })
+
+    test("the export has keys, null for a deleted entry", async () => {
+      const memory = project("keys")
+      const kept = (await memory.fact("Kept.", { keys: "kept keys" })).body.entry
+      const gone = (await memory.fact("Gone.", { keys: "gone keys" })).body.entry
+      await memory.forget(gone.id)
+      expect((await memory.export()).lines.map((line) => [line.id, line.keys])).toEqual([
+        [kept.id, "kept keys"],
+        [gone.id, null],
+      ])
+    })
+  })
+
+  describe("score", () => {
+    test("every entry of search and start has a score above 0", async () => {
+      const memory = project("score")
+      const term = word()
+      for (const index of Array.from({ length: 4 }, (_, index) => index))
+        await memory.fact(`Scored ${index} ${term}${" twice".repeat(index)}.`)
+      const search = await memory.search({ query: `${term} twice`, scopes: "all" })
+      const start = await memory.start({ prompt: `${term} twice`, scopes: "all" })
+      expect(search.body.entries.length).toBe(4)
+      expect(start.body.entries.length).toBe(4)
+      ;[...search.body.entries, ...start.body.entries].forEach((entry) => expect(entry.score).toBeGreaterThan(0))
+    })
+
+    test("a written, read, forgotten and exported entry has no score", async () => {
+      const memory = project("score")
+      const written = (await memory.fact("No score here.")).body.entry
+      const read = (await memory.read(written.id)).body.entry
+      const forgotten = (await memory.forget(written.id)).body.entry
+      const exported = (await memory.export()).lines[0]
+      ;[written, read, forgotten, exported].forEach((entry) => expect(entry).not.toHaveProperty("score"))
+    })
+  })
+
   test("export: one line per entry in the order stored, replaced entries in full, deleted ones without text", async () => {
     const memory = project("export")
     const one = (await memory.fact("Export one.")).body.entry
@@ -803,7 +938,7 @@ export function memoryContract(target: Target) {
     expect(answer.lines.map((line) => line.id)).toEqual([one.id, two.id, three.id])
     expect(answer.lines[0]).toEqual({ type: "entry", ...one, superseded_by: three.id })
     expect(answer.lines[1]).toEqual({ type: "entry", ...(await memory.read(two.id)).body.entry })
-    expect(answer.lines[1]).toMatchObject({ text: null, basis: null })
+    expect(answer.lines[1]).toMatchObject({ text: null, basis: null, keys: null })
     expect(answer.lines[2]).toEqual({ type: "entry", ...three })
   })
 
@@ -830,7 +965,9 @@ export function memoryContract(target: Target) {
     const answer = await send("GET", "/pacer/v1/capabilities")
     expect(answer.status).toBe(200)
     expect(answer.body).toMatchObject({
-      pacer: { memory: { version: 1, entry_characters: 800, query_characters: 2000, search_limit: 20 } },
+      pacer: {
+        memory: { version: 1, entry_characters: 800, keys_characters: 600, query_characters: 2000, search_limit: 20 },
+      },
     })
   })
 

@@ -11,7 +11,13 @@ import { search, tokenizer, type Scopes } from "./memory-search"
  * As a script: `bun memory-server.ts --port <n> --key <key>[=<label>] [--key …] [--file <path>]`.
  */
 
-export const capabilities = { version: 1, entry_characters: 800, query_characters: 2000, search_limit: 20 }
+export const capabilities = {
+  version: 1,
+  entry_characters: 800,
+  keys_characters: 600,
+  query_characters: 2000,
+  search_limit: 20,
+}
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 const BODY_BYTES = 64 * 1024
@@ -53,6 +59,7 @@ const SCHEMA = [
     kind text not null,
     text text,
     basis text,
+    keys text,
     scope text not null,
     role text,
     task text,
@@ -64,7 +71,7 @@ const SCHEMA = [
     deleted text
   )`,
   `create index if not exists entry_project on entry (project, scope, role, task)`,
-  `create virtual table if not exists entry_fts using fts5(text, basis, tokenize="${tokenizer}")`,
+  `create virtual table if not exists entry_fts using fts5(text, basis, keys, tokenize="${tokenizer}")`,
   `create table if not exists recall (
     id text primary key,
     project text not null,
@@ -84,6 +91,7 @@ type Row = {
   kind: string
   text: string | null
   basis: string | null
+  keys: string | null
   scope: string
   role: string | null
   task: string | null
@@ -190,6 +198,9 @@ function storeOf(db: Database) {
         refuse(
           `text: text and basis together have ${[...text].length + [...basis].length} characters, more than ${capabilities.entry_characters}`,
         )
+      const keys = body.keys === undefined || body.keys === null ? "" : visible(body.keys, "keys").trim()
+      if ([...keys].length > capabilities.keys_characters)
+        refuse(`keys: ${[...keys].length} characters, more than ${capabilities.keys_characters}`)
       const by = { person, ...byOf(body.by) }
       const supersedes = body.supersedes === undefined || body.supersedes === null ? null : body.supersedes
       if (supersedes !== null && typeof supersedes !== "string") refuse("supersedes: must be an entry id or null")
@@ -218,8 +229,8 @@ function storeOf(db: Database) {
           if (replaced?.deleted) refuse(`supersedes: entry ${replaced.id} is deleted`, 409, "conflict")
           const row = db
             .query<Row, (string | number | null)[]>(
-              `insert into entry (id, project, kind, text, basis, scope, role, task, subtask, by, at, supersedes)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning *`,
+              `insert into entry (id, project, kind, text, basis, keys, scope, role, task, subtask, by, at, supersedes)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) returning *`,
             )
             .get(
               newID(),
@@ -227,6 +238,7 @@ function storeOf(db: Database) {
               kind,
               text,
               basis,
+              keys,
               target.scope,
               target.role,
               target.task,
@@ -235,7 +247,7 @@ function storeOf(db: Database) {
               Date.now(),
               supersedes,
             )!
-          db.run("insert into entry_fts (rowid, text, basis) values (?, ?, ?)", [row.seq, text, basis])
+          db.run("insert into entry_fts (rowid, text, basis, keys) values (?, ?, ?, ?)", [row.seq, text, basis, keys])
           if (replaced) {
             db.run("update entry set superseded_by = ? where seq = ?", [row.id, replaced.seq])
             db.run("delete from entry_fts where rowid = ?", [replaced.seq])
@@ -261,13 +273,13 @@ function storeOf(db: Database) {
           if (!row) refuse(`no entry ${id} in this project`, 404, "not_found")
           if (row.deleted) return Response.json({ entry: entryOf(row) })
           const deleted = { at: Date.now(), by: { person, role: by.role, chat: by.chat }, reason }
-          db.run("update entry set text = null, basis = null, deleted = ? where seq = ?", [
+          db.run("update entry set text = null, basis = null, keys = null, deleted = ? where seq = ?", [
             JSON.stringify(deleted),
             row.seq,
           ])
           db.run("delete from entry_fts where rowid = ?", [row.seq])
           return Response.json({
-            entry: entryOf({ ...row, text: null, basis: null, deleted: JSON.stringify(deleted) }),
+            entry: entryOf({ ...row, text: null, basis: null, keys: null, deleted: JSON.stringify(deleted) }),
           })
         })
         .immediate()
@@ -276,21 +288,20 @@ function storeOf(db: Database) {
     search(project: string, body: Fields, person: string) {
       const query = queryOf(body.query, "query")
       const scopes = scopesOf(body.scopes)
-      const limit = body.limit === undefined ? 5 : body.limit
-      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > capabilities.search_limit)
-        refuse(`limit: must be a whole number from 1 to ${capabilities.search_limit}`)
+      const limit = limitOf(body.limit)
       const by = { person, ...byOf(body.by) }
-      const entries = search<Row>(db, { project, query, scopes, limit }).map(entryOf)
+      const entries = found(project, query, scopes, limit)
       return Response.json({ recall: logged(project, query, scopes, entries, by), entries })
     },
 
     start(project: string, body: Fields, person: string) {
       const prompt = queryOf(body.prompt, "prompt")
       const scopes = scopesOf(body.scopes)
+      const limit = limitOf(body.limit)
       if (body.task !== undefined && body.task !== null && typeof body.task !== "string")
         refuse("task: must be a task id or null")
       const by = { person, ...byOf(body.by) }
-      const entries = search<Row>(db, { project, query: prompt, scopes, limit: 5 }).map(entryOf)
+      const entries = found(project, prompt, scopes, limit)
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
       const count = (scope: string, list: string[] | "all") =>
         db
@@ -320,6 +331,11 @@ function storeOf(db: Database) {
     },
   }
 
+  /** The entries of a search, each with its score; only `search` and `start` answer one. */
+  function found(project: string, query: string, scopes: Scopes, limit: number) {
+    return search<Row>(db, { project, query, scopes, limit }).map((row) => ({ ...entryOf(row), score: row.score }))
+  }
+
   function logged(project: string, query: string, scopes: Scopes, entries: { id: string }[], by: { person: string }) {
     const id = newID()
     db.run("insert into recall (id, project, query, scopes, entries, by, at) values (?, ?, ?, ?, ?, ?, ?)", [
@@ -341,6 +357,7 @@ function entryOf(row: Row) {
     kind: row.kind,
     text: row.text,
     basis: row.basis,
+    keys: row.keys,
     scope: row.scope,
     role: row.role,
     task: row.task,
@@ -383,6 +400,13 @@ function queryOf(value: unknown, field: string) {
   if (typeof value !== "string") refuse(`${field}: must be a string`)
   if (!value || [...value].length > capabilities.query_characters)
     refuse(`${field}: must be 1 to ${capabilities.query_characters} characters`)
+  return value
+}
+
+function limitOf(value: unknown) {
+  if (value === undefined) return 5
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > capabilities.search_limit)
+    refuse(`limit: must be a whole number from 1 to ${capabilities.search_limit}`)
   return value
 }
 

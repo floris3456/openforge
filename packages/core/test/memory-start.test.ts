@@ -30,6 +30,7 @@ import { ReferenceInstructions } from "@opencode/core/reference/instructions"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
+import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
@@ -268,6 +269,22 @@ const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; rea
             ),
           ),
         ),
+    /** The ids of the start blocks the chat holds, in order. */
+    blockIDs: () =>
+      session
+        .messages({ sessionID, order: "asc" })
+        .pipe(
+          Effect.map((messages) =>
+            messages.flatMap((message) =>
+              message.type === "synthetic" && message.metadata?.memory !== undefined ? [message.id] : [],
+            ),
+          ),
+        ),
+    /** Takes the chat back to before `messageID`, as the revert a person commits does. */
+    revert: (messageID: SessionMessage.ID) =>
+      session.revert
+        .stage({ sessionID, messageID, files: false })
+        .pipe(Effect.andThen(session.revert.commit(sessionID)), Effect.orDie),
     starts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/start`),
   }
 })
@@ -391,6 +408,52 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[1]).toContain(quokka.id)
       const last = userTexts(h.requests().at(-1))
       expect(last.filter((text) => text.startsWith("Memory:"))).toEqual([blocks[1]])
+    }),
+  )
+
+  it.live("is built again after a revert took it out, from the newest prompt in the chat", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const zebra = yield* h.write({
+        kind: "verified",
+        text: "Zebra deploys run at noon.",
+        basis: "cron",
+        scope: "global",
+      })
+      const walrus = yield* h.write({ kind: "verified", text: "Walrus lint is strict.", basis: "ran", scope: "global" })
+      yield* h.prompt("zebra deploys?")
+      yield* h.prompt("and on fridays?")
+      const [first] = yield* h.blockIDs()
+      expect(first).toBeDefined()
+      // Back to before the block: the first prompt stays, the block and all after it go.
+      yield* h.revert(first!)
+      expect(yield* h.blocks()).toEqual([])
+      yield* h.prompt("walrus lint?")
+
+      expect(h.starts().map((call) => (call.body as { prompt: string }).prompt)).toEqual([
+        "zebra deploys?",
+        "walrus lint?",
+      ])
+      const blocks = yield* h.blocks()
+      expect(blocks).toHaveLength(1)
+      expect(blocks[0]).toContain(walrus.id)
+      expect(blocks[0]).not.toContain(zebra.id)
+      const last = userTexts(h.requests().at(-1))
+      expect(last).toEqual(["zebra deploys?", "walrus lint?", blocks[0]])
+    }),
+  )
+
+  it.live("gives the one line when the server fails after a revert took the old block with it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
+      yield* h.prompt("zebra deploys?")
+      const [first] = yield* h.blockIDs()
+      yield* h.revert(first!)
+      server.control.answer = () => new Response("bad gateway", { status: 502 })
+      yield* h.prompt("walrus lint?")
+      expect(yield* h.blocks()).toEqual([MemoryText.unavailable])
+      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(MemoryText.unavailable)
     }),
   )
 

@@ -77,7 +77,8 @@ const layer = Layer.effect(
           })),
           Effect.catch((error) =>
             Effect.logWarning("memory's start block could not be read", { reason: error.message }).pipe(
-              // A chat that had a block before keeps it.
+              // A chat that had a block before keeps it: after a compaction its message is still stored. A revert deletes
+              // the messages it takes back, the block among them, so a failure right after one gives the one line.
               Effect.as({
                 text: last?.text ?? MemoryText.unavailable,
                 description: last ? "Memory as before" : "Memory unavailable",

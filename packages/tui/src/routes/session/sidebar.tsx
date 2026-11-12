@@ -12,6 +12,7 @@ import "../../component/title-shimmer"
 import { getScrollAcceleration } from "../../util/scroll"
 import { SESSION_SIDEBAR_WIDTH } from "../../ui/layout"
 import { PacerUsage } from "../../pacer/usage"
+import { sidebarModel } from "./sidebar-model"
 
 export function Sidebar(props: { sessionID: string }) {
   const data = useData()
@@ -20,11 +21,12 @@ export function Sidebar(props: { sessionID: string }) {
   const config = useConfig().data
   const session = createMemo(() => data.session.get(props.sessionID))
   const scrollAcceleration = createMemo(() => getScrollAcceleration(config))
-  // The model picked for the chat now, as the prompt shows it: the Usage section follows it before it is sent. The
-  // chat's own while the prompt has none (its agents not loaded yet).
   const pacerModel = () => {
-    const picked = local.model.current()
-    const model = picked ? { providerID: picked.providerID, id: picked.modelID } : session()?.model
+    const model = sidebarModel({
+      session: session(),
+      messages: data.session.message.list(props.sessionID),
+      picked: local.model.current(),
+    })
     return model?.providerID === PACER_PROVIDER ? model.id : undefined
   }
 

@@ -107,6 +107,19 @@ describe("ConfigNormalize", () => {
     expect(result.agents?.reviewer?.system).toBe("Use V2")
   })
 
+  test("keeps memory.project, drops a key memory does not name, and drops a project the memory API refuses", () => {
+    const result = normalized({ memory: { project: "OpenForge.workspace_1-a", tasks: true } })
+    expect(result.diagnostics).toEqual([])
+    expect(result.encoded.memory).toEqual({ project: "OpenForge.workspace_1-a" })
+    expect(decoded({ memory: { project: "x".repeat(128) } }).memory?.project).toBe("x".repeat(128))
+    for (const project of ["", "x".repeat(129), "open forge", "a/b", "é", 7]) {
+      const refused = normalized({ memory: { project }, snapshots: false })
+      expect(refused.encoded.memory).toBeUndefined()
+      expect(refused.encoded.snapshots).toBe(false)
+      expect(refused.diagnostics.map((diagnostic) => diagnostic.path)).toEqual([["memory"]])
+    }
+  })
+
   test("canonicalizes transformed native values through decode then encode", () => {
     const result = normalized({ warming: { interval: "4 minutes", duration: "30 minutes" } })
     expect(result.encoded.warming).toEqual({ interval: "240000 millis", duration: "1800000 millis" })

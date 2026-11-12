@@ -12,6 +12,7 @@ import { ConfigExperimental } from "./config/experimental.js"
 import { ConfigFormatter } from "./config/formatter.js"
 import { ConfigLSP } from "./config/lsp.js"
 import { ConfigMCP } from "./config/mcp.js"
+import { ConfigMemory } from "./config/memory.js"
 import { ConfigModel } from "./config/model.js"
 import { ConfigPlugin } from "./config/plugin.js"
 import { ConfigPolicy } from "./config/policy.js"
@@ -88,6 +89,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   }),
   mcp: ConfigMCP.Info.pipe(optional).annotate({
     description: "MCP server configuration",
+  }),
+  memory: ConfigMemory.Info.pipe(optional).annotate({
+    description: "The shared memory CLIProxyPacer keeps for agents and people",
   }),
   compaction: ConfigCompaction.Info.pipe(optional).annotate({
     description: "Conversation compaction behavior",

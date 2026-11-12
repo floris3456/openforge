@@ -2784,6 +2784,7 @@ export type ConfigEntry =
                 }
           }
         }
+        memory?: { project?: string }
         compaction?: { auto?: boolean; keep?: { tokens?: number }; buffer?: ConfigCompactionPercent | number }
         skills?: Array<string>
         commands?: {

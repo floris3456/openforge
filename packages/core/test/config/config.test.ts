@@ -1793,6 +1793,7 @@ describe("Config", () => {
                   image: { auto_resize: false, max_width: 1200, max_height: 900, max_base64_bytes: 1048576 },
                 },
                 tool_output: { max_lines: 1000, max_bytes: 32768 },
+                memory: { project: "openforge-workspace" },
                 mcp: {
                   timeout: { startup: 5000, catalog: 60000, execution: 43200000 },
                   servers: {
@@ -1878,6 +1879,7 @@ describe("Config", () => {
               image: { auto_resize: false, max_width: 1200, max_height: 900, max_base64_bytes: 1048576 },
             })
             expect(documents[0]?.info.tool_output).toEqual({ max_lines: 1000, max_bytes: 32768 })
+            expect(documents[0]?.info.memory).toEqual({ project: "openforge-workspace" })
             expect(documents[0]?.info.mcp).toEqual({
               timeout: { startup: 5000, catalog: 60000, execution: 43200000 },
               servers: {

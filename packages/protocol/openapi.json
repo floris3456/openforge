@@ -18894,6 +18894,17 @@
             },
             "additionalProperties": false
           },
+          "memory": {
+            "type": "object",
+            "properties": {
+              "project": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "1 to 128 characters of A-Z a-z 0-9 . _ -"
+              }
+            },
+            "additionalProperties": false
+          },
           "compaction": {
             "type": "object",
             "properties": {

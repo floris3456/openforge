@@ -54,6 +54,7 @@ import { KV } from "../kv.js"
 import { Location } from "../location.js"
 import { ModelsDev } from "../models-dev.js"
 import { Mcp } from "../mcp/index.js"
+import { MemoryClient } from "../memory/client.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerModels } from "../pacer/models.js"
@@ -81,6 +82,7 @@ import { GrepTool } from "../tool/plugin/grep.js"
 import { ImageGenerateTool } from "../tool/plugin/image-generate.js"
 import { ImageTool } from "../tool/plugin/image.js"
 import { McpResourceTools } from "../tool/plugin/mcp-resource.js"
+import { MemoryTools } from "../tool/plugin/memory.js"
 import { OpenCodeTools } from "../tool/plugin/opencode.js"
 import { PacerWebTools } from "../tool/plugin/pacer-web.js"
 import { QuestionTool } from "../tool/plugin/question.js"
@@ -148,6 +150,7 @@ const services = [
   Location.Service,
   ModelsDev.Service,
   Mcp.Service,
+  MemoryClient.Service,
   Npm.Service,
   PacerEndpoint.Service,
   PacerModels.Service,
@@ -208,6 +211,7 @@ export const requirements = LayerNode.group([
   Location.node,
   ModelsDev.node,
   Mcp.node,
+  MemoryClient.node,
   Npm.node,
   PacerEndpoint.node,
   PacerModels.node,
@@ -278,6 +282,7 @@ const pre = [
   WebFetchTool.Plugin,
   WebSearchTool.Plugin,
   PacerWebTools.Plugin,
+  MemoryTools.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]

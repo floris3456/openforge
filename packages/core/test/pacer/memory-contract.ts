@@ -715,6 +715,17 @@ export function memoryContract(target: Target) {
       expect(dated.body.entries.map((entry) => entry.id)).toEqual([newer.id, older.id])
     })
 
+    test("an entry whose text the query contains is left out, and the cut starts from the best one left", async () => {
+      const memory = project("contained")
+      const term = word()
+      const quoted = (await memory.fact(`Remember ${term} for later.`)).body.entry
+      const other = (await memory.fact(`${term} matters here.`)).body.entry
+      const alone = await memory.search({ query: `remember ${term} later`, scopes: "all" })
+      expect(alone.body.entries.map((entry) => entry.id)).toEqual([quoted.id])
+      const answer = await memory.search({ query: `Please note: REMEMBER   ${term} for later. Thanks`, scopes: "all" })
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([other.id])
+    })
+
     test("a word with 's finds the word", async () => {
       const memory = project("possessive")
       const term = word()

@@ -14,6 +14,9 @@ export const tokenizer = "porter unicode61"
 /** A result is returned only when its BM25 score is at least this share of the best result's. */
 export const CUT = 0.6
 
+/** How many of the best matches are looked at before the query's own text and the cut take some out. */
+export const CANDIDATES = 50
+
 export const STOP = new Set(
   `a an and are as at be been but by can could did do does doing done for from had has have having he her here him his
 how i if in into is it its just me my no nor not of on or our out over own she so some such than that the their them
@@ -47,11 +50,14 @@ export function words(query: string) {
   ]
 }
 
+/** A text as it is compared with a query: lowercased, every run of white space one space. */
+export const plain = (text: string) => text.toLowerCase().split(/\s+/).filter(Boolean).join(" ")
+
 /**
- * The live entries of `project` within `scopes` that hold a word of `query`, best first: at most `limit`, and none
- * that scores under `CUT` of the best one.
+ * The live entries of `project` within `scopes` that hold a word of `query`, best first: at most `limit`, none whose
+ * text the query itself contains (the asker has it already), and none that scores under `CUT` of the best one left.
  */
-export function search<Row>(
+export function search<Row extends { readonly text: string | null }>(
   db: Database,
   input: { readonly project: string; readonly query: string; readonly scopes: Scopes; readonly limit: number },
 ) {
@@ -74,8 +80,10 @@ export function search<Row>(
       input.scopes !== "all" && input.scopes.global ? 1 : 0,
       JSON.stringify(input.scopes === "all" ? [] : input.scopes.roles),
       JSON.stringify(input.scopes === "all" ? [] : input.scopes.tasks),
-      input.limit,
+      CANDIDATES,
     )
+  const asked = plain(input.query)
+  const kept = rows.filter((row) => !asked.includes(plain(row.text ?? "")))
   // bm25() is negative and lower is better, so the best row is the first.
-  return rows.filter((row) => row.score <= rows[0]!.score * CUT)
+  return kept.filter((row) => row.score <= kept[0]!.score * CUT).slice(0, input.limit)
 }

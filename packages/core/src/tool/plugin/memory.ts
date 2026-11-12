@@ -4,7 +4,9 @@ import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { Effect, Schema, Stream } from "effect"
 import { Config } from "../../config.js"
+import { KV } from "../../kv.js"
 import { MemoryClient } from "../../memory/client.js"
+import { MemoryKnown } from "../../memory/known.js"
 import { MemorySecrets } from "../../memory/secrets.js"
 import { MemoryText } from "../../memory/text.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
@@ -13,10 +15,10 @@ import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 import type { Tool } from "../../tool.js"
 
-// The memory's three tools (the workspace's spec `docs/specs/memory.md`, section 4), offered as the web tools are:
-// while a CLIProxyPacer is set up and its catalog either is not read yet or says it has memory. What depends on a chat
-// being a lead or a child, or on its role, is checked here: the server cannot tell them apart. openforge sets who
-// writes (`by`: the role and the chat); the model never does.
+// The memory's three tools (the workspace's spec `docs/specs/memory.md`, section 4), offered while a CLIProxyPacer is
+// set up and its catalog says it has memory, or, while the catalog is not read yet, the server was last known to
+// (`MemoryKnown`). What depends on a chat being a lead or a child, or on its role, is checked here: the server cannot
+// tell them apart. openforge sets who writes (`by`: the role and the chat); the model never does.
 
 const Kind = MemoryClient.Kind.annotate({
   description:
@@ -79,15 +81,29 @@ export const Plugin = {
     const client = yield* MemoryClient.Service
     const sessions = yield* Session.Service
     const config = yield* Config.Service
+    const kv = yield* KV.Service
 
     const offered = Effect.gen(function* () {
-      if ((yield* endpoints.get()) === undefined) return false
+      const endpoint = yield* endpoints.get()
+      if (endpoint === undefined) return false
       const catalog = yield* catalogs.get()
-      // Not read yet: a step resumed right after a restart keeps its tools.
-      return catalog === undefined || catalog.pacer?.memory !== undefined
+      // Not read yet: as the server was last known, so a chat resumed right after a start keeps the tool list it had.
+      if (catalog === undefined) return yield* MemoryKnown.read(kv, endpoint)
+      return catalog.pacer?.memory !== undefined
     })
     const state = { enabled: yield* offered }
-    yield* Stream.merge(endpoints.changes(), catalogs.changes()).pipe(
+    yield* Stream.merge(
+      endpoints.changes(),
+      // A catalog is set only while the endpoint it was read from is still the current one (`PacerModels.refresh`).
+      catalogs.changes().pipe(
+        Stream.tap((catalog) =>
+          Effect.gen(function* () {
+            const endpoint = yield* endpoints.get()
+            if (catalog && endpoint) yield* MemoryKnown.write(kv, endpoint, catalog)
+          }),
+        ),
+      ),
+    ).pipe(
       Stream.runForEach(() =>
         Effect.gen(function* () {
           const enabled = yield* offered

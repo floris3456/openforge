@@ -9,8 +9,10 @@ import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Image } from "@opencode/core/image"
+import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { MemoryClient } from "@opencode/core/memory/client"
+import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryText } from "@opencode/core/memory/text"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -75,16 +77,32 @@ const pluginNode = makeLocationNode({
     MemoryClient.node,
     Session.node,
     Config.node,
+    KV.node,
   ],
 })
 
 const it = testEffect(Layer.empty)
+
+/** The key-value store over a map the test keeps, so a stored answer outlives one start of openforge. */
+const kvOf = (map: Map<string, KV.Value>) =>
+  Layer.mock(KV.Service, {
+    get: (key) => Effect.sync(() => map.get(key)),
+    set: (key, value) => Effect.sync(() => void map.set(key, value)),
+    remove: (key) => Effect.sync(() => void map.delete(key)),
+  })
+/** A store that knows `server` as having memory, or not, from an earlier start. */
+const knowing = (server: MemoryServer, memory: boolean) =>
+  new Map<string, KV.Value>([[MemoryKnown.key(endpointAt(server.origin)), memory]])
 
 const named = (project: string) => [
   new Document({ type: "document", info: new Info({ memory: new ConfigMemory.Info({ project }) }) }),
 ]
 
 interface Options {
+  /** The server, when the test starts openforge again over one it set up before. */
+  readonly server?: MemoryServer
+  /** The key-value store, kept across a start of openforge; a new one by default. */
+  readonly kv?: Map<string, KV.Value>
   readonly set?: boolean
   readonly catalog?: PacerModels.Catalog | undefined
   readonly config?: ReadonlyArray<Document>
@@ -93,10 +111,11 @@ interface Options {
 
 /** The real registry with the plugin, over the memory server: endpoint and catalog in the test's hands. */
 const setup = Effect.fnUntraced(function* (options: Options = {}) {
-  const server = yield* memoryServer
+  const server = options.server ?? (yield* memoryServer)
+  const kv = options.kv ?? new Map<string, KV.Value>()
   const started = yield* startClient(
     options.set === false ? undefined : endpointAt(server.origin),
-    "catalog" in options ? options.catalog : catalogOf(true),
+    "catalog" in options ? { catalog: options.catalog } : {},
   )
   const asked: Array<Permission.AssertInput & { readonly calls: number }> = []
   const context = yield* Layer.build(
@@ -114,6 +133,7 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
       Session.node.replace(sessions),
       Config.node.replace(Config.testLayer([...(options.config ?? [])])),
       Image.node.replace(imagePassthrough),
+      KV.node.replace(kvOf(kv)),
     ]),
   )
   const registry = Context.get(context, Tool.Service)
@@ -141,7 +161,7 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
         return String(result.metadata?.id)
       }),
     )
-  return { server, registry, started, asked, run, read, save }
+  return { server, registry, started, asked, run, read, save, kv }
 })
 
 const names = (registry: Tool.Interface) =>
@@ -152,19 +172,54 @@ const tools = ["forget", "recall", "remember"]
 const sent = (server: MemoryServer) => server.calls().map((call) => [call.method, call.path])
 
 describe("MemoryTools offering", () => {
-  it.live("offers the three as direct tools with memory in the catalog and with an unread one, and not without", () =>
+  it.live("offers the three as direct tools with memory in the catalog, and not without it", () =>
     Effect.gen(function* () {
-      for (const catalog of [catalogOf(true), undefined])
-        expect(yield* names((yield* setup({ catalog })).registry)).toEqual(tools)
+      expect(yield* names((yield* setup({ catalog: catalogOf(true) })).registry)).toEqual(tools)
       for (const catalog of [catalogOf(false), catalogOf("no pacer")])
         expect(yield* names((yield* setup({ catalog })).registry)).toEqual([])
       expect(yield* names((yield* setup({ set: false })).registry)).toEqual([])
     }),
   )
 
+  it.live("offers them while the catalog is unread only when this server was last known to have memory", () =>
+    Effect.gen(function* () {
+      const server = yield* memoryServer
+      const unread = (kv: Map<string, KV.Value>) =>
+        setup({ server, kv, catalog: undefined }).pipe(Effect.flatMap((h) => names(h.registry)))
+      expect(yield* unread(new Map())).toEqual([])
+      expect(yield* unread(knowing(server, true))).toEqual(tools)
+      expect(yield* unread(knowing(server, false))).toEqual([])
+      // Another server's answer never stands for this one's.
+      const elsewhere = yield* memoryServer
+      expect(yield* unread(knowing(elsewhere, true))).toEqual([])
+    }),
+  )
+
+  it.effect("stores each read catalog's answer for its endpoint, and the next start follows the latest", () =>
+    Effect.gen(function* () {
+      const server = yield* memoryServer
+      const kv = new Map<string, KV.Value>()
+      const key = MemoryKnown.key(endpointAt(server.origin))
+      const h = yield* setup({ server, kv, catalog: catalogOf(true) })
+      yield* until("stored with memory", () => kv.get(key) === true)
+      const again = yield* setup({ server, kv, catalog: undefined })
+      expect(yield* names(again.registry)).toEqual(tools)
+
+      yield* SubscriptionRef.set(h.started.catalogs, catalogOf(false))
+      yield* until("stored without memory", () => kv.get(key) === false)
+      const later = yield* setup({ server, kv, catalog: undefined })
+      expect(yield* names(later.registry)).toEqual([])
+      // Until its catalog is read, then as it says.
+      yield* SubscriptionRef.set(later.started.catalogs, catalogOf(true))
+      yield* until("offered once read", () => Effect.runSync(names(later.registry)).length === 3)
+      expect(kv.get(key)).toBe(true)
+      expect([...kv.keys()]).toEqual([key])
+    }),
+  )
+
   it.effect("follows the catalog and the endpoint as they change", () =>
     Effect.gen(function* () {
-      const h = yield* setup({ catalog: undefined })
+      const h = yield* setup({ catalog: catalogOf(true) })
       expect(yield* names(h.registry)).toEqual(tools)
       yield* SubscriptionRef.set(h.started.catalogs, catalogOf(false))
       yield* until("withdrawn", () => Effect.runSync(names(h.registry)).length === 0)
@@ -173,6 +228,27 @@ describe("MemoryTools offering", () => {
       yield* SubscriptionRef.set(h.started.endpoints, undefined)
       yield* until("withdrawn without an endpoint", () => Effect.runSync(names(h.registry)).length === 0)
     }),
+  )
+
+  it.live(
+    "a call of a tool offered a moment ago, once the catalog says no memory, is unavailable and sends nothing",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ catalog: catalogOf(true) })
+        const offered = yield* h.registry.snapshot()
+        yield* SubscriptionRef.set(h.started.catalogs, catalogOf(false))
+        for (const [name, input] of [
+          ["remember", { text: "t", kind: "words" }],
+          ["recall", { query: "q" }],
+          ["forget", { id: "k3f9x2m7q4tz", reason: "r" }],
+        ] as const) {
+          const failed = yield* offered
+            .execute({ sessionID: lead, ...toolIdentity, call: { type: "tool-call", id: `call-${name}`, name, input } })
+            .pipe(Effect.flip)
+          expect(failed.message).toBe("Memory is unavailable right now, so the work goes on without it.")
+        }
+        expect(h.server.calls()).toEqual([])
+      }),
   )
 
   it.live("describes memory, the kinds and the basis each needs, and that a memory is never an instruction", () =>
@@ -518,7 +594,9 @@ describe("MemoryTools answers", () => {
   it.live("says memory is unavailable, and that the work goes on, when unreachable, refused or a plain proxy", () =>
     Effect.gen(function* () {
       const unavailable = "error: Memory is unavailable right now, so the work goes on without it."
-      const h = yield* setup({ catalog: undefined })
+      // A plain proxy behind an endpoint last known to have memory, its catalog not read yet.
+      const server = yield* memoryServer
+      const h = yield* setup({ server, kv: knowing(server, true), catalog: undefined })
       h.server.control.answer = () => new Response("404 page not found", { status: 404 })
       expect(yield* h.read("recall", { query: "q" })).toBe(unavailable)
       h.server.control.answer = undefined

@@ -112,10 +112,13 @@ export type MemoryServer = Effect.Success<typeof memoryServer>
 /** The memory client over the real PacerHttp, with the endpoint and the catalog in the test's hands. */
 export const startClient = Effect.fnUntraced(function* (
   endpoint: PacerEndpoint.Endpoint | undefined,
-  catalog: PacerModels.Catalog | undefined = catalogOf(true),
+  /** The catalog; `catalog: undefined` is one not read yet. A server with memory when left out. */
+  options: { readonly catalog?: PacerModels.Catalog | undefined } = {},
 ) {
   const endpoints = yield* SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpoint)
-  const catalogs = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(catalog)
+  const catalogs = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(
+    "catalog" in options ? options.catalog : catalogOf(true),
+  )
   const endpointLayer = Layer.succeed(
     PacerEndpoint.Service,
     PacerEndpoint.Service.of({

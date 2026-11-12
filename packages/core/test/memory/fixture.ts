@@ -45,57 +45,58 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
  * The small memory server behind a proxy that keeps every request it gets, so a test can say what was sent (or that
  * nothing was). `answer` stands in for the server while set, and `hold` keeps answers until released.
  */
-export const memoryServer = Effect.acquireRelease(
-  Effect.sync(() => {
-    const store = startMemoryServer({ keys: [{ key, label: person }] })
-    const received: Received[] = []
-    const control = {
-      answer: undefined as ((request: Received) => Response | Promise<Response>) | undefined,
-      held: undefined as Promise<void> | undefined,
+export function startProxied() {
+  const store = startMemoryServer({ keys: [{ key, label: person }] })
+  const received: Received[] = []
+  const control = {
+    answer: undefined as ((request: Received) => Response | Promise<Response>) | undefined,
+    held: undefined as Promise<void> | undefined,
+  }
+  const proxy = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    idleTimeout: 0,
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      const text = await request.text()
+      const item = { method: request.method, path: url.pathname, body: text ? JSON.parse(text) : undefined }
+      received.push(item)
+      if (control.held) await control.held
+      if (control.answer) return control.answer(item)
+      return fetch(`${store.url}${url.pathname}`, {
+        method: request.method,
+        headers: request.headers,
+        ...(text ? { body: text } : {}),
+      })
+    },
+  })
+  const hold = () => {
+    const gate = Promise.withResolvers<void>()
+    control.held = gate.promise
+    return () => {
+      control.held = undefined
+      gate.resolve()
     }
-    const proxy = Bun.serve({
-      port: 0,
-      hostname: "127.0.0.1",
-      idleTimeout: 0,
-      fetch: async (request) => {
-        const url = new URL(request.url)
-        const text = await request.text()
-        const item = { method: request.method, path: url.pathname, body: text ? JSON.parse(text) : undefined }
-        received.push(item)
-        if (control.held) await control.held
-        if (control.answer) return control.answer(item)
-        return fetch(`${store.url}${url.pathname}`, {
-          method: request.method,
-          headers: request.headers,
-          ...(text ? { body: text } : {}),
-        })
-      },
-    })
-    const hold = () => {
-      const gate = Promise.withResolvers<void>()
-      control.held = gate.promise
-      return () => {
-        control.held = undefined
-        gate.resolve()
-      }
-    }
-    return {
-      origin: `http://127.0.0.1:${proxy.port}`,
-      store,
-      proxy,
-      received,
-      control,
-      hold,
-      /** The requests under `/pacer/v1/memory/`. */
-      calls: () => received.filter((item) => item.path.startsWith("/pacer/v1/memory/")),
-    }
-  }),
-  (served) =>
-    Effect.promise(async () => {
-      served.control.held = undefined
-      await served.proxy.stop(true)
-      await served.store.stop()
-    }),
+  }
+  return {
+    origin: `http://127.0.0.1:${proxy.port}`,
+    store,
+    proxy,
+    received,
+    control,
+    hold,
+    /** The requests under `/pacer/v1/memory/`. */
+    calls: () => received.filter((item) => item.path.startsWith("/pacer/v1/memory/")),
+    stop: async () => {
+      control.held = undefined
+      await proxy.stop(true)
+      await store.stop()
+    },
+  }
+}
+
+export const memoryServer = Effect.acquireRelease(Effect.sync(startProxied), (served) =>
+  Effect.promise(() => served.stop()),
 )
 export type MemoryServer = Effect.Success<typeof memoryServer>
 

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Clock, Context, Deferred, Effect, Fiber, Layer, Stream, SubscriptionRef } from "effect"
+import { Clock, Context, Deferred, Effect, Fiber, Layer, Schema, Stream, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/schema/agent"
@@ -2237,6 +2237,114 @@ describe("PacerConnection chats", () => {
       yield* until("deleted", () => events(parent).length === 7)
       expect(events(parent).at(-1)).toEqual({ type: "closed" })
     }),
+  )
+
+  it.effect("tells an event told again while the one before it goes out after it, not neither", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const id = yield* chat(h)
+      yield* step(h, id)
+      const events = () => seen(h, `${viewPath(id)}/events`, "POST").map((item) => item.body as Json)
+      yield* settle
+      const before = events().length
+      h.cpp.holds.add(`${viewPath(id)}/events`)
+      yield* h.sessions.rename({ sessionID: id, title: "First" })
+      yield* until("the first label on its way", () => events().length === before + 1)
+      yield* h.sessions.rename({ sessionID: id, title: "Second" })
+      yield* settle
+      h.cpp.release()
+      yield* until("the second label told", () => events().length === before + 2)
+      expect(events().slice(before)).toEqual([
+        { type: "label", label: "First" },
+        { type: "label", label: "Second" },
+      ])
+    }),
+  )
+
+  // The owner, 2026-11-12: "if the image tool would be used, would I see this in cpp monitor > tools?", then "parameter
+  // and values should also be monitored". CPP's answer: the `tool_calls` event of CPP 887501ea.
+  it.effect(
+    "tells CPP the calls of each Code Mode program of a chat through it, under their own names, once it ends",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const id = yield* chat(h)
+        const assistantMessageID = yield* step(h, id)
+        const events = () =>
+          seen(h, `${viewPath(id)}/events`, "POST")
+            .map((item) => item.body as Json)
+            .filter((event) => event.type === "tool_calls")
+        const program = (
+          callID: string,
+          toolCalls: ReadonlyArray<typeof Schema.Json.Type>,
+          input: {
+            readonly ends?: "success" | "failed"
+            readonly name?: string
+            readonly message?: SessionMessage.ID
+          } = {},
+        ) =>
+          Effect.gen(function* () {
+            const base = { sessionID: id, assistantMessageID: input.message ?? assistantMessageID, id: callID }
+            yield* h.bus.publish(SessionEvent.Tool.Input.Started, { ...base, name: input.name ?? "execute" })
+            yield* h.bus.publish(SessionEvent.Tool.Called, { ...base, input: { code: "return 1" }, executed: false })
+            if (input.ends === "failed")
+              return yield* h.bus.publish(SessionEvent.Tool.Failed, {
+                ...base,
+                error: { type: "tool.execution", message: "interrupted" },
+                metadata: { toolCalls: [...toolCalls] },
+                executed: false,
+              })
+            yield* h.bus.publish(SessionEvent.Tool.Success, {
+              ...base,
+              content: [{ type: "text", text: "1" }],
+              metadata: { toolCalls: [...toolCalls] },
+              executed: false,
+            })
+          })
+        const image = {
+          tool: "image",
+          status: "completed",
+          input: { id: 3, zoom: { x: 0, y: 0, width: 800, height: 600 } },
+        }
+        const fetched = { tool: "fetch", status: "error", input: { url: "https://example.com", method: "GET" } }
+        const running = { tool: "opencode.models", status: "running" }
+
+        // While the first goes out, two more end: each is told, in the order they ended.
+        h.cpp.holds.add(`${viewPath(id)}/events`)
+        yield* program("call_a", [image, fetched])
+        yield* until("the first on its way", () => events().length === 1)
+        yield* program("call_b", [running], { ends: "failed" })
+        yield* program("call_c", [image])
+        yield* settle
+        h.cpp.release()
+        yield* until("all three told", () => events().length === 3)
+        expect(events()).toEqual([
+          { type: "tool_calls", call_id: "call_a", tool: "execute", calls: [image, fetched] },
+          { type: "tool_calls", call_id: "call_b", tool: "execute", calls: [running] },
+          { type: "tool_calls", call_id: "call_c", tool: "execute", calls: [image] },
+        ])
+
+        // Nothing for a program that called nothing, for another tool's rows, or for a step through another provider.
+        yield* program("call_none", [])
+        yield* program("call_shell", [image], { name: "shell" })
+        const other = yield* step(h, id, otherModel)
+        yield* program("call_other", [image], { message: other })
+        yield* settle
+        expect(events()).toHaveLength(3)
+
+        // At most what CPP takes in one event, the first in the order they started.
+        const back = yield* step(h, id)
+        const many = Array.from({ length: PacerConnection.INNER_CALLS + 1 }, (_, index) => ({
+          tool: "read",
+          status: "completed",
+          input: { path: `file-${index}.ts` },
+        }))
+        yield* program("call_many", many, { message: back })
+        yield* until("the many told", () => events().length === 4)
+        expect(events()[3]?.calls).toEqual(many.slice(0, PacerConnection.INNER_CALLS))
+      }),
   )
 })
 

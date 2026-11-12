@@ -13,7 +13,7 @@ export function SidebarLimit(props: { context: Plugin.Context; sessionID: string
   const state = createMemo(() => {
     const selected = sidebarModel({
       session: props.context.data.session.get(props.sessionID),
-      messages: props.context.data.session.message.list(props.sessionID),
+      messages: () => props.context.data.session.message.list(props.sessionID),
       picked: local.model.current(),
     })
     const model = limits.models().find((item) => item.providerID === selected?.providerID && item.id === selected?.id)

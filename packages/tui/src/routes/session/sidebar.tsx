@@ -24,7 +24,7 @@ export function Sidebar(props: { sessionID: string }) {
   const pacerModel = () => {
     const model = sidebarModel({
       session: session(),
-      messages: data.session.message.list(props.sessionID),
+      messages: () => data.session.message.list(props.sessionID),
       picked: local.model.current(),
     })
     return model?.providerID === PACER_PROVIDER ? model.id : undefined

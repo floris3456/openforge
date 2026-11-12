@@ -96,25 +96,27 @@ describe("the model the sidebar follows", () => {
     }) as unknown as SessionMessageInfo
 
   test("a chat's: the prompt's pick, also before it is sent, else its own", () => {
-    expect(sidebarModel({ session: session("ses_a", { model: own }), messages: [], picked })).toEqual({
+    expect(sidebarModel({ session: session("ses_a", { model: own }), messages: () => [], picked })).toEqual({
       providerID: "anthropic",
       id: "claude-main",
     })
-    expect(sidebarModel({ session: session("ses_a", { model: own }), messages: [], picked: undefined })).toEqual(own)
+    expect(sidebarModel({ session: session("ses_a", { model: own }), messages: () => [], picked: undefined })).toEqual(
+      own,
+    )
   })
 
   test("a subagent's: its own model, not the prompt's pick, which is the main agent's", () => {
-    expect(sidebarModel({ session: { ...CHILD, model: own }, messages: [], picked })).toEqual(own)
+    expect(sidebarModel({ session: { ...CHILD, model: own }, messages: () => [], picked })).toEqual(own)
   })
 
   test("a subagent's started on the default model: its last answer's", () => {
     expect(
       sidebarModel({
         session: CHILD,
-        messages: [answer("anthropic", "older"), answer("cliproxypacer", "newer")],
+        messages: () => [answer("anthropic", "older"), answer("cliproxypacer", "newer")],
         picked,
       }),
     ).toEqual({ providerID: "cliproxypacer", id: "newer" })
-    expect(sidebarModel({ session: CHILD, messages: [], picked })).toBeUndefined()
+    expect(sidebarModel({ session: CHILD, messages: () => [], picked })).toBeUndefined()
   })
 })

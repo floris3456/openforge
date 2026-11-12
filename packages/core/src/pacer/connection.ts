@@ -1,7 +1,7 @@
 export * as PacerConnection from "./connection.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { Clock, Context, Effect, Exit, Layer, Queue, Result, Schema, Stream } from "effect"
+import { Clock, Context, Effect, Exit, Layer, Option, Queue, Result, Schema, Stream } from "effect"
 import { makeParser } from "effect/encoding/Sse"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import type { Model } from "@opencode/schema/model"
@@ -164,6 +164,27 @@ type ChatEvent =
   | { readonly type: Stopping }
   | { readonly type: "model_changed"; readonly model: string | null }
   | { readonly type: "label"; readonly label: string }
+  | {
+      readonly type: "tool_calls"
+      readonly call_id: string
+      readonly tool: string
+      readonly calls: ReadonlyArray<typeof InnerCall.Type>
+    }
+
+/** The calls a Code Mode program made, as its `execute` call's metadata keeps them (`CodeModeTool`'s rows). */
+const InnerCall = Schema.Struct({
+  tool: Schema.String,
+  status: Schema.Literals(["running", "completed", "error"]),
+  input: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+})
+const decodeInnerCalls = Schema.decodeUnknownOption(Schema.Array(InnerCall))
+/** The most calls one `tool_calls` event carries (CPP answers 400 to more), the first in the order they started. */
+export const INNER_CALLS = 2_000
+
+/** An event told while `held` waits to be: it takes its place when of its type, and for `tool_calls` of its call. */
+const replaces = (event: ChatEvent, held: ChatEvent) =>
+  held.type === event.type &&
+  (held.type !== "tool_calls" || event.type !== "tool_calls" || held.call_id === event.call_id)
 
 interface Info {
   readonly parentID?: SessionID
@@ -209,6 +230,8 @@ interface Chat {
   storeID: number | undefined
   /** Shell and subagent calls by call ID, from their start until they end. */
   readonly calls: Map<string, string>
+  /** Code Mode's `execute` calls of its steps through CPP, by call ID, from their start until they end. */
+  readonly programs: Map<string, string>
   /** The calls of `calls` being waited on: those in the foreground. */
   readonly waits: Set<string>
   /** Its background jobs still running (`Job.runningBackground`), as last counted. */
@@ -221,7 +244,7 @@ interface Chat {
   label: string | undefined
   /** Its last `model_changed`: the model, or null for another provider's. */
   model: string | null | undefined
-  /** Events to tell CPP, in order; one per type. */
+  /** Events to tell CPP, in order; one per type, and one `tool_calls` per call. */
   events: ChatEvent[]
   /** The stopping events told since its last step. */
   readonly stopped: Set<Stopping>
@@ -430,6 +453,7 @@ export const layer = Layer.effect(
         missing: false,
         storeID: undefined,
         calls: new Map(),
+        programs: new Map(),
         waits: new Set(),
         jobs: 0,
         count: false,
@@ -466,18 +490,29 @@ export const layer = Layer.effect(
     }
 
     const tell = (chat: Chat, event: ChatEvent) => {
-      if (event.type !== "model_changed" && event.type !== "label") {
+      if (event.type !== "model_changed" && event.type !== "label" && event.type !== "tool_calls") {
         if (chat.stopped.has(event.type)) return
         chat.stopped.add(event.type)
       }
-      chat.events = [...chat.events.filter((item) => item.type !== event.type), event]
+      chat.events = [...chat.events.filter((item) => !replaces(event, item)), event]
       mark(chat)
+    }
+
+    /** Tells CPP the calls a Code Mode program of the chat made, under their own names, once its `execute` ended. */
+    const report = (chat: Chat, callID: string, metadata: Readonly<Record<string, unknown>> | undefined) => {
+      const tool = chat.programs.get(callID)
+      if (tool === undefined) return
+      chat.programs.delete(callID)
+      const calls = Option.getOrUndefined(decodeInnerCalls(metadata?.toolCalls))
+      if (!calls?.length) return
+      tell(chat, { type: "tool_calls", call_id: callID, tool, calls: calls.slice(0, INNER_CALLS) })
     }
 
     const close = (chat: Chat) => {
       tell(chat, { type: "closed" })
       chat.waits.clear()
       chat.calls.clear()
+      chat.programs.clear()
       chat.jobs = 0
       chat.count = false
       chat.raw = undefined
@@ -720,8 +755,10 @@ export const layer = Layer.effect(
         if (chat.info.parentID) close(chat)
       }
       while (chat.events.length > 0) {
-        if (!(yield* post(chat, chat.events[0]))) return
-        chat.events = chat.events.slice(1)
+        const told = chat.events[0]
+        if (!(yield* post(chat, told))) return
+        // One told again while this one went out took its place, and goes next.
+        chat.events = chat.events.filter((item) => item !== told)
       }
       if (chat.removed) return forget(chat)
       if (chat.count) {
@@ -1108,7 +1145,9 @@ export const layer = Layer.effect(
         }
         case "session.tool.input.started": {
           const chat = chats.get(sessionID)
-          if (!chat?.step || (event.data.name !== "shell" && event.data.name !== "subagent")) return
+          if (!chat?.step) return
+          if (event.data.name === "execute") return void chat.programs.set(event.data.id, event.data.name)
+          if (event.data.name !== "shell" && event.data.name !== "subagent") return
           chat.calls.set(event.data.id, event.data.name)
           return
         }
@@ -1125,7 +1164,9 @@ export const layer = Layer.effect(
         case "session.tool.success":
         case "session.tool.failed": {
           const chat = chats.get(sessionID)
-          if (!chat?.calls.delete(event.data.id)) return
+          if (!chat) return
+          report(chat, event.data.id, event.data.metadata)
+          if (!chat.calls.delete(event.data.id)) return
           // A background call, or a foreground one moved there, leaves a job running.
           chat.waits.delete(event.data.id)
           chat.count = true
@@ -1145,6 +1186,7 @@ export const layer = Layer.effect(
           // A run that ended waits on nothing, also when it stopped before a call's end was published. A job that ended
           // woke the chat with its notice, so its count goes at the end of that run.
           chat.calls.clear()
+          chat.programs.clear()
           chat.waits.clear()
           chat.count = true
           mark(chat)

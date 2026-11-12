@@ -358,7 +358,9 @@ project is). Every chat gets three tools for them, also a chat on another provid
 - A chat started by another chat (a subagent) saves notes for its own role only, and replaces or deletes only its own
   role's. A person's words and global notes are for a chat a person talks to.
 - A note that looks like it holds a key or a token is refused before it is sent.
-- Each call asks first, under its own name (see [Approvals](/permissions#approvals)).
+- Each call is checked against the chat's [permissions](/permissions#approvals) under its own name, so a rule can
+  deny it or ask first. The built-in Explore agent allows all three: notes are not files.
+- An agent whose permissions deny `recall` still gets the lines below, without the words about `recall`.
 
 Every chat also starts with a few lines from memory: the notes nearest to its first prompt, and how many there are.
 They come again after a compaction, for the newest prompt. When memory can't be reached, the chat starts with one line

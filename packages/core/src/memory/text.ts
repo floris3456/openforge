@@ -31,9 +31,12 @@ export function recall(found: MemoryClient.Found) {
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
 
-/** The start block: the opening line, the entries nearest to the prompt when there are any, and what else there is. */
-export function block(started: MemoryClient.Started, role: string) {
-  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}; recall finds them.`
+/**
+ * The start block: the opening line, the entries nearest to the prompt when there are any, and what else there is.
+ * It names `recall` only for a chat that has the tool: an agent's permissions may leave it out.
+ */
+export function block(started: MemoryClient.Started, role: string, recall: boolean) {
+  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${recall ? "; recall finds them" : ""}.`
   if (started.entries.length === 0) return [opening, counts].join("\n")
   return [
     opening,

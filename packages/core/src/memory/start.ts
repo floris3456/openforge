@@ -30,6 +30,8 @@ export interface Interface {
     readonly session: SessionSchema.Info
     /** The agent the chat runs as: its role. */
     readonly agent: string
+    /** Whether the chat has the `recall` tool, which the block then names. */
+    readonly recall: boolean
   }) => Effect.Effect<void>
 }
 
@@ -71,7 +73,7 @@ const layer = Layer.effect(
         )
         .pipe(
           Effect.map((started) => ({
-            text: MemoryText.block(started, by.role),
+            text: MemoryText.block(started, by.role, input.recall),
             description: "Memory nearest to the prompt",
             memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id) },
           })),

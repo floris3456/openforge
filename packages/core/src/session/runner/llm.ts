@@ -270,7 +270,11 @@ const layer = Layer.effect(
     // call holds it; after an automatic compaction too, which reloads here without a boundary.
     const load = (selected: SessionContext.Selection) =>
       memory
-        .ensure({ session: selected.session, agent: selected.agent.id })
+        .ensure({
+          session: selected.session,
+          agent: selected.agent.id,
+          recall: selected.tools.definitions.some((tool) => tool.name === "recall"),
+        })
         .pipe(Effect.andThen(context.load(selected)))
 
     /**

@@ -211,6 +211,9 @@ describe("Agent", () => {
       expect(Permission.evaluate("read", ".env.example", explore?.permissions ?? []).effect).toBe("allow")
       expect(Permission.evaluate("read", "src/index.ts", explore?.permissions ?? []).effect).toBe("allow")
       expect(Permission.evaluate("external_directory", "/outside/*", explore?.permissions ?? []).effect).toBe("allow")
+      // openforge: memory's three tools are an explorer's too.
+      for (const action of ["recall", "remember", "forget"])
+        expect(Permission.evaluate(action, "*", explore?.permissions ?? []).effect).toBe("allow")
       for (const item of agents) {
         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
       }

@@ -113,7 +113,7 @@ const echo = makeLocationNode({
   name: "test/memory-start-tools",
   layer: Layer.effectDiscard(
     Tool.Service.use((registry) =>
-      registry.transform((editor) =>
+      registry.transform((editor) => {
         editor.add({
           name: "echo",
           description: "Echo text",
@@ -121,8 +121,16 @@ const echo = makeLocationNode({
           input: Schema.Struct({ text: Schema.String }),
           output: Schema.Struct({ text: Schema.String }),
           execute: ({ text }) => Effect.succeed({ output: { text }, content: text }),
-        }),
-      ),
+        })
+        // Stands for memory's own tool (its plugin is not loaded here): the block names `recall` for a chat that has it.
+        editor.add({
+          name: "recall",
+          description: "Finds entries in memory",
+          options: { codemode: false },
+          input: Schema.Struct({ query: Schema.String }),
+          execute: () => Effect.succeed({ content: "Memory holds nothing for this." }),
+        })
+      }),
     ),
   ),
   deps: [Tool.node],
@@ -211,6 +219,11 @@ const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; rea
     })
     editor.update(Agent.ID.make("explore"), (agent) => {
       agent.mode = "subagent"
+    })
+    // An agent whose permissions leave `recall` out, as a read-only agent of a person's own may.
+    editor.update(Agent.ID.make("reader"), (agent) => {
+      agent.mode = "subagent"
+      agent.permissions = [{ action: "recall", resource: "*", effect: "deny" }]
     })
   })
   const project = Project.ID.make(crypto.randomUUID().replaceAll("-", "").padEnd(40, "0"))
@@ -544,6 +557,27 @@ describe("MemoryStart through the runner", () => {
         scopes: { global: true, roles: ["explore"] },
         by: { role: "explore", chat: h.sessionID },
       })
+    }),
+  )
+
+  it.live("names recall only in a chat that has the tool", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ child: true, agent: "reader" })
+      const own = yield* h.write(
+        { kind: "unverified", text: "Zebra files live in src.", basis: "ls", scope: "role" },
+        "reader",
+      )
+      yield* h.prompt("where are the zebra files?")
+      const request = h.requests()[0]
+      expect(request?.tools.map((tool) => tool.name)).not.toContain("recall")
+      expect(userTexts(request)[1]).toBe(
+        [
+          opening,
+          "What memory holds nearest to this prompt; it may not be about it:",
+          `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
+          "Memory holds 0 global entries and 1 of role reader.",
+        ].join("\n"),
+      )
     }),
   )
 })

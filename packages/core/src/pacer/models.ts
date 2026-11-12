@@ -163,9 +163,9 @@ const Capable = Schema.Struct({
 /** One kind of login of a provider, with how many accounts the key has of it (capabilities' `providers[]`). */
 const Login = Schema.Struct({ provider: Schema.String, login: maybe(Schema.String), accounts: maybe(Schema.Number) })
 type Login = typeof Login.Type
-// `web_tools` and `memory` are read on their own (`webTools`, `memory`), so a block this version does not understand
-// leaves the rest alone.
-const CapabilitiesAnswer = Schema.Struct({
+// `web_tools` and `memory` are read on their own (`webTools`, `memory`, in `pacerOf`), so a block this version does not
+// understand leaves the rest alone.
+export const CapabilitiesAnswer = Schema.Struct({
   pacer: Schema.NullOr(
     Schema.Struct({
       compact_tokens: maybe(Schema.Array(Schema.String)),
@@ -281,22 +281,7 @@ export const layer = Layer.effect(
         each(list.body.data, decodeListed),
         pacer ? capable(capabilities?.models) : new Map(),
         pacer ? each(capabilities?.providers, decodeLogin) : [],
-        pacer && {
-          compactTokens: pacer.compact_tokens ?? [],
-          webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
-          ...Option.match(decodeMemory(pacer.memory), {
-            onNone: () => ({}),
-            onSome: (memory) => ({
-              memory: {
-                version: memory.version,
-                entryCharacters: memory.entry_characters,
-                queryCharacters: memory.query_characters,
-                searchLimit: memory.search_limit,
-                embedding: memory.embedding,
-              },
-            }),
-          }),
-        },
+        pacer && pacerOf(pacer),
         prices,
       )
     })
@@ -337,6 +322,26 @@ export const layer = Layer.effect(
 )
 
 export const node = makeGlobalNode({ service: Service, layer, deps: [PacerEndpoint.node, PacerHttp.node] })
+
+/** What capabilities' `pacer` block says the server does, each part read on its own. */
+export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>): Pacer {
+  return {
+    compactTokens: pacer.compact_tokens ?? [],
+    webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
+    ...Option.match(decodeMemory(pacer.memory), {
+      onNone: () => ({}),
+      onSome: (memory) => ({
+        memory: {
+          version: memory.version,
+          entryCharacters: memory.entry_characters,
+          queryCharacters: memory.query_characters,
+          searchLimit: memory.search_limit,
+          embedding: memory.embedding,
+        },
+      }),
+    }),
+  }
+}
 
 /** An answer that will not change on its own: anything but an unreachable server. */
 function definite(error: PacerHttp.Error) {

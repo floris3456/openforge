@@ -88,6 +88,10 @@ export const Plugin = define({
           { action: "read", resource: "*.env", effect: "ask" },
           { action: "read", resource: "*.env.*", effect: "ask" },
           { action: "read", resource: "*.env.example", effect: "allow" },
+          // openforge: memory's notes are no files; an explorer finds what its role noted, and notes what it found.
+          { action: "recall", resource: "*", effect: "allow" },
+          { action: "remember", resource: "*", effect: "allow" },
+          { action: "forget", resource: "*", effect: "allow" },
           { action: "subagent", resource: "*", effect: "deny" },
           { action: "external_directory", resource: "*", effect: "allow" },
         )

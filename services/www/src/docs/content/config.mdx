@@ -364,6 +364,21 @@ Set the maximum number of lines and bytes retained from a tool result.
 }
 ```
 
+### Memory
+
+Chats share a memory in [CLIProxyPacer](/cli/cliproxypacer#memory), kept per project. By default a project is the
+repository a chat works in. Name one in a project's config to make several repositories or worktrees one project.
+
+```jsonc
+{
+  "memory": {
+    "project": "my-workspace",
+  },
+}
+```
+
+A name is 1 to 128 characters of `A-Z a-z 0-9 . _ -`; another is left out with a config warning.
+
 ### Search
 
 Choose how OpenCode searches the web. Use `"random"` to select an available

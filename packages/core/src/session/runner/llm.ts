@@ -35,6 +35,7 @@ import { Plugin } from "../../plugin.js"
 import { PluginHooks } from "../../plugin/hooks.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
 import { ImageBudget } from "../../image/budget.js"
+import { MemoryStart } from "../../memory/start.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -64,6 +65,7 @@ const layer = Layer.effect(
     const jobs = yield* Job.Service
     const title = yield* SessionTitle.Service
     const continuity = yield* SessionContinuity.Service
+    const memory = yield* MemoryStart.Service
     const steps = yield* SessionStep.make
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
@@ -234,7 +236,7 @@ const layer = Layer.effect(
                       onlyIfMissing: true,
                     })
                   if (promoted > 0) step = 1
-                  return { _tag: "Ready" as const, context: yield* context.load(selected) }
+                  return { _tag: "Ready" as const, context: yield* load(selected) }
                 }),
               )
               if (ready) return ready
@@ -263,6 +265,17 @@ const layer = Layer.effect(
       yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
       return selected
     })
+
+    // openforge: memory's start block goes in once the prompt is in and before the request is built, so the first
+    // call holds it; after an automatic compaction too, which reloads here without a boundary.
+    const load = (selected: SessionContext.Selection) =>
+      memory
+        .ensure({
+          session: selected.session,
+          agent: selected.agent.id,
+          recall: selected.tools.definitions.some((tool) => tool.name === "recall"),
+        })
+        .pipe(Effect.andThen(context.load(selected)))
 
     /**
      * Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. `resume` continues a
@@ -299,7 +312,7 @@ const layer = Layer.effect(
       }
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
-        const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(context.load)))
+        const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(load)))
         initial = undefined
         const estimate = SessionCompaction.estimatePrompt(loaded)
         const finish = finishing && (yield* unsettled(finishing, resume?.tools))
@@ -576,5 +589,6 @@ export const node = makeLocationNode({
     ToolOutput.node,
     Database.node,
     SessionContinuity.node,
+    MemoryStart.node,
   ],
 })

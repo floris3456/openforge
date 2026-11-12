@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
-import { AIError, ai } from "@opencode/ai/effect"
+import { AIError, ai, ImageClient } from "@opencode/ai/effect"
+import * as CompatibleImages from "@opencode/ai/providers/openai-compatible/images"
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
 import { Cause, Clock, Effect, Layer, Schedule, Schema, Stream, SubscriptionRef } from "effect"
 import { Headers, HttpClient, HttpClientError, HttpClientResponse } from "effect/http"
@@ -32,6 +33,7 @@ const decodeConfig = Schema.decodeUnknownSync(Info)
 const providerID = Provider.ID.make("cliproxypacer")
 const MESSAGES = "@opencode/ai/providers/anthropic-compatible"
 const RESPONSES = "@opencode/ai/providers/openai-compatible-responses"
+const IMAGES = "@opencode/ai/providers/openai-compatible/images"
 const usd = Money.USDPerMillionTokens.make
 const rates = (input: number, output: number, read: number, write: number) => ({
   input: usd(input),
@@ -292,6 +294,74 @@ describe("CLIProxyPacerPlugin", () => {
         ["output-1", []],
         ["both-1", [rates(2, 8, 0, 0)]],
       ])
+    }),
+  )
+
+  // Spec image-tools, item 8.
+  it.effect("a model CPP says answers only images is an image model on CPP's images route, never a chat's", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(
+        yield* fakeCPP(configKey, {
+          ...catalog,
+          models: [
+            ...catalog.models,
+            { id: "both-image", ownedBy: "provc", input: ["text", "image"], output: ["text", "image"] },
+            { id: "speech-1", ownedBy: "provc", output: ["audio"] },
+          ],
+        }),
+      )
+      const models = yield* Model.Service
+      const images = (yield* models.available(["image"])).filter((model) => model.providerID === providerID)
+      expect(images.map((model) => [String(model.id), model.type, model.package])).toEqual([
+        ["image-1", "image", IMAGES],
+      ])
+      expect(required(images[0]).settings).toMatchObject({ baseURL: "https://cpp.test/proxy/v1", apiKey: "config-key" })
+      // One that answers text too stays a chat model; one that answers neither is left out, as before.
+      const chats = (yield* listed).map((model) => String(model.id))
+      expect(chats).toContain("both-image")
+      expect(chats).not.toContain("image-1")
+      expect(chats).not.toContain("speech-1")
+
+      const requests: { url: string; authorization?: string; body: unknown }[] = []
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          const body = request.body._tag === "Uint8Array" ? JSON.parse(new TextDecoder().decode(request.body.body)) : {}
+          requests.push({ url: request.url, authorization: request.headers["authorization"], body })
+          return HttpClientResponse.fromWeb(request, Response.json({ data: [{ b64_json: "aW1hZ2U=" }] }))
+        }),
+      )
+      const image = required(images[0])
+      const response = yield* ai.image
+        .generate({
+          model: CompatibleImages.model(image.modelID ?? image.id, image.settings as never),
+          prompt: "A dot",
+        })
+        .pipe(
+          Effect.provide(ImageClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.fresh)),
+          Effect.provideService(HttpClient.HttpClient, http),
+        )
+      expect(response.images).toHaveLength(1)
+      expect(requests).toEqual([
+        {
+          url: "https://cpp.test/proxy/v1/images/generations",
+          authorization: "Bearer config-key",
+          body: expect.objectContaining({ model: "image-1", prompt: "A dot" }),
+        },
+      ])
+    }),
+  )
+
+  it.effect("config makes a CPP model an image model, which keeps CPP's address and key", () =>
+    Effect.gen(function* () {
+      yield* addPlugin(yield* fakeCPP(configKey, catalog))
+      yield* addConfig({ cliproxypacer: { models: { "plain-1": { type: "image", package: IMAGES } } } })
+      const models = yield* Model.Service
+      const images = (yield* models.available(["image"])).filter((model) => model.providerID === providerID)
+      expect(images.map((model) => String(model.id)).sort()).toEqual(["image-1", "plain-1"])
+      const plain = required(images.find((model) => String(model.id) === "plain-1"))
+      expect(plain.package).toBe(IMAGES)
+      expect(plain.settings).toMatchObject({ baseURL: "https://cpp.test/proxy/v1", apiKey: "config-key" })
+      expect((yield* listed).map((model) => String(model.id))).not.toContain("plain-1")
     }),
   )
 

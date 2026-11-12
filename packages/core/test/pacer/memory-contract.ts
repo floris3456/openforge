@@ -684,13 +684,42 @@ export function memoryContract(target: Target) {
       expect(answer.body.recall).toMatch(ID)
     })
 
-    test("an entry holding all of a three-word query comes before one holding one of its words", async () => {
+    test("more of the query's words come first, and an entry far under the best one is cut", async () => {
       const memory = project("rank")
-      const terms = [word(), word(), word()]
-      const all = (await memory.fact(`Filler words here: ${terms.join(" ")}.`)).body.entry
-      const one = (await memory.fact(`Filler words here: ${terms[0]} plain text.`)).body.entry
-      const answer = await memory.search({ query: terms.join(" "), scopes: "all" })
-      expect(answer.body.entries.map((entry) => entry.id)).toEqual([all.id, one.id])
+      // Each word is in one entry only, and ten other entries keep the word statistics away from a tiny store's.
+      const terms = Array.from({ length: 8 }, word)
+      for (const index of Array.from({ length: 10 }, (_, index) => index)) await memory.fact(`Other entry ${index}.`)
+      const four = (await memory.fact(`${terms.slice(0, 4).join(" ")}.`)).body.entry
+      const three = (await memory.fact(`${terms.slice(4, 7).join(" ")} plain.`)).body.entry
+      await memory.fact(`${terms[7]} plain text here.`)
+      const answer = await memory.search({ query: terms.join(" "), scopes: "all", limit: 20 })
+      expect(answer.body.entries.map((entry) => entry.id)).toEqual([four.id, three.id])
+    })
+
+    test("with equal scores the nearer scope comes first, then the newer entry", async () => {
+      const memory = project("ties")
+      const term = word()
+      const text = `The gate holds ${term}.`
+      const global = (await memory.fact(text)).body.entry
+      const role = (await memory.fact(text, { scope: "role" })).body.entry
+      const task = (await memory.fact(text, { scope: "task", by: { ...by, task: "t1" } })).body.entry
+      const scopes = { global: true, roles: ["build"], tasks: ["t1"] }
+      const scoped = await memory.search({ query: term, scopes })
+      expect(scoped.body.entries.map((entry) => entry.id)).toEqual([task.id, role.id, global.id])
+
+      const other = word()
+      const older = (await memory.fact(`Left ${other} right.`)).body.entry
+      const newer = (await memory.fact(`Right ${other} left.`)).body.entry
+      const dated = await memory.search({ query: other, scopes: "all" })
+      expect(dated.body.entries.map((entry) => entry.id)).toEqual([newer.id, older.id])
+    })
+
+    test("a word with 's finds the word", async () => {
+      const memory = project("possessive")
+      const term = word()
+      const entry = (await memory.fact(`The check of ${term} took long.`)).body.entry
+      const answer = await memory.search({ query: `${term}'s check`, scopes: "all" })
+      expect(answer.body.entries).toEqual([entry])
     })
 
     test("every search answers a new recall id", async () => {
@@ -706,13 +735,10 @@ export function memoryContract(target: Target) {
       const memory = project("start")
       const term = word()
       for (const index of Array.from({ length: 7 }, (_, index) => index))
-        await memory.fact(
-          `Start entry ${index} holds ${term}${index % 2 ? " twice" : ""}.`,
-          index % 3 ? {} : { scope: "role" },
-        )
+        await memory.fact(`Start entry ${index} holds ${term}.`, index % 3 ? {} : { scope: "role" })
       await memory.fact(`An explore entry holds ${term}.`, { scope: "role", by: { role: "explore", chat: "ses_e" } })
       const scopes = { global: true, roles: ["build"], tasks: [] }
-      const prompt = `Which entry holds ${term} twice?`
+      const prompt = `Which entry holds ${term}?`
       const start = await memory.start({ prompt, scopes })
       const search = await memory.search({ query: prompt, scopes, limit: 5 })
       expect(start.status).toBe(200)

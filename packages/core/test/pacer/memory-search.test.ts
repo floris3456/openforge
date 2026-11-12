@@ -3,7 +3,7 @@ import { words } from "./memory-search"
 
 describe("memory search: a query's words", () => {
   test("outer punctuation is cut, words are lowercased", () => {
-    expect(words(`"Where's" the (Release), Script?! — ok…`)).toEqual(["where's", "release", "script", "ok"])
+    expect(words(`"Where" the (Release), Script?! — ok…`)).toEqual(["release", "script", "ok"])
   })
 
   test("stop words are dropped", () => {
@@ -21,6 +21,18 @@ describe("memory search: a query's words", () => {
       "/pacer/v1/meters",
     ])
     expect(words("(.env) -v --port _private")).toEqual([".env", "-v", "--port", "_private"])
+  })
+
+  test("a trailing 's is cut", () => {
+    expect(words("0.0.25's load check, the owner’s Mac and \"tmux's\" panes")).toEqual([
+      "0.0.25",
+      "load",
+      "check",
+      "owner",
+      "mac",
+      "tmux",
+      "panes",
+    ])
   })
 
   test("pieces of punctuation only and stop words only leave no words", () => {

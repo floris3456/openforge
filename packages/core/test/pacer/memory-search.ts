@@ -39,7 +39,7 @@ export function words(query: string) {
         .map((piece) =>
           piece
             .replace(/^[^\p{L}\p{N}/._-]+|[^\p{L}\p{N}]+$/gu, "")
-            .replace(/['’]s$/iu, "")
+            .replace(/['\u2019]s$/iu, "")
             .toLowerCase(),
         )
         .filter((word) => word && !STOP.has(word)),

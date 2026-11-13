@@ -577,6 +577,20 @@ describe("MemoryTools recall", () => {
       expect(yield* p.h.read("recall", { query: "quokka" })).toBe("Memory holds nothing for this.")
     }),
   )
+
+  it.live("keeps the search's recall id and the ids it returned in its metadata, as the start block does", () =>
+    Effect.gen(function* () {
+      const p = yield* prepare()
+      const result = yield* p.h.run("recall", { query: "zebra", scope: "all", limit: 3 })
+      const search = p.h.server.calls().findLast((call) => call.path.endsWith("/search"))
+      expect(search).toBeDefined()
+      const row = yield* p.h.started.client.recall(projectID, String(result.metadata?.recall))
+      expect(row.entries).toHaveLength(3)
+      expect(result.metadata).toEqual({ project: projectID, recall: row.id, entries: row.entries, meaning: false })
+      const none = yield* p.h.run("recall", { query: "quokka" })
+      expect(none.metadata).toEqual({ project: projectID, recall: expect.any(String), entries: [], meaning: false })
+    }),
+  )
 })
 
 describe("MemoryTools secrets", () => {

@@ -76,6 +76,28 @@ const TaskAnswer = Schema.Struct({ task: Task, existing: Schema.optional(Schema.
 const TaskList = Schema.Struct({ tasks: Schema.Array(Task), more: Schema.Boolean })
 export interface TaskList extends Schema.Schema.Type<typeof TaskList> {}
 
+/** A row of the recall log: one search or start, what followed it in the chat, and its labels. */
+export const Recall = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.NullOr(Schema.Literals(["search", "start"])),
+  query: Schema.String,
+  entries: Schema.Array(Schema.String),
+  meaning: Schema.NullOr(Schema.Boolean),
+  at: Schema.Number,
+  after: Schema.NullOr(
+    Schema.Struct({
+      step: Schema.NullOr(Schema.String),
+      acted: Schema.NullOr(Schema.Array(Schema.Struct({ id: Schema.String, how: Schema.String }))),
+      person: Schema.NullOr(Schema.String),
+      step_at: Schema.NullOr(Schema.Number),
+      person_at: Schema.NullOr(Schema.Number),
+    }),
+  ),
+  labels: Schema.Array(Schema.Unknown),
+})
+export interface Recall extends Schema.Schema.Type<typeof Recall> {}
+const RecallAnswer = Schema.Struct({ recall: Recall })
+
 const EntryAnswer = Schema.Struct({ entry: Entry })
 // An older server answers no `near`.
 const Written = Schema.Struct({
@@ -169,6 +191,15 @@ export interface StartInput {
   readonly by: By
 }
 
+/** What followed a search in the chat: the step after it, the person's next message, or both. */
+export interface AfterInput {
+  readonly step?: string
+  /** The entries the search returned that the step replaced or deleted. */
+  readonly acted?: ReadonlyArray<{ readonly id: string; readonly how: "superseded" | "forgotten" }>
+  readonly person?: string
+  readonly by: By
+}
+
 export interface MakeInput {
   readonly title: string
   readonly description?: string
@@ -215,7 +246,16 @@ export class MissingTask extends Schema.TaggedError<MissingTask>()("MemoryClient
   }
 }
 
-export type Error = Unavailable | Refused | Missing | MissingTask
+/** No such row in this project's recall log, or one already gone. */
+export class MissingRecall extends Schema.TaggedError<MissingRecall>()("MemoryClient.MissingRecall", {
+  id: Schema.String,
+}) {
+  override get message() {
+    return `There is no recall ${this.id} in this project's memory.`
+  }
+}
+
+export type Error = Unavailable | Refused | Missing | MissingTask | MissingRecall
 
 export interface Interface {
   /**
@@ -252,6 +292,15 @@ export interface Interface {
   readonly task: (project: string, id: string) => Effect.Effect<TaskRead, Error>
   /** Sets a task's state and note; `active` makes the caller its worker. */
   readonly change: (project: string, id: string, input: ChangeInput) => Effect.Effect<Task, Error>
+  /** Adds what followed to a search's row of the recall log; each part is kept once, the first that comes. */
+  readonly after: (
+    project: string,
+    id: string,
+    input: AfterInput,
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<Recall, Error>
+  /** Reads one row of the recall log. */
+  readonly recall: (project: string, id: string) => Effect.Effect<Recall, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MemoryClient") {}
@@ -263,6 +312,7 @@ export const layer = Layer.effect(
     const base = (project: string) => `/pacer/v1/memory/${encodeURIComponent(project)}`
     const entry = (project: string, id: string) => `${base(project)}/entries/${encodeURIComponent(id)}`
     const task = (project: string, id: string) => `${base(project)}/tasks/${encodeURIComponent(id)}`
+    const recall = (project: string, id: string) => `${base(project)}/recalls/${encodeURIComponent(id)}`
 
     return Service.of({
       write: (project, input) =>
@@ -358,6 +408,16 @@ export const layer = Layer.effect(
           Effect.map((answer) => answer.body.task),
           Effect.mapError(failure(id, "task")),
         ),
+      after: (project, id, input, options) =>
+        http.post(`${recall(project, id)}/after`, input, RecallAnswer, options).pipe(
+          Effect.map((answer) => answer.body.recall),
+          Effect.mapError(failure(id, "recall")),
+        ),
+      recall: (project, id) =>
+        http.get(recall(project, id), RecallAnswer).pipe(
+          Effect.map((answer) => answer.body.recall),
+          Effect.mapError(failure(id, "recall")),
+        ),
     })
   }),
 )
@@ -379,10 +439,14 @@ export function project(entries: Parameters<typeof Config.latest>[0], projectID:
  * How an answer that is not the entry reads to an agent. A 404 of the server's own (`not_found`) on a route naming an
  * entry is that entry missing; on any other route, or without the server's type, the proxy has no memory.
  */
-function failure(id?: string, thing: "entry" | "task" = "entry") {
+function failure(id?: string, thing: "entry" | "task" | "recall" = "entry") {
   return (error: PacerHttp.Error): Error => {
     if (error._tag === "PacerHttp.NotFound" && id !== undefined)
-      return thing === "task" ? new MissingTask({ id }) : new Missing({ id })
+      return thing === "task"
+        ? new MissingTask({ id })
+        : thing === "recall"
+          ? new MissingRecall({ id })
+          : new Missing({ id })
     if (error._tag === "PacerHttp.Unexpected" && (error.status === 400 || error.status === 409))
       return new Refused({ reason: error.reason })
     return new Unavailable({ reason: error.message })

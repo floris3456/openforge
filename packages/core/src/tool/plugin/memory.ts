@@ -331,7 +331,13 @@ export const Plugin = {
                 .pipe(Effect.mapError(fail))
               return {
                 content: MemoryText.recall(found),
-                metadata: { entries: found.entries.length, meaning: found.meaning },
+                // As the start block's message keeps its search: what followed it is added to this row (MemoryFollowed).
+                metadata: {
+                  project: who.project,
+                  recall: found.recall,
+                  entries: found.entries.map((entry) => entry.id),
+                  meaning: found.meaning,
+                },
               }
             }),
         })

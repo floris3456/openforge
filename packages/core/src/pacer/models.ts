@@ -33,6 +33,8 @@ export interface Memory {
   readonly embedding: string | null
   /** Whether the server has tasks (the memory API's section "Tasks"). */
   readonly tasks: boolean
+  /** Whether the server keeps the recall log, to which openforge adds what followed a search. */
+  readonly recalls: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -188,6 +190,7 @@ const MemoryBlock = Schema.Struct({
   search_limit: Limit,
   embedding: Schema.NullOr(Schema.String),
   tasks: Schema.optional(Schema.Unknown),
+  recalls: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -341,6 +344,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           searchLimit: memory.search_limit,
           embedding: memory.embedding,
           tasks: memory.tasks === true,
+          recalls: memory.recalls === true,
         },
       }),
     }),

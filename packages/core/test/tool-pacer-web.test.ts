@@ -146,6 +146,19 @@ describe("PacerWebTools registration", () => {
     }),
   )
 
+  it.effect("keeps the four through rebuilds of the registry, as a model update's reload, while the endpoint stays", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      expect(yield* names(h.registry)).toEqual([...web, "execute"])
+      // The same endpoint again, as each of its readers' first value after a reconnect.
+      yield* SubscriptionRef.set(h.endpoints, endpointOf(h.cpp.origin))
+      for (let index = 0; index < 3; index++) {
+        yield* h.registry.reload()
+        expect(yield* names(h.registry)).toEqual([...web, "execute"])
+      }
+    }),
+  )
+
   it.effect("leaves out the tools whose permission an agent denies, as it does upstream's", () =>
     Effect.gen(function* () {
       const h = yield* setup()

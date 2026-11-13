@@ -19,3 +19,14 @@ const patterns: ReadonlyArray<{ readonly kind: string; readonly pattern: RegExp 
 export function find(text: string) {
   return patterns.find((item) => item.pattern.test(text))?.kind
 }
+
+/**
+ * `text` with each known secret replaced by `[secret]`: for chat text memory keeps, which is not refused as an entry
+ * is. A private key goes with its body, up to its end line or the end of the text.
+ */
+export function redact(text: string) {
+  return patterns.reduce(
+    (out, item) => out.replace(new RegExp(item.pattern.source, `${item.pattern.flags}g`), "[secret]"),
+    text.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[secret]"),
+  )
+}

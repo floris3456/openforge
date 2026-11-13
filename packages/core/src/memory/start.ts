@@ -12,6 +12,7 @@ import { SessionEvent } from "../session/event.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
 import { MemoryClient } from "./client.js"
+import { MemoryFollowed } from "./followed.js"
 import { MemoryTask } from "./task.js"
 import { MemoryText } from "./text.js"
 
@@ -51,6 +52,8 @@ const layer = Layer.effect(
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
+    // What followed a search is added beside the chat; built with the start block, it runs wherever chats run.
+    yield* MemoryFollowed.Service
 
     const ensure = Effect.fn("MemoryStart.ensure")(function* (input: Parameters<Interface["ensure"]>[0]) {
       if ((yield* endpoints.get()) === undefined) return
@@ -172,5 +175,13 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, Database.node, Config.node, PacerEndpoint.node, PacerModels.node, MemoryClient.node],
+  deps: [
+    Bus.node,
+    Database.node,
+    Config.node,
+    PacerEndpoint.node,
+    PacerModels.node,
+    MemoryClient.node,
+    MemoryFollowed.node,
+  ],
 })

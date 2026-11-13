@@ -43,3 +43,24 @@ describe("MemorySecrets.find", () => {
       expect(MemorySecrets.find(text)).toBeUndefined()
   })
 })
+
+describe("MemorySecrets.redact", () => {
+  test("replaces each known secret with [secret] and leaves the rest as it was", () => {
+    const key = ["sk", "ant", "api03", fill(24)].join("-")
+    const token = ["ghp", fill(30)].join("_")
+    expect(MemorySecrets.redact(`Use ${key}\nor ${token}, not ${key}.`)).toBe(
+      "Use [secret]\nor [secret], not [secret].",
+    )
+    expect(MemorySecrets.redact(`Authorization: Bearer ${fill(40)}`)).toBe("Authorization: [secret]")
+    expect(MemorySecrets.redact("Keys start with sk- and live in the credential store.")).toBe(
+      "Keys start with sk- and live in the credential store.",
+    )
+  })
+
+  test("takes a private key out with its body, to its end line or the end of the text", () => {
+    const begin = ["-----BEGIN OPENSSH PRIVATE", "KEY-----"].join(" ")
+    const end = ["-----END OPENSSH PRIVATE", "KEY-----"].join(" ")
+    expect(MemorySecrets.redact(`before\n${begin}\n${fill(64)}\n${end}\nafter`)).toBe("before\n[secret]\nafter")
+    expect(MemorySecrets.redact(`cut: ${begin}\n${fill(64)}`)).toBe("cut: [secret]")
+  })
+})

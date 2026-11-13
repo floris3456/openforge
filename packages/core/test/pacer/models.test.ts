@@ -175,7 +175,11 @@ describe("PacerModels", () => {
       const server = yield* serve(cpp())
       const { models } = yield* start(endpoint(server.origin))
       const catalog = yield* until(models, loaded)
-      expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
+      expect(catalog?.pacer).toEqual({
+        compactTokens: ["auto", "before-cold", "cold"],
+        webTools: false,
+        freezePrompt: true,
+      })
       expect(catalog?.models).toEqual([
         {
           id: "claude-test-1",
@@ -358,14 +362,40 @@ describe("PacerModels", () => {
           const { models } = yield* start(endpoint(server.origin))
           return yield* until(models, loaded)
         })
-      expect((yield* told(webTools))?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: true })
+      expect((yield* told(webTools))?.pacer).toEqual({
+        compactTokens: ["auto", "before-cold", "cold"],
+        webTools: true,
+        freezePrompt: true,
+      })
       expect((yield* told({ tools: "/pacer/v1/tools" }))?.pacer?.webTools).toBe(true)
       // An older server leaves the block out; one this version cannot read is no web tools, and the rest stands.
       for (const unread of [undefined, null, { call: "/pacer/v1/tools/{name}" }, { tools: 7 }, "yes"]) {
         const catalog = yield* told(unread)
-        expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
+        expect(catalog?.pacer).toEqual({
+          compactTokens: ["auto", "before-cold", "cold"],
+          webTools: false,
+          freezePrompt: true,
+        })
         expect(catalog?.models).toHaveLength(5)
       }
+    }),
+  )
+
+  it.live("says whether a warm chat's prompt is kept, as capabilities' pacer.freeze_prompt says; on without it", () =>
+    Effect.gen(function* () {
+      const told = (freeze: unknown) =>
+        Effect.gen(function* () {
+          const server = yield* serve({
+            ...cpp(),
+            "/pacer/v1/capabilities": () =>
+              Response.json({ ...capabilities, pacer: { ...capabilities.pacer, freeze_prompt: freeze } }),
+          })
+          const { models } = yield* start(endpoint(server.origin))
+          return yield* until(models, loaded)
+        })
+      expect((yield* told(false))?.pacer?.freezePrompt).toBe(false)
+      expect((yield* told(true))?.pacer?.freezePrompt).toBe(true)
+      for (const unread of [undefined, null, "no"]) expect((yield* told(unread))?.pacer?.freezePrompt).toBe(true)
     }),
   )
 
@@ -387,6 +417,7 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: "granite-embedding-english-r2" }))?.pacer).toEqual({
           compactTokens: ["auto", "before-cold", "cold"],
           webTools: false,
+          freezePrompt: true,
           memory: {
             version: 1,
             entryCharacters: 800,
@@ -417,7 +448,11 @@ describe("PacerModels", () => {
           "yes",
         ]) {
           const catalog = yield* told(unread)
-          expect(catalog?.pacer).toEqual({ compactTokens: ["auto", "before-cold", "cold"], webTools: false })
+          expect(catalog?.pacer).toEqual({
+            compactTokens: ["auto", "before-cold", "cold"],
+            webTools: false,
+            freezePrompt: true,
+          })
           expect(catalog?.models).toHaveLength(5)
         }
       }),

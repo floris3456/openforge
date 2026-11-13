@@ -10,18 +10,25 @@ import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Message } from "@opencode/ai/effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Bus } from "@opencode/core/bus"
+import { Database } from "@opencode/core/database/database"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerTools } from "@opencode/core/pacer/tools"
+import { PacerWarmth } from "@opencode/core/pacer/warmth"
 import { Permission } from "@opencode/core/permission"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Project } from "@opencode/core/project"
+import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session as Sessions } from "@opencode/core/session"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionModelTransport } from "@opencode/core/session/model-transport"
+import { SessionPromptStart } from "@opencode/core/session/prompt-start"
+import { SessionTable } from "@opencode/core/session/sql"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { Tool } from "@opencode/core/tool"
 import { PacerWebTools } from "@opencode/core/tool/plugin/pacer-web"
@@ -321,6 +328,76 @@ describe("SessionModelRequest with CPP's web tools", () => {
       expect(names(yield* h.requests.primary(h.input(snapshot(all))))).toContain("web_search")
       yield* SubscriptionRef.set(h.catalogs, catalogOf(false))
       expect(names(yield* h.requests.primary(h.input(snapshot(all))))).toEqual(["read", "webfetch", "websearch"])
+    }),
+  )
+})
+
+describe("SessionModelRequest with CPP's web tools, for a chat whose start is recorded", () => {
+  /** The requests over a database holding the chat, with the start of each chat recorded (`SessionPromptStart`). */
+  const recorded = Effect.fnUntraced(function* () {
+    const h = yield* setup()
+    const base = yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node])))
+    const db = Context.get(base, Database.Service).db
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .onConflictDoNothing()
+      .run()
+      .pipe(Effect.orDie)
+    const store = (id: Session.ID) =>
+      db
+        .insert(SessionTable)
+        .values({ id, project_id: Project.ID.global, slug: id, directory: "/project", title: "t", version: "t" })
+        .run()
+        .pipe(Effect.orDie)
+    yield* store(session.id)
+    const starts = Context.get(
+      yield* Layer.build(
+        SessionPromptStart.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeedContext(base),
+              PacerWarmth.layer,
+              Layer.succeed(
+                PacerModels.Service,
+                PacerModels.Service.of({
+                  get: () => SubscriptionRef.get(h.catalogs),
+                  changes: () => SubscriptionRef.changes(h.catalogs),
+                  refresh: () => Effect.void,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      SessionPromptStart.Service,
+    )
+    const requests = yield* SessionModelRequest.Service.pipe(
+      Effect.provide(SessionModelRequest.layer),
+      Effect.provideService(SessionModelTransport.Service, transport),
+      Effect.provideService(PacerTools.Service, h.started.tools),
+      Effect.provideService(Database.Service, Context.get(base, Database.Service)),
+      Effect.provideService(SessionPromptStart.Service, starts),
+    )
+    return { ...h, requests, store }
+  })
+
+  it.effect("keeps a warm chat's web tools byte for byte when CPP's catalog drops them; a new chat goes without", () =>
+    Effect.gen(function* () {
+      const h = yield* recorded()
+      const first = yield* h.requests.primary(h.input(snapshot(all)))
+      expect(claude(first)).toBe(cppTools(web))
+      yield* SubscriptionRef.set(h.catalogs, catalogOf(false))
+      const second = yield* h.requests.primary(h.input(snapshot(all)))
+      expect(JSON.stringify(second.request.tools)).toBe(JSON.stringify(first.request.tools))
+      // The reminder of the step says they are gone, after the history.
+      const told = JSON.stringify(second.request.messages)
+      for (const name of web) expect(told).toContain(`The tool ${name} is gone`)
+
+      const other = Session.Info.make({ ...session, id: Session.ID.make("ses_model_request_pacer_later") })
+      yield* h.store(other.id)
+      const fresh = yield* h.requests.primary({ ...h.input(snapshot(all)), session: other })
+      expect(names(fresh)).toEqual(["read", "webfetch", "websearch"])
     }),
   )
 })

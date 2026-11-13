@@ -1,9 +1,17 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "733b4770-e19d-4b1e-91a0-f87da3b0719b",
-  "prevIds": ["5f1c0791-8f10-432c-9d83-c7a8c1e9319c"],
+  "id": "a33c3edb-02a0-4d12-873b-66a7b31439ed",
+  "prevIds": ["733b4770-e19d-4b1e-91a0-f87da3b0719b"],
   "ddl": [
+    {
+      "name": "session_prompt_start",
+      "entityType": "tables"
+    },
+    {
+      "name": "prompt_tools",
+      "entityType": "tables"
+    },
     {
       "name": "account_state",
       "entityType": "tables"
@@ -107,6 +115,126 @@
     {
       "name": "worktree",
       "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "agent",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "provider_id",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "model_id",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "system",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tools",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "told_system",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "told_tools",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compaction",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hash",
+      "entityType": "columns",
+      "table": "prompt_tools"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "value",
+      "entityType": "columns",
+      "table": "prompt_tools"
     },
     {
       "type": "integer",
@@ -2269,6 +2397,17 @@
       "table": "worktree"
     },
     {
+      "columns": ["session_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_session_prompt_start_session_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "session_prompt_start"
+    },
+    {
       "columns": ["active_account_id"],
       "tableTo": "account",
       "columnsTo": ["id"],
@@ -2521,6 +2660,20 @@
       "name": "worktree_pk",
       "entityType": "pks",
       "table": "worktree"
+    },
+    {
+      "columns": ["session_id"],
+      "nameExplicit": false,
+      "name": "session_prompt_start_pk",
+      "table": "session_prompt_start",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["hash"],
+      "nameExplicit": false,
+      "name": "prompt_tools_pk",
+      "table": "prompt_tools",
+      "entityType": "pks"
     },
     {
       "columns": ["id"],

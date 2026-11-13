@@ -4,7 +4,8 @@ import type { ToolDefinition } from "@opencode/ai/effect"
 import { PacerTools } from "./tools.js"
 
 // What a request offers of CPP's web tools, given the tools the agent may use and the chat's list: the one place that
-// decides it, which the Instructions work may replace. Pure, so it costs a pass over the definitions.
+// decides it. Pure, so it costs a pass over the definitions. A warm chat keeps what was decided at its latest cold
+// point (`SessionPromptStart`).
 
 const web = new Set<string>(PacerTools.names)
 /** upstream's own search (`tool/plugin/websearch.ts`), hidden from a chat CPP offers `web_search`: one search tool. */

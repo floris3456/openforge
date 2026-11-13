@@ -15,7 +15,8 @@ import { PacerModels } from "./models.js"
 // calls. CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
 // anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
 // model changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
-// is `PacerOffer`'s; this module stays when that changes.
+// is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
+// warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
 
 /** CPP's four web tools (WEB-TOOLS.md, "The tools' parameters"). */
 export const names = ["web_search", "web_extract", "web_crawl", "web_research"] as const

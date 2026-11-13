@@ -39,7 +39,8 @@ The service uses shared `State` to replay synchronous transforms in registration
 - The latest valid active registration for the same effective name wins.
 - `update` and `remove` target effective names and do nothing for missing tools. Updates preserve the name and namespace; invalid updates leave the previous definition intact. Creating a tool requires `add`.
 - Disposing a registration or closing its scope removes only its transform and rebuilds from the remaining transforms, revealing any earlier definition it overrode.
-- Each model request captures the effective definitions and executors it advertises; later reloads and disposal affect later snapshots. Captured executors may still reference mutable producer-owned state.
+- Each step captures the effective definitions and executors; later reloads and disposal affect later snapshots. Captured executors may still reference mutable producer-owned state.
+- openforge: a warm chat advertises the definitions recorded at its latest cold point, not the snapshot's (`session/prompt-start.ts`, spec `docs/specs/frozen-prefix.md`). A call runs against the snapshot's executors: a tool gone since answers that it is unavailable, and one the rules now wholly deny answers `Permission denied`.
 
 MCP owns one stable tool transform that reads its latest discovered tools. Tool-list changes update that source and reload the tool state instead of re-registering at the end of the transform order. MCP refresh therefore preserves the precedence of later plugin overrides.
 

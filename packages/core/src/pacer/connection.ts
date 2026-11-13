@@ -17,6 +17,7 @@ import { PacerModels } from "./models.js"
 import { PacerNotices } from "./notices.js"
 import { PacerSessionID } from "./session-id.js"
 import { PacerStatus } from "./status.js"
+import { PacerWarmth } from "./warmth.js"
 import { PacerWire } from "./wire.js"
 
 // The service's one connection to CPP, which every TUI reads through the `pacer.*` routes of `server.experimental`.
@@ -294,6 +295,8 @@ export const layer = Layer.effect(
     const notices = yield* PacerNotices.Service
     // Compaction reads the state there: it can't depend on this service.
     const shared = yield* PacerStatus.Service
+    // A step reads there whether its chat's cache is still warm: it can't depend on this service either.
+    const warmth = yield* PacerWarmth.Service
 
     const link: Link = {
       endpoint: undefined,
@@ -530,6 +533,7 @@ export const layer = Layer.effect(
       const next = PacerWire.chat(chat.raw, chat.sessionID, { ...(yield* context()), alias })
       const changed = !chat.view || !isDeepStrictEqual({ ...chat.view, asOf: 0 }, { ...next, asOf: 0 })
       chat.view = next
+      yield* warmth.set(next)
       if (changed) yield* bus.publish(Pacer.Event.ChatUpdated, { chat: next })
     })
 
@@ -1516,6 +1520,7 @@ export const node = makeGlobalNode({
     PacerModels.node,
     PacerNotices.node,
     PacerStatus.node,
+    PacerWarmth.node,
     Bus.node,
     Job.node,
     Session.node,

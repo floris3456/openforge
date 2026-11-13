@@ -20,6 +20,7 @@ import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerStatus } from "@opencode/core/pacer/status"
+import { PacerWarmth } from "@opencode/core/pacer/warmth"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -406,6 +407,8 @@ interface Harness {
   readonly connect: (key?: string) => Effect.Effect<void>
   /** The connection's state as compaction reads it (`PacerStatus`). */
   readonly shared: PacerStatus.Interface
+  /** Each chat's warmth as a step reads it (`PacerWarmth`). */
+  readonly warmth: PacerWarmth.Interface
 }
 
 /** The connection over the real Bus and Session store, with CPP's endpoint and catalog in the test's hands. */
@@ -484,11 +487,13 @@ const harness = Effect.fnUntraced(function* () {
     Effect.provideService(Session.Service, sessions),
   )
   const shared = Context.get(yield* Layer.build(PacerStatus.layer), PacerStatus.Service)
+  const warmth = Context.get(yield* Layer.build(PacerWarmth.layer), PacerWarmth.Service)
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(PacerStatus.Service, shared),
+          Layer.succeed(PacerWarmth.Service, warmth),
           PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints)),
           endpoints,
           Layer.succeed(
@@ -532,6 +537,7 @@ const harness = Effect.fnUntraced(function* () {
     connect: (key = "test-key") =>
       SubscriptionRef.set(endpoint, PacerEndpoint.resolve({ baseURL: `${cpp.origin}/v1`, apiKey: key }, undefined)),
     shared,
+    warmth,
   } satisfies Harness
 })
 
@@ -1423,6 +1429,13 @@ describe("PacerConnection chats", () => {
       // Every answer came at the same moment, so `Date` says CPP's clock to within its second: the middle of it.
       expect(Math.abs(held!.warmUntil! - (warmUntil - 120_000))).toBeLessThanOrEqual(500)
       expect(held!.coldAt).toBe(held!.warmUntil! + 3 * 240_000)
+      // A step reads the chat's warmth from the view held, as it was read (`PacerWarmth`).
+      expect(yield* h.warmth.get(id)).toEqual({
+        warm: true,
+        warmUntil: held!.warmUntil!,
+        coldAt: held!.coldAt!,
+        asOf: held!.asOf,
+      })
       expect(seen(h, viewPath(id))).toHaveLength(1)
       const accounts = yield* h.connection.accounts()
       expect(accounts?.items[0].windows[0]).toMatchObject({ label: "5h", left: 62, stale: false })

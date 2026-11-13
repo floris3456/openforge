@@ -21,6 +21,11 @@ export interface Pacer {
   readonly webTools: boolean
   /** `pacer.memory`, when the server has memory in a version this one reads; absent otherwise. */
   readonly memory?: Memory
+  /**
+   * `pacer.freeze_prompt` for the asking key: false when it lets a warm chat's prompt follow every change at its next
+   * step (`SessionPromptStart`). A server without the field: true.
+   */
+  readonly freezePrompt?: boolean
 }
 
 /** The limits of the server's memory store (the memory API's capabilities). */
@@ -175,6 +180,7 @@ export const CapabilitiesAnswer = Schema.Struct({
       compact_tokens: maybe(Schema.Array(Schema.String)),
       web_tools: Schema.optional(Schema.Unknown),
       memory: Schema.optional(Schema.Unknown),
+      freeze_prompt: Schema.optional(Schema.Unknown),
     }),
   ),
   providers: Items,
@@ -340,6 +346,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
   return {
     compactTokens: pacer.compact_tokens ?? [],
     webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
+    freezePrompt: pacer.freeze_prompt !== false,
     ...Option.match(decodeMemory(pacer.memory), {
       onNone: () => ({}),
       onSome: (memory) => ({

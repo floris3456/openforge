@@ -1468,6 +1468,15 @@ describe("SessionRunnerLLM", () => {
       Expected.assistant({}, [
         Expected.completedTool({ id: "call-reloaded" }, { content: [Expected.text('{"value":"advertised"}')] }),
       ]),
+      // openforge: the chat is warm, so its next step keeps the advertised definition and is told of the new one
+      // (spec frozen-prefix, rule 3).
+      {
+        type: "synthetic",
+        metadata: { promptStart: true },
+        text: expect.stringContaining(
+          "The tool reloaded changed; its calls follow this from now on:\nDescription: Record the replacement tool",
+        ),
+      },
     ])
   })
 
@@ -6397,7 +6406,10 @@ describe("SessionRunnerLLM", () => {
     // the window instead of rejecting it.
     s.currentModel = recoveryModel
     yield* s.llm.push(
-      TestLLM.complete({ reason: { normalized: "length" }, usage: { inputTokens: 199_994, nonCachedInputTokens: 199_994, outputTokens: 0 } }),
+      TestLLM.complete({
+        reason: { normalized: "length" },
+        usage: { inputTokens: 199_994, nonCachedInputTokens: 199_994, outputTokens: 0 },
+      }),
       TestLLM.text("## Objective\n- summary", "summary"),
       TestLLM.text("Done", "done"),
     )

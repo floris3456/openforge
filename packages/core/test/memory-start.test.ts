@@ -18,6 +18,7 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryKnown } from "@opencode/core/memory/known"
+import { MemoryStart } from "@opencode/core/memory/start"
 import { MemoryText } from "@opencode/core/memory/text"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -45,6 +46,7 @@ import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
 import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Context, Effect, Fiber, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
@@ -184,7 +186,22 @@ const memoryTools = makeLocationNode({
     KV.node,
   ],
 })
+/** The test's database, counting its lookups (`select`). */
+const lookups = { count: 0 }
+const counting = Layer.effect(
+  Database.Service,
+  Effect.map(Database.Service, ({ db }) => ({
+    db: new Proxy(db, {
+      get: (target, key) => {
+        if (key === "select") lookups.count++
+        const value = Reflect.get(target, key, target)
+        return typeof value === "function" ? value.bind(target) : value
+      },
+    }),
+  })),
+).pipe(Layer.provide(Database.layer()), Layer.provide(Global.layerWith({})))
 const replacements: LayerNode.Replacements = [
+  Database.node.replace(counting),
   Snapshot.node.replace(Snapshot.noopLayer),
   LayerNodePlatform.llmClient.replace(testLLM),
   SessionRunnerModel.node.replace(models),
@@ -737,6 +754,25 @@ describe("MemoryStart while the server's memory comes and goes", () => {
       yield* h.session.compact({ sessionID: h.sessionID })
       yield* h.session.resume(h.sessionID)
     })
+
+  it.live("a step on a server without memory looks nothing of the chat up", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const info = yield* h.session.get(h.sessionID).pipe(Effect.orDie)
+      const input = { session: info, agent: "build", recall: true, remember: true, task: true }
+      yield* Effect.gen(function* () {
+        const start = yield* MemoryStart.Service
+        pacer.catalog = catalogOf(false)
+        lookups.count = 0
+        yield* start.ensure(input)
+        // 0.0.31 looked up the chat's block and steps at every step boundary first: three lookups a step.
+        expect(lookups.count).toBe(0)
+        pacer.catalog = catalogOf(true)
+        yield* start.ensure(input)
+        expect(lookups.count).toBeGreaterThan(0)
+      }).pipe(Effect.provide(AppNodeBuilder.build(MemoryStart.node, replacements)))
+    }),
+  )
 
   it.live("a running chat without memory keeps its tools and gets no block when memory comes, till a compaction", () =>
     Effect.gen(function* () {

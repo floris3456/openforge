@@ -20,6 +20,7 @@ export const capabilities = {
   query_characters: 2000,
   search_limit: 20,
   tasks: true,
+  recalls: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -37,6 +38,13 @@ const STATES = ["todo", "active", "blocked", "review", "done"]
 /** How many tasks a list answers, and how many changes and entries a read. */
 const LIST = 200
 const READ = 20
+/** The recall log: how long a row is kept, how long what followed may be, how many judges label a row. */
+const KEPT_MS = 30 * 24 * 60 * 60 * 1000
+const STEP = 4000
+const PERSON = 2000
+const JUDGES = 10
+const LABELS = ["used", "beside", "unsure"]
+const ACTS = ["superseded", "forgotten"]
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
 const REFUSED = [
@@ -88,14 +96,19 @@ const SCHEMA = [
   `create index if not exists entry_project on entry (project, scope, role, task)`,
   `create virtual table if not exists entry_fts using fts5(text, basis, tokenize="${tokenizer}")`,
   `create table if not exists recall (
-    id text primary key,
+    seq integer primary key autoincrement,
+    id text not null unique,
     project text not null,
+    kind text not null,
     query text not null,
     scopes text not null,
     kinds text not null,
     entries text not null,
+    meaning integer not null,
     by text not null,
-    at integer not null
+    at integer not null,
+    after text,
+    labels text not null
   )`,
   `create table if not exists task (
     seq integer primary key autoincrement,
@@ -158,6 +171,33 @@ type TaskRow = {
   at: number
   changed: number
 }
+
+/** A row of the recall log: `scopes`, `kinds`, `entries`, `by`, `after` and `labels` are JSON. */
+type RecallRow = {
+  seq: number
+  id: string
+  project: string
+  kind: string
+  query: string
+  scopes: string
+  kinds: string
+  entries: string
+  meaning: number
+  by: string
+  at: number
+  after: string | null
+  labels: string
+}
+
+type After = {
+  step: string | null
+  acted: { id: string; how: string }[] | null
+  person: string | null
+  step_at: number | null
+  person_at: number | null
+}
+
+type Labels = { judge: string; entries: { id: string; label: string }[]; corrected: string | null; at: number }
 
 type ChangeRow = {
   seq: number
@@ -248,6 +288,22 @@ export function startMemoryServer(input: {
       "/pacer/v1/memory/:project/tasks/:id/state": {
         POST: guarded(async (request, person) =>
           store.change(projectOf(request.params.project), request.params.id, await bodyOf(request), person),
+        ),
+      },
+      "/pacer/v1/memory/:project/recalls": {
+        GET: guarded((request) => store.recalls(projectOf(request.params.project), new URL(request.url).searchParams)),
+      },
+      "/pacer/v1/memory/:project/recalls/:id": {
+        GET: guarded((request) => store.recall(projectOf(request.params.project), request.params.id)),
+      },
+      "/pacer/v1/memory/:project/recalls/:id/after": {
+        POST: guarded(async (request) =>
+          store.after(projectOf(request.params.project), request.params.id, await bodyOf(request)),
+        ),
+      },
+      "/pacer/v1/memory/:project/recalls/:id/labels": {
+        POST: guarded(async (request) =>
+          store.label(projectOf(request.params.project), request.params.id, await bodyOf(request)),
         ),
       },
       "/pacer/v1/memory/:project/export": {
@@ -442,7 +498,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const limit = limitOf(body.limit)
       const by = { person, ...byOf(body.by) }
       const answer = await found({ project, query, scopes, kinds, limit })
-      const recall = logged(project, query, scopes, kinds, answer.entries, by)
+      const recall = logged(project, "search", query, body, answer, by)
       catchUp()
       return Response.json({ recall, ...answer })
     },
@@ -466,7 +522,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
              and (? or coalesce(role, task) in (select value from json_each(?)))`,
           )
           .get(project, scope, list === "all" ? 1 : 0, JSON.stringify(list === "all" ? [] : list))?.n ?? 0
-      const recall = logged(project, prompt, scopes, kinds, answer.entries, by)
+      const recall = logged(project, "start", prompt, body, answer, by)
       catchUp()
       // Only a task that has no parent is a chat's task; its subtask only when it is one of that task's.
       const task = typeof body.task === "string" ? getTask(project, body.task) : null
@@ -600,9 +656,115 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
         .immediate()
     },
 
+    recall(project: string, id: string) {
+      return Response.json({ recall: recallOf(getRecall(project, id)) })
+    },
+
+    recalls(project: string, params: URLSearchParams) {
+      const limit = params.has("limit") ? Number(params.get("limit")) : 100
+      if (!/^\d+$/.test(params.get("limit") ?? "100") || limit < 1 || limit > 500)
+        refuse("limit: must be a whole number from 1 to 500")
+      // A cursor carries the filters of the first request and where it stopped.
+      const cursor = params.has("cursor") ? cursorOf(params.get("cursor")!) : undefined
+      const from = cursor?.from ?? (params.has("from") ? params.get("from")! : "0")
+      if (!/^\d+$/.test(from)) refuse("from: must be Unix milliseconds")
+      const kind = cursor
+        ? cursor.kind
+        : params.has("kind")
+          ? oneOf(params.get("kind"), ["search", "start"], "kind")
+          : null
+      const rows = db
+        .query<RecallRow, (string | number | null)[]>(
+          `select * from recall where project = ? and seq > ? and at >= ? and at >= ? and (? is null or kind = ?)
+           order by seq limit ?`,
+        )
+        .all(project, cursor?.seq ?? 0, Number(from), Date.now() - KEPT_MS, kind, kind, limit + 1)
+      const page = rows.slice(0, limit)
+      return Response.json({
+        recalls: page.map(recallOf),
+        next:
+          rows.length > limit
+            ? Buffer.from(JSON.stringify({ seq: page.at(-1)!.seq, from, kind })).toString("base64url")
+            : null,
+      })
+    },
+
+    after(project: string, id: string, body: Fields) {
+      const step = body.step === undefined || body.step === null ? null : said(body.step, "step", STEP)
+      const person = body.person === undefined || body.person === null ? null : said(body.person, "person", PERSON)
+      if (step === null && person === null) refuse("step, person: a body needs step, person or both")
+      const acted = actedOf(body.acted)
+      byOf(body.by)
+      return db
+        .transaction(() => {
+          const row = getRecall(project, id)
+          const entries: string[] = JSON.parse(row.entries)
+          const stranger = acted.find((item) => !entries.includes(item.id))
+          if (stranger) refuse(`acted: entry ${stranger.id} is not among the entries this recall returned`)
+          const now = Date.now()
+          const after: After = row.after
+            ? JSON.parse(row.after)
+            : { step: null, acted: null, person: null, step_at: null, person_at: null }
+          // Each part is kept once: the first that comes, with its time.
+          const next: After = {
+            ...after,
+            ...(step !== null && after.step === null ? { step, acted, step_at: now } : {}),
+            ...(person !== null && after.person === null ? { person, person_at: now } : {}),
+          }
+          const changed = { ...row, after: JSON.stringify(next) }
+          db.run("update recall set after = ? where seq = ?", [changed.after, row.seq])
+          return Response.json({ recall: recallOf(changed) })
+        })
+        .immediate()
+    },
+
+    label(project: string, id: string, body: Fields) {
+      if (typeof body.judge !== "string" || ![...body.judge].length || [...body.judge].length > 100)
+        refuse("judge: must be 1 to 100 characters")
+      const judge = body.judge
+      if (!Array.isArray(body.entries)) refuse("entries: must be a list of {id, label}")
+      const labelled = body.entries.map((item) => {
+        if (!isFields(item) || typeof item.id !== "string") refuse("entries: each must be {id, label}")
+        return { id: item.id, label: oneOf(item.label, LABELS, "entries.label") }
+      })
+      if (new Set(labelled.map((item) => item.id)).size !== labelled.length)
+        refuse("entries: an entry is labelled at most once")
+      const corrected = body.corrected === undefined || body.corrected === null ? null : body.corrected
+      if (
+        corrected !== null &&
+        (typeof corrected !== "string" || ![...corrected].length || [...corrected].length > 300)
+      )
+        refuse("corrected: must be null or 1 to 300 characters")
+      if (corrected !== null && /[\n\r\u0085\u2028\u2029]/.test(corrected)) refuse("corrected: must be on one line")
+      byOf(body.by)
+      return db
+        .transaction(() => {
+          const row = getRecall(project, id)
+          const entries: string[] = JSON.parse(row.entries)
+          const stranger = labelled.find((item) => !entries.includes(item.id))
+          if (stranger) refuse(`entries: entry ${stranger.id} is not among the entries this recall returned`)
+          // One set per judge: a judge's second set replaces its first.
+          const others = (JSON.parse(row.labels) as Labels[]).filter((set) => set.judge !== judge)
+          if (others.length >= JUDGES) refuse(`judge: a recall has labels of at most ${JUDGES} judges`)
+          const labels = JSON.stringify([...others, { judge, entries: labelled, corrected, at: Date.now() }])
+          db.run("update recall set labels = ? where seq = ?", [labels, row.seq])
+          return Response.json({ recall: recallOf({ ...row, labels }) })
+        })
+        .immediate()
+    },
+
     stop() {
       stopped = true
     },
+  }
+
+  /** A row of the recall log that is still kept, or 404. */
+  function getRecall(project: string, id: string) {
+    return (
+      db
+        .query<RecallRow, (string | number)[]>("select * from recall where project = ? and id = ? and at >= ?")
+        .get(project, id, Date.now() - KEPT_MS) ?? refuse(`no recall ${id} in this project`, 404, "not_found")
+    )
   }
 
   /** What `search` and `start` answer: the entries, each with its score, whether vectors ranked them, and how many wait for one. */
@@ -665,25 +827,32 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       })
   }
 
+  /** Logs a search or a start: its scopes and kinds as the request sent them. */
   function logged(
     project: string,
+    kind: "search" | "start",
     query: string,
-    scopes: Scopes,
-    kinds: string[],
-    entries: { id: string }[],
+    body: Fields,
+    answer: { entries: { id: string }[]; meaning: boolean },
     by: { person: string },
   ) {
     const id = newID()
-    db.run("insert into recall (id, project, query, scopes, kinds, entries, by, at) values (?, ?, ?, ?, ?, ?, ?, ?)", [
-      id,
-      project,
-      query,
-      JSON.stringify(scopes),
-      JSON.stringify(kinds),
-      JSON.stringify(entries.map((entry) => entry.id)),
-      JSON.stringify(by),
-      Date.now(),
-    ])
+    db.run(
+      `insert into recall (id, project, kind, query, scopes, kinds, entries, meaning, by, at, after, labels)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, '[]')`,
+      [
+        id,
+        project,
+        kind,
+        query,
+        JSON.stringify(body.scopes),
+        JSON.stringify(body.kinds ?? null),
+        JSON.stringify(answer.entries.map((entry) => entry.id)),
+        answer.meaning ? 1 : 0,
+        JSON.stringify(by),
+        Date.now(),
+      ],
+    )
     return id
   }
 }
@@ -719,6 +888,58 @@ function taskOf(row: TaskRow) {
     at: row.at,
     changed: row.changed,
   }
+}
+
+function recallOf(row: RecallRow) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    query: row.query,
+    scopes: JSON.parse(row.scopes),
+    kinds: JSON.parse(row.kinds),
+    entries: JSON.parse(row.entries),
+    meaning: row.meaning === 1,
+    by: JSON.parse(row.by),
+    at: row.at,
+    after: row.after === null ? null : JSON.parse(row.after),
+    labels: JSON.parse(row.labels),
+  }
+}
+
+/** Chat text of what followed a search: kept as sent, only its length checked, in code points. */
+function said(value: unknown, field: string, most: number) {
+  if (typeof value !== "string" || ![...value].length || [...value].length > most)
+    refuse(`${field}: must be 1 to ${most} characters`)
+  return value
+}
+
+function actedOf(value: unknown) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > READ) refuse(`acted: must be a list of at most ${READ} {id, how}`)
+  const acted = value.map((item) => {
+    if (!isFields(item) || typeof item.id !== "string") refuse("acted: each must be {id, how}")
+    return { id: item.id, how: oneOf(item.how, ACTS, "acted.how") }
+  })
+  if (new Set(acted.map((item) => item.id)).size !== acted.length) refuse("acted: each entry at most once")
+  return acted
+}
+
+function cursorOf(value: string) {
+  const cursor = (() => {
+    try {
+      return JSON.parse(Buffer.from(value, "base64url").toString()) as unknown
+    } catch {
+      return undefined
+    }
+  })()
+  if (
+    !isFields(cursor) ||
+    typeof cursor.seq !== "number" ||
+    typeof cursor.from !== "string" ||
+    (cursor.kind !== null && typeof cursor.kind !== "string")
+  )
+    refuse("cursor: must be the next of an earlier answer")
+  return { seq: cursor.seq, from: cursor.from, kind: cursor.kind as string | null }
 }
 
 function changeOf(row: ChangeRow) {

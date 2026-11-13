@@ -1,5 +1,5 @@
 import { afterAll, describe, expect } from "bun:test"
-import { LLMRequest } from "@opencode/ai/effect"
+import { LLMEvent, LLMRequest } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { LanguageModel } from "@opencode/ai/effect"
 import { TestLLM } from "@opencode/ai/testing"
@@ -54,8 +54,8 @@ import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
 import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin } from "./lib/tool"
-import { until } from "./pacer/fake-tools"
-import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
+import { settle, until } from "./pacer/fake-tools"
+import { catalogOf, endpointAt, key, startProxied } from "./memory/fixture"
 
 // The start block through the real runner: what each model request holds, over the small memory server. One server
 // for the file; each test works in a project of its own.
@@ -269,6 +269,7 @@ const setup = Effect.fnUntraced(function* (
   pacer.endpoint = endpointAt(server.origin)
   pacer.catalog = catalogOf(true)
   server.reset()
+  server.control.answer = undefined
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
@@ -369,6 +370,38 @@ const setup = Effect.fnUntraced(function* (
         .stage({ sessionID, messageID, files: false })
         .pipe(Effect.andThen(session.revert.commit(sessionID)), Effect.orDie),
     starts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/start`),
+    /** What followed a search that was sent, for one row or all. */
+    afters: (recall?: string) =>
+      server
+        .calls()
+        .filter((call) =>
+          recall
+            ? call.path === `/pacer/v1/memory/${project}/recalls/${recall}/after`
+            : call.path.startsWith(`/pacer/v1/memory/${project}/recalls/`) && call.path.endsWith("/after"),
+        ),
+    /** The searches of the chat's `recall` calls, in order, as the tool keeps them in its results' metadata. */
+    searches: () =>
+      session.messages({ sessionID, order: "asc" }).pipe(
+        Effect.map((messages) =>
+          messages.flatMap((message) =>
+            message.type === "assistant"
+              ? message.content.flatMap((part) =>
+                  part.type === "tool" && part.name === "recall" && part.state.status === "completed"
+                    ? [part.state.metadata as { project: string; recall: string; entries: string[] }]
+                    : [],
+                )
+              : [],
+          ),
+        ),
+      ),
+    /** The search of the chat's newest start block. */
+    blockRecall: () =>
+      session.messages({ sessionID, order: "desc" }).pipe(
+        Effect.map((messages) => {
+          const block = messages.find((message) => message.type === "synthetic" && message.metadata?.memory)
+          return String((block?.metadata?.memory as { recall?: string } | undefined)?.recall)
+        }),
+      ),
   }
 })
 
@@ -1100,6 +1133,224 @@ describe("MemoryStart inside a task", () => {
       expect(kept.length).toBeLessThan(written.length)
       expect(kept).toEqual(written.slice(written.length - kept.length))
       expect(part).toContain(long)
+    }),
+  )
+})
+
+/** Waits, in real time, until `check` holds; at most 5 seconds. */
+const eventually = (label: string, check: () => boolean) =>
+  Effect.gen(function* () {
+    const deadline = performance.now() + 5_000
+    while (!check()) {
+      if (performance.now() > deadline) return yield* Effect.die(new Error(`never happened: ${label}`))
+      yield* Effect.sleep("5 millis")
+    }
+  })
+
+/** A step that says `text` and makes the calls, in order. */
+const step = (text: string, ...calls: ReadonlyArray<readonly [string, Record<string, unknown>]>) =>
+  TestLLM.toolCalls(
+    LLMEvent.textStart({ id: "said" }),
+    LLMEvent.textDelta({ id: "said", text }),
+    LLMEvent.textEnd({ id: "said" }),
+    ...calls.map(([name, input], index) => LLMEvent.toolCall({ id: `call-${name}-${index}`, name, input })),
+  )
+const json = (value: unknown) => JSON.stringify(value)
+// Built here rather than written out, so no secret scanner reads this file as holding one.
+const fill = (length: number) => "Q7x".repeat(length).slice(0, length)
+
+describe("MemoryFollowed through the runner", () => {
+  it.live(
+    "after the step that reads a recall's result, its text and calls go to the search's row, with the entries it replaced or deleted",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const [kept, replaced, deleted] = yield* Effect.forEach([1, 2, 3], (n) =>
+          h
+            .write({ kind: "verified", text: `Zebra fact ${n}.`, basis: "b", scope: "global" })
+            .pipe(Effect.map((entry) => entry.id)),
+        )
+        const remember = { text: "Zebra fact two, corrected.", kind: "verified", basis: "b", supersedes: replaced }
+        const forget = { id: deleted, reason: "wrong" }
+        const elsewhere = { id: "000000000000", reason: "not one of them" }
+        yield* h.llm.push(
+          step("Let me look.", ["recall", { query: "zebra fact" }]),
+          step("Two are stale.", ["remember", remember], ["forget", forget], ["forget", elsewhere]),
+          TestLLM.text("Done.", "done"),
+        )
+        yield* h.prompt("zebra?")
+        const block = yield* h.blockRecall()
+        const [found] = yield* h.searches()
+        expect(found?.entries.toSorted()).toEqual([kept, replaced, deleted].toSorted())
+        if (!found) return yield* Effect.die(new Error("the recall's search is missing"))
+        yield* eventually("both rows were added to", () => h.afters().length === 2)
+        // The start block: the first step is the first that sees it.
+        expect(h.afters(block).map((call) => call.body)).toEqual([
+          {
+            step: `Let me look.\nrecall ${json({ query: "zebra fact" })}`,
+            acted: [],
+            by: { role: "build", chat: h.sessionID },
+          },
+        ])
+        // The recall: the step after its own.
+        expect(h.afters(found.recall).map((call) => call.body)).toEqual([
+          {
+            step: [
+              "Two are stale.",
+              `remember ${json(remember)}`,
+              `forget ${json(forget)}`,
+              `forget ${json(elsewhere)}`,
+            ].join("\n"),
+            acted: [
+              { id: replaced, how: "superseded" },
+              { id: deleted, how: "forgotten" },
+            ],
+            by: { role: "build", chat: h.sessionID },
+          },
+        ])
+        const row = yield* Effect.provide(MemoryClient.Service, client).pipe(
+          Effect.flatMap((memory) => memory.recall(h.project, found.recall)),
+          Effect.orDie,
+        )
+        expect(row.after).toMatchObject({ step: expect.stringContaining("Two are stale."), person: null })
+        expect(row.entries).toContain(kept)
+        // The last step followed no search: nothing more is sent.
+        yield* Effect.sleep("30 millis")
+        expect(h.afters()).toHaveLength(2)
+      }),
+  )
+
+  it.live("the step's text is cut to 4,000 code points from its start", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const said = "𝄞" + "x".repeat(4_100)
+      yield* h.llm.push(TestLLM.text(said, "long"))
+      yield* h.prompt("zebra?")
+      const block = yield* h.blockRecall()
+      yield* eventually("the block's row was added to", () => h.afters(block).length === 1)
+      expect((h.afters(block)[0]?.body as { step: string }).step).toBe("𝄞" + "x".repeat(3_999))
+    }),
+  )
+
+  it.live(
+    "the person's next message goes to each search since their message before, the newest 10, and only those",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        yield* h.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
+        yield* h.llm.push(
+          step("Looking.", ...Array.from({ length: 11 }, () => ["recall", { query: "zebra" }] as const)),
+          TestLLM.text("Found it.", "found"),
+        )
+        yield* h.prompt("zebra?")
+        const block = yield* h.blockRecall()
+        const first = yield* h.searches()
+        expect(first).toHaveLength(11)
+        yield* eventually("the steps' rows were added to", () => h.afters().length === 12)
+
+        yield* h.llm.push(step("Again.", ["recall", { query: "zebra again" }]), TestLLM.text("There.", "there"))
+        yield* h.prompt("No, the other one.")
+        const second = (yield* h.searches())[11]
+        if (!second) return yield* Effect.die(new Error("the second turn's search is missing"))
+        // The block and the first of the eleven are older than the newest 10.
+        const told = first.slice(1).map((search) => search.recall)
+        yield* eventually("the person's message was added", () =>
+          told.every((recall) => h.afters(recall).some((call) => "person" in (call.body as object))),
+        )
+        const people = () =>
+          h
+            .afters()
+            .filter((call) => "person" in (call.body as object))
+            .map((call) => call.path.split("/").at(-2))
+        yield* Effect.sleep("30 millis")
+        expect(people().toSorted()).toEqual(told.toSorted())
+        expect(people()).not.toContain(block)
+        expect(h.afters(told[0]).find((call) => "person" in (call.body as object))?.body).toEqual({
+          person: "No, the other one.",
+          by: { role: "build", chat: h.sessionID },
+        })
+
+        yield* h.llm.push(TestLLM.text("Ok.", "ok"))
+        yield* h.prompt("Thanks.")
+        yield* eventually("the second turn's search got it", () =>
+          h.afters(second.recall).some((call) => (call.body as { person?: string }).person === "Thanks."),
+        )
+        yield* Effect.sleep("30 millis")
+        expect(people().filter((recall) => recall === second.recall)).toHaveLength(1)
+        expect(people()).toHaveLength(11)
+      }),
+  )
+
+  it.live("takes secrets out of both texts, each as [secret]", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const key = ["sk", "ant", "api03", fill(24)].join("-")
+      const token = ["ghp", fill(30)].join("_")
+      yield* h.llm.push(TestLLM.text(`The key is ${key}, keep it.`, "key"))
+      yield* h.prompt("zebra?")
+      const block = yield* h.blockRecall()
+      yield* eventually("the block's row was added to", () => h.afters(block).length === 1)
+      expect((h.afters(block)[0]?.body as { step: string }).step).toBe("The key is [secret], keep it.")
+      yield* h.llm.push(TestLLM.text("Ok.", "ok"))
+      yield* h.prompt(`Use ${token} instead`)
+      yield* eventually("the person's message was added", () => h.afters(block).length === 2)
+      expect((h.afters(block)[1]?.body as { person: string }).person).toBe("Use [secret] instead")
+    }),
+  )
+
+  it.live("sends nothing while capabilities do not say recalls", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const memory = catalogOf(true).pacer!.memory!
+      pacer.catalog = {
+        ...catalogOf(true),
+        pacer: { ...catalogOf(true).pacer!, memory: { ...memory, recalls: false } },
+      }
+      yield* h.llm.push(step("Looking.", ["recall", { query: "zebra" }]), TestLLM.text("Done.", "done"))
+      yield* h.prompt("zebra?")
+      yield* h.llm.push(TestLLM.text("Ok.", "ok"))
+      yield* h.prompt("Thanks.")
+      expect(h.starts()).toHaveLength(1)
+      yield* Effect.sleep("30 millis")
+      expect(h.afters()).toEqual([])
+    }),
+  )
+
+  it.effect("a hanging or failing server never holds up a step: one try, dropped after 2 seconds", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const forward = (request: { method: string; path: string; body: unknown }) =>
+        fetch(`${server.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        })
+      // Every row hangs; the rest goes through.
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      server.control.answer = (request) => (request.path.endsWith("/after") ? hung.promise : forward(request))
+      yield* h.llm.push(
+        step("Looking.", ["recall", { query: "zebra" }]),
+        step("Still looking.", ["echo", { text: "one" }]),
+        TestLLM.text("Done.", "done"),
+      )
+      // The clock never moves: a step that waited for a row would never end.
+      yield* h.prompt("zebra?")
+      expect(h.requests()).toHaveLength(3)
+      yield* until("both rows were tried", () => h.afters().length === 2)
+      yield* TestClock.adjust("2 seconds")
+
+      // A server that refuses: the chat goes on, and nothing is tried again.
+      server.control.answer = (request) =>
+        request.path.endsWith("/after")
+          ? Response.json({ error: { type: "busy", message: "no free turn" } }, { status: 503 })
+          : forward(request)
+      yield* h.llm.push(TestLLM.text("Ok.", "ok"))
+      yield* h.prompt("Thanks.")
+      expect(h.requests()).toHaveLength(4)
+      yield* until("the person's message was tried", () => h.afters().length === 4)
+      yield* settle
+      expect(h.afters()).toHaveLength(4)
     }),
   )
 })

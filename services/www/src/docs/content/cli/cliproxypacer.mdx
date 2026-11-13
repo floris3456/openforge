@@ -379,6 +379,20 @@ Memory holds 12 global entries and 40 of role build; recall finds them.
 Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files.
 ```
 
+When CLIProxyPacer keeps a recall log (its capabilities say `recalls`), it logs every search, these first lines'
+included, for 30 days, so that searches can be measured and improved. openforge then adds to each search what followed
+it in the chat:
+
+- the step that read its result (for the first lines, the first step after them): the agent's text, then each tool
+  call on a line of its own with its input, at most 4,000 characters, and which of the notes found it replaced or
+  deleted;
+- the person's next message in that chat, at most 2,000 characters, for each search since their message before, the
+  newest 10.
+
+Keys and tokens are replaced by `[secret]` before anything is sent. It never holds up a chat: each is tried once in the
+background, and dropped when CLIProxyPacer does not answer within 2 seconds. Anyone with a key for the project can read
+the log, queries and what followed included.
+
 ## Code Mode's calls
 
 A chat's prompts show CLIProxyPacer a Code Mode program as one `execute` call. When the program ends, openforge tells

@@ -394,11 +394,17 @@ describe("PacerModels", () => {
             searchLimit: 20,
             embedding: "granite-embedding-english-r2",
             tasks: false,
+            recalls: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
           embedding: null,
           tasks: true,
+          recalls: false,
+        })
+        expect((yield* told({ ...block, embedding: null, recalls: true }))?.pacer?.memory).toMatchObject({
+          tasks: false,
+          recalls: true,
         })
         // Left out, or in a version or shape this one cannot read: no memory, and the rest stands.
         for (const unread of [

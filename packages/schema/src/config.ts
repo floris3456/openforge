@@ -120,6 +120,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   warming: ConfigWarming.Warming.pipe(optional).annotate({
     description: "Keep recently active sessions warm with transient model requests (default: false)",
   }),
+  freeze_prompt: Schema.Boolean.pipe(optional).annotate({
+    description:
+      "Keep a warm session's system prompt and tool definitions unchanged until its next cold point, such as a compaction (default: true). For sessions on CLIProxyPacer, its own setting decides.",
+  }),
   providers: Schema.Record(Schema.String, ConfigProvider.Info).pipe(optional),
   experimental: ConfigExperimental.Info.pipe(optional),
 }) {}

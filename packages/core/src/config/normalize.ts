@@ -218,6 +218,7 @@ export function normalize(input: unknown): Result {
     websearch: Info.fields.websearch,
     worktree: Info.fields.worktree,
     warming: Info.fields.warming,
+    freeze_prompt: Info.fields.freeze_prompt,
     sandbox: Info.fields.sandbox,
   }
   Object.entries(nativeAtomic).forEach(([key, schema]) => {

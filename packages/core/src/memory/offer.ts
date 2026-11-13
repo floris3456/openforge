@@ -6,10 +6,10 @@ import type { Database } from "../database/database.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
 
-// What memory a chat is offered, decided where its prompt cache is lost anyway: at its first step, and at the first
-// step after each compaction, when the start block goes in (`MemoryStart`). The block's metadata records it; between
-// those points nothing that memory adds to a chat changes, whatever the server says meanwhile (the workspace's spec
-// `docs/specs/memory.md`, sections 3 and 4).
+// What memory a chat is offered: what its start block in view says, which goes in at its first step and at the first
+// step after each compaction (`MemoryStart`); the block's metadata records it (the workspace's spec
+// `docs/specs/memory.md`, sections 3 and 4). It is read where a chat's start is recorded, at its cold points; between
+// them the chat keeps the tools recorded with its start (`SessionPromptStart`), whatever the server says meanwhile.
 
 type Db = Database.Interface["db"]
 

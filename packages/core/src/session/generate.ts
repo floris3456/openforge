@@ -50,6 +50,7 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
       model,
       tools: selection.tools,
       system: transcript.system,
+      start: transcript.start,
       messages: [
         ...transcript.messages,
         ...(history.instructionUpdate ? [Message.system(history.instructionUpdate)] : []),

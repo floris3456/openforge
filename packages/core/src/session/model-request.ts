@@ -43,6 +43,7 @@ import { QuestionTool } from "../tool/plugin/question.js"
 import { Tool } from "../tool.js"
 import { SessionAffinity } from "./affinity.js"
 import { SessionModelTransport } from "./model-transport.js"
+import { SessionPromptStart } from "./prompt-start.js"
 import { SessionProxyRequest } from "./proxy-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
@@ -90,6 +91,11 @@ export interface Input {
   readonly model: SessionRunnerModel.Resolved
   readonly tools?: Tool.Snapshot
   readonly system: Array<SystemPart>
+  /**
+   * The text of `system`'s first part when it is the agent's prompt (`baseTranscript`'s `start`), which a warm chat
+   * sends as recorded (`SessionPromptStart`).
+   */
+  readonly start?: string
   readonly messages: Array<Message>
   readonly toolChoice?: LLM.RequestInput["toolChoice"]
   /** Only the durable runner may use a stateful WebSocket. */
@@ -121,14 +127,15 @@ export const baseTranscript = (input: {
   readonly messages: ReadonlyArray<SessionMessage.Info>
 }) => {
   const providerMetadataKey = input.model.model.route.providerMetadataKey ?? input.model.model.provider
+  const start = input.agent.system
+    ? input.agent.system
+    : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name))
   return {
     providerMetadataKey,
+    /** The agent's prompt: `system`'s first part. */
+    start,
     system: [
-      SystemPart.make(
-        input.agent.system
-          ? input.agent.system
-          : SessionSystemPrompt.make(input.tools.definitions.map((tool) => tool.name)),
-      ),
+      SystemPart.make(start),
       {
         ...SystemPart.make(Instructions.join(input.initial)),
         metadata: { experimental: { instructions: input.initial } },
@@ -256,6 +263,7 @@ export const layer = Layer.effect(
     const app = yield* App.Metadata
     const pacerTools = yield* PacerTools.Service
     const database = yield* Effect.serviceOption(Database.Service)
+    const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     // openforge: the tool's images arrive whole in its result and are fitted once, here (ImageBank).
     const bankImages = (
       execution: Effect.Effect<Tool.NormalizedResult, Tool.Error>,
@@ -283,25 +291,53 @@ export const layer = Layer.effect(
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
       }
-      // The memory tools as the chat's start block in view offers them, so memory coming or going changes no running
-      // chat's tools (`MemoryOffer`).
-      const offered =
-        Option.isSome(database) && tools.definitions.some((tool) => MemoryOffer.tools.has(tool.name))
-          ? MemoryOffer.apply(tools.definitions, yield* MemoryOffer.offered(database.value.db, session.id))
-          : tools.definitions
+      // What decides the tools now: the memory tools as the chat's start block in view offers them (`MemoryOffer`), and
       // CPP's web tools as the chat's list defines them, before any hook, so plugins' hooks see and may change them.
-      const definitions = PacerOffer.wanted(offered)
-        ? PacerOffer.apply(
-            offered,
-            yield* pacerTools.list({
-              sessionID: session.id,
-              parentID: session.parentID,
-              model: model.ref.id,
-              step: kind === "primary",
-              continues: input.messages.some((message) => message.role === "assistant"),
-            }),
-          )
-        : offered
+      const now = Effect.gen(function* () {
+        const offered =
+          Option.isSome(database) && tools.definitions.some((tool) => MemoryOffer.tools.has(tool.name))
+            ? MemoryOffer.apply(tools.definitions, yield* MemoryOffer.offered(database.value.db, session.id))
+            : tools.definitions
+        if (!PacerOffer.wanted(offered)) return offered
+        return PacerOffer.apply(
+          offered,
+          yield* pacerTools.list({
+            sessionID: session.id,
+            parentID: session.parentID,
+            model: model.ref.id,
+            step: kind === "primary",
+            continues: input.messages.some((message) => message.role === "assistant"),
+          }),
+        )
+      })
+      // A warm chat sends its start as recorded at its latest cold point, whatever changed since (`SessionPromptStart`).
+      const start = Option.isSome(starts)
+        ? yield* starts.value.resolve({
+            kind,
+            sessionID: session.id,
+            agent: input.agent,
+            model: model.ref,
+            ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
+            system: input.start,
+            definitions: now,
+          })
+        : { system: input.start, definitions: yield* now }
+      const definitions = start.definitions
+      // A reminder stored for this step goes after the history, where the next step's history holds it; before the
+      // closing assistant message a step at its limit adds, which is not stored.
+      const reminder = "reminder" in start ? start.reminder : undefined
+      const end = input.messages.at(-1)?.role === "assistant" ? input.messages.length - 1 : input.messages.length
+      const messages = reminder
+        ? [
+            ...input.messages.slice(0, end),
+            Message.make({ id: reminder.id, role: "user", content: reminder.text }),
+            ...input.messages.slice(end),
+          ]
+        : input.messages
+      const system =
+        input.start !== undefined && start.system !== undefined && start.system !== input.start
+          ? [SystemPart.make(start.system), ...input.system.slice(1)]
+          : input.system
       // Remember which tool each definition object came from. Hooks rename a tool by moving
       // its definition to a new key, so after the hook we find the tool by object identity.
       // Definitions are shared across steps and sessions, and hooks may edit schemas in place,
@@ -317,8 +353,8 @@ export const layer = Layer.effect(
         {
           sessionID: session.id,
           model: model.ref,
-          system: input.system,
-          messages: input.messages,
+          system,
+          messages,
           options:
             kind === "primary"
               ? { maxTokens: outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM) }
@@ -509,5 +545,12 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, SessionModelTransport.node, App.node, PacerTools.node, Database.node],
+  deps: [
+    PluginHooks.node,
+    SessionModelTransport.node,
+    App.node,
+    PacerTools.node,
+    Database.node,
+    SessionPromptStart.node,
+  ],
 })

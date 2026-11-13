@@ -1026,6 +1026,7 @@ export const layer = Layer.effect(
         model: context.model,
         tools: context.tools,
         system: base.system,
+        start: base.start,
         messages: base.messages,
         webSocket,
         inputTokens: { measured: budget, estimated: 0 },

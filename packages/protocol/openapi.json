@@ -19008,6 +19008,9 @@
               }
             ]
           },
+          "freeze_prompt": {
+            "type": "boolean"
+          },
           "providers": {
             "type": "object",
             "additionalProperties": {

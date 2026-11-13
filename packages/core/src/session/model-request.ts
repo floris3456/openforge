@@ -291,6 +291,7 @@ export const layer = Layer.effect(
               parentID: session.parentID,
               model: model.ref.id,
               step: kind === "primary",
+              continues: input.messages.some((message) => message.role === "assistant"),
             }),
           )
         : tools.definitions

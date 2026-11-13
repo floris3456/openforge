@@ -96,7 +96,12 @@ const start = Effect.fnUntraced(function* (origin: string) {
 
 const chat = SessionID.make("ses_web_tools_reconnect_chat")
 const other = SessionID.make("ses_web_tools_reconnect_other")
-const step = (sessionID: SessionID): PacerTools.ListInput => ({ sessionID, model: "claude-opus-5-5", step: true })
+const step = (sessionID: SessionID): PacerTools.ListInput => ({
+  sessionID,
+  model: "claude-opus-5-5",
+  step: true,
+  continues: false,
+})
 const lists = (seen: ReadonlyArray<string>) => seen.filter((path) => path === "/pacer/v1/tools").length
 
 const it = testEffect(Layer.empty)
@@ -172,7 +177,7 @@ describe("PacerTools across a reconnect of CPP's stream", () => {
     ),
   )
 
-  it.live("leaves out every chat's tools, without a warning, after one list read answered 404", () =>
+  it.live("leaves out only the chat whose list read answered CPP's own 404", () =>
     logged((warnings) =>
       Effect.gen(function* () {
         const cpp = yield* serve
@@ -181,14 +186,16 @@ describe("PacerTools across a reconnect of CPP's stream", () => {
 
         cpp.answers["/pacer/v1/tools"] = () =>
           Response.json({ error: { type: "not_found", message: "no such chat" } }, { status: 404 })
-        expect(yield* h.tools.list(step(other))).toBeUndefined()
-        // The chat that holds its list loses it too, until the catalog changes; the reconnect's read changes it.
+        h.tools.seen(chat, "0123456789abcdef")
         expect(yield* h.tools.list(step(chat))).toBeUndefined()
-        cpp.answers["/pacer/v1/tools"] = () => Response.json(ownerList)
-        yield* h.catalogs.refresh()
         expect(warnings).toEqual([])
+
+        // Another chat still reads its list; the first reads again at its next request.
+        cpp.answers["/pacer/v1/tools"] = () => Response.json(ownerList)
+        expect((yield* h.tools.list(step(other)))?.version).toBe(ownerList.version)
         const back = yield* h.tools.list(step(chat))
         expect(back?.version).toBe(ownerList.version)
+        expect(lists(cpp.seen)).toBe(4)
 
         // Whereas a list read that fails is logged, and the chat keeps the list it holds.
         cpp.answers["/pacer/v1/tools"] = () => new Response("down", { status: 503 })

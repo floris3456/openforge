@@ -26,6 +26,13 @@ export const CHATS = 1_000
 export const READ_TIMEOUT = Duration.seconds(5)
 /** After a failed list read, no list a chat holds is read again for this long. */
 export const PAUSE = Duration.seconds(30)
+/**
+ * A chat with earlier steps that holds no list waits for CPP's answer: it reads again this long after a read that got
+ * none, then `RETRY` after each later one, for up to `WAIT` from its first read.
+ */
+export const RETRY_FIRST = Duration.seconds(3)
+export const RETRY = Duration.seconds(5)
+export const WAIT = Duration.minutes(1)
 /** A call waits at most this long; CPP's longest is 3 attempts of 30 s, or a job's 50 s wait. */
 export const CALL_TIMEOUT = Duration.minutes(2)
 
@@ -48,6 +55,11 @@ export interface ListInput {
    * one; a compaction or one-off generation carries the list the chat's steps hold, whatever its own model.
    */
   readonly step: boolean
+  /**
+   * Whether the chat has earlier steps: its history holds a model answer. Such a chat that holds no list, as after a
+   * restart, waits for CPP's answer, since going without the tools would cost it its prompt cache; a new chat reads once.
+   */
+  readonly continues: boolean
 }
 
 export interface CallInput {
@@ -109,8 +121,16 @@ interface Chat {
   stale: boolean
   /** Counts the events that make the list stale, so one during a read leaves it stale. */
   generation: number
-  reading?: Deferred.Deferred<List | undefined>
+  reading?: Deferred.Deferred<Read>
 }
+
+/** A list read's outcome: `answered` is false when CPP gave no definite answer (no answer, a 5xx, a 429, …). */
+interface Read {
+  readonly list: List | undefined
+  readonly answered: boolean
+  readonly reason?: string
+}
+const none: Read = { list: undefined, answered: true }
 
 export const layer = Layer.effect(
   Service,
@@ -131,6 +151,8 @@ export const layer = Layer.effect(
       pausedUntil: 0,
       /** The endpoint answered the list's path with a 404: it has no web tools until the catalog or endpoint changes. */
       absent: false,
+      /** Done at the next endpoint change, which ends every chat's wait. */
+      changed: Deferred.makeUnsafe<void>(),
     }
 
     const release = (list: List | undefined) => {
@@ -165,18 +187,19 @@ export const layer = Layer.effect(
       return held.list
     }
 
-    const read = (chat: Chat, input: ListInput) =>
+    /** One read, shared by the chat's requests; `quiet` leaves a failure's warning to the caller. */
+    const read = (chat: Chat, input: ListInput, quiet: boolean) =>
       Effect.gen(function* () {
         if (chat.reading) return yield* Deferred.await(chat.reading)
-        const result = Deferred.makeUnsafe<List | undefined>()
+        const result = Deferred.makeUnsafe<Read>()
         const generation = chat.generation
         const epoch = state.epoch
         chat.reading = result
         // Done before a waiter resumes, so the chat's next request finds no read under way.
-        const done = (list: List | undefined) =>
+        const done = (read: Read) =>
           Effect.sync(() => {
             if (chat.reading === result) chat.reading = undefined
-            Deferred.doneUnsafe(result, Exit.succeed(list))
+            Deferred.doneUnsafe(result, Exit.succeed(read))
           })
         // Shared by the chat's requests that wait for it, so it outlives the one that started it.
         yield* http
@@ -186,49 +209,93 @@ export const layer = Layer.effect(
           })
           .pipe(
             Effect.flatMap((answer) =>
-              Effect.sync(() => {
-                if (epoch !== state.epoch) return undefined
+              Effect.sync((): Read => {
+                if (epoch !== state.epoch) return none
                 // A chat deleted or pushed out meanwhile holds nothing; this request still gets the list.
                 if (chats.get(input.sessionID) !== chat)
-                  return versions.get(answer.body.version)?.list ?? parse(answer.body.version, answer.body.tools.claude)
+                  return {
+                    list:
+                      versions.get(answer.body.version)?.list ?? parse(answer.body.version, answer.body.tools.claude),
+                    answered: true,
+                  }
                 const list = hold(chat, answer.body.version, answer.body.tools.claude)
                 chat.model = input.model
                 if (chat.generation === generation) chat.stale = false
-                return list
+                return { list, answered: true }
               }),
             ),
             Effect.catch((error) =>
               Effect.gen(function* () {
-                if (epoch !== state.epoch) return undefined
-                if (error._tag === "PacerHttp.NoPacer" || error._tag === "PacerHttp.NotFound") {
+                if (epoch !== state.epoch) return none
+                if (error._tag === "PacerHttp.NoPacer") {
                   state.absent = true
-                  return undefined
+                  return none
+                }
+                // CPP never answers this path with its own 404 (cpa-server web_tools/mod.rs, `client`): one would be
+                // about this chat, so only it goes without, and reads again at its next request.
+                if (error._tag === "PacerHttp.NotFound") {
+                  if (chats.get(input.sessionID) === chat) {
+                    release(chat.list)
+                    chat.list = undefined
+                    chat.model = undefined
+                  }
+                  return none
                 }
                 if (error._tag !== "PacerHttp.NotSetUp")
                   state.pausedUntil = (yield* Clock.currentTimeMillis) + Duration.toMillis(PAUSE)
-                yield* Effect.logWarning("could not read CLIProxyPacer's web tools", { reason: error.message })
-                return chat.list
+                if (!quiet)
+                  yield* Effect.logWarning("could not read CLIProxyPacer's web tools", { reason: error.message })
+                // A refused key or no CPP set up is an answer; nothing else from it is.
+                const answered = error._tag === "PacerHttp.Refused" || error._tag === "PacerHttp.NotSetUp"
+                return { list: chat.list, answered, reason: error.message }
               }),
             ),
             Effect.flatMap(done),
-            Effect.ensuring(done(undefined)),
+            Effect.ensuring(done(none)),
             Effect.forkIn(scope, { startImmediately: true }),
           )
         return yield* Deferred.await(result)
       })
 
-    const list = Effect.fn("PacerTools.list")(function* (input: ListInput) {
-      if (!(yield* endpoints.get())) return undefined
+    const offered = Effect.gen(function* () {
+      if (!(yield* endpoints.get())) return false
       // A catalog not read yet reads anyway: a step resumed right after a restart gets the tools it had.
       const catalog = yield* catalogs.get()
-      if (catalog && !catalog.pacer?.webTools) return undefined
-      if (state.absent) return undefined
+      if (catalog && !catalog.pacer?.webTools) return false
+      return !state.absent
+    })
+
+    const list = Effect.fn("PacerTools.list")(function* (input: ListInput) {
+      if (!(yield* offered)) return undefined
       const chat = touch(input)
       const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model))
       // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
       // tools would cost it its prompt cache because another chat's read failed first.
       if (!due || (chat.list && (yield* Clock.currentTimeMillis) < state.pausedUntil)) return chat.list
-      return yield* read(chat, input)
+      if (chat.list || !input.continues) return (yield* read(chat, input, false)).list
+      return yield* wait(chat, input)
+    })
+
+    /** Reads until CPP answers, the endpoint changes, or no read would start within `WAIT` of the first. */
+    const wait = Effect.fnUntraced(function* (chat: Chat, input: ListInput) {
+      const begun = yield* Clock.currentTimeMillis
+      const epoch = state.epoch
+      const changed = Deferred.await(state.changed)
+      for (let retry = RETRY_FIRST; ; retry = RETRY) {
+        const result = yield* Effect.raceFirst(read(chat, input, true), Effect.as(changed, none))
+        if (result.answered || result.list) return result.list
+        const now = yield* Clock.currentTimeMillis
+        if (now + Duration.toMillis(retry) > begun + Duration.toMillis(WAIT)) {
+          yield* Effect.logWarning("went on without CLIProxyPacer's web tools: no answer to their list", {
+            sessionID: input.sessionID,
+            waited: Duration.format(Duration.millis(now - begun)),
+            reason: result.reason,
+          })
+          return undefined
+        }
+        yield* Effect.raceFirst(Effect.sleep(retry), changed)
+        if (state.epoch !== epoch || !(yield* offered)) return undefined
+      }
     })
 
     const call = Effect.fn("PacerTools.call")(function* (input: CallInput) {
@@ -267,6 +334,8 @@ export const layer = Layer.effect(
           state.absent = false
           chats.clear()
           versions.clear()
+          Deferred.doneUnsafe(state.changed, Exit.void)
+          state.changed = Deferred.makeUnsafe<void>()
         }),
       ),
       Effect.forkScoped({ startImmediately: true }),

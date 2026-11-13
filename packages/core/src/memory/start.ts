@@ -67,14 +67,16 @@ const layer = Layer.effect(
     const ensure = Effect.fn("MemoryStart.ensure")(function* (input: Parameters<Interface["ensure"]>[0]) {
       const endpoint = yield* endpoints.get()
       if (endpoint === undefined) return
-      const sessionID = input.session.id
-      const last = yield* MemoryOffer.newestBlock(db, sessionID)
-      if (last?.visible) return
-      if (yield* MemoryOffer.stepped(db, sessionID)) return
+      // Whether the server has memory before anything of the chat is looked up: on a server without it, a step costs
+      // memory nothing.
       const catalog = yield* catalogs.get()
       // Not read yet, as right after a start: as the server was last known. Whether it has tasks is known only once
       // the catalog is read; till the chat's next compaction it has none.
       if (!(catalog ? catalog.pacer?.memory !== undefined : yield* MemoryKnown.read(kv, endpoint))) return
+      const sessionID = input.session.id
+      const last = yield* MemoryOffer.newestBlock(db, sessionID)
+      if (last?.visible) return
+      if (yield* MemoryOffer.stepped(db, sessionID)) return
       const tasks = catalog?.pacer?.memory?.tasks === true
       const project = MemoryClient.project(yield* config.entries(), input.session.projectID)
       if (project === undefined) return

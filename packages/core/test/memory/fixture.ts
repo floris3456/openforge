@@ -6,6 +6,7 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { capabilities, startMemoryServer } from "../pacer/memory-server"
 import { endpointOf } from "../pacer/fake-tools"
+import { startFakeEmbedding } from "../pacer/memory-embedding"
 
 export const key = "memory-client-key-f1"
 export const person = "floris"
@@ -45,8 +46,11 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
  * The small memory server behind a proxy that keeps every request it gets, so a test can say what was sent (or that
  * nothing was). `answer` stands in for the server while set, and `hold` keeps answers until released.
  */
-export function startProxied() {
-  const store = startMemoryServer({ keys: [{ key, label: person }] })
+export function startProxied(options: { readonly embedding?: string } = {}) {
+  const store = startMemoryServer({
+    keys: [{ key, label: person }],
+    ...(options.embedding ? { embedding: { url: options.embedding, model: "test-embedding" } } : {}),
+  })
   const received: Received[] = []
   const releases: Array<() => void> = []
   const control = {
@@ -108,6 +112,15 @@ export const memoryServer = Effect.acquireRelease(Effect.sync(startProxied), (se
   Effect.promise(() => served.stop()),
 )
 export type MemoryServer = Effect.Success<typeof memoryServer>
+
+/** The same with the fake embedding endpoint behind the memory server, so that a write answers its `near` entries. */
+export const nearServer = Effect.acquireRelease(
+  Effect.sync(() => {
+    const embedding = startFakeEmbedding()
+    return { embedding, served: startProxied({ embedding: embedding.url }) }
+  }),
+  (both) => Effect.promise(() => both.served.stop().then(() => both.embedding.stop())),
+).pipe(Effect.map((both) => both.served))
 
 /** The memory client over the real PacerHttp, with the endpoint and the catalog in the test's hands. */
 export const startClient = Effect.fnUntraced(function* (

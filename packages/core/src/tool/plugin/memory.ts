@@ -9,6 +9,7 @@ import { MemoryClient } from "../../memory/client.js"
 import { MemoryKnown } from "../../memory/known.js"
 import { MemorySecrets } from "../../memory/secrets.js"
 import { MemoryText } from "../../memory/text.js"
+import { MemoryWords } from "../../memory/words.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
 import { PacerModels } from "../../pacer/models.js"
 import { Permission } from "../../permission.js"
@@ -40,7 +41,9 @@ export const RememberInput = Schema.Struct({
     }),
   ),
   supersedes: Schema.optional(
-    Schema.String.annotate({ description: "The id of an entry this one replaces; it takes that entry's scope" }),
+    Schema.String.annotate({
+      description: "The id of an entry this one replaces; without scope it takes that entry's scope",
+    }),
   ),
 })
 
@@ -63,6 +66,11 @@ export const ForgetInput = Schema.Struct({
   id: Schema.String.annotate({ description: "The entry's id" }),
   reason: Schema.String.annotate({ description: "Why it goes, in a few words" }),
 })
+
+// How alike (the cosine of their vectors) an entry near the one written must be for `remember` to show it. Chosen on
+// `run/evidence/memory/near-1` of the workspace for granite-embedding-english-r2; it changes only with a run of the
+// behaviour set.
+const NEAR = 0.86
 
 const memory = "Memory holds short notes that agents and people of this project wrote earlier."
 
@@ -173,6 +181,19 @@ export const Plugin = {
                 return yield* new ToolFailure({
                   message: `Not saved: it holds what looks like a ${secret}, and memory never keeps secrets. Save it without the secret.`,
                 })
+              if (input.kind === "words") {
+                // What the person typed in this chat, stored also when a compaction or a staged revert hides it from
+                // the model; synthetic messages (memory's start block, a child's notice) and tool output are not theirs.
+                const said = yield* sessions
+                  .messages({ sessionID: context.sessionID, type: "user", order: "asc" })
+                  .pipe(Effect.mapError(fail))
+                const texts = said.flatMap((message) => (message.type === "user" ? [message.text] : []))
+                if (!MemoryWords.quoted(input.text, texts))
+                  return yield* new ToolFailure({
+                    message:
+                      "Not saved: words are a person's exact words, and this text is not in what the person wrote in this chat. Quote the words as written, or save what follows from them as unverified.",
+                  })
+              }
               const replaced = input.supersedes === undefined ? undefined : yield* changeable(who, input.supersedes)
               const written = yield* client
                 .write(who.project, {
@@ -180,19 +201,67 @@ export const Plugin = {
                   text: input.text,
                   ...(input.basis === undefined ? {} : { basis: input.basis }),
                   scope,
-                  ...(replaced ? { supersedes: replaced.id } : {}),
+                  // A scope named with supersedes moves the replacement there; without one it takes the replaced
+                  // entry's, and the server ignores the default sent.
+                  ...(replaced
+                    ? { supersedes: replaced.id, ...(input.scope === undefined ? {} : { move: true }) }
+                    : {}),
                   by: who.by,
                 })
                 .pipe(Effect.mapError(fail))
+              const id = written.entry.id
               const what = `a ${written.entry.kind} entry, ${scopeOf(written.entry)}`
               if (written.existing)
                 return {
-                  content: `Memory holds this already as ${written.entry.id} (${what}); nothing new was saved.`,
-                  metadata: { id: written.entry.id, existing: true },
+                  content:
+                    replaced && id !== replaced.id && !replaced.superseded_by && !replaced.deleted
+                      ? // Said so that the copy is not taken for a second entry: a model that read "holds this already
+                        // as X; it now replaces Y" deleted X as a duplicate, the only live one (behaviour set, 2026-11-13).
+                        `Nothing new was written: ${id} (${what}) holds this text already and now replaces ${replaced.id}.`
+                      : `Memory holds this already as ${id} (${what}); nothing new was saved.`,
+                  metadata: { id, existing: true, near: [] },
                 }
+              // Saved first in its own scope, then sent again to replace an entry of another one: the server wrote it
+              // once more where the replaced entry belongs, so this chat's first writing would stay as a twin.
+              const removed = replaced
+                ? yield* Effect.forEach(
+                    written.near.filter(
+                      (entry) =>
+                        !entry.superseded_by &&
+                        !entry.deleted &&
+                        entry.text === written.entry.text &&
+                        entry.by.chat === who.by.chat,
+                    ),
+                    (twin) =>
+                      client
+                        .forget(who.project, twin.id, {
+                          reason: `written again as ${id}, which replaces ${replaced.id}`,
+                          by: who.by,
+                        })
+                        .pipe(
+                          Effect.as([twin.id]),
+                          Effect.orElseSucceed(() => []),
+                        ),
+                  ).pipe(Effect.map((ids) => ids.flat()))
+                : []
+              const shown = written.near.filter((entry) => entry.score >= NEAR && !removed.includes(entry.id))
+              const saved = `Saved as ${id}${replaced ? `, replacing ${replaced.id}` : ""}: ${what}${removed.length ? `; the first writing ${removed.join(", ")} is removed` : ""}.`
+              const metadata = { id, near: shown.map((entry) => entry.id) }
+              if (!shown.length) return { content: saved, metadata }
               return {
-                content: `Saved as ${written.entry.id}${replaced ? `, replacing ${replaced.id}` : ""}: ${what}.`,
-                metadata: { id: written.entry.id },
+                content: [
+                  saved,
+                  "Memory holds entries close to it:",
+                  ...shown.map((entry) =>
+                    mayChange(who, entry)
+                      ? `${MemoryText.entry(entry).slice(0, -1)}; not yours to replace)`
+                      : MemoryText.entry(entry),
+                  ),
+                  shown.some((entry) => !mayChange(who, entry))
+                    ? `If ${id} corrects one of them or says the same as one, replace that one now, without asking: remember ${id}'s text again with supersedes. An entry that is only about the same subject stays.`
+                    : "They are not yours to replace: if yours contradicts one, say so in your answer.",
+                ].join("\n"),
+                metadata,
               }
             }),
         })

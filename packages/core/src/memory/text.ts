@@ -31,18 +31,31 @@ export function recall(found: MemoryClient.Found) {
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
 
+// Chosen by the workspace's behaviour set (its evidence, memory/behaviour-1/wording): without it a cheap model saved
+// or corrected nothing unasked; said more widely, a strong model noted what its own edit had just put in the files.
+// A sentence on when to recall was tried there too and left out: the strong model then recalled in every chat. It
+// changes only with a run of that set.
+const keep =
+  "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
+
 /**
- * The start block: the opening line, the entries nearest to the prompt when there are any, and what else there is.
- * It names `recall` only for a chat that has the tool: an agent's permissions may leave it out.
+ * The start block: the opening line, the entries nearest to the prompt when there are any, what else there is, and,
+ * for a chat that can save, that memory is its to keep true. It names `recall` and `remember` only for a chat that
+ * has the tool: an agent's permissions may leave one out.
  */
-export function block(started: MemoryClient.Started, role: string, recall: boolean) {
-  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${recall ? "; recall finds them" : ""}.`
-  if (started.entries.length === 0) return [opening, counts].join("\n")
+export function block(
+  started: MemoryClient.Started,
+  role: string,
+  tools: { readonly recall: boolean; readonly remember: boolean },
+) {
+  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tools.recall ? "; recall finds them" : ""}.`
   return [
     opening,
-    "What memory holds nearest to this prompt; it may not be about it:",
-    ...started.entries.map(entry),
+    ...(started.entries.length === 0
+      ? []
+      : ["What memory holds nearest to this prompt; it may not be about it:", ...started.entries.map(entry)]),
     counts,
+    ...(tools.remember ? [keep] : []),
   ].join("\n")
 }
 

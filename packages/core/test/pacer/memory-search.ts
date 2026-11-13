@@ -126,6 +126,32 @@ export function search<Row extends Ranked>(
   return merged.filter((row) => row.score >= merged[0]!.score * CUT).slice(0, input.limit)
 }
 
+/**
+ * The live entries of a project nearest to the entry `id`, whose vector (length 1, of `model`) is `vector`: those with
+ * a vector of that model, of every scope and kind, by cosine best first, equal ones as in the keyword list; at most
+ * `limit`, each with its cosine as `score`. Answered by a write as `near`.
+ */
+export function nearest<Row extends Ranked>(
+  db: Database,
+  input: {
+    readonly project: string
+    readonly id: string
+    readonly vector: Float32Array
+    readonly model: string
+    readonly limit: number
+  },
+) {
+  return db
+    .query<Row, string[]>(
+      `select * from entry where project = ? and superseded_by is null and deleted is null and id != ?
+       and vector is not null and vector_model = ?`,
+    )
+    .all(input.project, input.id, input.model)
+    .map((row) => ({ ...row, score: cosine(input.vector, row.vector!) }))
+    .toSorted(order)
+    .slice(0, input.limit)
+}
+
 /** How many live entries of the selection have no vector of `model`. */
 export function waiting(db: Database, input: Selection & { readonly model: string }) {
   const selection = selected(input)

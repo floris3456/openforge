@@ -32,6 +32,8 @@ export interface Interface {
     readonly agent: string
     /** Whether the chat has the `recall` tool, which the block then names. */
     readonly recall: boolean
+    /** Whether the chat has the `remember` tool: the block then says that memory is its to keep true. */
+    readonly remember: boolean
   }) => Effect.Effect<void>
 }
 
@@ -73,7 +75,7 @@ const layer = Layer.effect(
         )
         .pipe(
           Effect.map((started) => ({
-            text: MemoryText.block(started, by.role, input.recall),
+            text: MemoryText.block(started, by.role, input),
             description: "Memory nearest to the prompt",
             memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id) },
           })),

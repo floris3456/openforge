@@ -277,7 +277,7 @@ export const Plugin = {
                       : MemoryText.entry(entry),
                   ),
                   shown.some((entry) => !mayChange(who, entry))
-                    ? `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`
+                    ? `If ${id} corrects one of them or says the same as one, replace that one now, without asking: remember ${id}'s text again with supersedes. An entry that is only about the same subject stays.`
                     : "They are not yours to replace: if yours contradicts one, say so in your answer.",
                 ].join("\n"),
                 metadata,

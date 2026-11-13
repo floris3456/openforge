@@ -130,6 +130,14 @@ const echo = makeLocationNode({
           input: Schema.Struct({ query: Schema.String }),
           execute: () => Effect.succeed({ content: "Memory holds nothing for this." }),
         })
+        // And for `remember`: a chat that has it is told that memory is its to keep true.
+        editor.add({
+          name: "remember",
+          description: "Saves an entry in memory",
+          options: { codemode: false },
+          input: Schema.Struct({ text: Schema.String }),
+          execute: () => Effect.succeed({ content: "Saved." }),
+        })
       }),
     ),
   ),
@@ -232,6 +240,11 @@ const setup = Effect.fnUntraced(function* (
       agent.mode = "subagent"
       agent.permissions = [{ action: "recall", resource: "*", effect: "deny" }]
     })
+    // And one that may look but not save.
+    editor.update(Agent.ID.make("viewer"), (agent) => {
+      agent.mode = "subagent"
+      agent.permissions = [{ action: "remember", resource: "*", effect: "deny" }]
+    })
   })
   const project = Project.ID.make(crypto.randomUUID().replaceAll("-", "").padEnd(40, "0"))
   yield* db
@@ -319,6 +332,10 @@ const userTexts = (request: LLMRequest | undefined) =>
 const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
+const look =
+  "; recall finds them: look there before a step this project may have its own way for (running, testing, releasing, deploying)."
+const keep =
+  "Keep it true as you work: replace an entry you find wrong or have now checked (remember with supersedes), and remember what a later chat will need that the project's files do not say: a fact you had to find out, a rule the person gives."
 
 describe("MemoryStart through the runner", () => {
   it.live("puts the block after the first prompt, in the first request, with the default search's entries", () =>
@@ -348,7 +365,8 @@ describe("MemoryStart through the runner", () => {
         // Equal scores: the nearer scope first.
         `- [${own.id}] Zebra deploys use the train. (words of floris, noted as build; role build; ${day(own)})`,
         `- [${global.id}] Zebra deploys run at noon. (verified by floris as build; global; ${day(global)}; basis: cron)`,
-        "Memory holds 1 global entry and 1 of role build; recall finds them.",
+        `Memory holds 1 global entry and 1 of role build${look}`,
+        keep,
       ].join("\n")
       expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", block])
       expect(yield* h.blocks()).toEqual([block])
@@ -379,7 +397,8 @@ describe("MemoryStart through the runner", () => {
       const empty = yield* setup()
       yield* empty.prompt("nothing is stored here")
       expect(userTexts(empty.requests()[0])[1]).toBe(
-        [opening, "Memory holds 0 global entries and 0 of role build; recall finds them."].join("\n"),
+        // Nothing to find: the block does not say when to recall.
+        [opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n"),
       )
     }),
   )
@@ -562,7 +581,7 @@ describe("MemoryStart through the runner", () => {
       const block = userTexts(h.requests()[0])[1] ?? ""
       expect(block).toContain(own.id)
       expect(block).not.toContain(lead.id)
-      expect(block).toEndWith("Memory holds 0 global entries and 1 of role explore; recall finds them.")
+      expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore${look}\n${keep}`)
       expect(h.starts()[0]?.body).toMatchObject({
         scopes: { global: true, roles: ["explore"] },
         by: { role: "explore", chat: h.sessionID },
@@ -586,6 +605,29 @@ describe("MemoryStart through the runner", () => {
           "What memory holds nearest to this prompt; it may not be about it:",
           `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
           "Memory holds 0 global entries and 1 of role reader.",
+          keep,
+        ].join("\n"),
+      )
+    }),
+  )
+
+  it.live("says that memory is the chat's to keep true only in a chat that can save", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ child: true, agent: "viewer" })
+      const own = yield* h.write(
+        { kind: "unverified", text: "Zebra files live in src.", basis: "ls", scope: "role" },
+        "viewer",
+      )
+      yield* h.prompt("where are the zebra files?")
+      const request = h.requests()[0]
+      expect(request?.tools.map((tool) => tool.name)).toContain("recall")
+      expect(request?.tools.map((tool) => tool.name)).not.toContain("remember")
+      expect(userTexts(request)[1]).toBe(
+        [
+          opening,
+          "What memory holds nearest to this prompt; it may not be about it:",
+          `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
+          `Memory holds 0 global entries and 1 of role viewer${look}`,
         ].join("\n"),
       )
     }),
@@ -645,7 +687,9 @@ describe("MemoryStart inside a task", () => {
           "What was noted in the task, newest first:",
           MemoryText.entry(noted),
           opening,
-          "Memory holds 0 global entries and 0 of role build, 1 of this task; recall finds them.",
+          // The task's entry counts for when to recall.
+          `Memory holds 0 global entries and 0 of role build, 1 of this task${look}`,
+          keep,
         ].join("\n"),
       )
       expect(h.starts()[0]?.body).toMatchObject({
@@ -680,6 +724,7 @@ describe("MemoryStart inside a task", () => {
           "Only the lint part.",
           opening,
           "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+          keep,
         ].join("\n"),
       )
       expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })

@@ -689,7 +689,7 @@ describe("MemoryTools near", () => {
           `Saved as ${id}: a unverified entry, role build.`,
           "Memory holds entries close to it:",
           `- [${p.global}] A screenshot of the login page. (verified by floris as build; global; ${p.day}; basis: looked)`,
-          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+          `If ${id} corrects one of them or says the same as one, replace that one now, without asking: remember ${id}'s text again with supersedes. An entry that is only about the same subject stays.`,
         ].join("\n"),
       )
       expect(result.metadata).toEqual({ id, near: [p.global] })
@@ -730,7 +730,7 @@ describe("MemoryTools near", () => {
           "Memory holds entries close to it:",
           `- [${own}] A picture of the login page is stale. (unverified by floris as general; role general; ${p.day}; basis: saw it)`,
           `- [${p.global}] A screenshot of the login page. (verified by floris as build; global; ${p.day}; basis: looked; not yours to replace)`,
-          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+          `If ${id} corrects one of them or says the same as one, replace that one now, without asking: remember ${id}'s text again with supersedes. An entry that is only about the same subject stays.`,
         ].join("\n"),
       )
     }),
@@ -784,7 +784,7 @@ describe("MemoryTools near", () => {
           `Saved as ${id}, replacing ${p.global}: a unverified entry, global.`,
           "Memory holds entries close to it:",
           `- [${others}] A picture of the login page is stale. (unverified by floris as build; role build; ${p.day}; basis: saw it)`,
-          `If ${id} replaces one of them or says the same as one, remember it again with supersedes.`,
+          `If ${id} corrects one of them or says the same as one, replace that one now, without asking: remember ${id}'s text again with supersedes. An entry that is only about the same subject stays.`,
         ].join("\n"),
       )
 
@@ -805,7 +805,7 @@ describe("MemoryTools near", () => {
           `Saved as ${next}, replacing ${q.global}: a unverified entry, global.`,
           "Memory holds entries close to it:",
           `- [${first}] A picture of the login page is stale. (unverified by floris as build; role build; ${q.day}; basis: saw it)`,
-          `If ${next} replaces one of them or says the same as one, remember it again with supersedes.`,
+          `If ${next} corrects one of them or says the same as one, replace that one now, without asking: remember ${next}'s text again with supersedes. An entry that is only about the same subject stays.`,
         ].join("\n"),
       )
       expect(q.h.server.calls().filter((call) => call.path.endsWith("/forget"))).toHaveLength(1)
@@ -879,7 +879,7 @@ describe("MemoryTools move", () => {
           `Saved as ${global}: a verified entry, global.`,
           "Memory holds entries close to it:",
           `- [${role}] The deploy uses port 3675. (verified by floris as build; role build; ${day}; basis: ss -ltn)`,
-          `If ${global} replaces one of them or says the same as one, remember it again with supersedes.`,
+          `If ${global} corrects one of them or says the same as one, replace that one now, without asking: remember ${global}'s text again with supersedes. An entry that is only about the same subject stays.`,
         ].join("\n"),
       )
 

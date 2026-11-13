@@ -274,6 +274,7 @@ const layer = Layer.effect(
           session: selected.session,
           agent: selected.agent.id,
           recall: selected.tools.definitions.some((tool) => tool.name === "recall"),
+          remember: selected.tools.definitions.some((tool) => tool.name === "remember"),
         })
         .pipe(Effect.andThen(context.load(selected)))
 

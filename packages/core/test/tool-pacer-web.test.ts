@@ -117,6 +117,35 @@ describe("PacerWebTools registration", () => {
     }),
   )
 
+  it.effect("registers the four when the endpoint arrives between the plugin's first read and its subscription", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const started = yield* startTools(endpointOf(cpp.origin))
+      // `get` still answers from before the endpoint was set; `changes` already has it, as a SubscriptionRef replays
+      // its latest value to a new subscriber.
+      const context = yield* Layer.build(
+        AppNodeBuilder.build(LayerNode.group([Tool.node, pluginNode]), [
+          Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
+          PacerEndpoint.node.replace(
+            Layer.succeed(
+              PacerEndpoint.Service,
+              PacerEndpoint.Service.of({
+                get: () => Effect.succeed(undefined),
+                changes: () => SubscriptionRef.changes(started.endpoints),
+              }),
+            ),
+          ),
+          PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
+          Session.node.replace(sessions),
+          Image.node.replace(imagePassthrough),
+        ]),
+      )
+      const registry = Context.get(context, Tool.Service)
+      yield* until("registered", () => Effect.runSync(names(registry)).length > 1)
+      expect(yield* names(registry)).toEqual([...web, "execute"])
+    }),
+  )
+
   it.effect("leaves out the tools whose permission an agent denies, as it does upstream's", () =>
     Effect.gen(function* () {
       const h = yield* setup()

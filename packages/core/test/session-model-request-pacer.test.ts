@@ -238,6 +238,27 @@ describe("SessionModelRequest with CPP's web tools", () => {
     }),
   )
 
+  it.effect("gives a warm chat's first step after a restart its list, also after another chat's read failed", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const other = Session.Info.make({ ...session, id: Session.ID.make("ses_model_request_pacer_other") })
+      h.cpp.answers.list = () =>
+        Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
+      const failed = yield* h.requests.primary({ ...h.input(snapshot(all)), session: other })
+      expect(names(failed)).toEqual(["read", "webfetch", "websearch"])
+
+      // The service holds no chat's list after a restart: this chat's frozen copy is read, not left out.
+      h.cpp.answers.list = () => Response.json(ownerList)
+      const prepared = yield* h.requests.primary(h.input(snapshot(all)))
+      expect(names(prepared)).toEqual(["read", "web_crawl", "web_extract", "web_research", "web_search", "webfetch"])
+      expect(claude(prepared)).toBe(cppTools(["web_crawl", "web_extract", "web_research", "web_search"]))
+      expect(h.cpp.lists().map((read) => read.headers.get("x-pacer-session"))).toEqual([
+        PacerSessionID.make(other.id),
+        PacerSessionID.make(session.id),
+      ])
+    }),
+  )
+
   it.effect("follows the catalog: a CPP whose capabilities drop the web tools is offered none", () =>
     Effect.gen(function* () {
       const h = yield* setup()

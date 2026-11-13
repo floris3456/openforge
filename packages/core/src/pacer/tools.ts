@@ -24,7 +24,7 @@ export const names = ["web_search", "web_extract", "web_crawl", "web_research"] 
 export const CHATS = 1_000
 /** A list read waits at most this long. */
 export const READ_TIMEOUT = Duration.seconds(5)
-/** After a failed list read, no chat's list is read for this long. */
+/** After a failed list read, no list a chat holds is read again for this long. */
 export const PAUSE = Duration.seconds(30)
 /** A call waits at most this long; CPP's longest is 3 attempts of 30 s, or a job's 50 s wait. */
 export const CALL_TIMEOUT = Duration.minutes(2)
@@ -225,7 +225,9 @@ export const layer = Layer.effect(
       if (state.absent) return undefined
       const chat = touch(input)
       const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model))
-      if (!due || (yield* Clock.currentTimeMillis) < state.pausedUntil) return chat.list
+      // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
+      // tools would cost it its prompt cache because another chat's read failed first.
+      if (!due || (chat.list && (yield* Clock.currentTimeMillis) < state.pausedUntil)) return chat.list
       return yield* read(chat, input)
     })
 

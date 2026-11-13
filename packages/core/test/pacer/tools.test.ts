@@ -187,13 +187,15 @@ describe("PacerTools.list", () => {
     }),
   )
 
-  it.effect("waits at most 5 s for a read, then goes without the list and reads none for 30 s", () =>
+  it.effect("waits at most 5 s for a read, then goes without the list and reads no held list again for 30 s", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
       const { tools } = yield* startTools(endpointOf(cpp.origin))
+      const held = yield* tools.list(step(other))
+      tools.seen(other, "0123456789abcdef")
       cpp.hold()
       const reading = yield* tools.list(step(chat)).pipe(Effect.forkChild({ startImmediately: true }))
-      yield* until("the read", () => cpp.lists().length === 1)
+      yield* until("the read", () => cpp.lists().length === 2)
       yield* TestClock.adjust("4999 millis")
       yield* settle
       expect(reading.pollUnsafe()).toBeUndefined()
@@ -201,14 +203,34 @@ describe("PacerTools.list", () => {
       expect(yield* Fiber.join(reading)).toBeUndefined()
       cpp.gate.release()
 
-      // No chat's list is read during the pause.
-      expect(yield* tools.list(step(other))).toBeUndefined()
+      // A held list is not read again during the pause.
+      expect(yield* tools.list(step(other))).toBe(held!)
       yield* TestClock.adjust("29999 millis")
-      expect(yield* tools.list(step(chat))).toBeUndefined()
-      expect(cpp.lists()).toHaveLength(1)
-      yield* TestClock.adjust("1 millis")
-      expect((yield* tools.list(step(chat)))?.version).toBe(ownerList.version)
+      expect(yield* tools.list(step(other))).toBe(held!)
       expect(cpp.lists()).toHaveLength(2)
+      yield* TestClock.adjust("1 millis")
+      yield* tools.list(step(other))
+      expect(cpp.lists()).toHaveLength(3)
+    }),
+  )
+
+  it.effect("reads the list of a chat that holds none during the pause, as every chat's right after a restart", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin), undefined)
+      cpp.answers.list = () =>
+        Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
+      expect(yield* tools.list(step(chat))).toBeUndefined()
+
+      cpp.answers.list = () => Response.json(ownerList)
+      expect((yield* tools.list(step(other)))?.version).toBe(ownerList.version)
+      // The chat whose read failed holds none either: its next request reads again.
+      expect((yield* tools.list(step(chat)))?.version).toBe(ownerList.version)
+      expect(cpp.lists().map((read) => read.headers.get("x-pacer-session"))).toEqual([
+        PacerSessionID.make(chat),
+        PacerSessionID.make(other),
+        PacerSessionID.make(chat),
+      ])
     }),
   )
 

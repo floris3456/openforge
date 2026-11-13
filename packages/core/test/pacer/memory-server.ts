@@ -222,6 +222,10 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const by = { person, ...byOf(body.by) }
       const supersedes = body.supersedes === undefined || body.supersedes === null ? null : body.supersedes
       if (supersedes !== null && typeof supersedes !== "string") refuse("supersedes: must be an entry id or null")
+      if (body.move !== undefined && body.move !== null && typeof body.move !== "boolean")
+        refuse("move: must be true, false or null")
+      // A new entry, or a replacement that moves, belongs where the body's scope says.
+      const home = supersedes === null || body.move === true ? homeOf(body.scope, by) : undefined
 
       const written = db
         .transaction(() => {
@@ -230,10 +234,13 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
               ? undefined
               : (get(project, supersedes) ??
                 refuse(`supersedes: no entry ${supersedes} in this project`, 404, "not_found"))
-          // A replacement takes what the replaced entry belongs to; the body's scope is ignored.
-          const target = replaced
-            ? { scope: replaced.scope, role: replaced.role, task: replaced.task, subtask: replaced.subtask }
-            : homeOf(body.scope, by)
+          // Without move a replacement takes what the replaced entry belongs to; the body's scope is ignored.
+          const target = home ?? {
+            scope: replaced!.scope,
+            role: replaced!.role,
+            task: replaced!.task,
+            subtask: replaced!.subtask,
+          }
           // An exact copy is looked for before the replaced entry's state, so a retried replacement answers the entry it
           // made. The replaced entry is never its own copy: the same text with another kind or basis replaces it.
           const copy = db

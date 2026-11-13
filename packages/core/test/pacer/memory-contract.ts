@@ -606,6 +606,172 @@ export function memoryContract(target: Target) {
     })
   })
 
+  describe("a replacement that moves", () => {
+    const explore = { role: "explore", chat: "ses_explore" }
+
+    test("a role entry moved to global is global, the old one replaced, and another role's search finds the new one", async () => {
+      const memory = project("move-global")
+      const term = word()
+      const old = (await memory.verified(`The port is ${term} old.`, { scope: "role" })).body.entry
+      const moved = await memory.verified(`The port is ${term} new.`, {
+        scope: "global",
+        move: true,
+        supersedes: old.id,
+      })
+      expect(moved.status).toBe(201)
+      expect(moved.body.entry).toMatchObject({
+        scope: "global",
+        role: null,
+        task: null,
+        subtask: null,
+        supersedes: old.id,
+        superseded_by: null,
+      })
+      expect((await memory.read(old.id)).body.entry).toEqual({ ...old, superseded_by: moved.body.entry.id })
+      const found = await memory.search({ query: term, scopes: { global: true, roles: ["explore"] }, by: explore })
+      expect(ids(found.body.entries)).toEqual([moved.body.entry.id])
+    })
+
+    test("a global entry moved to role belongs to by.role", async () => {
+      const memory = project("move-role")
+      const old = (await memory.verified("A global entry to move.")).body.entry
+      const moved = await memory.verified("A role entry now.", {
+        scope: "role",
+        move: true,
+        supersedes: old.id,
+        by: explore,
+      })
+      expect(moved.status).toBe(201)
+      expect(moved.body.entry).toMatchObject({ scope: "role", role: "explore", task: null, supersedes: old.id })
+      expect((await memory.read(old.id)).body.entry.superseded_by).toBe(moved.body.entry.id)
+    })
+
+    test("moved to task it belongs to by.task and by.subtask; without by.task it is 400 and nothing changes", async () => {
+      const memory = project("move-task")
+      const old = (await memory.verified("A global entry for a task.")).body.entry
+      const refused = await memory.verified("A task entry without a task.", {
+        scope: "task",
+        move: true,
+        supersedes: old.id,
+      })
+      expectInvalid(refused, "by.task")
+      expect((await memory.read(old.id)).body.entry).toEqual(old)
+      const moved = await memory.verified("A task entry now.", {
+        scope: "task",
+        move: true,
+        supersedes: old.id,
+        by: { ...by, task: "t1move", subtask: "s1move" },
+      })
+      expect(moved.status).toBe(201)
+      expect(moved.body.entry).toMatchObject({ scope: "task", role: null, task: "t1move", subtask: "s1move" })
+      expect((await memory.read(old.id)).body.entry.superseded_by).toBe(moved.body.entry.id)
+      expect((await memory.export()).lines.length).toBe(2)
+    })
+
+    test("move without scope is 400, and a move that is not a boolean or null is 400", async () => {
+      const memory = project("move-checks")
+      const old = (await memory.verified("An entry that stays.")).body.entry
+      expectInvalid(
+        await memory.write({ kind: "words", text: "No scope.", by, move: true, supersedes: old.id }),
+        "scope",
+      )
+      expectInvalid(await memory.verified("A string move.", { move: "true", supersedes: old.id }), "move")
+      expectInvalid(await memory.verified("A number move.", { move: 1, supersedes: old.id }), "move")
+      expect((await memory.export()).lines).toEqual([{ type: "entry", ...old }])
+    })
+
+    test("move false or null is as absent: the replacement stays where the replaced entry was", async () => {
+      const memory = project("move-absent")
+      for (const move of [false, null]) {
+        const old = (await memory.verified(`A role entry, move ${move}.`, { scope: "role" })).body.entry
+        const answer = await memory.verified(`Its replacement, move ${move}.`, {
+          scope: "global",
+          move,
+          supersedes: old.id,
+        })
+        expect(answer.status).toBe(201)
+        expect(answer.body.entry).toMatchObject({ scope: "role", role: "build", supersedes: old.id })
+      }
+    })
+
+    test("move without supersedes writes a new entry where scope says", async () => {
+      const answer = await project("move-new").verified("A new entry with move.", {
+        scope: "role",
+        move: true,
+        by: explore,
+      })
+      expect(answer.status).toBe(201)
+      expect(answer.body.entry).toMatchObject({ scope: "role", role: "explore", supersedes: null })
+    })
+
+    test("move to the place the entry is in is an ordinary replacement, and the named entry is never its own copy", async () => {
+      const memory = project("move-same")
+      const text = `The gate holds ${word()}.`
+      const old = (await memory.verified(text, { scope: "role", kind: "unverified", basis: "a guess" })).body.entry
+      const answer = await memory.verified(text, { scope: "role", move: true, supersedes: old.id })
+      expect(answer.status).toBe(201)
+      expect(answer.body.existing).toBeUndefined()
+      expect(answer.body.entry).toMatchObject({ text, scope: "role", role: "build", supersedes: old.id })
+      expect(answer.body.entry.id).not.toBe(old.id)
+      expect((await memory.read(old.id)).body.entry).toEqual({ ...old, superseded_by: answer.body.entry.id })
+    })
+
+    test("with a copy in the target place the named entry is replaced by the copy, and nothing is written", async () => {
+      const memory = project("move-copy")
+      const text = `The gate holds ${word()}.`
+      const copy = (await memory.verified(text)).body.entry
+      const named = (await memory.verified("The gate held something else.", { scope: "role" })).body.entry
+      const before = (await memory.export()).lines.length
+      const answer = await memory.verified(text, { scope: "global", move: true, supersedes: named.id })
+      expect(answer.status).toBe(200)
+      expect(JSON.parse(answer.text)).toEqual({ entry: copy, existing: true, near: [] })
+      expect((await memory.read(named.id)).body.entry).toEqual({ ...named, superseded_by: copy.id })
+      expect((await memory.read(copy.id)).body.entry).toEqual(copy)
+      expect((await memory.export()).lines.length).toBe(before)
+    })
+
+    test("a copy in the replaced entry's own place is no copy when move goes elsewhere", async () => {
+      const memory = project("move-copy-left")
+      const text = `The gate holds ${word()}.`
+      const left = (await memory.verified(text, { scope: "role" })).body.entry
+      const named = (await memory.verified("The gate held something else.", { scope: "role" })).body.entry
+      const answer = await memory.verified(text, { scope: "global", move: true, supersedes: named.id })
+      expect(answer.status).toBe(201)
+      expect(answer.body.existing).toBeUndefined()
+      expect(answer.body.entry).toMatchObject({ text, scope: "global", role: null, supersedes: named.id })
+      expect(answer.body.entry.id).not.toBe(left.id)
+      expect((await memory.read(named.id)).body.entry.superseded_by).toBe(answer.body.entry.id)
+      expect((await memory.read(left.id)).body.entry).toEqual(left)
+      expect((await memory.export()).lines.length).toBe(3)
+    })
+
+    test("the named entry deleted or already replaced is 409, or the copy when the target place has one", async () => {
+      const memory = project("move-late")
+      const text = `The gate holds ${word()}.`
+      const copy = (await memory.verified(text)).body.entry
+      const replaced = (await memory.verified("The gate is shut.", { scope: "role" })).body.entry
+      const replacement = (await memory.verified("The gate is open.", { supersedes: replaced.id })).body.entry
+      const deleted = (await memory.verified("The gate is gone.", { scope: "role" })).body.entry
+      const forgotten = (await memory.forget(deleted.id)).body.entry
+      const before = (await memory.export()).lines
+      for (const named of [replaced.id, deleted.id]) {
+        const conflict = await memory.verified("The gate is elsewhere.", {
+          scope: "global",
+          move: true,
+          supersedes: named,
+        })
+        expect(conflict.status).toBe(409)
+        expect(conflict.body.error.type).toBe("conflict")
+        const answer = await memory.verified(text, { scope: "global", move: true, supersedes: named })
+        expect(answer.status).toBe(200)
+        expect(JSON.parse(answer.text)).toEqual({ entry: copy, existing: true, near: [] })
+      }
+      expect((await memory.read(replaced.id)).body.entry.superseded_by).toBe(replacement.id)
+      expect((await memory.read(deleted.id)).body.entry).toEqual(forgotten)
+      expect((await memory.export()).lines).toEqual(before)
+    })
+  })
+
   describe("near", () => {
     /** The cosine of two texts' vectors, as the fake endpoint makes them (the tests' basis holds no concept word). */
     const alike = (a: string, b: string) => {

@@ -788,6 +788,93 @@ describe("MemoryTools near", () => {
   )
 })
 
+describe("MemoryTools move", () => {
+  const writes = (server: MemoryServer) =>
+    server
+      .calls()
+      .filter((call) => call.method === "POST" && call.path.endsWith("/entries"))
+      .map((call) => call.body as Record<string, unknown>)
+  const port = { text: "The deploy uses port 3675.", kind: "verified", basis: "ss -ltn" }
+  const saved = (text: string) => text.match(/^Saved as ([0-9a-z]{12})/)?.[1] ?? "none"
+
+  it.live("a lead's scope with supersedes moves the replacement there", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const old = yield* h.save({ text: "The deploy uses port 3674.", kind: "verified", basis: "ss -ltn" })
+      const answer = yield* h.read("remember", { ...port, scope: "global", supersedes: old })
+      const id = saved(answer)
+      expect(answer).toBe(`Saved as ${id}, replacing ${old}: a verified entry, global.`)
+      expect(writes(h.server).at(-1)).toMatchObject({ scope: "global", supersedes: old, move: true })
+      expect(yield* h.started.client.read(projectID, id)).toMatchObject({ scope: "global", role: null })
+      expect((yield* h.started.client.read(projectID, old)).superseded_by).toBe(id)
+    }),
+  )
+
+  it.live("supersedes without scope sends no move, and the replacement stays in the replaced entry's scope", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const old = yield* h.save({ text: "The deploy uses port 3674.", kind: "verified", basis: "ss" }, child, "explore")
+      const answer = yield* h.read("remember", { ...port, supersedes: old })
+      const id = saved(answer)
+      expect(answer).toBe(`Saved as ${id}, replacing ${old}: a verified entry, role explore.`)
+      const sent = writes(h.server).at(-1)!
+      expect(sent).toMatchObject({ supersedes: old })
+      expect("move" in sent).toBe(false)
+    }),
+  )
+
+  it.live("a child naming scope global with supersedes is refused, and nothing is written", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const own = yield* h.save({ text: "The deploy uses port 3674.", kind: "verified", basis: "ss" }, child, "general")
+      const before = h.server.calls().length
+      expect(yield* h.read("remember", { ...port, scope: "global", supersedes: own }, child, "general")).toBe(
+        "error: Only a lead chat saves a global entry.",
+      )
+      expect(h.server.calls().length).toBe(before)
+      expect((yield* h.started.client.read(projectID, own)).superseded_by).toBeNull()
+    }),
+  )
+
+  it.live("the model's sequence: replaced in its role, written again as global, then moved onto the global one", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ server: yield* nearServer })
+      const old = yield* h.save({ text: "The deploy uses port 3674.", kind: "verified", basis: "ss -ltn" })
+      const day = new Date((yield* h.started.client.read(projectID, old)).at).toISOString().slice(0, 10)
+
+      const first = yield* h.read("remember", { ...port, supersedes: old })
+      const role = saved(first)
+      expect(first).toBe(`Saved as ${role}, replacing ${old}: a verified entry, role build.`)
+
+      const second = yield* h.read("remember", { ...port, scope: "global" })
+      const global = saved(second)
+      expect(second).toBe(
+        [
+          `Saved as ${global}: a verified entry, global.`,
+          "Memory holds entries close to it:",
+          `- [${role}] The deploy uses port 3675. (verified by floris as build; role build; ${day}; basis: ss -ltn)`,
+          `If ${global} replaces one of them or says the same as one, remember it again with supersedes.`,
+        ].join("\n"),
+      )
+
+      expect(yield* h.read("remember", { ...port, scope: "global", supersedes: role })).toBe(
+        `Memory holds this already as ${global} (a verified entry, global); it now replaces ${role}.`,
+      )
+      const exported = yield* Effect.promise(() =>
+        fetch(`${h.server.store.url}/pacer/v1/memory/${projectID}/export`, {
+          headers: { authorization: "Bearer memory-client-key-f1" },
+        }).then((response) => response.text()),
+      )
+      const live = exported
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as MemoryClient.Entry)
+        .filter((entry) => !entry.superseded_by && !entry.deleted && entry.text === port.text)
+      expect(live.map((entry) => entry.id)).toEqual([global])
+    }),
+  )
+})
+
 describe("MemoryTools project", () => {
   it.live("calls the project memory.project names, else the chat's own, and none for a chat outside a project", () =>
     Effect.gen(function* () {

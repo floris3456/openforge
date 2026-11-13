@@ -40,7 +40,9 @@ export const RememberInput = Schema.Struct({
     }),
   ),
   supersedes: Schema.optional(
-    Schema.String.annotate({ description: "The id of an entry this one replaces; it takes that entry's scope" }),
+    Schema.String.annotate({
+      description: "The id of an entry this one replaces; without scope it takes that entry's scope",
+    }),
   ),
 })
 
@@ -185,7 +187,11 @@ export const Plugin = {
                   text: input.text,
                   ...(input.basis === undefined ? {} : { basis: input.basis }),
                   scope,
-                  ...(replaced ? { supersedes: replaced.id } : {}),
+                  // A scope named with supersedes moves the replacement there; without one it takes the replaced
+                  // entry's, and the server ignores the default sent.
+                  ...(replaced
+                    ? { supersedes: replaced.id, ...(input.scope === undefined ? {} : { move: true }) }
+                    : {}),
                   by: who.by,
                 })
                 .pipe(Effect.mapError(fail))

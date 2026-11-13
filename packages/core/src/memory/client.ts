@@ -71,6 +71,8 @@ export interface WriteInput {
   readonly basis?: string
   readonly scope: "global" | "role"
   readonly supersedes?: string
+  /** With `supersedes`: the replacement belongs where `scope` says, not where the replaced entry was. */
+  readonly move?: boolean
   readonly by: By
 }
 
@@ -164,6 +166,7 @@ export const layer = Layer.effect(
               scope: input.scope,
               by: input.by,
               supersedes: input.supersedes ?? null,
+              ...(input.move === undefined ? {} : { move: input.move }),
             },
             Written,
           )

@@ -9,6 +9,7 @@ import { MemoryClient } from "../../memory/client.js"
 import { MemoryKnown } from "../../memory/known.js"
 import { MemorySecrets } from "../../memory/secrets.js"
 import { MemoryText } from "../../memory/text.js"
+import { MemoryWords } from "../../memory/words.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
 import { PacerModels } from "../../pacer/models.js"
 import { Permission } from "../../permission.js"
@@ -180,6 +181,19 @@ export const Plugin = {
                 return yield* new ToolFailure({
                   message: `Not saved: it holds what looks like a ${secret}, and memory never keeps secrets. Save it without the secret.`,
                 })
+              if (input.kind === "words") {
+                // What the person typed in this chat, stored also when a compaction or a staged revert hides it from
+                // the model; synthetic messages (memory's start block, a child's notice) and tool output are not theirs.
+                const said = yield* sessions
+                  .messages({ sessionID: context.sessionID, type: "user", order: "asc" })
+                  .pipe(Effect.mapError(fail))
+                const texts = said.flatMap((message) => (message.type === "user" ? [message.text] : []))
+                if (!MemoryWords.quoted(input.text, texts))
+                  return yield* new ToolFailure({
+                    message:
+                      "Not saved: words are a person's exact words, and this text is not in what the person wrote in this chat. Quote the words as written, or save what follows from them as unverified.",
+                  })
+              }
               const replaced = input.supersedes === undefined ? undefined : yield* changeable(who, input.supersedes)
               const written = yield* client
                 .write(who.project, {

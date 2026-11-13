@@ -3,6 +3,7 @@ import { Context, DateTime, Effect, Fiber, Layer, SubscriptionRef } from "effect
 import { TestClock } from "effect/testing"
 import { Money } from "@opencode/schema/money"
 import { Session as SessionInfo } from "@opencode/schema/session"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigMemory } from "@opencode/schema/config/memory"
 import { Agent } from "@opencode/core/agent"
@@ -57,14 +58,24 @@ const known = new Map([
   [other, info(other, otherProjectID)],
   [outside, info(outside, Project.ID.global)],
 ])
-const sessions = Layer.mock(Session.Service, {
-  get: (id) => Effect.succeed(known.get(id)!),
-  revert: {
-    stage: () => Effect.die("unused"),
-    clear: () => Effect.die("unused"),
-    commit: () => Effect.die("unused"),
-  },
-})
+/** The store's sessions, each chat's messages those of `history`, oldest first. */
+const sessionsOf = (history: Map<SessionInfo.ID, SessionMessage.Info[]>) =>
+  Layer.mock(Session.Service, {
+    get: (id) => Effect.succeed(known.get(id)!),
+    messages: (input) =>
+      Effect.sync(() => {
+        const messages = (history.get(input.sessionID) ?? []).filter(
+          (message) => input.type === undefined || message.type === input.type,
+        )
+        return input.order === "asc" ? messages : messages.toReversed()
+      }),
+    revert: {
+      stage: () => Effect.die("unused"),
+      clear: () => Effect.die("unused"),
+      commit: () => Effect.die("unused"),
+    },
+  })
+const time = { created: DateTime.makeUnsafe(0) }
 
 const pluginNode = makeLocationNode({
   name: "test/memory-tool-plugin",
@@ -118,6 +129,15 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
     "catalog" in options ? { catalog: options.catalog } : {},
   )
   const asked: Array<Permission.AssertInput & { readonly calls: number }> = []
+  const history = new Map<SessionInfo.ID, SessionMessage.Info[]>()
+  const add = (chat: SessionInfo.ID, message: SessionMessage.Info) =>
+    void history.set(chat, [...(history.get(chat) ?? []), message])
+  /** The person writes `text` in the chat. */
+  const say = (text: string, chat: SessionInfo.ID = lead) =>
+    add(chat, SessionMessage.User.make({ id: SessionMessage.ID.create(), type: "user", text, time }))
+  /** A message openforge puts in the chat, as memory's start block. */
+  const note = (text: string, chat: SessionInfo.ID = lead) =>
+    add(chat, SessionMessage.Synthetic.make({ id: SessionMessage.ID.create(), type: "synthetic", text, time }))
   const context = yield* Layer.build(
     AppNodeBuilder.build(LayerNode.group([Tool.node, pluginNode]), [
       Permission.node.replace(
@@ -130,7 +150,7 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
       PacerEndpoint.node.replace(started.endpointLayer),
       PacerModels.node.replace(started.modelsLayer),
       MemoryClient.node.replace(Layer.succeed(MemoryClient.Service, started.client)),
-      Session.node.replace(sessions),
+      Session.node.replace(sessionsOf(history)),
       Config.node.replace(Config.testLayer([...(options.config ?? [])])),
       Image.node.replace(imagePassthrough),
       KV.node.replace(kvOf(kv)),
@@ -161,7 +181,7 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
         return String(result.metadata?.id)
       }),
     )
-  return { server, registry, started, asked, run, read, save, kv }
+  return { server, registry, started, asked, run, read, save, kv, say, note }
 })
 
 const names = (registry: Tool.Interface) =>
@@ -276,6 +296,7 @@ describe("MemoryTools rules", () => {
       ).toBe("error: Only a lead chat saves a global entry.")
       expect(h.server.calls()).toEqual([])
 
+      h.say("Ship on Fridays.")
       const words = yield* h.save({ text: "Ship on Fridays.", kind: "words" })
       const global = yield* h.save({ text: "CI is green.", kind: "verified", basis: "ran it", scope: "global" })
       const entries = yield* Effect.forEach([words, global], (id) => h.started.client.read(projectID, id))
@@ -320,6 +341,7 @@ describe("MemoryTools rules", () => {
       const ownToo = yield* h.save({ text: "Lint is slow.", kind: "unverified", basis: "felt so" }, child, "general")
       const otherRole = yield* h.save({ text: "Docs live in www.", kind: "verified", basis: "ls" }, child, "explore")
       const global = yield* h.save({ text: "Main is protected.", kind: "verified", basis: "gh", scope: "global" })
+      h.say("No pushes without me.")
       const words = yield* h.save({ text: "No pushes without me.", kind: "words" })
 
       const replaced = yield* h.read(
@@ -365,6 +387,7 @@ describe("MemoryTools rules", () => {
 
       // A lead changes any entry of its project, in the replaced entry's scope.
       yield* h.save({ text: "Docs live in services/www.", kind: "verified", basis: "ls", supersedes: otherRole })
+      h.say("No pushes without asking me.")
       yield* h.save({ text: "No pushes without asking me.", kind: "words", supersedes: words })
       expect(yield* h.read("forget", { id: global, reason: "obsolete" })).toBe(
         `Deleted the text of ${global} for good.`,
@@ -433,6 +456,7 @@ describe("MemoryTools rules", () => {
 describe("MemoryTools recall", () => {
   const prepare = Effect.fnUntraced(function* () {
     const h = yield* setup()
+    h.say("zebra means the release train")
     const ids = {
       global: yield* h.save({
         text: "The zebra deploy runs at noon.",
@@ -567,6 +591,7 @@ describe("MemoryTools answers", () => {
       expect(yield* h.read("remember", { text: "x".repeat(700), kind: "unverified", basis: "y".repeat(101) })).toBe(
         "error: text: text and basis together have 801 characters, more than 800",
       )
+      h.say("a\u202eb")
       expect(yield* h.read("remember", { text: "a\u202eb", kind: "words" })).toBe(
         "error: text: refused character U+202E at position 2; characters a reader cannot see and line breaks are not allowed",
       )
@@ -602,6 +627,7 @@ describe("MemoryTools answers", () => {
       h.server.control.answer = undefined
 
       yield* SubscriptionRef.set(h.started.endpoints, endpointAt(h.server.origin, "a-key-it-does-not-know"))
+      h.say("t")
       expect(yield* h.read("remember", { text: "t", kind: "words" })).toBe(unavailable)
 
       yield* Effect.promise(() => h.server.proxy.stop(true))
@@ -871,6 +897,69 @@ describe("MemoryTools move", () => {
         .map((line) => JSON.parse(line) as MemoryClient.Entry)
         .filter((entry) => !entry.superseded_by && !entry.deleted && entry.text === port.text)
       expect(live.map((entry) => entry.id)).toEqual([global])
+    }),
+  )
+})
+
+describe("MemoryTools words", () => {
+  const releases = "Releases moved: we cut them on Thursdays now. Update memory."
+  const refused =
+    "error: Not saved: words are a person's exact words, and this text is not in what the person wrote in this chat. Quote the words as written, or save what follows from them as unverified."
+  const saved = (text: string) => text.match(/^Saved as ([0-9a-z]{12})/)?.[1] ?? "none"
+
+  it.live("a lead saves the person's exact words as before", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      h.say(releases)
+      const answer = yield* h.read("remember", { text: "Releases moved: we cut them on Thursdays now.", kind: "words" })
+      const id = saved(answer)
+      expect(answer).toBe(`Saved as ${id}: a words entry, role build.`)
+      expect(yield* h.started.client.read(projectID, id)).toMatchObject({
+        kind: "words",
+        text: "Releases moved: we cut them on Thursdays now.",
+      })
+    }),
+  )
+
+  it.live("a reworded text is refused before anything is sent, also when it replaces an entry", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      h.say(releases)
+      expect(yield* h.read("remember", { text: "Releases are cut on Thursdays.", kind: "words" })).toBe(refused)
+      expect(h.server.calls()).toEqual([])
+
+      const old = yield* h.save({ text: "Releases are cut on Tuesdays.", kind: "verified", basis: "the calendar" })
+      const before = h.server.calls().length
+      expect(
+        yield* h.read("remember", { text: "Releases are cut on Thursdays.", kind: "words", supersedes: old }),
+      ).toBe(refused)
+      expect(h.server.calls().length).toBe(before)
+      expect((yield* h.started.client.read(projectID, old)).superseded_by).toBeNull()
+    }),
+  )
+
+  it.live("exact words of an earlier message still count after the chat got more messages", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      h.say(releases)
+      h.note("Memory holds entries for this project.")
+      h.say("Thanks. Now run the tests.")
+      h.say("And keep the changelog short.")
+      const answer = yield* h.read("remember", { text: "we cut them on Thursdays now", kind: "words" })
+      expect(answer).toBe(`Saved as ${saved(answer)}: a words entry, role build.`)
+      // Only this chat's person: what was said in another chat is not.
+      h.say("Never deploy on Fridays.", other)
+      expect(yield* h.read("remember", { text: "Never deploy on Fridays.", kind: "words" })).toBe(refused)
+    }),
+  )
+
+  it.live("words only in the chat's start block are not the person's, and are refused", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      h.note("Memory of this project:\n- [k3f9x2m7q4tz] Releases are cut on Thursdays. (verified by floris as build)")
+      h.say(releases)
+      expect(yield* h.read("remember", { text: "Releases are cut on Thursdays.", kind: "words" })).toBe(refused)
+      expect(h.server.calls()).toEqual([])
     }),
   )
 })

@@ -18,6 +18,8 @@ export type Target = {
   readonly bare?: string
   /** Whether the server's capabilities say `tasks`: the group "tasks" runs only then. */
   readonly tasks: boolean
+  /** Whether they say `recalls`: the group "recall log" runs only then. */
+  readonly recalls: boolean
 }
 
 type Task = {
@@ -50,6 +52,35 @@ type TaskBody = {
 /** What `GET …/tasks/{id}` answers, and `start` for the chat's task and subtask. */
 type TaskRead = { task: Task; changes: Change[]; subtasks: Task[]; entries: Entry[] }
 type StartBody = { task: TaskRead | null; subtask: TaskRead | null }
+
+/** A row of the recall log. */
+type Recall = {
+  id: string
+  kind: string | null
+  query: string
+  scopes: unknown
+  kinds: string[] | null
+  entries: string[]
+  meaning: boolean | null
+  by: { person: string; role: string; chat: string; task: string | null; subtask: string | null }
+  at: number
+  after: null | {
+    step: string | null
+    acted: { id: string; how: string }[] | null
+    person: string | null
+    step_at: number | null
+    person_at: number | null
+  }
+  labels: { judge: string; entries: { id: string; label: string }[]; corrected: string | null; at: number }[]
+}
+
+/** What the recall log's routes answer. */
+type RecallBody = {
+  recall: Recall
+  recalls: Recall[]
+  next: string | null
+  error: { type: string; message: string }
+}
 
 type Entry = {
   id: string
@@ -2266,6 +2297,492 @@ export function memoryContract(target: Target) {
     })
   })
 
+  describe.if(target.recalls)("recall log", () => {
+    const logged = async (answer: Promise<Awaited<ReturnType<typeof send>>>) => {
+      const result = await answer
+      return { ...result, body: result.body as unknown as RecallBody }
+    }
+    /** A fresh project with the recall log's routes beside the entry ones. */
+    const log = (name: string, url = target.url) => {
+      const memory = project(name, url)
+      const base = `/pacer/v1/memory/${memory.id}`
+      const routes = {
+        ...memory,
+        row: (id: string) => logged(send("GET", `${base}/recalls/${id}`, undefined, undefined, url)),
+        /** The row once the server has stored it: the contract gives it a second after the search's answer. */
+        stored: async (id: string) => {
+          const deadline = Date.now() + 1500
+          while (true) {
+            const answer = await routes.row(id)
+            if (answer.status !== 404 || Date.now() > deadline) return (await answered(Promise.resolve(answer))).recall
+            await Bun.sleep(50)
+          }
+        },
+        rows: (query = "") => logged(send("GET", `${base}/recalls${query}`, undefined, undefined, url)),
+        after: (id: string, body: Record<string, unknown>) =>
+          logged(send("POST", `${base}/recalls/${id}/after`, { by, ...body }, undefined, url)),
+        label: (id: string, body: Record<string, unknown>) =>
+          logged(send("POST", `${base}/recalls/${id}/labels`, { by, corrected: null, ...body }, undefined, url)),
+        /**
+         * Writes `count` entries of a role of their own and searches that role: the row's id and the ids it returned.
+         * A search by meaning finds every entry it looks in, so each call looks in its own.
+         */
+        searched: async (count = 2) => {
+          const term = word()
+          const role = `role-${term}`
+          for (const index of Array.from({ length: count }, (_, index) => index))
+            await created(
+              memory.verified(`Entry ${index} of ${term}${" again".repeat(index)}.`, {
+                scope: "role",
+                by: { ...by, role },
+              }),
+            )
+          const found = await answered(memory.search({ query: term, scopes: { roles: [role] } }))
+          expect(found.entries.length).toBe(count)
+          return { id: found.recall, entries: found.entries.map((entry) => entry.id) }
+        },
+      }
+      return routes
+    }
+    const expectRecallInvalid = (answer: { status: number; body: RecallBody }, field: string) => {
+      expect(answer.status).toBe(400)
+      expect(answer.body.error.type).toBe("invalid_request")
+      expect(answer.body.error.message).toContain(field)
+    }
+    const expectRecallMissing = (answer: { status: number; body: RecallBody }) => {
+      expect(answer.status).toBe(404)
+      expect(answer.body.error.type).toBe("not_found")
+    }
+
+    describe("rows", () => {
+      test("a search is a row: kind search, its query, scopes and kinds as sent, the ids in order, meaning, by, at", async () => {
+        const memory = log("recall-row")
+        const term = word()
+        const one = (await created(memory.verified(`One ${term}.`))).entry
+        const two = (await created(memory.verified(`Two ${term} ${term}.`, { scope: "role" }))).entry
+        const scopes = { global: true, roles: ["build"], tasks: [] }
+        const before = Date.now()
+        const found = await answered(
+          memory.search({ query: term, scopes, by: { ...by, task: "t-recall", subtask: "s-recall" } }),
+        )
+        expect(found.entries.length).toBe(2)
+        const row = await memory.stored(found.recall)
+        expect(row).toEqual({
+          id: found.recall,
+          kind: "search",
+          query: term,
+          scopes,
+          kinds: null,
+          entries: found.entries.map((entry) => entry.id),
+          meaning: found.meaning,
+          by: { person: target.person, role: by.role, chat: by.chat, task: "t-recall", subtask: "s-recall" },
+          at: expect.any(Number),
+          after: null,
+          labels: [],
+        })
+        expect(row.entries.toSorted()).toEqual([one.id, two.id].toSorted())
+        expect(row.at).toBeGreaterThanOrEqual(before - 1000)
+      })
+
+      test("a start is a row of kind start, its prompt the query, kinds as sent and by's task null when absent", async () => {
+        const memory = log("recall-start")
+        const term = word()
+        await created(memory.verified(`Started ${term}.`))
+        const start = await answered(memory.start({ prompt: `What of ${term}?`, scopes: "all", kinds: ["verified"] }))
+        const row = await memory.stored(start.recall)
+        expect(row).toMatchObject({
+          kind: "start",
+          query: `What of ${term}?`,
+          scopes: "all",
+          kinds: ["verified"],
+          entries: start.entries.map((entry) => entry.id),
+          meaning: start.meaning,
+          by: { person: target.person, role: by.role, chat: by.chat, task: null, subtask: null },
+          after: null,
+          labels: [],
+        })
+        expect(row.entries.length).toBe(1)
+      })
+
+      test("an unknown id, and another project's row, are 404 for read, after and labels", async () => {
+        const memory = log("recall-own")
+        const elsewhere = log("recall-other")
+        const found = await memory.searched(1)
+        await memory.stored(found.id)
+        for (const routes of [elsewhere, memory]) {
+          const id = routes === memory ? "000000000000" : found.id
+          expectRecallMissing(await routes.row(id))
+          expectRecallMissing(await routes.after(id, { step: "Read it." }))
+          expectRecallMissing(await routes.label(id, { judge: "human:floris", entries: [] }))
+        }
+        expect((await memory.stored(found.id)).after).toBeNull()
+      })
+    })
+
+    describe("after", () => {
+      test("a step is kept with its acted entries and its time; person stays null", async () => {
+        const memory = log("recall-step")
+        const found = await memory.searched(2)
+        const before = Date.now()
+        const answer = await memory.after(found.id, {
+          step: 'Replaced one.\nremember {"supersedes":"x"}',
+          acted: [{ id: found.entries[1], how: "superseded" }],
+        })
+        expect(answer.status).toBe(200)
+        expect(answer.body.recall.after).toEqual({
+          step: 'Replaced one.\nremember {"supersedes":"x"}',
+          acted: [{ id: found.entries[1], how: "superseded" }],
+          person: null,
+          step_at: expect.any(Number),
+          person_at: null,
+        })
+        expect(answer.body.recall.after!.step_at).toBeGreaterThanOrEqual(before - 1000)
+        expect(await memory.stored(found.id)).toEqual(answer.body.recall)
+      })
+
+      test("each part is kept once: the first wins, a later one changes nothing and is no error", async () => {
+        const memory = log("recall-once")
+        const found = await memory.searched(2)
+        const first = (await answered(memory.after(found.id, { step: "The first step." }))).recall
+        expect(first.after).toMatchObject({ step: "The first step.", acted: [], person: null, person_at: null })
+        const again = await memory.after(found.id, {
+          step: "Another step.",
+          acted: [{ id: found.entries[0], how: "forgotten" }],
+        })
+        expect(again.status).toBe(200)
+        expect(again.body.recall).toEqual(first)
+        const person = (await answered(memory.after(found.id, { person: "No, the other one." }))).recall
+        expect(person.after).toEqual({ ...first.after!, person: "No, the other one.", person_at: expect.any(Number) })
+        const later = (await answered(memory.after(found.id, { person: "Later words.", step: "And a step." }))).recall
+        expect(later).toEqual(person)
+      })
+
+      test("person first, then step; and both in one body", async () => {
+        const memory = log("recall-both")
+        const found = await memory.searched(1)
+        const person = (await answered(memory.after(found.id, { person: "Thanks." }))).recall
+        expect(person.after).toEqual({
+          step: null,
+          acted: null,
+          person: "Thanks.",
+          step_at: null,
+          person_at: expect.any(Number),
+        })
+        const step = (await answered(memory.after(found.id, { step: "Done." }))).recall
+        expect(step.after).toMatchObject({ step: "Done.", acted: [], person: "Thanks.", step_at: expect.any(Number) })
+        const other = await memory.searched(1)
+        const both = (
+          await answered(
+            memory.after(other.id, { step: "S.", person: "P.", acted: [{ id: other.entries[0], how: "forgotten" }] }),
+          )
+        ).recall
+        expect(both.after).toEqual({
+          step: "S.",
+          acted: [{ id: other.entries[0], how: "forgotten" }],
+          person: "P.",
+          step_at: expect.any(Number),
+          person_at: expect.any(Number),
+        })
+      })
+
+      test("acted absent or null is []; an id not returned, an id twice, another how are 400", async () => {
+        const memory = log("recall-acted")
+        const found = await memory.searched(2)
+        const stranger = (await created(memory.verified(`Not returned ${word()}.`))).entry.id
+        expectRecallInvalid(
+          await memory.after(found.id, { step: "S.", acted: [{ id: stranger, how: "forgotten" }] }),
+          "acted",
+        )
+        expectRecallInvalid(
+          await memory.after(found.id, {
+            step: "S.",
+            acted: [
+              { id: found.entries[0], how: "forgotten" },
+              { id: found.entries[0], how: "superseded" },
+            ],
+          }),
+          "acted",
+        )
+        expectRecallInvalid(
+          await memory.after(found.id, { step: "S.", acted: [{ id: found.entries[0], how: "deleted" }] }),
+          "acted",
+        )
+        expect((await memory.stored(found.id)).after).toBeNull()
+        expect((await answered(memory.after(found.id, { step: "S.", acted: null }))).recall.after?.acted).toEqual([])
+        const other = await memory.searched(1)
+        expect((await answered(memory.after(other.id, { step: "S." }))).recall.after?.acted).toEqual([])
+      })
+
+      test("neither step nor person is 400; their lengths are counted in code points", async () => {
+        const memory = log("recall-lengths")
+        const found = await memory.searched(1)
+        expectRecallInvalid(await memory.after(found.id, {}), "step")
+        expectRecallInvalid(await memory.after(found.id, { step: null, person: null }), "step")
+        expectRecallInvalid(await memory.after(found.id, { step: "" }), "step")
+        expectRecallInvalid(await memory.after(found.id, { step: "x".repeat(4_001) }), "step")
+        expectRecallInvalid(await memory.after(found.id, { person: "" }), "person")
+        expectRecallInvalid(await memory.after(found.id, { person: "x".repeat(2_001) }), "person")
+        expectRecallInvalid(await memory.after(found.id, { step: 4 }), "step")
+        expect((await memory.stored(found.id)).after).toBeNull()
+        // One code point outside the BMP is two UTF-16 units and counts as one.
+        const step = "𝄞" + "x".repeat(3_999)
+        const person = "𝄞" + "y".repeat(1_999)
+        const kept = (await answered(memory.after(found.id, { step, person }))).recall
+        expect(kept.after).toMatchObject({ step, person })
+      })
+
+      test("the text is kept as sent, line breaks and spaces included", async () => {
+        const memory = log("recall-text")
+        const found = await memory.searched(1)
+        const step = '  Read the entry.\n\nrecall {"query":"a"}\r\n\tthen stopped  '
+        const person = "\nNo.\n  Use the other script. "
+        const kept = (await answered(memory.after(found.id, { step, person }))).recall
+        expect(kept.after).toMatchObject({ step, person })
+      })
+
+      test("by is checked as on every POST", async () => {
+        const memory = log("recall-by")
+        const found = await memory.searched(1)
+        expectRecallInvalid(await memory.after(found.id, { step: "S.", by: undefined }), "by")
+        expectRecallInvalid(await memory.after(found.id, { step: "S.", by: { role: "", chat: "c" } }), "by.role")
+        expectRecallInvalid(await memory.label(found.id, { judge: "j", entries: [], by: { role: "r" } }), "by.chat")
+      })
+    })
+
+    describe("labels", () => {
+      test("a judge's set is kept with its time; sets are oldest first, a returned entry left out is unlabelled", async () => {
+        const memory = log("recall-labels")
+        const found = await memory.searched(2)
+        const before = Date.now()
+        const first = (
+          await answered(
+            memory.label(found.id, {
+              judge: "deepseek/deepseek-v4.1-flash",
+              entries: [{ id: found.entries[0], label: "used" }],
+              corrected: "It wanted the newer script.",
+            }),
+          )
+        ).recall
+        expect(first.labels).toEqual([
+          {
+            judge: "deepseek/deepseek-v4.1-flash",
+            entries: [{ id: found.entries[0], label: "used" }],
+            corrected: "It wanted the newer script.",
+            at: expect.any(Number),
+          },
+        ])
+        expect(first.labels[0]!.at).toBeGreaterThanOrEqual(before - 1000)
+        const second = (
+          await answered(
+            memory.label(found.id, {
+              judge: "human:floris",
+              entries: [
+                { id: found.entries[1], label: "beside" },
+                { id: found.entries[0], label: "unsure" },
+              ],
+            }),
+          )
+        ).recall
+        expect(second.labels.map((set) => set.judge)).toEqual(["deepseek/deepseek-v4.1-flash", "human:floris"])
+        expect(second.labels[1]).toEqual({
+          judge: "human:floris",
+          entries: [
+            { id: found.entries[1], label: "beside" },
+            { id: found.entries[0], label: "unsure" },
+          ],
+          corrected: null,
+          at: expect.any(Number),
+        })
+        expect(second.after).toBeNull()
+        expect(await memory.stored(found.id)).toEqual(second)
+      })
+
+      test("a second set from the same judge replaces its first", async () => {
+        const memory = log("recall-relabel")
+        const found = await memory.searched(2)
+        await answered(memory.label(found.id, { judge: "j1", entries: [{ id: found.entries[0], label: "used" }] }))
+        const again = (
+          await answered(
+            memory.label(found.id, {
+              judge: "j1",
+              entries: [{ id: found.entries[1], label: "beside" }],
+              corrected: "Another thing.",
+            }),
+          )
+        ).recall
+        expect(again.labels).toEqual([
+          {
+            judge: "j1",
+            entries: [{ id: found.entries[1], label: "beside" }],
+            corrected: "Another thing.",
+            at: expect.any(Number),
+          },
+        ])
+      })
+
+      test("ten judges a row: an eleventh is 400, one of the ten may still replace its set", async () => {
+        const memory = log("recall-judges")
+        const found = await memory.searched(1)
+        for (const index of Array.from({ length: 10 }, (_, index) => index))
+          await answered(memory.label(found.id, { judge: `judge-${index}`, entries: [] }))
+        expectRecallInvalid(await memory.label(found.id, { judge: "judge-10", entries: [] }), "judge")
+        const replaced = (
+          await answered(
+            memory.label(found.id, { judge: "judge-3", entries: [{ id: found.entries[0], label: "used" }] }),
+          )
+        ).recall
+        expect(replaced.labels.length).toBe(10)
+        expect(replaced.labels.find((set) => set.judge === "judge-3")?.entries).toEqual([
+          { id: found.entries[0], label: "used" },
+        ])
+      })
+
+      test("an id not returned, an id twice, another label, a judge of 0 or 101 characters are 400", async () => {
+        const memory = log("recall-label-checks")
+        const found = await memory.searched(1)
+        const stranger = (await created(memory.verified(`Not returned ${word()}.`))).entry.id
+        const id = found.entries[0]
+        expectRecallInvalid(
+          await memory.label(found.id, { judge: "j", entries: [{ id: stranger, label: "used" }] }),
+          "entries",
+        )
+        expectRecallInvalid(
+          await memory.label(found.id, {
+            judge: "j",
+            entries: [
+              { id, label: "used" },
+              { id, label: "beside" },
+            ],
+          }),
+          "entries",
+        )
+        expectRecallInvalid(await memory.label(found.id, { judge: "j", entries: [{ id, label: "relevant" }] }), "label")
+        expectRecallInvalid(await memory.label(found.id, { judge: "", entries: [] }), "judge")
+        expectRecallInvalid(await memory.label(found.id, { judge: "j".repeat(101), entries: [] }), "judge")
+        expect((await memory.stored(found.id)).labels).toEqual([])
+        await answered(memory.label(found.id, { judge: "𝄞" + "j".repeat(99), entries: [] }))
+      })
+
+      test("corrected is null or 1 to 300 characters on one line", async () => {
+        const memory = log("recall-corrected")
+        const found = await memory.searched(1)
+        expectRecallInvalid(await memory.label(found.id, { judge: "j", entries: [], corrected: "" }), "corrected")
+        expectRecallInvalid(
+          await memory.label(found.id, { judge: "j", entries: [], corrected: "x".repeat(301) }),
+          "corrected",
+        )
+        expectRecallInvalid(
+          await memory.label(found.id, { judge: "j", entries: [], corrected: "one\ntwo" }),
+          "corrected",
+        )
+        const kept = (
+          await answered(memory.label(found.id, { judge: "j", entries: [], corrected: "𝄞" + "x".repeat(299) }))
+        ).recall
+        expect(kept.labels[0]?.corrected).toBe("𝄞" + "x".repeat(299))
+      })
+    })
+
+    describe("read", () => {
+      /** `count` searches, one after another; their rows' ids in order once the server holds them all. */
+      const searches = async (memory: ReturnType<typeof log>, count: number) => {
+        const ids: string[] = []
+        for (const index of Array.from({ length: count }, (_, index) => index))
+          ids.push((await answered(memory.search({ query: `search ${index}`, scopes: "all" }))).recall)
+        await memory.stored(ids.at(-1)!)
+        return ids
+      }
+
+      test("the rows oldest first; from and kind narrow them", async () => {
+        const memory = log("recall-list")
+        const search = (await answered(memory.search({ query: "first", scopes: "all" }))).recall
+        await memory.stored(search)
+        const start = (await answered(memory.start({ prompt: "second", scopes: "all" }))).recall
+        const last = (await answered(memory.search({ query: "third", scopes: "all" }))).recall
+        const rows = await memory.stored(last).then(() => answered(memory.rows()))
+        expect(rows.recalls.map((row) => row.id)).toEqual([search, start, last])
+        expect(rows.next).toBeNull()
+        expect((await answered(memory.rows("?kind=start"))).recalls.map((row) => row.id)).toEqual([start])
+        expect((await answered(memory.rows("?kind=search"))).recalls.map((row) => row.id)).toEqual([search, last])
+        const at = rows.recalls[1]!.at
+        expect((await answered(memory.rows(`?from=${at}`))).recalls.map((row) => row.id)).toEqual(
+          rows.recalls.filter((row) => row.at >= at).map((row) => row.id),
+        )
+        expect((await answered(memory.rows(`?from=${rows.recalls[2]!.at + 1}`))).recalls).toEqual([])
+        expect((await answered(log("recall-empty").rows())).recalls).toEqual([])
+      })
+
+      test("limit defaults to 100; next goes on where the page stopped, null at the end", async () => {
+        const memory = log("recall-pages")
+        // At most 20 at once, so their order is the server's: the pages are checked by their times.
+        const ids = (
+          await batched(101, (index) => answered(memory.search({ query: `search ${index}`, scopes: "all" })))
+        ).map((answer) => answer.recall)
+        await Promise.all(ids.slice(-20).map((id) => memory.stored(id)))
+        const first = await answered(memory.rows())
+        expect(first.recalls.length).toBe(100)
+        expect(first.next).toEqual(expect.any(String))
+        const second = await answered(memory.rows(`?cursor=${encodeURIComponent(first.next!)}`))
+        expect(second.recalls.length).toBe(1)
+        expect(second.next).toBeNull()
+        const rows = [...first.recalls, ...second.recalls]
+        expect(rows.map((row) => row.id).toSorted()).toEqual(ids.toSorted())
+        expect(rows.map((row) => row.at)).toEqual(rows.map((row) => row.at).toSorted((a, b) => a - b))
+      })
+
+      test("limit 1 to 500: 0, 501 and a word are 400; from and kind that break the rules are 400", async () => {
+        const memory = log("recall-checks")
+        await searches(memory, 1)
+        for (const query of ["?limit=0", "?limit=501", "?limit=many", "?limit=2.5"])
+          expectRecallInvalid(await memory.rows(query), "limit")
+        expectRecallInvalid(await memory.rows("?from=yesterday"), "from")
+        expectRecallInvalid(await memory.rows("?kind=entry"), "kind")
+        expectRecallInvalid(await memory.rows("?cursor=not-a-cursor"), "cursor")
+        expect((await answered(memory.rows("?limit=500"))).recalls.length).toBe(1)
+        expect((await answered(memory.rows("?limit=1"))).recalls.length).toBe(1)
+      })
+
+      test("a cursor keeps the first request's filters, and a row stored while reading never comes twice", async () => {
+        const memory = log("recall-cursor")
+        const ids: string[] = []
+        for (const index of Array.from({ length: 4 }, (_, index) => index))
+          ids.push(
+            (
+              await answered(
+                index % 2
+                  ? memory.start({ prompt: `start ${index}`, scopes: "all" })
+                  : memory.search({ query: `search ${index}`, scopes: "all" }),
+              )
+            ).recall,
+          )
+        await memory.stored(ids.at(-1)!)
+        const page = await answered(memory.rows("?kind=start&limit=1"))
+        expect(page.recalls.map((row) => row.id)).toEqual([ids[1]])
+        // Rows added while reading: a later page or none, never one already read.
+        const added = await searches(memory, 3)
+        const seen = [...page.recalls.map((row) => row.id)]
+        let next = page.next
+        while (next) {
+          const more = await answered(memory.rows(`?cursor=${encodeURIComponent(next)}&kind=search&limit=1`))
+          seen.push(...more.recalls.map((row) => row.id))
+          more.recalls.forEach((row) => expect(row.kind).toBe("start"))
+          next = more.next
+        }
+        expect(seen).toEqual([ids[1], ids[3]])
+        const all: string[] = []
+        let cursor: string | null = ""
+        while (cursor !== null) {
+          const more: { recalls: Recall[]; next: string | null } = await answered(
+            memory.rows(`?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+          )
+          all.push(...more.recalls.map((row) => row.id))
+          if (cursor === "") await searches(memory, 1).then((id) => added.push(...id))
+          cursor = more.next
+        }
+        expect(all).toEqual([...ids, ...added])
+      })
+    })
+  })
+
   test("capabilities say that the server has memory, with its limits", async () => {
     const answer = await send("GET", "/pacer/v1/capabilities")
     expect(answer.status).toBe(200)
@@ -2276,6 +2793,7 @@ export function memoryContract(target: Target) {
       search_limit: 20,
       embedding: "test-embedding",
       ...(target.tasks ? { tasks: true } : {}),
+      ...(target.recalls ? { recalls: true } : {}),
     })
   })
 

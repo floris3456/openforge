@@ -35,6 +35,8 @@ export interface Interface {
     readonly recall: boolean
     /** Whether the chat has the `remember` tool: the block then says that memory is its to keep true. */
     readonly remember: boolean
+    /** Whether the chat has the `task` tool: inside a task the block then says what to do with the task's state. */
+    readonly task: boolean
   }) => Effect.Effect<void>
 }
 

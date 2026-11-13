@@ -324,7 +324,7 @@ describe("MemoryTools offering", () => {
         "Tasks are pieces of work this project's lead gives out. Without parameters it lists the open ones; with a title it makes one; with an id it reads one, and with a state it sets that state (todo, active, blocked, review, done; a note says why). A subagent started with a task's id as taskID works inside that task.",
       )
       expect(fields("remember").scope).toBe(
-        "role: for your role (the default outside a task); global: for the whole project",
+        "task: for the task you are in (the default there); role: for your role (the default elsewhere); global: for the whole project",
       )
     }),
   )
@@ -1226,6 +1226,7 @@ describe("MemoryTools task", () => {
           `Task ${task} is now active; you are inside it.`,
           `Your task [${task}]: Move the checks (active)`,
           "One script.",
+          MemoryText.states,
         ].join("\n"),
       )
       expect(h.metadata(lead)).toEqual({ memory: { task } })
@@ -1237,6 +1238,7 @@ describe("MemoryTools task", () => {
           `Your task [${sub}]: A part (active)`,
           `Part of task [${task}]: Move the checks.`,
           "The first half.",
+          MemoryText.states,
           "What was noted in the task, newest first:",
           MemoryText.entry(yield* h.started.client.read(projectID, entry)),
         ].join("\n"),
@@ -1296,6 +1298,100 @@ describe("MemoryTools task", () => {
       expect(MemoryText.entry(yield* h.started.client.read(projectID, saved(second)))).toContain(
         `; task ${task}, subtask ${sub};`,
       )
+    }),
+  )
+
+  it.live("remember with scope task writes for the chat's task, inside a subtask too; outside one it is refused", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "The task" }))
+      const sub = (yield* h.started.client.make(projectID, {
+        title: "The part",
+        parent: task,
+        by: { role: "build", chat: lead },
+      })).task.id
+      const before = h.server.calls().length
+      expect(
+        yield* h.read("remember", { text: "Outside.", kind: "verified", basis: "b", scope: "task" }, child, "general"),
+      ).toBe("error: This chat is in no task.")
+      expect(yield* h.read("remember", { text: "Outside.", kind: "verified", basis: "b", scope: "task" })).toBe(
+        "error: This chat is in no task.",
+      )
+      expect(h.server.calls().length).toBe(before)
+      h.place(child, { task })
+      const inTask = yield* h.read(
+        "remember",
+        { text: "For whoever works on this next.", kind: "verified", basis: "b", scope: "task" },
+        child,
+        "general",
+      )
+      expect(inTask).toBe(`Saved as ${saved(inTask)}: a verified entry, task ${task}.`)
+      h.place(child, { task, subtask: sub })
+      const inSub = yield* h.read(
+        "remember",
+        { text: "For the next one on the part.", kind: "unverified", basis: "read it", scope: "task" },
+        child,
+        "general",
+      )
+      expect(inSub).toBe(`Saved as ${saved(inSub)}: a unverified entry, task ${task}, subtask ${sub}.`)
+      const writes = h.server
+        .calls()
+        .filter((call) => call.path.endsWith("/entries"))
+        .map((call) => call.body as { scope: string; by: unknown })
+      expect(writes.map((body) => [body.scope, body.by])).toEqual([
+        ["task", { role: "general", chat: child, task }],
+        ["task", { role: "general", chat: child, task, subtask: sub }],
+      ])
+    }),
+  )
+
+  it.live("scope task with supersedes moves a role entry into the chat's task", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "The task" }))
+      const sub = (yield* h.started.client.make(projectID, {
+        title: "The part",
+        parent: task,
+        by: { role: "build", chat: lead },
+      })).task.id
+      const old = yield* h.save({ text: "The part uses port 3674.", kind: "verified", basis: "ss" }, child, "general")
+      h.place(child, { task, subtask: sub })
+      const answer = yield* h.read(
+        "remember",
+        { text: "The part uses port 3675.", kind: "verified", basis: "ss", scope: "task", supersedes: old },
+        child,
+        "general",
+      )
+      const id = saved(answer)
+      expect(answer).toBe(`Saved as ${id}, replacing ${old}: a verified entry, task ${task}, subtask ${sub}.`)
+      expect(h.server.calls().at(-1)?.body).toMatchObject({
+        scope: "task",
+        supersedes: old,
+        move: true,
+        by: { role: "general", chat: child, task, subtask: sub },
+      })
+      expect(yield* h.started.client.read(projectID, id)).toMatchObject({
+        scope: "task",
+        role: null,
+        task,
+        subtask: sub,
+      })
+      expect((yield* h.started.client.read(projectID, old)).superseded_by).toBe(id)
+    }),
+  )
+
+  it.live("a child's global inside a task is refused with a pointer to the task's default; outside one as before", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "The task" }))
+      const note = { text: "For whoever works on this next.", kind: "verified", basis: "b", scope: "global" }
+      expect(yield* h.read("remember", note, child, "general")).toBe("error: Only a lead chat saves a global entry.")
+      h.place(child, { task })
+      const before = h.server.calls().length
+      expect(yield* h.read("remember", note, child, "general")).toBe(
+        "error: Only a lead chat saves a global entry. Leave scope out to save it for the task.",
+      )
+      expect(h.server.calls().length).toBe(before)
     }),
   )
 

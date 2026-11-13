@@ -78,7 +78,13 @@ describe("MemoryText tasks", () => {
 
     const long = MemoryText.task({ task: task({ description: "d".repeat(5_000) }), entries })
     expect([...long].length).toBe(MemoryText.TASK_CHARACTERS)
-    expect(long).toBe([`Your task [t8n2k4m7q9xz]: Move the checks (todo)`, "d".repeat(4_000 - 50) + "…"].join("\n"))
+    expect(long).toBe(
+      [
+        `Your task [t8n2k4m7q9xz]: Move the checks (todo)`,
+        "d".repeat(4_000 - 51 - MemoryText.states.length) + "…",
+        MemoryText.states,
+      ].join("\n"),
+    )
     expect(long).not.toContain("What was noted")
   })
 
@@ -91,11 +97,15 @@ describe("MemoryText tasks", () => {
       task: { task: task({ description }), subtasks: [], entries },
       subtask: null,
     })
-    const tools = { recall: true, remember: false }
+    const tools = { recall: true, remember: false, task: true }
     const lines = MemoryText.block(started("One script.", [entry("e1", "Noted.")]), "build", tools, true).split("\n")
-    expect(lines.slice(0, 2)).toEqual(["Your task [t8n2k4m7q9xz]: Move the checks (todo)", "One script."])
-    expect(lines[2]).toStartWith("Memory: what agents and people of this project noted earlier.")
-    expect(lines.slice(3, 5)).toEqual([
+    expect(lines.slice(0, 3)).toEqual([
+      "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+      "One script.",
+      "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review.",
+    ])
+    expect(lines[3]).toStartWith("Memory: what agents and people of this project noted earlier.")
+    expect(lines.slice(4, 6)).toEqual([
       "What was noted in the task, newest first:",
       MemoryText.entry(entry("e1", "Noted.")),
     ])
@@ -105,9 +115,18 @@ describe("MemoryText tasks", () => {
       tools,
       true,
     ).split("\n")
-    expect(cut[1]).toBe("d".repeat(4_000 - 50) + "…")
-    expect(cut[2]).toStartWith("Memory: what agents")
+    // The line on the task's state counts into the 4,000 characters and is never cut.
+    expect(cut[1]).toBe("d".repeat(4_000 - 51 - MemoryText.states.length) + "…")
+    expect(cut[2]).toBe(MemoryText.states)
+    expect(cut[3]).toStartWith("Memory: what agents")
+    expect([...cut.slice(0, 3).join("\n")].length).toBe(MemoryText.TASK_CHARACTERS)
     expect(cut.join("\n")).not.toContain("What was noted")
+    // Without the task tool there is no such line, and the description has its room.
+    const without = MemoryText.block(started("d".repeat(5_000), []), "build", { ...tools, task: false }, true).split(
+      "\n",
+    )
+    expect(without[1]).toBe("d".repeat(4_000 - 50) + "…")
+    expect(without[2]).toStartWith("Memory: what agents")
   })
 
   test("a subtask of a task not listed stands on its own in the list", () => {

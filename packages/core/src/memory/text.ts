@@ -52,11 +52,13 @@ const keep =
 export function block(
   started: MemoryClient.Started,
   role: string,
-  tools: { readonly recall: boolean; readonly remember: boolean },
+  tools: { readonly recall: boolean; readonly remember: boolean; readonly task: boolean },
   inside?: boolean,
 ) {
   // The task's title and description are the chat's assignment; what was noted in it is memory, under the opening.
-  const part = started.task ? taskParts(started.task, started.subtask ?? undefined) : { assignment: [], notes: [] }
+  const part = started.task
+    ? taskParts(started.task, started.subtask ?? undefined, tools.task)
+    : { assignment: [], notes: [] }
   const tasked = inside ? `, ${started.counts.task} of this task` : ""
   const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tasked}${tools.recall ? "; recall finds them" : ""}.`
   return [
@@ -82,18 +84,23 @@ export function task(
   started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
   subtask?: MemoryClient.Task,
 ) {
-  const part = taskParts(started, subtask)
+  const part = taskParts(started, subtask, true)
   return [...part.assignment, ...part.notes].join("\n")
 }
 
+/** What a chat inside a task does with its state, for a chat that has the `task` tool. */
+export const states =
+  "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
+
 /**
- * The task part's lines: the assignment (the task or subtask, the task it is part of, the description) and the notes
- * (what was noted in the task). Together within {@link TASK_CHARACTERS}: the notes go from the oldest, then the
- * description is cut from its end.
+ * The task part's lines: the assignment (the task or subtask, the task it is part of, the description, and with
+ * `states` what to do with the task's state) and the notes (what was noted in the task). Together within
+ * {@link TASK_CHARACTERS}: the notes go from the oldest, then the description is cut from its end; the rest is never cut.
  */
 function taskParts(
   started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
-  subtask?: MemoryClient.Task,
+  subtask: MemoryClient.Task | undefined,
+  withStates: boolean,
 ) {
   const own = subtask ?? started.task
   const head = [
@@ -101,7 +108,7 @@ function taskParts(
     ...(subtask ? [`Part of task [${started.task.id}]: ${started.task.title}.`] : []),
   ]
   const parts = (description: string, entries: ReadonlyArray<MemoryClient.Entry>) => ({
-    assignment: [...head, ...(description ? [description] : [])],
+    assignment: [...head, ...(description ? [description] : []), ...(withStates ? [states] : [])],
     notes: entries.length ? ["What was noted in the task, newest first:", ...entries.map(entry)] : [],
   })
   const length = (part: ReturnType<typeof parts>) => [...[...part.assignment, ...part.notes].join("\n")].length

@@ -138,6 +138,14 @@ const echo = makeLocationNode({
           input: Schema.Struct({ text: Schema.String }),
           execute: () => Effect.succeed({ content: "Saved." }),
         })
+        // And for `task`: inside a task, a chat that has it is told what to do with the task's state.
+        editor.add({
+          name: "task",
+          description: "Lists, makes, reads and changes tasks",
+          options: { codemode: false },
+          input: Schema.Struct({ id: Schema.optional(Schema.String) }),
+          execute: () => Effect.succeed({ content: "No tasks." }),
+        })
       }),
     ),
   ),
@@ -245,6 +253,11 @@ const setup = Effect.fnUntraced(function* (
       agent.mode = "subagent"
       agent.permissions = [{ action: "remember", resource: "*", effect: "deny" }]
     })
+    // And one without the task tool.
+    editor.update(Agent.ID.make("untasked"), (agent) => {
+      agent.mode = "subagent"
+      agent.permissions = [{ action: "task", resource: "*", effect: "deny" }]
+    })
   })
   const project = Project.ID.make(crypto.randomUUID().replaceAll("-", "").padEnd(40, "0"))
   yield* db
@@ -332,6 +345,8 @@ const userTexts = (request: LLMRequest | undefined) =>
 const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
+const states =
+  "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
 const keep =
   "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
@@ -689,6 +704,7 @@ describe("MemoryStart inside a task", () => {
             `Your task [${ids.task}]: Move the checks (todo)`,
             "One script.",
             "Done when it passes.",
+            states,
             opening,
             "What was noted in the task, newest first:",
             MemoryText.entry(noted),
@@ -729,6 +745,7 @@ describe("MemoryStart inside a task", () => {
         [
           `Your task [${ids.task}]: Move the checks (todo)`,
           "One script.",
+          states,
           opening,
           "What memory holds nearest to this prompt; it may not be about it:",
           MemoryText.entry(global),
@@ -760,12 +777,70 @@ describe("MemoryStart inside a task", () => {
           `Your task [${ids.subtask}]: The first half (todo)`,
           `Part of task [${ids.task}]: Move the checks.`,
           "Only the lint part.",
+          states,
           opening,
           "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
           keep,
         ].join("\n"),
       )
       expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
+    }),
+  )
+
+  it.live("inside a subtask without a description the line on the state follows the task it is part of", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        child: true,
+        agent: "explore",
+        inside: (project) =>
+          make(project, "Move the checks").pipe(
+            Effect.flatMap((task) => make(project, "The first half", undefined, task.id)),
+            Effect.map((sub) => {
+              ids.task = sub.parent!
+              ids.subtask = sub.id
+              return { task: sub.parent!, subtask: sub.id }
+            }),
+          ),
+      })
+      yield* h.prompt("go on")
+      expect(userTexts(h.requests()[0])[1]).toBe(
+        [
+          `Your task [${ids.subtask}]: The first half (todo)`,
+          `Part of task [${ids.task}]: Move the checks.`,
+          states,
+          opening,
+          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+          keep,
+        ].join("\n"),
+      )
+    }),
+  )
+
+  it.live("a chat without the task tool gets no line on the task's state", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        child: true,
+        agent: "untasked",
+        inside: (project) =>
+          make(project, "Move the checks", "One script.").pipe(
+            Effect.map((task) => {
+              ids.task = task.id
+              return { task: task.id }
+            }),
+          ),
+      })
+      yield* h.prompt("go on")
+      const request = h.requests()[0]
+      expect(request?.tools.map((tool) => tool.name)).not.toContain("task")
+      expect(userTexts(request)[1]).toBe(
+        [
+          `Your task [${ids.task}]: Move the checks (todo)`,
+          "One script.",
+          opening,
+          "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
+          keep,
+        ].join("\n"),
+      )
     }),
   )
 
@@ -789,7 +864,8 @@ describe("MemoryStart inside a task", () => {
       // The assignment above the opening and the notes under it are bounded together.
       const assignment = block.slice(0, block.indexOf(`\n${opening}\n`))
       const notes = block.slice(block.indexOf(`${opening}\n`) + opening.length + 1, block.indexOf("\nMemory holds "))
-      expect(assignment).toBe(`Your task [${ids.task}]: Long task (todo)\n${long}`)
+      // The line on the task's state is kept and counts.
+      expect(assignment).toBe(`Your task [${ids.task}]: Long task (todo)\n${long}\n${states}`)
       expect(notes).toStartWith("What was noted in the task, newest first:\n")
       const part = `${assignment}\n${notes}`
       expect([...part].length).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)

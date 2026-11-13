@@ -38,8 +38,9 @@ export const RememberInput = Schema.Struct({
     }),
   ),
   scope: Schema.optional(
-    Schema.Literals(["role", "global"]).annotate({
-      description: "role: for your role (the default outside a task); global: for the whole project",
+    Schema.Literals(["task", "role", "global"]).annotate({
+      description:
+        "task: for the task you are in (the default there); role: for your role (the default elsewhere); global: for the whole project",
     }),
   ),
   supersedes: Schema.optional(
@@ -201,8 +202,14 @@ export const Plugin = {
               const scope = input.scope ?? (who.inside ? "task" : "role")
               if (!who.lead && input.kind === "words")
                 return yield* new ToolFailure({ message: "Only a lead chat saves a person's words." })
+              if (scope === "task" && !who.inside)
+                return yield* new ToolFailure({ message: "This chat is in no task." })
               if (!who.lead && scope === "global")
-                return yield* new ToolFailure({ message: "Only a lead chat saves a global entry." })
+                return yield* new ToolFailure({
+                  message: who.inside
+                    ? "Only a lead chat saves a global entry. Leave scope out to save it for the task."
+                    : "Only a lead chat saves a global entry.",
+                })
               const secret = MemorySecrets.find(input.text) ?? MemorySecrets.find(input.basis ?? "")
               if (secret)
                 return yield* new ToolFailure({

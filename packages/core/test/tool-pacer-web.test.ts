@@ -117,6 +117,50 @@ describe("PacerWebTools registration", () => {
     }),
   )
 
+  it.effect("registers the four when the endpoint arrives between the plugin's first read and its subscription", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const started = yield* startTools(endpointOf(cpp.origin))
+      // `get` still answers from before the endpoint was set; `changes` already has it, as a SubscriptionRef replays
+      // its latest value to a new subscriber.
+      const context = yield* Layer.build(
+        AppNodeBuilder.build(LayerNode.group([Tool.node, pluginNode]), [
+          Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
+          PacerEndpoint.node.replace(
+            Layer.succeed(
+              PacerEndpoint.Service,
+              PacerEndpoint.Service.of({
+                get: () => Effect.succeed(undefined),
+                changes: () => SubscriptionRef.changes(started.endpoints),
+              }),
+            ),
+          ),
+          PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
+          Session.node.replace(sessions),
+          Image.node.replace(imagePassthrough),
+        ]),
+      )
+      const registry = Context.get(context, Tool.Service)
+      yield* until("registered", () => Effect.runSync(names(registry)).length > 1)
+      expect(yield* names(registry)).toEqual([...web, "execute"])
+    }),
+  )
+
+  it.effect(
+    "keeps the four through rebuilds of the registry, as a model update's reload, while the endpoint stays",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        expect(yield* names(h.registry)).toEqual([...web, "execute"])
+        // The same endpoint again, as each of its readers' first value after a reconnect.
+        yield* SubscriptionRef.set(h.endpoints, endpointOf(h.cpp.origin))
+        for (let index = 0; index < 3; index++) {
+          yield* h.registry.reload()
+          expect(yield* names(h.registry)).toEqual([...web, "execute"])
+        }
+      }),
+  )
+
   it.effect("leaves out the tools whose permission an agent denies, as it does upstream's", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -310,7 +354,7 @@ describe("PacerWebTools answers", () => {
   it.effect("404: fails, and the chat's list is read again at its next request", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const step = { sessionID, parentID, model: "claude-haiku-5-5", step: true }
+      const step = { sessionID, parentID, model: "claude-haiku-5-5", step: true, continues: false }
       yield* h.tools.list(step)
       h.cpp.answers.call = () =>
         Response.json({ error: { type: "not_found", message: "no tool web_crawl" } }, { status: 404 })

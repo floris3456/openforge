@@ -5,8 +5,10 @@ import { compileRequest } from "@opencode/ai/testing"
 import { Agent } from "@opencode/schema/agent"
 import { Money } from "@opencode/schema/money"
 import { Session } from "@opencode/schema/session"
-import { Context, DateTime, Effect, Layer, SubscriptionRef } from "effect"
+import { Context, DateTime, Effect, Fiber, Layer, SubscriptionRef } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
+import { TestClock } from "effect/testing"
+import { Message } from "@opencode/ai/effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
@@ -29,7 +31,7 @@ import { testEffect } from "./lib/effect"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin, toolIdentity } from "./lib/tool"
-import { catalogOf, endpointOf, fakeCpp, ownerList, startTools } from "./pacer/fake-tools"
+import { catalogOf, endpointOf, fakeCpp, ownerList, settle, startTools, until } from "./pacer/fake-tools"
 import { PluginTestLayer } from "./plugin/fixture"
 
 const it = testEffect(PluginTestLayer)
@@ -105,6 +107,7 @@ const setup = Effect.fnUntraced(function* (webTools = true) {
   return { cpp, requests, input, catalogs: started.catalogs, started }
 })
 
+const busy = () => Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
 const names = (prepared: SessionModelRequest.Prepared<unknown>) => prepared.request.tools.map((tool) => tool.name)
 /** CPP's tools in a request, in the shape CPP lists them. */
 const claude = (prepared: SessionModelRequest.Prepared<unknown>) =>
@@ -235,6 +238,80 @@ describe("SessionModelRequest with CPP's web tools", () => {
       })
       expect(executed[0]?.get("web_search")?.name).toBe("web_search")
       expect(executed[0]?.has("web_crawl")).toBe(false)
+    }),
+  )
+
+  it.effect("gives a warm chat's first step after a restart its list, also after another chat's read failed", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const other = Session.Info.make({ ...session, id: Session.ID.make("ses_model_request_pacer_other") })
+      h.cpp.answers.list = () =>
+        Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
+      const failed = yield* h.requests.primary({ ...h.input(snapshot(all)), session: other })
+      expect(names(failed)).toEqual(["read", "webfetch", "websearch"])
+
+      // The service holds no chat's list after a restart: this chat's frozen copy is read, not left out.
+      h.cpp.answers.list = () => Response.json(ownerList)
+      const prepared = yield* h.requests.primary(h.input(snapshot(all)))
+      expect(names(prepared)).toEqual(["read", "web_crawl", "web_extract", "web_research", "web_search", "webfetch"])
+      expect(claude(prepared)).toBe(cppTools(["web_crawl", "web_extract", "web_research", "web_search"]))
+      expect(h.cpp.lists().map((read) => read.headers.get("x-pacer-session"))).toEqual([
+        PacerSessionID.make(other.id),
+        PacerSessionID.make(session.id),
+      ])
+    }),
+  )
+
+  it.effect("waits for the list of a chat whose history holds a model answer; a new chat reads once", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const fresh = Session.Info.make({ ...session, id: Session.ID.make("ses_model_request_pacer_new") })
+      h.cpp.answers.list = () => (h.cpp.lists().length < 3 ? busy() : Response.json(ownerList))
+      const first = yield* h.requests.primary({
+        ...h.input(snapshot(all)),
+        session: fresh,
+        messages: [Message.user("hello")],
+      })
+      expect(names(first)).toEqual(["read", "webfetch", "websearch"])
+      expect(h.cpp.lists()).toHaveLength(1)
+
+      const history = [Message.user("hello"), Message.assistant("hi"), Message.user("go on")]
+      const waiting = yield* h.requests
+        .compaction({ ...h.input(snapshot(all)), messages: history })
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the chat's first read", () => h.cpp.lists().length === 2)
+      yield* settle
+      yield* TestClock.adjust("3 seconds")
+      const prepared = yield* Fiber.join(waiting)
+      expect(claude(prepared)).toBe(cppTools(["web_crawl", "web_extract", "web_research", "web_search"]))
+      expect(h.cpp.lists().map((read) => read.headers.get("x-pacer-session"))).toEqual([
+        PacerSessionID.make(fresh.id),
+        PacerSessionID.make(session.id),
+        PacerSessionID.make(session.id),
+      ])
+    }),
+  )
+
+  it.effect("a chat with steps and no list whose first read times out, as in a stalled process, sends its tools", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const history = [Message.user("hello"), Message.assistant("hi"), Message.user("go on")]
+      h.cpp.hold()
+      const waiting = yield* h.requests
+        .primary({ ...h.input(snapshot(all)), messages: history })
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => h.cpp.lists().length === 1)
+      // CPP answers at once, but openforge's 5 s pass first.
+      yield* TestClock.adjust("5 seconds")
+      yield* settle
+      h.cpp.gate.release()
+      yield* settle
+      expect(waiting.pollUnsafe()).toBeUndefined()
+      yield* TestClock.adjust("3 seconds")
+      const prepared = yield* Fiber.join(waiting)
+      expect(names(prepared)).toEqual(["read", "web_crawl", "web_extract", "web_research", "web_search", "webfetch"])
+      expect(claude(prepared)).toBe(cppTools(["web_crawl", "web_extract", "web_research", "web_search"]))
+      expect(h.cpp.lists()).toHaveLength(2)
     }),
   )
 

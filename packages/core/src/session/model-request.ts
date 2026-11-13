@@ -32,6 +32,7 @@ import { Database } from "../database/database.js"
 import { ImageBank } from "../image/bank.js"
 import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
+import { MemoryOffer } from "../memory/offer.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerOffer } from "../pacer/offer.js"
 import { PacerTools } from "../pacer/tools.js"
@@ -282,18 +283,25 @@ export const layer = Layer.effect(
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
       }
+      // The memory tools as the chat's start block in view offers them, so memory coming or going changes no running
+      // chat's tools (`MemoryOffer`).
+      const offered =
+        Option.isSome(database) && tools.definitions.some((tool) => MemoryOffer.tools.has(tool.name))
+          ? MemoryOffer.apply(tools.definitions, yield* MemoryOffer.offered(database.value.db, session.id))
+          : tools.definitions
       // CPP's web tools as the chat's list defines them, before any hook, so plugins' hooks see and may change them.
-      const definitions = PacerOffer.wanted(tools.definitions)
+      const definitions = PacerOffer.wanted(offered)
         ? PacerOffer.apply(
-            tools.definitions,
+            offered,
             yield* pacerTools.list({
               sessionID: session.id,
               parentID: session.parentID,
               model: model.ref.id,
               step: kind === "primary",
+              continues: input.messages.some((message) => message.role === "assistant"),
             }),
           )
-        : tools.definitions
+        : offered
       // Remember which tool each definition object came from. Hooks rename a tool by moving
       // its definition to a new key, so after the hook we find the tool by object identity.
       // Definitions are shared across steps and sessions, and hooks may edit schemas in place,

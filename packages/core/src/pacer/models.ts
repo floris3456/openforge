@@ -260,13 +260,19 @@ export const layer = Layer.effect(
 
     const read = Effect.fn("PacerModels.read")(function* (endpoint: PacerEndpoint.Endpoint) {
       const options = { endpoint }
+      // A first read takes an answer it can't use for a plain proxy, as one that serves a page at every path; once a
+      // catalog is held, such an answer (a 429, a redirect, a body that does not decode) keeps it instead.
+      const held = (yield* SubscriptionRef.get(current)) !== undefined
       const [list, capabilities, priced] = yield* Effect.all(
         [
           http.get("/v1/models", ListAnswer, options),
-          // A refusal, a 404 or an answer that is not CPP's is a plain proxy; only an unreachable one fails the read.
+          // A refusal or a 404 is a plain proxy; an unreachable server or another answer fails the read.
           http.get("/pacer/v1/capabilities", CapabilitiesAnswer, options).pipe(
             Effect.map((answer) => answer.body),
-            Effect.catchIf(definite, () => Effect.succeed(undefined)),
+            Effect.catchIf(
+              (error) => definite(error) || (!held && error._tag === "PacerHttp.Unexpected"),
+              () => Effect.succeed(undefined),
+            ),
           ),
           http.get("/pacer/v1/models", PricesAnswer, options).pipe(
             Effect.map((answer): Prices | undefined => ({
@@ -351,9 +357,9 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
   }
 }
 
-/** An answer that will not change on its own: anything but an unreachable server. */
+/** An answer that will not change on its own: a 404, a refused key. Not an unreachable server, a 429 or a redirect. */
 function definite(error: PacerHttp.Error) {
-  return error._tag !== "PacerHttp.Unreachable"
+  return error._tag !== "PacerHttp.Unreachable" && error._tag !== "PacerHttp.Unexpected"
 }
 
 function capable(items: ReadonlyArray<unknown> | null | undefined) {

@@ -18,10 +18,12 @@ import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
 import type { Tool } from "../../tool.js"
 
-// The memory's three tools (the workspace's spec `docs/specs/memory.md`, section 4), offered while a CLIProxyPacer is
-// set up and its catalog says it has memory, or, while the catalog is not read yet, the server was last known to
-// (`MemoryKnown`). What depends on a chat being a lead or a child, or on its role, is checked here: the server cannot
-// tell them apart. openforge sets who writes (`by`: the role and the chat); the model never does.
+// The memory's tools (the workspace's spec `docs/specs/memory.md`, section 4), registered while a CLIProxyPacer is set
+// up, as its web tools are. Which of them a chat is offered is its start block's to say (`MemoryOffer`, applied where
+// each request's tools are put together), so a server that gains or loses memory changes no running chat's tools; a
+// call while the server has no memory answers that memory is unavailable. What depends on a chat being a lead or a
+// child, or on its role, is checked here: the server cannot tell them apart. openforge sets who writes (`by`: the role
+// and the chat); the model never does.
 
 const Kind = MemoryClient.Kind.annotate({
   description:
@@ -113,35 +115,22 @@ export const Plugin = {
     const config = yield* Config.Service
     const kv = yield* KV.Service
 
-    const offered = Effect.gen(function* () {
-      const endpoint = yield* endpoints.get()
-      if (endpoint === undefined) return { enabled: false, tasks: false }
-      const catalog = yield* catalogs.get()
-      // Not read yet: as the server was last known, so a chat resumed right after a start keeps the tool list it had.
-      // Whether it has tasks is known only once the catalog is read.
-      if (catalog === undefined) return { enabled: yield* MemoryKnown.read(kv, endpoint), tasks: false }
-      return { enabled: catalog.pacer?.memory !== undefined, tasks: catalog.pacer?.memory?.tasks === true }
-    })
-    const state = yield* offered
-    yield* Stream.merge(
-      endpoints.changes(),
-      // A catalog is set only while the endpoint it was read from is still the current one (`PacerModels.refresh`).
-      catalogs.changes().pipe(
-        Stream.tap((catalog) =>
-          Effect.gen(function* () {
-            const endpoint = yield* endpoints.get()
-            if (catalog && endpoint) yield* MemoryKnown.write(kv, endpoint, catalog)
-          }),
-        ),
-      ),
-    ).pipe(
-      Stream.runForEach(() =>
+    const state = { enabled: (yield* endpoints.get()) !== undefined }
+    yield* endpoints.changes().pipe(
+      Stream.runForEach((endpoint) => {
+        if ((endpoint !== undefined) === state.enabled) return Effect.void
+        state.enabled = endpoint !== undefined
+        return ctx.tool.reload()
+      }),
+      Effect.forkScoped({ startImmediately: true }),
+    )
+    // What a server said of memory, for a chat that starts before its catalog is read again (`MemoryStart`). A catalog
+    // is set only while the endpoint it was read from is still the current one (`PacerModels.refresh`).
+    yield* catalogs.changes().pipe(
+      Stream.runForEach((catalog) =>
         Effect.gen(function* () {
-          const next = yield* offered
-          if (next.enabled === state.enabled && next.tasks === state.tasks) return
-          state.enabled = next.enabled
-          state.tasks = next.tasks
-          yield* ctx.tool.reload()
+          const endpoint = yield* endpoints.get()
+          if (catalog && endpoint) yield* MemoryKnown.write(kv, endpoint, catalog)
         }),
       ),
       Effect.forkScoped({ startImmediately: true }),
@@ -356,7 +345,6 @@ export const Plugin = {
               return { content: `Deleted the text of ${entry.id} for good.`, metadata: { id: entry.id } }
             }),
         })
-        if (!state.tasks) return
         editor.add({
           name: "task",
           options: { codemode: false },
@@ -365,6 +353,10 @@ export const Plugin = {
           execute: (input, context) =>
             Effect.gen(function* () {
               const who = yield* caller(context, "task", input)
+              // A chat whose block offered tasks keeps the tool when the server's tasks go.
+              const catalog = yield* catalogs.get()
+              if (catalog && !catalog.pacer?.memory?.tasks)
+                return yield* new ToolFailure({ message: new MemoryClient.Unavailable({ reason: "no tasks" }).message })
               const form = formOf(input)
               if (form === undefined) return yield* new ToolFailure({ message: forms })
               if (form === "list") {

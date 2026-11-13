@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Fiber, Layer, SubscriptionRef } from "effect"
+import { Effect, Fiber, Layer, Logger, SubscriptionRef } from "effect"
 import { TestClock } from "effect/testing"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
@@ -31,7 +31,19 @@ const step = (sessionID: SessionID, model = "claude-haiku-5-5", parentID?: Sessi
   ...(parentID ? { parentID } : {}),
   model,
   step: true,
+  continues: false,
 })
+/** A step of a chat with earlier steps, as after a restart. */
+const resumed = (sessionID: SessionID): PacerTools.ListInput => ({ ...step(sessionID), continues: true })
+const busy = () => Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
+/** Runs `body` with every warning logged meanwhile in hand, as `[message, annotations]`. */
+const logged = <A, E, R>(body: (warnings: ReadonlyArray<ReadonlyArray<unknown>>) => Effect.Effect<A, E, R>) => {
+  const warnings: Array<ReadonlyArray<unknown>> = []
+  const logger = Logger.make(({ logLevel, message }) => {
+    if (logLevel === "Warn") warnings.push(message as ReadonlyArray<unknown>)
+  })
+  return body(warnings).pipe(Effect.provide(Logger.layer([logger])))
+}
 const compaction = (sessionID: SessionID, model = "claude-haiku-5-5"): PacerTools.ListInput => ({
   ...step(sessionID, model),
   step: false,
@@ -187,13 +199,15 @@ describe("PacerTools.list", () => {
     }),
   )
 
-  it.effect("waits at most 5 s for a read, then goes without the list and reads none for 30 s", () =>
+  it.effect("waits at most 5 s for a read, then goes without the list and reads no held list again for 30 s", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
       const { tools } = yield* startTools(endpointOf(cpp.origin))
+      const held = yield* tools.list(step(other))
+      tools.seen(other, "0123456789abcdef")
       cpp.hold()
       const reading = yield* tools.list(step(chat)).pipe(Effect.forkChild({ startImmediately: true }))
-      yield* until("the read", () => cpp.lists().length === 1)
+      yield* until("the read", () => cpp.lists().length === 2)
       yield* TestClock.adjust("4999 millis")
       yield* settle
       expect(reading.pollUnsafe()).toBeUndefined()
@@ -201,14 +215,196 @@ describe("PacerTools.list", () => {
       expect(yield* Fiber.join(reading)).toBeUndefined()
       cpp.gate.release()
 
-      // No chat's list is read during the pause.
-      expect(yield* tools.list(step(other))).toBeUndefined()
+      // A held list is not read again during the pause.
+      expect(yield* tools.list(step(other))).toBe(held!)
       yield* TestClock.adjust("29999 millis")
-      expect(yield* tools.list(step(chat))).toBeUndefined()
-      expect(cpp.lists()).toHaveLength(1)
-      yield* TestClock.adjust("1 millis")
-      expect((yield* tools.list(step(chat)))?.version).toBe(ownerList.version)
+      expect(yield* tools.list(step(other))).toBe(held!)
       expect(cpp.lists()).toHaveLength(2)
+      yield* TestClock.adjust("1 millis")
+      yield* tools.list(step(other))
+      expect(cpp.lists()).toHaveLength(3)
+    }),
+  )
+
+  it.effect("reads the list of a chat that holds none during the pause, as every chat's right after a restart", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin), undefined)
+      cpp.answers.list = () =>
+        Response.json({ error: { type: "busy", message: "every store turn busy" } }, { status: 503 })
+      expect(yield* tools.list(step(chat))).toBeUndefined()
+
+      cpp.answers.list = () => Response.json(ownerList)
+      expect((yield* tools.list(step(other)))?.version).toBe(ownerList.version)
+      // The chat whose read failed holds none either: its next request reads again.
+      expect((yield* tools.list(step(chat)))?.version).toBe(ownerList.version)
+      expect(cpp.lists().map((read) => read.headers.get("x-pacer-session"))).toEqual([
+        PacerSessionID.make(chat),
+        PacerSessionID.make(other),
+        PacerSessionID.make(chat),
+      ])
+    }),
+  )
+
+  it.effect("a chat with steps and no list reads again at +3 s, then every 5 s, and goes without at 60 s", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools } = yield* startTools(endpointOf(cpp.origin))
+        cpp.answers.list = busy
+        const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+        yield* until("the first read", () => cpp.lists().length === 1)
+        // Each read starts 3 s, then 5 s, after the last one ended; the last starts at 58 s, as one at 63 s would not.
+        let at = 0
+        for (const [index, gap] of [3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5].entries()) {
+          yield* settle
+          yield* TestClock.adjust(`${gap * 1000 - 1} millis`)
+          yield* settle
+          expect(cpp.lists()).toHaveLength(index + 1)
+          yield* TestClock.adjust("1 millis")
+          at += gap
+          yield* until(`the read at ${at} s`, () => cpp.lists().length === index + 2)
+        }
+        expect(at).toBe(58)
+        expect(yield* Fiber.join(waiting)).toBeUndefined()
+        expect(warnings).toEqual([
+          [
+            "went on without CLIProxyPacer's web tools: no answer to their list",
+            {
+              sessionID: chat,
+              waited: "58s",
+              reason: "CLIProxyPacer is unreachable: every store turn busy",
+            },
+          ],
+        ])
+        yield* TestClock.adjust("1 minute")
+        yield* settle
+        expect(cpp.lists()).toHaveLength(13)
+      }),
+    ),
+  )
+
+  it.effect("a chat with steps and no list sends the list its third read gets, without a warning", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools } = yield* startTools(endpointOf(cpp.origin))
+        cpp.answers.list = () => (cpp.lists().length < 3 ? busy() : Response.json(ownerList))
+        const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+        yield* until("the first read", () => cpp.lists().length === 1)
+        yield* settle
+        yield* TestClock.adjust("3 seconds")
+        yield* until("the second read", () => cpp.lists().length === 2)
+        yield* settle
+        yield* TestClock.adjust("5 seconds")
+        expect((yield* Fiber.join(waiting))?.version).toBe(ownerList.version)
+        expect(cpp.lists()).toHaveLength(3)
+        expect(warnings).toEqual([])
+        // Requests of the same chat meanwhile share its reads, and later ones get the list it holds.
+        expect((yield* tools.list(resumed(chat)))?.version).toBe(ownerList.version)
+        expect(cpp.lists()).toHaveLength(3)
+      }),
+    ),
+  )
+
+  it.effect("a chat without steps reads once and goes without", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = busy
+      expect(yield* tools.list(step(chat))).toBeUndefined()
+      yield* TestClock.adjust("1 minute")
+      yield* settle
+      expect(cpp.lists()).toHaveLength(1)
+    }),
+  )
+
+  it.effect("takes a 429 and a timeout for no answer, and waits on", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = () => Response.json({ error: { type: "rate_limited", message: "slow down" } }, { status: 429 })
+      const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => cpp.lists().length === 1)
+      cpp.hold()
+      yield* settle
+      yield* TestClock.adjust("3 seconds")
+      yield* until("the second read", () => cpp.lists().length === 2)
+      // It times out at 8 s; the next read starts 5 s after that.
+      yield* TestClock.adjust("5 seconds")
+      yield* settle
+      cpp.answers.list = () => Response.json(ownerList)
+      cpp.gate.release()
+      yield* TestClock.adjust("4999 millis")
+      yield* settle
+      expect(cpp.lists()).toHaveLength(2)
+      yield* TestClock.adjust("1 millis")
+      expect((yield* Fiber.join(waiting))?.version).toBe(ownerList.version)
+      expect(cpp.lists()).toHaveLength(3)
+    }),
+  )
+
+  it.effect("ends the wait at once on a 404 that is not CPP's, or a refused key", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools, endpoints } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = () => Response.json({ error: { type: "unauthorized", message: "no" } }, { status: 401 })
+      expect(yield* tools.list(resumed(chat))).toBeUndefined()
+      expect(cpp.lists()).toHaveLength(1)
+
+      cpp.answers.list = () => new Response("404 page not found", { status: 404 })
+      expect(yield* tools.list(resumed(other))).toBeUndefined()
+      expect(cpp.lists()).toHaveLength(2)
+      yield* TestClock.adjust("1 minute")
+      yield* settle
+      expect(cpp.lists()).toHaveLength(2)
+
+      // CPP's own 404 is about this chat: it ends its wait too, and leaves the others theirs.
+      yield* SubscriptionRef.set(endpoints, endpointOf(cpp.origin, "client-key-other"))
+      yield* settle
+      cpp.answers.list = () => Response.json({ error: { type: "not_found", message: "not found" } }, { status: 404 })
+      expect(yield* tools.list(resumed(chat))).toBeUndefined()
+      cpp.answers.list = () => Response.json(ownerList)
+      expect((yield* tools.list(resumed(other)))?.version).toBe(ownerList.version)
+      expect(cpp.lists()).toHaveLength(4)
+    }),
+  )
+
+  it.effect("ends the wait when the chat is interrupted, or at once when the endpoint changes", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools, endpoints } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = busy
+      const interrupted = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => cpp.lists().length === 1)
+      yield* settle
+      yield* Fiber.interrupt(interrupted)
+      yield* TestClock.adjust("1 minute")
+      yield* settle
+      expect(cpp.lists()).toHaveLength(1)
+
+      const waiting = yield* tools.list(resumed(other)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the other chat's read", () => cpp.lists().length === 2)
+      yield* settle
+      yield* SubscriptionRef.set(endpoints, endpointOf(cpp.origin, "client-key-other"))
+      expect(yield* Fiber.join(waiting)).toBeUndefined()
+      yield* TestClock.adjust("1 minute")
+      yield* settle
+      expect(cpp.lists()).toHaveLength(2)
+    }),
+  )
+
+  it.effect("waits for one chat without holding up another's read", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = (request) =>
+        request.headers.get("x-pacer-session") === PacerSessionID.make(chat) ? busy() : Response.json(ownerList)
+      const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => cpp.lists().length === 1)
+      expect((yield* tools.list(resumed(other)))?.version).toBe(ownerList.version)
+      expect(waiting.pollUnsafe()).toBeUndefined()
+      yield* Fiber.interrupt(waiting)
     }),
   )
 

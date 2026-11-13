@@ -12,10 +12,12 @@ import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { InstructionBuiltIns } from "@opencode/core/instructions/builtins"
 import { Instructions } from "@opencode/core/instructions/index"
+import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
+import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryText } from "@opencode/core/memory/text"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -41,15 +43,17 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SkillInstructions } from "@opencode/core/skill/instructions"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
+import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Context, Effect, Fiber, Layer, Schema } from "effect"
+import { Context, Effect, Fiber, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
 import { permissionLayer } from "./lib/permission"
+import { registerToolPlugin } from "./lib/tool"
 import { until } from "./pacer/fake-tools"
 import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
 
@@ -59,10 +63,25 @@ import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
 const server = startProxied()
 afterAll(() => server.stop())
 
-/** What the memory side sees, in the test's hands: the endpoint and the catalog are read at each boundary. */
+/**
+ * What the memory side sees, in the test's hands, as openforge's own services give it: each change is announced, as
+ * a live service's catalog read is.
+ */
+const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
+const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(catalogOf(true)))
 const pacer = {
-  endpoint: endpointAt(server.origin) as PacerEndpoint.Endpoint | undefined,
-  catalog: catalogOf(true) as PacerModels.Catalog | undefined,
+  get endpoint() {
+    return Effect.runSync(SubscriptionRef.get(endpointRef))
+  },
+  set endpoint(next: PacerEndpoint.Endpoint | undefined) {
+    if (!PacerEndpoint.same(next, this.endpoint)) Effect.runSync(SubscriptionRef.set(endpointRef, next))
+  },
+  get catalog() {
+    return Effect.runSync(SubscriptionRef.get(catalogRef))
+  },
+  set catalog(next: PacerModels.Catalog | undefined) {
+    Effect.runSync(SubscriptionRef.set(catalogRef, next))
+  },
 }
 
 class LLMRequests extends Context.Service<LLMRequests, LLMRequest[]>()("test/MemoryStartRequests") {}
@@ -94,15 +113,15 @@ const none = { load: () => Effect.succeed(Instructions.empty) }
 const endpoints = Layer.succeed(
   PacerEndpoint.Service,
   PacerEndpoint.Service.of({
-    get: () => Effect.sync(() => pacer.endpoint),
-    changes: () => Effect.die("unused") as never,
+    get: () => SubscriptionRef.get(endpointRef),
+    changes: () => SubscriptionRef.changes(endpointRef),
   }),
 )
 const catalogs = Layer.succeed(
   PacerModels.Service,
   PacerModels.Service.of({
-    get: () => Effect.sync(() => pacer.catalog),
-    changes: () => Effect.die("unused") as never,
+    get: () => SubscriptionRef.get(catalogRef),
+    changes: () => SubscriptionRef.changes(catalogRef),
     refresh: () => Effect.void,
   }),
 )
@@ -122,34 +141,48 @@ const echo = makeLocationNode({
           output: Schema.Struct({ text: Schema.String }),
           execute: ({ text }) => Effect.succeed({ output: { text }, content: text }),
         })
-        // Stands for memory's own tool (its plugin is not loaded here): the block names `recall` for a chat that has it.
-        editor.add({
-          name: "recall",
-          description: "Finds entries in memory",
-          options: { codemode: false },
-          input: Schema.Struct({ query: Schema.String }),
-          execute: () => Effect.succeed({ content: "Memory holds nothing for this." }),
-        })
-        // And for `remember`: a chat that has it is told that memory is its to keep true.
-        editor.add({
-          name: "remember",
-          description: "Saves an entry in memory",
-          options: { codemode: false },
-          input: Schema.Struct({ text: Schema.String }),
-          execute: () => Effect.succeed({ content: "Saved." }),
-        })
-        // And for `task`: inside a task, a chat that has it is told what to do with the task's state.
-        editor.add({
-          name: "task",
-          description: "Lists, makes, reads and changes tasks",
-          options: { codemode: false },
-          input: Schema.Struct({ id: Schema.optional(Schema.String) }),
-          execute: () => Effect.succeed({ content: "No tasks." }),
-        })
       }),
     ),
   ),
   deps: [Tool.node],
+})
+// Memory's own tools, registered as in openforge. Their calls here read only the chat, which the store answers.
+const memoryTools = makeLocationNode({
+  name: "test/memory-start-memory-tools",
+  layer: Layer.effectDiscard(
+    Effect.gen(function* () {
+      const store = yield* SessionStore.Service
+      yield* registerToolPlugin(MemoryTools.Plugin).pipe(
+        Effect.provide(
+          Layer.mock(Session.Service, {
+            get: (sessionID) =>
+              store
+                .get(sessionID)
+                .pipe(
+                  Effect.flatMap((found) =>
+                    found ? Effect.succeed(found) : Effect.fail(new Session.NotFoundError({ sessionID })),
+                  ),
+                ),
+            revert: {
+              stage: () => Effect.die("unused"),
+              clear: () => Effect.die("unused"),
+              commit: () => Effect.die("unused"),
+            },
+          }),
+        ),
+      )
+    }),
+  ),
+  deps: [
+    Tool.node,
+    Permission.node,
+    PacerEndpoint.node,
+    PacerModels.node,
+    MemoryClient.node,
+    SessionStore.node,
+    Config.node,
+    KV.node,
+  ],
 })
 const replacements: LayerNode.Replacements = [
   Snapshot.node.replace(Snapshot.noopLayer),
@@ -162,7 +195,7 @@ const replacements: LayerNode.Replacements = [
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),
   Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
   Config.node.replace(Config.testLayer()),
-  Permission.node.replace(permissionLayer()),
+  Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
   PluginSupervisor.node.replace(Layer.empty),
   Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
   PacerEndpoint.node.replace(endpoints),
@@ -189,6 +222,7 @@ const execution = Layer.effect(
 const layer = AppNodeBuilder.build(
   LayerNode.group([
     Database.node,
+    KV.node,
     Bus.node,
     SessionProjector.node,
     SessionStore.node,
@@ -197,6 +231,7 @@ const layer = AppNodeBuilder.build(
     PluginHooks.node,
     Tool.node,
     echo,
+    memoryTools,
     Config.node,
     Snapshot.node,
     SessionRunnerLLM.node,
@@ -336,6 +371,10 @@ const setup = Effect.fnUntraced(function* (
     starts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/start`),
   }
 })
+
+const names = (request: LLMRequest | undefined) =>
+  (request?.tools ?? []).map((tool) => tool.name).filter((name) => name !== "execute")
+const blocksIn = (request: LLMRequest | undefined) => userTexts(request).filter((text) => text.startsWith("Memory"))
 
 /** The texts of a request's user-role messages, in order: prompts and synthetic messages alike. */
 const userTexts = (request: LLMRequest | undefined) =>
@@ -565,19 +604,27 @@ describe("MemoryStart through the runner", () => {
     }),
   )
 
-  it.live("waits for an unread catalog, and puts the block in at the next boundary once it says memory", () =>
+  it.live("decides at the first step: an unread catalog goes as the server was last known, and nothing later", () =>
     Effect.gen(function* () {
-      const h = yield* setup()
-      pacer.catalog = undefined
-      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
-      const gate = yield* h.llm.gate()
-      const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
-      yield* gate.started
-      pacer.catalog = catalogOf(true)
-      yield* gate.release
-      yield* Fiber.join(run)
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?"])
-      expect(userTexts(h.requests()[1]).filter((text) => text.startsWith("Memory:"))).toHaveLength(1)
+      const kv = yield* KV.Service
+      const key = MemoryKnown.key(endpointAt(server.origin))
+      for (const known of [true, false]) {
+        const h = yield* setup()
+        pacer.catalog = undefined
+        yield* kv.set(key, known)
+        yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+        const gate = yield* h.llm.gate()
+        const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
+        yield* gate.started
+        pacer.catalog = catalogOf(true)
+        yield* gate.release
+        yield* Fiber.join(run)
+        // Whether the server has tasks is known only once its catalog is read: till the next compaction, none.
+        const expected = known ? ["echo", "forget", "recall", "remember"] : ["echo"]
+        for (const request of h.requests()) expect(names(request)).toEqual(expected)
+        expect(h.requests().map((request) => blocksIn(request).length)).toEqual(known ? [1, 1] : [0, 0])
+      }
+      yield* kv.remove(key)
     }),
   )
 
@@ -642,6 +689,124 @@ describe("MemoryStart through the runner", () => {
           `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
         ].join("\n"),
       )
+    }),
+  )
+})
+
+describe("MemoryStart while the server's memory comes and goes", () => {
+  const withTasks = (tasks: boolean) => {
+    const catalog = catalogOf(true)
+    return { ...catalog, pacer: { ...catalog.pacer!, memory: { ...catalog.pacer!.memory!, tasks } } }
+  }
+  const compact = (h: Effect.Success<ReturnType<typeof setup>>) =>
+    Effect.gen(function* () {
+      yield* h.llm.push(TestLLM.text("## Objective\n- summary", "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+    })
+
+  it.live("a running chat without memory keeps its tools and gets no block when memory comes, till a compaction", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      pacer.catalog = catalogOf(false)
+      yield* h.llm.push(TestLLM.text("no zebras", "text-zebra"))
+      yield* h.prompt("zebra?")
+      const first = h.requests()[0]
+      expect(names(first)).toEqual(["echo"])
+
+      pacer.catalog = catalogOf(true)
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+      yield* h.prompt("and on fridays?")
+      for (const request of h.requests().slice(1)) {
+        expect(JSON.stringify(request.tools)).toBe(JSON.stringify(first?.tools))
+        expect(blocksIn(request)).toEqual([])
+      }
+      expect(yield* h.blocks()).toEqual([])
+      expect(h.starts()).toEqual([])
+
+      yield* compact(h)
+      yield* h.prompt("quokka?")
+      const after = h.requests().at(-1)
+      expect(names(after)).toEqual(["echo", "forget", "recall", "remember", "task"])
+      expect(blocksIn(after)).toHaveLength(1)
+      expect(yield* h.blocks()).toHaveLength(1)
+    }),
+  )
+
+  it.live("a chat with memory keeps its tools byte for byte when memory goes; a chat started then has neither", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("zebra?")
+      const first = h.requests()[0]
+      expect(names(first)).toEqual(["echo", "forget", "recall", "remember", "task"])
+      const block = blocksIn(first)
+
+      pacer.catalog = catalogOf(false)
+      yield* h.llm.push(TestLLM.toolCall("call-recall", "recall", { query: "zebra" }), TestLLM.text("ok", "text-ok"))
+      yield* h.prompt("and on fridays?")
+      for (const request of h.requests().slice(1)) {
+        expect(JSON.stringify(request.tools)).toBe(JSON.stringify(first?.tools))
+        expect(blocksIn(request)).toEqual(block)
+      }
+      // The call answers that memory is unavailable, and nothing reaches the server.
+      expect(JSON.stringify(h.requests().at(-1)?.messages)).toContain(
+        "Memory is unavailable right now, so the work goes on without it.",
+      )
+      expect(server.calls().filter((call) => call.path.endsWith("/search"))).toEqual([])
+
+      const k = yield* setup()
+      pacer.catalog = catalogOf(false)
+      yield* k.prompt("zebra?")
+      expect(names(k.requests()[0])).toEqual(["echo"])
+      expect(blocksIn(k.requests()[0])).toEqual([])
+    }),
+  )
+
+  it.live("tasks coming or going change no running chat's tools; a new chat gets task as the server says", () =>
+    Effect.gen(function* () {
+      for (const [from, to] of [
+        [false, true],
+        [true, false],
+      ]) {
+        const h = yield* setup()
+        pacer.catalog = withTasks(from)
+        yield* h.prompt("zebra?")
+        const first = h.requests()[0]
+        expect(names(first).includes("task")).toBe(from)
+        pacer.catalog = withTasks(to)
+        yield* h.prompt("and on fridays?")
+        expect(JSON.stringify(h.requests().at(-1)?.tools)).toBe(JSON.stringify(first?.tools))
+
+        const k = yield* setup()
+        pacer.catalog = withTasks(to)
+        yield* k.prompt("zebra?")
+        expect(names(k.requests()[0]).includes("task")).toBe(to)
+      }
+    }),
+  )
+
+  it.live("a step right after a restart, before the catalog is read, offers what the chat's block says", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("zebra?")
+      const first = h.requests()[0]
+      // A new process: nothing read yet, and nothing known of the server.
+      pacer.catalog = undefined
+      yield* h.prompt("and on fridays?")
+      expect(JSON.stringify(h.requests().at(-1)?.tools)).toBe(JSON.stringify(first?.tools))
+      expect(names(first)).toEqual(["echo", "forget", "recall", "remember", "task"])
+    }),
+  )
+
+  it.live("a subagent decides at its own first step, whatever its lead has", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ child: true, agent: "explore" })
+      pacer.catalog = catalogOf(false)
+      yield* h.llm.push(TestLLM.text("in src", "text-src"))
+      yield* h.prompt("where are the zebra files?")
+      pacer.catalog = catalogOf(true)
+      yield* h.prompt("and the quokka ones?")
+      for (const request of h.requests()) expect(names(request)).toEqual(["echo"])
     }),
   )
 })

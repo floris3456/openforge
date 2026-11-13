@@ -743,7 +743,7 @@ describe("MemoryTools near", () => {
       const named = yield* p.h.save({ text: "The login page is fresh.", kind: "verified", basis: "looked" })
       const again = { ...write, supersedes: named }
       expect(yield* p.h.read("remember", again)).toBe(
-        `Memory holds this already as ${copy} (a unverified entry, role build); it now replaces ${named}.`,
+        `Nothing new was written: ${copy} (a unverified entry, role build) holds this text already and now replaces ${named}.`,
       )
       expect((yield* p.h.started.client.read(projectID, named)).superseded_by).toBe(copy)
       expect(yield* p.h.read("remember", again)).toBe(
@@ -884,7 +884,7 @@ describe("MemoryTools move", () => {
       )
 
       expect(yield* h.read("remember", { ...port, scope: "global", supersedes: role })).toBe(
-        `Memory holds this already as ${global} (a verified entry, global); it now replaces ${role}.`,
+        `Nothing new was written: ${global} (a verified entry, global) holds this text already and now replaces ${role}.`,
       )
       const exported = yield* Effect.promise(() =>
         fetch(`${h.server.store.url}/pacer/v1/memory/${projectID}/export`, {

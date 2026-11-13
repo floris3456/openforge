@@ -215,7 +215,9 @@ export const Plugin = {
                 return {
                   content:
                     replaced && id !== replaced.id && !replaced.superseded_by && !replaced.deleted
-                      ? `Memory holds this already as ${id} (${what}); it now replaces ${replaced.id}.`
+                      ? // Said so that the copy is not taken for a second entry: a model that read "holds this already
+                        // as X; it now replaces Y" deleted X as a duplicate, the only live one (behaviour set, 2026-11-13).
+                        `Nothing new was written: ${id} (${what}) holds this text already and now replaces ${replaced.id}.`
                       : `Memory holds this already as ${id} (${what}); nothing new was saved.`,
                   metadata: { id, existing: true, near: [] },
                 }

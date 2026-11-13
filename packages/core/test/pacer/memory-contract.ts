@@ -1584,7 +1584,9 @@ export function memoryContract(target: Target) {
         ...memory,
         make: (body: Record<string, unknown>, key?: string) =>
           tasked(send("POST", `${base}/tasks`, { by, ...body }, key)),
-        list: (all = false) => tasked(send("GET", `${base}/tasks${all ? "?all=1" : ""}`)),
+        /** `true` sends `?all=1`; a string is sent as the value of `all`. */
+        list: (all: boolean | string = false) =>
+          tasked(send("GET", `${base}/tasks${all === false ? "" : `?all=${all === true ? "1" : all}`}`)),
         get: (id: string) => tasked(send("GET", `${base}/tasks/${id}`)),
         set: (id: string, body: Record<string, unknown>, key?: string) =>
           tasked(send("POST", `${base}/tasks/${id}/state`, { by, ...body }, key)),
@@ -1641,6 +1643,14 @@ export function memoryContract(target: Target) {
         const nulled = await tasks.make({ title: "Parent null", parent: null })
         expect(nulled.status).toBe(201)
         expect(nulled.body.task.parent).toBeNull()
+      })
+
+      test("a null description counts as absent and is stored empty", async () => {
+        const tasks = board("make-description-null")
+        const nulled = await tasks.make({ title: "Null description", description: null })
+        expect(nulled.status).toBe(201)
+        expect(nulled.body.task.description).toBe("")
+        expect((await tasks.get(nulled.body.task.id)).body.task.description).toBe("")
       })
 
       test("a subtask names its parent; a subtask of a subtask is 400, an unknown parent 404", async () => {
@@ -1767,6 +1777,26 @@ export function memoryContract(target: Target) {
         expect(all.body.more).toBe(false)
       })
 
+      test("newest first by when a task was made, not by when it changed", async () => {
+        const tasks = board("list-made")
+        const older = await tasks.task("Older")
+        const newer = await tasks.task("Newer")
+        await tasks.set(older.id, { state: "review", note: "changed after the newer was made" })
+        expect((await tasks.list()).body.tasks.map((item) => item.id)).toEqual([newer.id, older.id])
+        expect((await tasks.list(true)).body.tasks.map((item) => item.id)).toEqual([newer.id, older.id])
+      })
+
+      test("only all=1 adds the done tasks; all=true, all=0 and an empty all are as without it", async () => {
+        const tasks = board("list-all")
+        const open = await tasks.task("Open")
+        const done = await tasks.task("Done")
+        await tasks.set(done.id, { state: "done" })
+        const ids = async (all: boolean | string) => (await tasks.list(all)).body.tasks.map((item) => item.id)
+        expect(await ids(false)).toEqual([open.id])
+        for (const all of ["true", "0", ""]) expect(await ids(all)).toEqual([open.id])
+        expect(await ids(true)).toEqual([done.id, open.id])
+      })
+
       test("at most 200, and more says there are others", async () => {
         const tasks = board("list-more")
         const made = await Promise.all(Array.from({ length: 201 }, (_, index) => tasks.task(`Task ${index}`)))
@@ -1831,6 +1861,21 @@ export function memoryContract(target: Target) {
           own.id,
         ])
         expect((await tasks.get(sub.id)).body.entries).toEqual([inSub])
+      })
+
+      test("a subtask's entries are those whose subtask is its id", async () => {
+        const tasks = board("read-subtask-entries")
+        const task = await tasks.task("The task")
+        const sub = await tasks.task("Its sub", { parent: task.id })
+        const sibling = await tasks.task("Its other sub", { parent: task.id })
+        const write = (text: string, labels: Record<string, unknown>) =>
+          tasks.verified(text, { scope: "task", by: { ...by, ...labels } }).then((answer) => answer.body.entry)
+        const own = await write("Written in the sub.", { task: task.id, subtask: sub.id })
+        await write("Written in the task.", { task: task.id })
+        await write("Written in the other sub.", { task: task.id, subtask: sibling.id })
+        // The subtask's id as the task, without a subtask: not the subtask's.
+        await write("The sub's id as task.", { task: sub.id })
+        expect((await tasks.get(sub.id)).body.entries).toEqual([own])
       })
 
       test("at most 20 entries, newest first", async () => {
@@ -1918,6 +1963,13 @@ export function memoryContract(target: Target) {
         expect((await tasks.get(task.id)).body.changes.length).toBe(1)
       })
 
+      test("the body is checked before the task is looked up: a bad body is 400 whatever the id", async () => {
+        const tasks = board("change-checks-first")
+        for (const body of [{ state: "started" }, {}, { state: "blocked" }, { state: "review", note: "n".repeat(501) }])
+          expectTaskInvalid(await tasks.set("000000000000", body))
+        expectTaskMissing(await tasks.set("000000000000", { state: "review" }))
+      })
+
       test("an unknown state is 400", async () => {
         const tasks = board("change-state")
         const task = await tasks.task("States")
@@ -1955,6 +2007,25 @@ export function memoryContract(target: Target) {
         expect((await tasks.set(task.id, { state: "review", by })).body.task.worker).toEqual(other.body.task.worker)
       })
 
+      test("active again is a change when the caller's role or chat differs from the worker", async () => {
+        const tasks = board("change-worker-parts")
+        const task = await tasks.task("Worked on")
+        const first = { role: "general", chat: "ses_worker" }
+        await tasks.set(task.id, { state: "active", by: first })
+        const role = await tasks.set(task.id, { state: "active", by: { role: "explore", chat: "ses_worker" } })
+        expect(role.body.task.worker).toEqual({ person: target.person, role: "explore", chat: "ses_worker" })
+        const chat = await tasks.set(task.id, { state: "active", by: { role: "explore", chat: "ses_next" } })
+        expect(chat.body.task.worker).toEqual({ person: target.person, role: "explore", chat: "ses_next" })
+        expect(
+          (await tasks.set(task.id, { state: "active", by: { role: "explore", chat: "ses_next" } })).body.task,
+        ).toEqual(chat.body.task)
+        expect((await tasks.get(task.id)).body.changes.map((change) => [change.by.role, change.by.chat])).toEqual([
+          ["explore", "ses_next"],
+          ["explore", "ses_worker"],
+          ["general", "ses_worker"],
+        ])
+      })
+
       test.if(target.second !== undefined)("two keys are two people in by and worker", async () => {
         const second = target.second!
         const tasks = board("change-people")
@@ -1962,8 +2033,9 @@ export function memoryContract(target: Target) {
         expect(task.by.person).toBe(second.person)
         const active = (await tasks.set(task.id, { state: "active" })).body.task
         expect(active.worker?.person).toBe(target.person)
+        // The same role and chat under the second key is a change: the person differs.
         const again = (await tasks.set(task.id, { state: "active" }, second.key)).body.task
-        expect(again.worker?.person).toBe(second.person)
+        expect(again.worker).toEqual({ person: second.person, role: by.role, chat: by.chat })
         expect((await tasks.get(task.id)).body.changes.map((change) => change.by.person)).toEqual([
           second.person,
           target.person,
@@ -2023,6 +2095,44 @@ export function memoryContract(target: Target) {
           { task: sub.id, subtask: sub.id },
           { task: null },
           {},
+        ]) {
+          const start = await tasks.begin(body)
+          expect(start.status).toBe(200)
+          expect(start.body.task).toBeNull()
+          expect(start.body.subtask).toBeNull()
+        }
+      })
+    })
+
+    describe("start's task and subtask", () => {
+      test("are strings or null; anything else is 400", async () => {
+        const tasks = board("start-types")
+        const task = await tasks.task("The task")
+        for (const body of [
+          { task: 1 },
+          { task: true },
+          { task: {} },
+          { task: [task.id] },
+          { task: task.id, subtask: 1 },
+          { task: task.id, subtask: false },
+          { task: task.id, subtask: [] },
+        ]) {
+          const start = await tasks.begin(body)
+          expect(start.status).toBe(400)
+          expect((start.body as unknown as TaskBody).error.type).toBe("invalid_request")
+        }
+        expect((await tasks.begin({ task: task.id, subtask: null })).status).toBe(200)
+      })
+
+      test("subtask is null whenever task is", async () => {
+        const tasks = board("start-subtask-null")
+        const task = await tasks.task("The task")
+        const sub = await tasks.task("The part", { parent: task.id })
+        for (const body of [
+          { subtask: sub.id },
+          { task: null, subtask: sub.id },
+          { task: "000000000000", subtask: sub.id },
+          { task: sub.id, subtask: sub.id },
         ]) {
           const start = await tasks.begin(body)
           expect(start.status).toBe(200)

@@ -492,7 +492,10 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
     make(project: string, body: Fields, person: string) {
       const title = visible(body.title, "title").trim()
       if (!title || [...title].length > 200) refuse("title: must be 1 to 200 characters")
-      const description = body.description === undefined ? "" : visible(body.description, "description", true).trim()
+      const description =
+        body.description === undefined || body.description === null
+          ? ""
+          : visible(body.description, "description", true).trim()
       if ([...description].length > 2000) refuse("description: must be at most 2000 characters")
       if (body.parent !== undefined && body.parent !== null && typeof body.parent !== "string")
         refuse("parent: must be a task id or null")

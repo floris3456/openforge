@@ -154,7 +154,15 @@ export function read(found: MemoryClient.TaskRead) {
         ]
       : []),
     ...(found.entries.length ? ["Entries:", ...found.entries.map(entry)] : []),
+    ...(item.state === "todo"
+      ? [`Nobody works on it yet: start a subagent with taskID "${item.id}", or set it active to work on it yourself.`]
+      : []),
   ].join("\n")
+}
+
+/** What `task` adds when it makes a task: how a subagent comes to work on it. */
+export function started(id: string) {
+  return `A subagent works on it when you start it with taskID "${id}".`
 }
 
 /** The line a subagent's maker gets when the task it was started on is no longer active. */

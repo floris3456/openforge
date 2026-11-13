@@ -320,6 +320,9 @@ describe("MemoryTools offering", () => {
         state: "The state to set: todo, active, blocked, review or done",
         note: "Why the state changes, in a few words; needed for blocked",
       })
+      expect(description("task")).toBe(
+        "Tasks are pieces of work this project's lead gives out. Without parameters it lists the open ones; with a title it makes one; with an id it reads one, and with a state it sets that state (todo, active, blocked, review, done; a note says why). A subagent started with a task's id as taskID works inside that task.",
+      )
       expect(fields("remember").scope).toBe(
         "role: for your role (the default outside a task); global: for the whole project",
       )
@@ -1073,20 +1076,27 @@ describe("MemoryTools task", () => {
       expect(h.server.calls()).toEqual([])
       const answer = yield* h.read("task", { title: "Move the checks", description: "One script." })
       const task = made(answer)
-      expect(answer).toBe(`Made task ${task}: Move the checks.`)
+      expect(answer).toBe(
+        `Made task ${task}: Move the checks. A subagent works on it when you start it with taskID "${task}".`,
+      )
       expect(yield* h.read("task", { title: "Move the checks" })).toBe(`That task exists already as ${task} (todo).`)
       h.place(lead, { task })
       const part = yield* h.read("task", { title: "Part" })
       const sub = made(part)
-      expect(part).toBe(`Made subtask ${sub} of ${task}: Part.`)
+      expect(part).toBe(
+        `Made subtask ${sub} of ${task}: Part. A subagent works on it when you start it with taskID "${sub}".`,
+      )
       // A chat inside a subtask makes another subtask of the same task.
       h.place(child, { task, subtask: sub })
       const other = yield* h.read("task", { title: "Another part" }, child, "general")
-      expect(other).toBe(`Made subtask ${made(other)} of ${task}: Another part.`)
+      const another = made(other)
+      expect(other).toBe(
+        `Made subtask ${another} of ${task}: Another part. A subagent works on it when you start it with taskID "${another}".`,
+      )
     }),
   )
 
-  it.live("reads a task with every part, and one with none", () =>
+  it.live("reads a task with every part, and one with none; a todo one ends with how work on it starts", () =>
     Effect.gen(function* () {
       const h = yield* setup()
       const bare = made(yield* h.read("task", { title: "Bare" }))
@@ -1116,10 +1126,44 @@ describe("MemoryTools task", () => {
           MemoryText.entry(yield* h.started.client.read(projectID, entry)),
         ].join("\n"),
       )
-      expect(yield* h.read("task", { id: sub })).toBe(
-        [`Task ${sub}: First part (todo; made by floris as build, ${at})`, `Subtask of ${task}.`].join("\n"),
+      const nobody = (id: string) =>
+        `Nobody works on it yet: start a subagent with taskID "${id}", or set it active to work on it yourself.`
+      // Back to todo, with every part: the line comes after all of them.
+      yield* h.read("task", { id: task, state: "todo" })
+      const again = yield* h.started.client.task(projectID, task)
+      expect(yield* h.read("task", { id: task })).toBe(
+        [
+          `Task ${task}: Move the checks (todo; made by floris as build, ${at}; worked on by floris as build)`,
+          "One script.",
+          "Done when it passes.",
+          "Subtasks:",
+          `- [${sub}] First part (todo)`,
+          "Changes, newest first:",
+          `- ${day(again.changes[0]!.at)} todo by floris as build`,
+          `- ${day(again.changes[1]!.at)} active by floris as build`,
+          `- ${day(again.changes[2]!.at)} blocked by floris as build: the file is not there`,
+          "Entries:",
+          MemoryText.entry(yield* h.started.client.read(projectID, entry)),
+          nobody(task),
+        ].join("\n"),
       )
-      expect(yield* h.read("task", { id: bare })).toBe(`Task ${bare}: Bare (todo; made by floris as build, ${at})`)
+      expect(yield* h.read("task", { id: sub })).toBe(
+        [`Task ${sub}: First part (todo; made by floris as build, ${at})`, `Subtask of ${task}.`, nobody(sub)].join(
+          "\n",
+        ),
+      )
+      expect(yield* h.read("task", { id: bare })).toBe(
+        [`Task ${bare}: Bare (todo; made by floris as build, ${at})`, nobody(bare)].join("\n"),
+      )
+      // Blocked, review and done add nothing either.
+      for (const [state, note] of [
+        ["blocked", "wrong"],
+        ["review", undefined],
+        ["done", undefined],
+      ] as const) {
+        yield* h.read("task", { id: bare, state, ...(note ? { note } : {}) })
+        expect(yield* h.read("task", { id: bare })).not.toContain("Nobody works on it yet")
+      }
     }),
   )
 

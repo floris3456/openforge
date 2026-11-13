@@ -360,6 +360,12 @@ describe("SubagentTool", () => {
           const locations = yield* LocationServiceMap.Service
           const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
           expect((yield* registry.snapshot()).definitions.map((tool) => tool.name)).toContain(SubagentTool.name)
+          const definition = (yield* registry.snapshot()).definitions.find((tool) => tool.name === SubagentTool.name)
+          const fields = (definition?.inputSchema as { properties: Record<string, { description?: string }> })
+            .properties
+          expect(fields.taskID?.description).toBe(
+            "The id of a task (the task tool) this subagent is to work on; give it whenever the work is a task",
+          )
           expect(
             yield* executeTool(registry, {
               sessionID: parent.id,

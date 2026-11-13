@@ -31,26 +31,24 @@ export function recall(found: MemoryClient.Found) {
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
 
-// The two sentences below were chosen by the workspace's behaviour set (its evidence, memory/behaviour-1/wording) on a
-// cheap model, which without them recalled nothing in a later step and saved or corrected nothing unasked; they
-// change only with a run of that set.
-const look = "look there before a step this project may have its own way for (running, testing, releasing, deploying)"
+// Chosen by the workspace's behaviour set (its evidence, memory/behaviour-1/wording): without it a cheap model saved
+// or corrected nothing unasked; said more widely, a strong model noted what its own edit had just put in the files.
+// A sentence on when to recall was tried there too and left out: the strong model then recalled in every chat. It
+// changes only with a run of that set.
 const keep =
-  "Keep it true as you work: replace an entry you find wrong or have now checked (remember with supersedes), and remember what a later chat will need that the project's files do not say: a fact you had to find out, a rule the person gives."
+  "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
 /**
  * The start block: the opening line, the entries nearest to the prompt when there are any, what else there is, and,
  * for a chat that can save, that memory is its to keep true. It names `recall` and `remember` only for a chat that
- * has the tool: an agent's permissions may leave one out. When to recall is said only while there is something to
- * find.
+ * has the tool: an agent's permissions may leave one out.
  */
 export function block(
   started: MemoryClient.Started,
   role: string,
   tools: { readonly recall: boolean; readonly remember: boolean },
 ) {
-  const finds = started.counts.global + started.counts.role > 0 ? `; recall finds them: ${look}` : "; recall finds them"
-  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tools.recall ? finds : ""}.`
+  const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tools.recall ? "; recall finds them" : ""}.`
   return [
     opening,
     ...(started.entries.length === 0

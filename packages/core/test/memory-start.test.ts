@@ -323,10 +323,8 @@ const userTexts = (request: LLMRequest | undefined) =>
 const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
-const look =
-  "; recall finds them: look there before a step this project may have its own way for (running, testing, releasing, deploying)."
 const keep =
-  "Keep it true as you work: replace an entry you find wrong or have now checked (remember with supersedes), and remember what a later chat will need that the project's files do not say: a fact you had to find out, a rule the person gives."
+  "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
 describe("MemoryStart through the runner", () => {
   it.live("puts the block after the first prompt, in the first request, with the default search's entries", () =>
@@ -356,7 +354,7 @@ describe("MemoryStart through the runner", () => {
         // Equal scores: the nearer scope first.
         `- [${own.id}] Zebra deploys use the train. (words of floris, noted as build; role build; ${day(own)})`,
         `- [${global.id}] Zebra deploys run at noon. (verified by floris as build; global; ${day(global)}; basis: cron)`,
-        `Memory holds 1 global entry and 1 of role build${look}`,
+        `Memory holds 1 global entry and 1 of role build; recall finds them.`,
         keep,
       ].join("\n")
       expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", block])
@@ -387,7 +385,6 @@ describe("MemoryStart through the runner", () => {
       const empty = yield* setup()
       yield* empty.prompt("nothing is stored here")
       expect(userTexts(empty.requests()[0])[1]).toBe(
-        // Nothing to find: the block does not say when to recall.
         [opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n"),
       )
     }),
@@ -571,7 +568,7 @@ describe("MemoryStart through the runner", () => {
       const block = userTexts(h.requests()[0])[1] ?? ""
       expect(block).toContain(own.id)
       expect(block).not.toContain(lead.id)
-      expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore${look}\n${keep}`)
+      expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore; recall finds them.\n${keep}`)
       expect(h.starts()[0]?.body).toMatchObject({
         scopes: { global: true, roles: ["explore"] },
         by: { role: "explore", chat: h.sessionID },
@@ -617,7 +614,7 @@ describe("MemoryStart through the runner", () => {
           opening,
           "What memory holds nearest to this prompt; it may not be about it:",
           `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
-          `Memory holds 0 global entries and 1 of role viewer${look}`,
+          `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
         ].join("\n"),
       )
     }),

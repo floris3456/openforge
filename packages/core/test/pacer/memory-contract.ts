@@ -16,7 +16,38 @@ export type Target = {
   readonly second?: { readonly key: string; readonly person: string }
   readonly embedding: { readonly fake: FakeEmbedding; readonly key?: string }
   readonly bare?: string
+  /** Whether the server's capabilities say `tasks`: the group "tasks" runs only then. */
+  readonly tasks: boolean
 }
+
+type Task = {
+  id: string
+  parent: string | null
+  title: string
+  description: string
+  state: string
+  note: string | null
+  by: { person: string; role: string; chat: string }
+  worker: { person: string; role: string; chat: string } | null
+  at: number
+  changed: number
+}
+
+type Change = { state: string; note: string | null; by: { person: string; role: string; chat: string }; at: number }
+
+/** What the task routes answer. */
+type TaskBody = {
+  task: Task
+  existing?: boolean
+  tasks: Task[]
+  more: boolean
+  changes: Change[]
+  subtasks: Task[]
+  entries: Entry[]
+  error: { type: string; message: string }
+}
+/** The task parts of what `start` answers. */
+type StartBody = { task: { task: Task; subtasks: Task[]; entries: Entry[] } | null; subtask: Task | null }
 
 type Entry = {
   id: string
@@ -1539,6 +1570,466 @@ export function memoryContract(target: Target) {
     })
   })
 
+  describe.if(target.tasks)("tasks", () => {
+    const STATES = ["todo", "active", "blocked", "review", "done"]
+    const tasked = async (answer: Promise<Awaited<ReturnType<typeof send>>>) => {
+      const result = await answer
+      return { ...result, body: result.body as unknown as TaskBody }
+    }
+    /** A fresh project with the task routes beside the entry ones. */
+    const board = (name: string) => {
+      const memory = project(name)
+      const base = `/pacer/v1/memory/${memory.id}`
+      const routes = {
+        ...memory,
+        make: (body: Record<string, unknown>, key?: string) =>
+          tasked(send("POST", `${base}/tasks`, { by, ...body }, key)),
+        list: (all = false) => tasked(send("GET", `${base}/tasks${all ? "?all=1" : ""}`)),
+        get: (id: string) => tasked(send("GET", `${base}/tasks/${id}`)),
+        set: (id: string, body: Record<string, unknown>, key?: string) =>
+          tasked(send("POST", `${base}/tasks/${id}/state`, { by, ...body }, key)),
+        begin: async (body: Record<string, unknown>) => {
+          const answer = await memory.start({ prompt: "the task", scopes: "all", ...body })
+          return { ...answer, body: answer.body as unknown as StartBody }
+        },
+        /** Makes a task and answers it. */
+        task: async (title: string, extra: Record<string, unknown> = {}) =>
+          (await routes.make({ title, ...extra })).body.task,
+      }
+      return routes
+    }
+    const expectTaskInvalid = (answer: { status: number; body: TaskBody }, ...parts: string[]) => {
+      expect(answer.status).toBe(400)
+      expect(answer.body.error.type).toBe("invalid_request")
+      parts.forEach((part) => expect(answer.body.error.message).toContain(part))
+    }
+    const expectTaskMissing = (answer: { status: number; body: TaskBody }) => {
+      expect(answer.status).toBe(404)
+      expect(answer.body.error.type).toBe("not_found")
+    }
+    const hex = (point: number) => `U+${point.toString(16).toUpperCase().padStart(4, "0")}`
+
+    describe("make", () => {
+      test("a new task is todo, with every field, and reads back the same", async () => {
+        const tasks = board("make")
+        const before = Date.now()
+        const answer = await tasks.make({ title: "Move the checks", description: "One script.\nDone when it passes." })
+        expect(answer.status).toBe(201)
+        expect(answer.body.existing).toBeUndefined()
+        const task = answer.body.task
+        expect(task).toEqual({
+          id: expect.stringMatching(ID),
+          parent: null,
+          title: "Move the checks",
+          description: "One script.\nDone when it passes.",
+          state: "todo",
+          note: null,
+          by: { person: target.person, role: by.role, chat: by.chat },
+          worker: null,
+          at: expect.any(Number),
+          changed: task.at,
+        })
+        expect(task.at).toBeGreaterThanOrEqual(before - 1000)
+        expect((await tasks.get(task.id)).body as unknown).toEqual({ task, changes: [], subtasks: [], entries: [] })
+      })
+
+      test("description may be absent and is then empty; parent may be absent or null", async () => {
+        const tasks = board("make-absent")
+        const absent = await tasks.make({ title: "No description" })
+        expect(absent.status).toBe(201)
+        expect(absent.body.task).toMatchObject({ description: "", parent: null })
+        const nulled = await tasks.make({ title: "Parent null", parent: null })
+        expect(nulled.status).toBe(201)
+        expect(nulled.body.task.parent).toBeNull()
+      })
+
+      test("a subtask names its parent; a subtask of a subtask is 400, an unknown parent 404", async () => {
+        const tasks = board("make-parent")
+        const parent = await tasks.task("The parent")
+        const child = await tasks.make({ title: "The child", parent: parent.id })
+        expect(child.status).toBe(201)
+        expect(child.body.task.parent).toBe(parent.id)
+        expectTaskInvalid(await tasks.make({ title: "The grandchild", parent: child.body.task.id }), "parent")
+        expectTaskMissing(await tasks.make({ title: "An orphan", parent: "000000000000" }))
+        expect((await tasks.list(true)).body.tasks.length).toBe(2)
+      })
+
+      test("title 1 to 200 characters on one line, cut of white space; empty is 400", async () => {
+        const tasks = board("make-title")
+        expect((await tasks.make({ title: "t".repeat(200) })).status).toBe(201)
+        expect((await tasks.make({ title: "  Cut both ends  " })).body.task.title).toBe("Cut both ends")
+        expectTaskInvalid(await tasks.make({ title: "t".repeat(201) }), "title")
+        expectTaskInvalid(await tasks.make({ title: "" }), "title")
+        expectTaskInvalid(await tasks.make({ title: "   " }), "title")
+        expectTaskInvalid(await tasks.make({}), "title")
+        expectTaskInvalid(await tasks.make({ title: "two\nlines" }), "title", "U+000A", "position 4")
+      })
+
+      test("description 0 to 2,000 characters, a line feed allowed and a tab refused, cut of white space", async () => {
+        const tasks = board("make-description")
+        expect((await tasks.make({ title: "Long", description: "d".repeat(2000) })).status).toBe(201)
+        expectTaskInvalid(await tasks.make({ title: "Longer", description: "d".repeat(2001) }), "description")
+        const cut = await tasks.make({ title: "Cut", description: "  first\nsecond\n" })
+        expect(cut.body.task.description).toBe("first\nsecond")
+        expectTaskInvalid(
+          await tasks.make({ title: "Tab", description: "a\tb" }),
+          "description",
+          "U+0009",
+          "position 2",
+        )
+      })
+
+      test("each refused character is refused in title, description and note, the message naming field, code point and position", async () => {
+        const tasks = board("make-refused")
+        const task = await tasks.task("Refusals")
+        for (const point of REFUSED) {
+          const char = String.fromCodePoint(point)
+          expectTaskInvalid(await tasks.make({ title: `ab${char}` }), "title", hex(point), "position 3")
+          if (point !== 0x0a)
+            expectTaskInvalid(
+              await tasks.make({ title: `ok ${point}`, description: `a${char}` }),
+              "description",
+              hex(point),
+              "position 2",
+            )
+          expectTaskInvalid(
+            await tasks.set(task.id, { state: "review", note: `${char}` }),
+            "note",
+            hex(point),
+            "position 1",
+          )
+        }
+        expect((await tasks.list(true)).body.tasks.map((item) => item.id)).toEqual([task.id])
+      })
+
+      test("the same title and parent while the first is not done answers the first; after done a new one is made", async () => {
+        const tasks = board("make-copy")
+        const first = await tasks.task("Once")
+        await tasks.set(first.id, { state: "active" })
+        const again = await tasks.make({ title: "Once", description: "another description" })
+        expect(again.status).toBe(200)
+        expect(again.body.existing).toBe(true)
+        expect(again.body.task).toEqual((await tasks.get(first.id)).body.task)
+        await tasks.set(first.id, { state: "done" })
+        const next = await tasks.make({ title: "Once" })
+        expect(next.status).toBe(201)
+        expect(next.body.task.id).not.toBe(first.id)
+      })
+
+      test("the same title under another parent, or as a task and a subtask, is another task", async () => {
+        const tasks = board("make-copy-parent")
+        const one = await tasks.task("One")
+        const two = await tasks.task("Two")
+        const under = await tasks.make({ title: "Shared", parent: one.id })
+        const other = await tasks.make({ title: "Shared", parent: two.id })
+        const top = await tasks.make({ title: "Shared" })
+        expect([under.status, other.status, top.status]).toEqual([201, 201, 201])
+        expect(new Set([under.body.task.id, other.body.task.id, top.body.task.id]).size).toBe(3)
+        const copy = await tasks.make({ title: "Shared", parent: one.id })
+        expect(copy.status).toBe(200)
+        expect(copy.body.task.id).toBe(under.body.task.id)
+      })
+    })
+
+    describe("list", () => {
+      test("open tasks and subtasks newest first, the done subtasks of an open task, not the done tasks; ?all=1 adds them", async () => {
+        const tasks = board("list")
+        const open = await tasks.task("Open")
+        const closed = await tasks.task("Closed")
+        const sub = await tasks.task("Open's sub", { parent: open.id })
+        const finished = await tasks.task("Open's done sub", { parent: open.id })
+        const closedSub = await tasks.task("Closed's sub", { parent: closed.id })
+        await tasks.set(finished.id, { state: "done" })
+        await tasks.set(closedSub.id, { state: "done" })
+        await tasks.set(closed.id, { state: "done" })
+        const later = await tasks.task("Later")
+        const list = await tasks.list()
+        expect(list.status).toBe(200)
+        expect(list.body.more).toBe(false)
+        const read = async (id: string) => (await tasks.get(id)).body.task
+        expect(list.body.tasks).toEqual([later, await read(finished.id), sub, open])
+        const all = await tasks.list(true)
+        expect(all.body.tasks.map((item) => item.id)).toEqual([
+          later.id,
+          closedSub.id,
+          finished.id,
+          sub.id,
+          closed.id,
+          open.id,
+        ])
+        expect(all.body.more).toBe(false)
+      })
+
+      test("at most 200, and more says there are others", async () => {
+        const tasks = board("list-more")
+        const made = await Promise.all(Array.from({ length: 201 }, (_, index) => tasks.task(`Task ${index}`)))
+        const list = await tasks.list()
+        expect(list.body.tasks.length).toBe(200)
+        expect(list.body.more).toBe(true)
+        await tasks.set(made[0]!.id, { state: "done" })
+        const fewer = await tasks.list()
+        expect(fewer.body.tasks.length).toBe(200)
+        expect(fewer.body.more).toBe(false)
+        expect((await tasks.list(true)).body.more).toBe(true)
+      })
+    })
+
+    describe("read", () => {
+      test("changes newest first, at most 20, the making not among them", async () => {
+        const tasks = board("read-changes")
+        const task = await tasks.task("Changed often")
+        for (let index = 0; index < 22; index++) await tasks.set(task.id, { state: "review", note: `round ${index}` })
+        const changes = (await tasks.get(task.id)).body.changes
+        expect(changes.length).toBe(20)
+        expect(changes.map((change) => change.note)).toEqual(
+          Array.from({ length: 20 }, (_, index) => `round ${21 - index}`),
+        )
+        expect(changes[0]).toEqual({
+          state: "review",
+          note: "round 21",
+          by: { person: target.person, role: by.role, chat: by.chat },
+          at: expect.any(Number),
+        })
+      })
+
+      test("subtasks oldest first; a subtask has none", async () => {
+        const tasks = board("read-subtasks")
+        const task = await tasks.task("Parent")
+        const one = await tasks.task("First", { parent: task.id })
+        const two = await tasks.task("Second", { parent: task.id })
+        await tasks.set(one.id, { state: "done" })
+        const read = (await tasks.get(task.id)).body
+        expect(read.subtasks).toEqual([(await tasks.get(one.id)).body.task, two])
+        expect((await tasks.get(two.id)).body.subtasks).toEqual([])
+      })
+
+      test("a task's entries hold its subtasks' too, a subtask's only its own; replaced and deleted ones are not there", async () => {
+        const tasks = board("read-entries")
+        const task = await tasks.task("With entries")
+        const sub = await tasks.task("Its sub", { parent: task.id })
+        const other = await tasks.task("Another")
+        const write = (text: string, labels: Record<string, unknown>) =>
+          tasks.verified(text, { scope: "task", by: { ...by, ...labels } }).then((answer) => answer.body.entry)
+        const own = await write("In the task.", { task: task.id })
+        const inSub = await write("In the subtask.", { task: task.id, subtask: sub.id })
+        const replaced = await write("To be replaced.", { task: task.id })
+        const replacement = (await tasks.verified("The replacement.", { supersedes: replaced.id })).body.entry
+        const deleted = await write("To be deleted.", { task: task.id, subtask: sub.id })
+        await tasks.forget(deleted.id)
+        await write("In another task.", { task: other.id })
+        await tasks.verified("A global one.")
+        expect((await tasks.get(task.id)).body.entries.map((entry) => entry.id)).toEqual([
+          replacement.id,
+          inSub.id,
+          own.id,
+        ])
+        expect((await tasks.get(sub.id)).body.entries).toEqual([inSub])
+      })
+
+      test("at most 20 entries, newest first", async () => {
+        const tasks = board("read-entries-20")
+        const task = await tasks.task("Many entries")
+        const written = []
+        for (let index = 0; index < 22; index++)
+          written.push(
+            (await tasks.verified(`Entry ${index}.`, { scope: "task", by: { ...by, task: task.id } })).body.entry,
+          )
+        expect((await tasks.get(task.id)).body.entries.map((entry) => entry.id)).toEqual(
+          written
+            .slice(2)
+            .map((entry) => entry.id)
+            .toReversed(),
+        )
+      })
+    })
+
+    describe("change", () => {
+      test("every state follows every state, with its note and changed, and the change is kept", async () => {
+        const tasks = board("change-all")
+        for (const from of STATES)
+          for (const to of STATES) {
+            const task = await tasks.task(`From ${from} to ${to}`)
+            if (from !== "todo") await tasks.set(task.id, { state: from, note: `to ${from}` })
+            const answer = await tasks.set(task.id, { state: to, note: `then ${to}` })
+            expect(answer.status).toBe(200)
+            expect(answer.body.task).toMatchObject({ state: to, note: `then ${to}`, title: task.title, parent: null })
+            expect(answer.body.task.changed).toBeGreaterThanOrEqual(task.changed)
+            const read = (await tasks.get(task.id)).body
+            expect(read.task).toEqual(answer.body.task)
+            expect(read.changes[0]).toMatchObject({ state: to, note: `then ${to}` })
+            expect(read.changes.length).toBe(from === "todo" ? 1 : 2)
+          }
+      })
+
+      test("an absent or null note is null; title, description and parent never change", async () => {
+        const tasks = board("change-note")
+        const parent = await tasks.task("Parent")
+        const task = await tasks.task("Kept", { description: "As made.", parent: parent.id })
+        await tasks.set(task.id, { state: "review", note: "first" })
+        const absent = await tasks.set(task.id, { state: "active" })
+        expect(absent.body.task.note).toBeNull()
+        await tasks.set(task.id, { state: "review", note: "again" })
+        const nulled = await tasks.set(task.id, { state: "todo", note: null })
+        expect(nulled.body.task).toMatchObject({
+          state: "todo",
+          note: null,
+          title: "Kept",
+          description: "As made.",
+          parent: parent.id,
+        })
+      })
+
+      test("blocked without a note is 400; a note is at most 500 characters on one line", async () => {
+        const tasks = board("change-blocked")
+        const task = await tasks.task("Blocked")
+        for (const note of [undefined, null, "", "   "])
+          expectTaskInvalid(
+            await tasks.set(task.id, { state: "blocked", ...(note === undefined ? {} : { note }) }),
+            "note",
+          )
+        expect((await tasks.get(task.id)).body.task.state).toBe("todo")
+        expect((await tasks.set(task.id, { state: "blocked", note: "n".repeat(500) })).status).toBe(200)
+        expectTaskInvalid(await tasks.set(task.id, { state: "review", note: "n".repeat(501) }), "note")
+        expectTaskInvalid(await tasks.set(task.id, { state: "review", note: "a\nb" }), "note", "U+000A")
+        expect((await tasks.set(task.id, { state: "review", note: "" })).status).toBe(200)
+      })
+
+      test("an unknown state is 400", async () => {
+        const tasks = board("change-state")
+        const task = await tasks.task("States")
+        for (const state of ["started", "", null, undefined, 1])
+          expectTaskInvalid(await tasks.set(task.id, { state }), "state")
+      })
+
+      test("the same state with the same note changes nothing and keeps nothing", async () => {
+        const tasks = board("change-same")
+        const task = await tasks.task("Same")
+        const first = (await tasks.set(task.id, { state: "review", note: "look" })).body.task
+        const again = await tasks.set(task.id, { state: "review", note: "look" })
+        expect(again.status).toBe(200)
+        expect(again.body.task).toEqual(first)
+        expect((await tasks.get(task.id)).body.changes.length).toBe(1)
+        const todo = await tasks.task("Todo again")
+        expect((await tasks.set(todo.id, { state: "todo" })).body.task).toEqual(todo)
+        expect((await tasks.get(todo.id)).body.changes).toEqual([])
+      })
+
+      test("active sets worker to the caller; active again by the same caller changes nothing, by another chat it does", async () => {
+        const tasks = board("change-worker")
+        const task = await tasks.task("Worked on")
+        const worker = { role: "general", chat: "ses_worker" }
+        const active = await tasks.set(task.id, { state: "active", by: worker })
+        expect(active.body.task.worker).toEqual({ person: target.person, ...worker })
+        expect((await tasks.set(task.id, { state: "active", by: worker })).body.task).toEqual(active.body.task)
+        const other = await tasks.set(task.id, { state: "active", by: { role: "general", chat: "ses_other" } })
+        expect(other.body.task.worker).toEqual({ person: target.person, role: "general", chat: "ses_other" })
+        expect((await tasks.get(task.id)).body.changes.map((change) => change.by.chat)).toEqual([
+          "ses_other",
+          "ses_worker",
+        ])
+        // Another state keeps the worker.
+        expect((await tasks.set(task.id, { state: "review", by })).body.task.worker).toEqual(other.body.task.worker)
+      })
+
+      test.if(target.second !== undefined)("two keys are two people in by and worker", async () => {
+        const second = target.second!
+        const tasks = board("change-people")
+        const task = (await tasks.make({ title: "Made by the second" }, second.key)).body.task
+        expect(task.by.person).toBe(second.person)
+        const active = (await tasks.set(task.id, { state: "active" })).body.task
+        expect(active.worker?.person).toBe(target.person)
+        const again = (await tasks.set(task.id, { state: "active" }, second.key)).body.task
+        expect(again.worker?.person).toBe(second.person)
+        expect((await tasks.get(task.id)).body.changes.map((change) => change.by.person)).toEqual([
+          second.person,
+          target.person,
+        ])
+      })
+    })
+
+    test("another project's task id is 404 in every route, and no task in start", async () => {
+      const a = board("across-a")
+      const b = board("across-b")
+      const task = await a.task("Only in a")
+      expectTaskMissing(await b.get(task.id))
+      expectTaskMissing(await b.set(task.id, { state: "active" }))
+      expectTaskMissing(await b.make({ title: "Under a's task", parent: task.id }))
+      expect((await b.begin({ task: task.id })).body.task).toBeNull()
+      expect((await b.list(true)).body.tasks).toEqual([])
+      expect((await b.export()).lines).toEqual([])
+      expect((await a.get(task.id)).body.task).toEqual(task)
+    })
+
+    describe("start", () => {
+      test("with a task: the task, its subtasks and its entries, without changes; subtask null", async () => {
+        const tasks = board("start-task")
+        const task = await tasks.task("The chat's task", { description: "What to do." })
+        const sub = await tasks.task("A part", { parent: task.id })
+        await tasks.set(task.id, { state: "active" })
+        const entry = (
+          await tasks.verified("Noted in the part.", { scope: "task", by: { ...by, task: task.id, subtask: sub.id } })
+        ).body.entry
+        const read = (await tasks.get(task.id)).body
+        const start = await tasks.begin({ task: task.id })
+        expect(start.status).toBe(200)
+        expect(start.body.task).toEqual({ task: read.task, subtasks: [sub], entries: [entry] })
+        expect(start.body.subtask).toBeNull()
+      })
+
+      test("with a task and its subtask: the subtask alone as subtask", async () => {
+        const tasks = board("start-subtask")
+        const task = await tasks.task("The task")
+        const sub = await tasks.task("The part", { parent: task.id })
+        const elsewhere = await tasks.task("Another")
+        const otherSub = await tasks.task("Another's part", { parent: elsewhere.id })
+        const start = await tasks.begin({ task: task.id, subtask: sub.id })
+        expect(start.body.task?.task).toEqual(task)
+        expect(start.body.subtask).toEqual(sub)
+        expect((await tasks.begin({ task: task.id, subtask: otherSub.id })).body.subtask).toBeNull()
+        expect((await tasks.begin({ task: task.id, subtask: "000000000000" })).body.subtask).toBeNull()
+      })
+
+      test("an unknown id, a subtask's id as task, or no task: task and subtask null", async () => {
+        const tasks = board("start-none")
+        const task = await tasks.task("The task")
+        const sub = await tasks.task("The part", { parent: task.id })
+        for (const body of [
+          { task: "000000000000" },
+          { task: sub.id },
+          { task: sub.id, subtask: sub.id },
+          { task: null },
+          {},
+        ]) {
+          const start = await tasks.begin(body)
+          expect(start.status).toBe(200)
+          expect(start.body.task).toBeNull()
+          expect(start.body.subtask).toBeNull()
+        }
+      })
+    })
+
+    test("export: the tasks in the order made, then every change in the order it happened, then the entries", async () => {
+      const tasks = board("export-tasks")
+      const one = await tasks.task("First")
+      const entry = (await tasks.verified("An entry.")).body.entry
+      const two = await tasks.task("Second", { parent: one.id })
+      await tasks.set(two.id, { state: "active" })
+      await tasks.set(one.id, { state: "blocked", note: "wrong file" })
+      const answer = await tasks.export()
+      const lines = answer.lines as unknown as Record<string, unknown>[]
+      const read = async (id: string) => (await tasks.get(id)).body
+      const first = await read(one.id)
+      const second = await read(two.id)
+      expect(lines).toEqual([
+        { type: "task", ...first.task },
+        { type: "task", ...second.task },
+        { type: "task_change", task: two.id, ...second.changes[0] },
+        { type: "task_change", task: one.id, ...first.changes[0] },
+        { type: "entry", ...entry },
+      ])
+    })
+  })
+
   test("capabilities say that the server has memory, with its limits", async () => {
     const answer = await send("GET", "/pacer/v1/capabilities")
     expect(answer.status).toBe(200)
@@ -1548,6 +2039,7 @@ export function memoryContract(target: Target) {
       query_characters: 2000,
       search_limit: 20,
       embedding: "test-embedding",
+      ...(target.tasks ? { tasks: true } : {}),
     })
   })
 

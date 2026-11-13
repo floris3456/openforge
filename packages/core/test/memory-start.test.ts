@@ -351,6 +351,7 @@ describe("MemoryStart through the runner", () => {
           limit: 5,
           by: { role: "build", chat: h.sessionID },
           task: null,
+          subtask: null,
         },
       ])
     }),

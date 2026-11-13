@@ -273,6 +273,7 @@ export const Plugin = {
                     ),
                   ))
 
+              // Known and left so: when setting the task active fails, the child session made above already exists.
               if (assigned) yield* tasks.activate(assigned, { id: child.id, role: agent.id })
               const background = input.background === true
               yield* context.progress({ sessionID: child.id, status: "running" })
@@ -304,6 +305,8 @@ export const Plugin = {
               yield* subagents.start(recovery)
 
               if (background) {
+                // Known and left so: the task line of a background child is lost when the process restarts before the
+                // notice is delivered (`SessionRestart` delivers it without `ended`).
                 yield* subagents.background(recovery, ended)
                 return backgroundResult(child.id)
               }

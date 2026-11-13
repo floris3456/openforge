@@ -39,7 +39,7 @@ export const RememberInput = Schema.Struct({
   ),
   scope: Schema.optional(
     Schema.Literals(["role", "global"]).annotate({
-      description: "role (the default): for your role; global: for the whole project",
+      description: "role: for your role (the default outside a task); global: for the whole project",
     }),
   ),
   supersedes: Schema.optional(
@@ -66,11 +66,17 @@ export const RecallInput = Schema.Struct({
 })
 
 export const TaskInput = Schema.Struct({
-  id: Schema.optional(Schema.String),
-  title: Schema.optional(Schema.String),
-  description: Schema.optional(Schema.String),
-  state: Schema.optional(MemoryClient.State),
-  note: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.String.annotate({ description: "A task's id" })),
+  title: Schema.optional(Schema.String.annotate({ description: "For a new task: what it is, in one line" })),
+  description: Schema.optional(
+    Schema.String.annotate({ description: "For a new task: what is to be done and when it is done" }),
+  ),
+  state: Schema.optional(
+    MemoryClient.State.annotate({ description: "The state to set: todo, active, blocked, review or done" }),
+  ),
+  note: Schema.optional(
+    Schema.String.annotate({ description: "Why the state changes, in a few words; needed for blocked" }),
+  ),
 })
 
 export const ForgetInput = Schema.Struct({

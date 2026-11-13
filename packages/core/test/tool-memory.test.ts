@@ -302,6 +302,27 @@ describe("MemoryTools offering", () => {
       for (const name of unreadTools)
         expect(description(name)).toContain("short notes that agents and people of this project wrote earlier")
       expect(description("task")).toBe(MemoryTools.descriptions.task)
+      const fields = (name: string) =>
+        Object.fromEntries(
+          Object.entries(
+            (
+              definitions.find((item) => item.name === name)?.inputSchema as {
+                properties: Record<string, { description?: string; anyOf?: Array<{ description?: string }> }>
+              }
+            ).properties,
+          ) // An optional field's description is on its value, the first of anyOf.
+            .map(([key, value]) => [key, value.description ?? value.anyOf?.[0]?.description]),
+        )
+      expect(fields("task")).toEqual({
+        id: "A task's id",
+        title: "For a new task: what it is, in one line",
+        description: "For a new task: what is to be done and when it is done",
+        state: "The state to set: todo, active, blocked, review or done",
+        note: "Why the state changes, in a few words; needed for blocked",
+      })
+      expect(fields("remember").scope).toBe(
+        "role: for your role (the default outside a task); global: for the whole project",
+      )
     }),
   )
 })

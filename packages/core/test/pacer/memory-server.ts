@@ -562,7 +562,8 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
 
     change(project: string, id: string, body: Fields, person: string) {
       const state = oneOf(body.state, STATES, "state")
-      const note = body.note === undefined || body.note === null ? null : visible(body.note, "note").trim()
+      // A note that is empty once cut counts as none.
+      const note = body.note === undefined || body.note === null ? null : visible(body.note, "note").trim() || null
       if (note !== null && [...note].length > 500) refuse("note: must be at most 500 characters")
       if (state === "blocked" && !note) refuse("note: blocked needs a note of at least 1 character")
       const by = byOf(body.by)
@@ -822,7 +823,7 @@ function visible(value: unknown, field: string, lines = false) {
   )
   if (at >= 0)
     refuse(
-      `${field}: refused character U+${points[at].toString(16).toUpperCase().padStart(4, "0")} at position ${at + 1}; characters a reader cannot see and line breaks are not allowed`,
+      `${field}: refused character U+${points[at].toString(16).toUpperCase().padStart(4, "0")} at position ${at + 1}; ${lines ? "characters a reader cannot see are not allowed" : "characters a reader cannot see and line breaks are not allowed"}`,
     )
   return value
 }

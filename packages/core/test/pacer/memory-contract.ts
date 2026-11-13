@@ -1651,6 +1651,13 @@ export function memoryContract(target: Target) {
         expect(child.body.task.parent).toBe(parent.id)
         expectTaskInvalid(await tasks.make({ title: "The grandchild", parent: child.body.task.id }), "parent")
         expectTaskMissing(await tasks.make({ title: "An orphan", parent: "000000000000" }))
+        // The body's own checks come first, whatever its parent.
+        expectTaskInvalid(await tasks.make({ title: "", parent: "000000000000" }), "title")
+        expectTaskInvalid(
+          await tasks.make({ title: "Bad", description: "a\tb", parent: "000000000000" }),
+          "description",
+        )
+        expectTaskInvalid(await tasks.make({ title: "t".repeat(201), parent: child.body.task.id }), "title")
         expect((await tasks.list(true)).body.tasks.length).toBe(2)
       })
 
@@ -1891,7 +1898,24 @@ export function memoryContract(target: Target) {
         expect((await tasks.set(task.id, { state: "blocked", note: "n".repeat(500) })).status).toBe(200)
         expectTaskInvalid(await tasks.set(task.id, { state: "review", note: "n".repeat(501) }), "note")
         expectTaskInvalid(await tasks.set(task.id, { state: "review", note: "a\nb" }), "note", "U+000A")
-        expect((await tasks.set(task.id, { state: "review", note: "" })).status).toBe(200)
+      })
+
+      test("a note that is empty after cutting white space counts as none and is stored as null", async () => {
+        const tasks = board("change-empty-note")
+        const task = await tasks.task("Empty notes")
+        for (const note of ["", "   "]) {
+          const answer = await tasks.set(task.id, { state: "review", note })
+          expect(answer.status).toBe(200)
+          expect(answer.body.task).toMatchObject({ state: "review", note: null })
+        }
+        // The second was the same state with the same note as the first: one change.
+        expect((await tasks.get(task.id)).body.changes).toEqual([
+          expect.objectContaining({ state: "review", note: null }),
+        ])
+        expect((await tasks.set(task.id, { state: "review", note: null })).body.task.changed).toBe(
+          (await tasks.get(task.id)).body.task.changed,
+        )
+        expect((await tasks.get(task.id)).body.changes.length).toBe(1)
       })
 
       test("an unknown state is 400", async () => {

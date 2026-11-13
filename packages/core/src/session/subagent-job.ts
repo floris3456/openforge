@@ -8,7 +8,10 @@ import { Session } from "../session.js"
 import { SubagentCompletion } from "./subagent-completion.js"
 
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
-/** What the notice adds to a completed child's answer (memory's task line). */
+/**
+ * What the notice adds to a completed child's answer (memory's task line). Known and left so: it lives in this process
+ * only, so a notice delivered after a restart (`SessionRestart`) has no task line.
+ */
 type Ended = (output: string) => Effect.Effect<string>
 
 export interface Interface {

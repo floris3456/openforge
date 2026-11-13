@@ -6,12 +6,15 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { Config } from "../config.js"
 import { Database } from "../database/database.js"
+import { KV } from "../kv.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerModels } from "../pacer/models.js"
 import { SessionEvent } from "../session/event.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
 import { MemoryClient } from "./client.js"
+import { MemoryKnown } from "./known.js"
+import { MemoryOffer } from "./offer.js"
 import { MemoryTask } from "./task.js"
 import { MemoryText } from "./text.js"
 
@@ -19,6 +22,8 @@ import { MemoryText } from "./text.js"
 // a chat the model sees, put in at the step boundary before the step's request is built. As with file instructions
 // (`SessionInstructions`), the message's metadata is the only ledger: a block that a compaction or a revert took out
 // of view is built again, from the chat's newest prompt. It is stored, so every step of the span sends the same bytes.
+// It goes in only where the chat's prompt cache is new anyway, before the span's first step: a chat that stepped
+// without one gets none, nor the memory tools (`MemoryOffer`), until its next compaction.
 
 /** How long the start call may take before the chat goes on without it. */
 const TIMEOUT = "2 seconds"
@@ -35,7 +40,10 @@ export interface Interface {
     readonly recall: boolean
     /** Whether the chat has the `remember` tool: the block then says that memory is its to keep true. */
     readonly remember: boolean
-    /** Whether the chat has the `task` tool: inside a task the block then says what to do with the task's state. */
+    /**
+     * Whether the agent may use the `task` tool: when the server has tasks, inside a task the block then says what to
+     * do with the task's state.
+     */
     readonly task: boolean
   }) => Effect.Effect<void>
 }
@@ -47,24 +55,31 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
+    const kv = yield* KV.Service
     const config = yield* Config.Service
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
 
     const ensure = Effect.fn("MemoryStart.ensure")(function* (input: Parameters<Interface["ensure"]>[0]) {
-      if ((yield* endpoints.get()) === undefined) return
-      // An unread catalog may yet say memory is there: the next boundary tries again.
-      if (!(yield* catalogs.get())?.pacer?.memory) return
+      const endpoint = yield* endpoints.get()
+      if (endpoint === undefined) return
       const sessionID = input.session.id
-      const last = yield* newestBlock(sessionID)
+      const last = yield* MemoryOffer.newestBlock(db, sessionID)
       if (last?.visible) return
+      if (yield* MemoryOffer.stepped(db, sessionID)) return
+      const catalog = yield* catalogs.get()
+      // Not read yet, as right after a start: as the server was last known. Whether it has tasks is known only once
+      // the catalog is read; till the chat's next compaction it has none.
+      if (!(catalog ? catalog.pacer?.memory !== undefined : yield* MemoryKnown.read(kv, endpoint))) return
+      const tasks = catalog?.pacer?.memory?.tasks === true
       const project = MemoryClient.project(yield* config.entries(), input.session.projectID)
       if (project === undefined) return
       const prompt = yield* newestPrompt(sessionID)
       if (!prompt) return
       const inside = MemoryTask.inside(input.session.metadata)
       const by = { role: input.agent, chat: sessionID, ...inside }
+      const offered = { ...input, task: input.task && tasks }
       const block = yield* client
         .start(
           project,
@@ -80,9 +95,9 @@ const layer = Layer.effect(
         )
         .pipe(
           Effect.map((started) => ({
-            text: MemoryText.block(started, by.role, input, inside !== undefined),
+            text: MemoryText.block(started, by.role, offered, inside !== undefined),
             description: "Memory nearest to the prompt",
-            memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id) },
+            memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id), tasks },
           })),
           Effect.catch((error) =>
             Effect.logWarning("memory's start block could not be read", { reason: error.message }).pipe(
@@ -91,7 +106,7 @@ const layer = Layer.effect(
               Effect.as({
                 text: last?.text ?? MemoryText.unavailable,
                 description: last ? "Memory as before" : "Memory unavailable",
-                memory: { project, unavailable: true },
+                memory: { project, unavailable: true, tasks },
               }),
             ),
           ),
@@ -102,49 +117,6 @@ const layer = Layer.effect(
         description: block.description,
         metadata: { memory: block.memory },
       })
-    })
-
-    /**
-     * The chat's newest start block, and whether it is in the model's view: after the latest completed compaction,
-     * which `SessionHistory.load` starts from. Two lookups on the session's type index, decoding no message.
-     */
-    const newestBlock = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
-      const block = yield* db
-        .select({
-          seq: SessionMessageTable.seq,
-          text: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.text')`,
-        })
-        .from(SessionMessageTable)
-        .where(
-          and(
-            eq(SessionMessageTable.session_id, sessionID),
-            eq(SessionMessageTable.type, "synthetic"),
-            sql`json_extract(${SessionMessageTable.data}, '$.metadata.memory') is not null`,
-          ),
-        )
-        .orderBy(desc(SessionMessageTable.seq))
-        .limit(1)
-        .get()
-        .pipe(Effect.orDie)
-      if (!block) return undefined
-      const compaction = yield* db
-        .select({ seq: SessionMessageTable.seq })
-        .from(SessionMessageTable)
-        .where(
-          and(
-            eq(SessionMessageTable.session_id, sessionID),
-            eq(SessionMessageTable.type, "compaction"),
-            sql`json_extract(${SessionMessageTable.data}, '$.status') = 'completed'`,
-          ),
-        )
-        .orderBy(desc(SessionMessageTable.seq))
-        .limit(1)
-        .get()
-        .pipe(Effect.orDie)
-      return {
-        visible: compaction === undefined || block.seq > compaction.seq,
-        text: typeof block.text === "string" ? block.text : undefined,
-      }
     })
 
     const newestPrompt = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
@@ -172,5 +144,5 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, Database.node, Config.node, PacerEndpoint.node, PacerModels.node, MemoryClient.node],
+  deps: [Bus.node, Database.node, Config.node, KV.node, PacerEndpoint.node, PacerModels.node, MemoryClient.node],
 })

@@ -280,6 +280,19 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   const live = "superseded_by is null and deleted is null"
   const getTask = (project: string, id: string) =>
     db.query<TaskRow, string[]>("select * from task where project = ? and id = ?").get(project, id)
+  /** What `GET …/tasks/{id}` answers for a task, and `start` for the chat's task and subtask. */
+  const readOf = (row: TaskRow) => ({
+    task: taskOf(row),
+    changes: db
+      .query<
+        ChangeRow,
+        [string, string]
+      >(`select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`)
+      .all(row.project, row.id)
+      .map(changeOf),
+    subtasks: subtasksOf(row),
+    entries: taskEntries(row),
+  })
   const subtasksOf = (row: TaskRow) =>
     row.parent !== null
       ? []
@@ -462,8 +475,8 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       return Response.json({
         recall,
         ...answer,
-        task: own ? { task: taskOf(own), subtasks: subtasksOf(own), entries: taskEntries(own) } : null,
-        subtask: subtask && subtask.parent === own!.id ? taskOf(subtask) : null,
+        task: own ? readOf(own) : null,
+        subtask: subtask && subtask.parent === own!.id ? readOf(subtask) : null,
         counts: {
           global: count("global", "all"),
           role: count("role", scopes === "all" ? "all" : scopes.roles),
@@ -549,18 +562,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
 
     task(project: string, id: string) {
       const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
-      const changes = db
-        .query<
-          ChangeRow,
-          [string, string]
-        >(`select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`)
-        .all(project, row.id)
-      return Response.json({
-        task: taskOf(row),
-        changes: changes.map(changeOf),
-        subtasks: subtasksOf(row),
-        entries: taskEntries(row),
-      })
+      return Response.json(readOf(row))
     },
 
     change(project: string, id: string, body: Fields, person: string) {

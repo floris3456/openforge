@@ -47,7 +47,9 @@ type TaskBody = {
   error: { type: string; message: string }
 }
 /** The task parts of what `start` answers. */
-type StartBody = { task: { task: Task; subtasks: Task[]; entries: Entry[] } | null; subtask: Task | null }
+/** What `GET …/tasks/{id}` answers, and `start` for the chat's task and subtask. */
+type TaskRead = { task: Task; changes: Change[]; subtasks: Task[]; entries: Entry[] }
+type StartBody = { task: TaskRead | null; subtask: TaskRead | null }
 
 type Entry = {
   id: string
@@ -2105,7 +2107,7 @@ export function memoryContract(target: Target) {
     })
 
     describe("start", () => {
-      test("with a task: the task, its subtasks and its entries, without changes; subtask null", async () => {
+      test("with a task: what reading it answers, its changes, subtasks and entries; subtask null", async () => {
         const tasks = board("start-task")
         const task = await tasks.task("The chat's task", { description: "What to do." })
         const sub = await tasks.task("A part", { parent: task.id })
@@ -2116,21 +2118,73 @@ export function memoryContract(target: Target) {
         const read = (await tasks.get(task.id)).body
         const start = await tasks.begin({ task: task.id })
         expect(start.status).toBe(200)
-        expect(start.body.task).toEqual({ task: read.task, subtasks: [sub], entries: [entry] })
+        expect(start.body.task).toEqual(read)
+        expect(start.body.task).toEqual({
+          task: read.task,
+          changes: [read.changes[0]],
+          subtasks: [sub],
+          entries: [entry],
+        })
+        expect(start.body.task?.changes[0]).toMatchObject({ state: "active", note: null })
         expect(start.body.subtask).toBeNull()
       })
 
-      test("with a task and its subtask: the subtask alone as subtask", async () => {
+      test("with a task and its subtask: what reading the subtask answers, its changes and only its own entries", async () => {
         const tasks = board("start-subtask")
         const task = await tasks.task("The task")
         const sub = await tasks.task("The part", { parent: task.id })
         const elsewhere = await tasks.task("Another")
         const otherSub = await tasks.task("Another's part", { parent: elsewhere.id })
+        await answered(tasks.set(sub.id, { state: "review", note: "half done" }))
+        const inSub = (
+          await created(
+            tasks.verified("Noted in the part.", { scope: "task", by: { ...by, task: task.id, subtask: sub.id } }),
+          )
+        ).entry
+        await created(tasks.verified("Noted in the task.", { scope: "task", by: { ...by, task: task.id } }))
         const start = await tasks.begin({ task: task.id, subtask: sub.id })
-        expect(start.body.task?.task).toEqual(task)
-        expect(start.body.subtask).toEqual(sub)
+        expect(start.body.task).toEqual((await tasks.get(task.id)).body)
+        const read = (await tasks.get(sub.id)).body
+        expect(start.body.subtask).toEqual(read)
+        expect(start.body.subtask).toEqual({
+          task: read.task,
+          changes: [expect.objectContaining({ state: "review", note: "half done" })],
+          subtasks: [],
+          entries: [inSub],
+        })
         expect((await tasks.begin({ task: task.id, subtask: otherSub.id })).body.subtask).toBeNull()
         expect((await tasks.begin({ task: task.id, subtask: "000000000000" })).body.subtask).toBeNull()
+      })
+
+      test("changes newest first, at most 20, the making not among them", async () => {
+        const tasks = board("start-changes")
+        const task = await tasks.task("Changed often")
+        const fresh = await tasks.begin({ task: task.id })
+        expect(fresh.body.task?.changes).toEqual([])
+        for (let index = 0; index < 22; index++)
+          await answered(tasks.set(task.id, { state: "review", note: `round ${index}` }))
+        const changes = (await tasks.begin({ task: task.id })).body.task?.changes ?? []
+        expect(changes.map((change) => change.note)).toEqual(
+          Array.from({ length: 20 }, (_, index) => `round ${21 - index}`),
+        )
+        expect(changes).toEqual((await tasks.get(task.id)).body.changes)
+      })
+
+      test("a note said with a change is in task.changes after a later change replaced the task's note", async () => {
+        const tasks = board("start-said")
+        const task = await tasks.task("Two steps")
+        const found = "Run bun run gen first, then bun test."
+        await answered(tasks.set(task.id, { state: "review", note: found }))
+        // A later active with no note: the task's own note is none.
+        const active = (
+          await answered(tasks.set(task.id, { state: "active", by: { role: "general", chat: "ses_next" } }))
+        ).task
+        expect(active.note).toBeNull()
+        const changes = (await tasks.begin({ task: task.id })).body.task?.changes ?? []
+        expect(changes).toEqual([
+          expect.objectContaining({ state: "active", note: null }),
+          expect.objectContaining({ state: "review", note: found }),
+        ])
       })
 
       test("an unknown id, a subtask's id as task, or no task: task and subtask null", async () => {

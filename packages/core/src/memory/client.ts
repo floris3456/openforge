@@ -85,18 +85,39 @@ const Written = Schema.Struct({
 })
 const Found = Schema.Struct({ recall: Schema.String, entries: Schema.Array(Entry), meaning: Schema.Boolean })
 export interface Found extends Schema.Schema.Type<typeof Found> {}
-const Started = Schema.Struct({
+// An older server answers `start`'s task without `changes`, and its subtask as a task alone.
+const StartedTask = Schema.Struct({
+  task: Task,
+  changes: Schema.optional(Schema.Array(Change)),
+  subtasks: Schema.Array(Task),
+  entries: Schema.Array(Entry),
+})
+const StartedAnswer = Schema.Struct({
   recall: Schema.String,
   entries: Schema.Array(Entry),
   meaning: Schema.Boolean,
   counts: Schema.Struct({ global: Schema.Number, role: Schema.Number, task: Schema.Number }),
   // A server without tasks may answer neither.
-  task: Schema.optional(
-    Schema.NullOr(Schema.Struct({ task: Task, subtasks: Schema.Array(Task), entries: Schema.Array(Entry) })),
-  ),
-  subtask: maybe(Task),
+  task: maybe(StartedTask),
+  subtask: maybe(Schema.Union([StartedTask, Task])),
 })
-export interface Started extends Schema.Schema.Type<typeof Started> {}
+type StartedAnswer = typeof StartedAnswer.Type
+/** `start`'s answer, its task and subtask as reading them answers (`changes` empty from an older server). */
+export interface Started extends Omit<StartedAnswer, "task" | "subtask"> {
+  readonly task?: TaskRead | null
+  readonly subtask?: TaskRead | null
+}
+
+function started(answer: StartedAnswer): Started {
+  const read = (found: typeof StartedTask.Type): TaskRead => ({ ...found, changes: found.changes ?? [] })
+  const subtask = answer.subtask
+  return {
+    ...answer,
+    task: answer.task ? read(answer.task) : answer.task,
+    subtask:
+      subtask && "id" in subtask ? { task: subtask, changes: [], subtasks: [], entries: [] } : subtask && read(subtask),
+  }
+}
 
 /** Who calls: the agent running the call (its role) and the chat. The model never sets it. */
 export interface By {
@@ -299,11 +320,11 @@ export const layer = Layer.effect(
           .post(
             `${base(project)}/start`,
             { ...input, task: input.task ?? null, subtask: input.subtask ?? null },
-            Started,
+            StartedAnswer,
             options,
           )
           .pipe(
-            Effect.map((answer) => answer.body),
+            Effect.map((answer) => started(answer.body)),
             Effect.mapError(failure()),
           ),
       make: (project, input) =>

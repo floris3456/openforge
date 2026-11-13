@@ -1229,6 +1229,19 @@ describe("MemoryTools task", () => {
           MemoryText.states,
         ].join("\n"),
       )
+      // What was said with a change of state is in the answer, after the line on the state and before the notes.
+      yield* h.read("task", { id: task, state: "review", note: "Run bun run gen first." })
+      const said = new Date((yield* h.started.client.task(projectID, task)).changes[0]!.at).toISOString().slice(0, 10)
+      expect(yield* h.read("task", { id: task, state: "active" })).toBe(
+        [
+          `Task ${task} is now active; you are inside it.`,
+          `Your task [${task}]: Move the checks (active)`,
+          "One script.",
+          MemoryText.states,
+          "Said with the task's changes of state, newest first:",
+          `- ${said} review by floris as build: Run bun run gen first.`,
+        ].join("\n"),
+      )
       expect(h.metadata(lead)).toEqual({ memory: { task } })
       const entry = saved(yield* h.read("remember", { text: "Noted in the task.", kind: "verified", basis: "ls" }))
       const sub = made(yield* h.read("task", { title: "A part", description: "The first half." }))
@@ -1239,6 +1252,9 @@ describe("MemoryTools task", () => {
           `Part of task [${task}]: Move the checks.`,
           "The first half.",
           MemoryText.states,
+          // The subtask has said nothing; the task's said line follows.
+          "Said with the task's changes of state, newest first:",
+          `- ${said} review by floris as build: Run bun run gen first.`,
           "What was noted in the task, newest first:",
           MemoryText.entry(yield* h.started.client.read(projectID, entry)),
         ].join("\n"),

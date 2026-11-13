@@ -95,9 +95,45 @@ describe("MemoryClient", () => {
         subtask: sub.id,
         by,
       })
-      expect(started.task?.task.id).toBe(made.task.id)
-      expect(started.subtask?.id).toBe(sub.id)
+      // The task and the subtask as reading them answers.
+      expect(started.task).toEqual(read)
+      expect(started.subtask).toEqual(yield* h.client.task(project, sub.id))
       expect(started.counts.task).toBe(1)
+
+      // An older server answers the task without changes and the subtask as a task alone: no changes, nothing noted.
+      yield* h.client.change(project, sub.id, { state: "review", note: "half done", by })
+      h.server.control.answer = async (request) => {
+        const answer = await fetch(`${h.server.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify(request.body),
+        })
+        const body = (await answer.json()) as {
+          task: { task: unknown; subtasks: unknown; entries: unknown } | null
+          subtask: { task: unknown } | null
+        }
+        return Response.json(
+          {
+            ...body,
+            task: body.task && { task: body.task.task, subtasks: body.task.subtasks, entries: body.task.entries },
+            subtask: body.subtask && body.subtask.task,
+          },
+          { status: answer.status },
+        )
+      }
+      const older = yield* h.client.start(project, {
+        prompt: "the checks",
+        scopes: { global: true, roles: ["build"], tasks: [made.task.id] },
+        limit: 5,
+        task: made.task.id,
+        subtask: sub.id,
+        by,
+      })
+      h.server.control.answer = undefined
+      const subRead = yield* h.client.task(project, sub.id)
+      expect(subRead.changes[0]).toMatchObject({ state: "review", note: "half done" })
+      expect(older.task).toEqual({ ...(yield* h.client.task(project, made.task.id)), changes: [] })
+      expect(older.subtask).toEqual({ task: subRead.task, changes: [], subtasks: [], entries: [] })
       const missing = yield* h.client.task(project, "000000000000").pipe(Effect.flip)
       expect(missing.message).toBe("There is no task 000000000000 in this project's memory.")
       expect((yield* h.client.change("other-project", sub.id, { state: "done", by }).pipe(Effect.flip))._tag).toBe(

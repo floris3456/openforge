@@ -78,12 +78,9 @@ export const TASK_CHARACTERS = 4_000
 
 /**
  * The task part as `task` answers it when a chat sets a task active: the chat's task, or its subtask with the task it
- * is part of, then what was noted in the task.
+ * is part of, then what was said with their changes of state and what was noted in the task.
  */
-export function task(
-  started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
-  subtask?: MemoryClient.Task,
-) {
+export function task(started: Read, subtask?: Said) {
   const part = taskParts(started, subtask, true)
   return [...part.assignment, ...part.notes].join("\n")
 }
@@ -92,34 +89,57 @@ export function task(
 export const states =
   "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
 
+/** How many changes of state the task part shows the notes of. */
+export const SAID = 5
+
+type Said = { readonly task: MemoryClient.Task; readonly changes: ReadonlyArray<MemoryClient.Change> }
+type Read = Said & { readonly entries: ReadonlyArray<MemoryClient.Entry> }
+
 /**
  * The task part's lines: the assignment (the task or subtask, the task it is part of, the description, and with
- * `states` what to do with the task's state) and the notes (what was noted in the task). Together within
- * {@link TASK_CHARACTERS}: the notes go from the oldest, then the description is cut from its end; the rest is never cut.
+ * `states` what to do with the task's state) and the notes (what was said with the changes of state that have a note,
+ * at most {@link SAID}, the subtask's before the task's; then what was noted in the task). Together within
+ * {@link TASK_CHARACTERS}: the noted entries go from the oldest, then the said lines from the oldest, then the
+ * description is cut from its end; the rest is never cut.
  */
-function taskParts(
-  started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
-  subtask: MemoryClient.Task | undefined,
-  withStates: boolean,
-) {
-  const own = subtask ?? started.task
+function taskParts(started: Read, subtask: Said | undefined, withStates: boolean) {
+  const own = subtask?.task ?? started.task
   const head = [
     `Your task [${own.id}]: ${own.title} (${own.state})`,
     ...(subtask ? [`Part of task [${started.task.id}]: ${started.task.title}.`] : []),
   ]
-  const parts = (description: string, entries: ReadonlyArray<MemoryClient.Entry>) => ({
+  const noted = (changes: ReadonlyArray<MemoryClient.Change>) => changes.filter((change) => change.note)
+  const said = [...noted(subtask?.changes ?? []), ...noted(started.changes)].slice(0, SAID)
+  const parts = (
+    description: string,
+    changes: ReadonlyArray<MemoryClient.Change>,
+    entries: ReadonlyArray<MemoryClient.Entry>,
+  ) => ({
     assignment: [...head, ...(description ? [description] : []), ...(withStates ? [states] : [])],
-    notes: entries.length ? ["What was noted in the task, newest first:", ...entries.map(entry)] : [],
+    notes: [
+      ...(changes.length
+        ? [
+            "Said with the task's changes of state, newest first:",
+            ...changes.map((change) => `- ${day(change.at)} ${change.state} by ${who(change.by)}: ${change.note}`),
+          ]
+        : []),
+      ...(entries.length ? ["What was noted in the task, newest first:", ...entries.map(entry)] : []),
+    ],
   })
-  const length = (part: ReturnType<typeof parts>) => [...[...part.assignment, ...part.notes].join("\n")].length
-  const kept = started.entries.findLastIndex(
-    (_, index) => length(parts(own.description, started.entries.slice(0, index + 1))) <= TASK_CHARACTERS,
-  )
-  if (kept >= 0) return parts(own.description, started.entries.slice(0, kept + 1))
-  if (length(parts(own.description, [])) <= TASK_CHARACTERS) return parts(own.description, [])
+  const fits = (part: ReturnType<typeof parts>) =>
+    [...[...part.assignment, ...part.notes].join("\n")].length <= TASK_CHARACTERS
+  for (let count = started.entries.length; count >= 0; count--) {
+    const part = parts(own.description, said, started.entries.slice(0, count))
+    if (fits(part)) return part
+  }
+  for (let count = said.length - 1; count >= 0; count--) {
+    const part = parts(own.description, said.slice(0, count), [])
+    if (fits(part)) return part
+  }
   // What is left for the description, with its line break and the cut's mark.
-  const room = TASK_CHARACTERS - length(parts("", [])) - 2
-  return parts(room > 0 ? [...own.description].slice(0, room).join("") + "…" : "", [])
+  const bare = parts("", [], [])
+  const room = TASK_CHARACTERS - [...[...bare.assignment, ...bare.notes].join("\n")].length - 2
+  return parts(room > 0 ? [...own.description].slice(0, room).join("") + "…" : "", [], [])
 }
 
 /** `task`'s list: each task with its subtasks indented under it. */

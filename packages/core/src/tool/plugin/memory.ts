@@ -454,13 +454,14 @@ export const Plugin = {
                   metadata,
                 }
               if (next !== "active") return { content: `Task ${changed.id} is now ${changed.state}.`, metadata }
+              const read = yield* client.task(who.project, changed.id).pipe(Effect.mapError(fail))
               const top = changed.parent
                 ? yield* client.task(who.project, changed.parent).pipe(Effect.mapError(fail))
-                : yield* client.task(who.project, changed.id).pipe(Effect.mapError(fail))
+                : read
               return {
                 content: [
                   `Task ${changed.id} is now active; you are inside it.`,
-                  MemoryText.task(top, changed.parent ? changed : undefined),
+                  MemoryText.task(top, changed.parent ? read : undefined),
                 ].join("\n"),
                 metadata,
               }

@@ -662,6 +662,19 @@ describe("MemoryStart inside a task", () => {
       Effect.orDie,
     )
   const ids: { task: string; subtask: string } = { task: "", subtask: "" }
+  /** A change of the task's state, said by a child. */
+  const set = (project: string, id: string, state: MemoryClient.State, note?: string) =>
+    memoryOf.pipe(
+      Effect.flatMap((memory) =>
+        memory.change(project, id, {
+          state,
+          ...(note === undefined ? {} : { note }),
+          by: { role: "general", chat: "ses_child" },
+        }),
+      ),
+      Effect.map((changed) => new Date(changed.changed).toISOString().slice(0, 10)),
+      Effect.orDie,
+    )
   /** An entry noted in the task. */
   const note = (project: string, text: string) =>
     memoryOf.pipe(
@@ -679,7 +692,7 @@ describe("MemoryStart inside a task", () => {
     )
 
   it.live(
-    "begins with the task and its description; what was noted in it and the nearest entries come under the opening",
+    "begins with the task and its description; what was said and noted in it and the nearest entries come under the opening",
     () =>
       Effect.gen(function* () {
         const h = yield* setup({
@@ -692,6 +705,9 @@ describe("MemoryStart inside a task", () => {
             ),
         })
         const noted = yield* note(h.project, "The script is scripts/check.ts.")
+        const found = yield* set(h.project, ids.task, "review", "Run bun run gen first, then bun test.")
+        // A later change without a note: what was said with the first stays.
+        yield* set(h.project, ids.task, "active")
         const global = yield* h.write({
           kind: "verified",
           text: "Zebra deploys run at noon.",
@@ -701,11 +717,13 @@ describe("MemoryStart inside a task", () => {
         yield* h.prompt("zebra deploys")
         expect(userTexts(h.requests()[0])[1]).toBe(
           [
-            `Your task [${ids.task}]: Move the checks (todo)`,
+            `Your task [${ids.task}]: Move the checks (active)`,
             "One script.",
             "Done when it passes.",
             states,
             opening,
+            "Said with the task's changes of state, newest first:",
+            `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
             "What was noted in the task, newest first:",
             MemoryText.entry(noted),
             "What memory holds nearest to this prompt; it may not be about it:",
@@ -784,6 +802,47 @@ describe("MemoryStart inside a task", () => {
         ].join("\n"),
       )
       expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
+    }),
+  )
+
+  it.live("inside a subtask what was said with the subtask's changes comes before the task's", () =>
+    Effect.gen(function* () {
+      const said: string[] = []
+      const h = yield* setup({
+        child: true,
+        agent: "explore",
+        inside: (project) =>
+          make(project, "Move the checks", "One script.").pipe(
+            Effect.flatMap((task) => make(project, "The first half", "Only the lint part.", task.id)),
+            Effect.tap((sub) =>
+              Effect.gen(function* () {
+                said.push(`- ${yield* set(project, sub.parent!, "blocked", "The old script is gone.")} blocked`)
+                said.push(`- ${yield* set(project, sub.parent!, "active")}`)
+                said.push(`- ${yield* set(project, sub.id, "review", "Lint runs from scripts/lint.ts.")} review`)
+              }),
+            ),
+            Effect.map((sub) => {
+              ids.task = sub.parent!
+              ids.subtask = sub.id
+              return { task: sub.parent!, subtask: sub.id }
+            }),
+          ),
+      })
+      yield* h.prompt("go on")
+      expect(userTexts(h.requests()[0])[1]).toBe(
+        [
+          `Your task [${ids.subtask}]: The first half (review)`,
+          `Part of task [${ids.task}]: Move the checks.`,
+          "Only the lint part.",
+          states,
+          opening,
+          "Said with the task's changes of state, newest first:",
+          `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
+          `${said[0]} by floris as general: The old script is gone.`,
+          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+          keep,
+        ].join("\n"),
+      )
     }),
   )
 

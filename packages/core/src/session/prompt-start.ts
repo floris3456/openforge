@@ -115,10 +115,16 @@ export const layer = Layer.effect(
     /** Stores a reminder of what changed since the chat was last told, and what it was told; none when nothing did. */
     const remind = Effect.fnUntraced(function* (db: Db, input: Input, row: Row) {
       const now = yield* current(input)
-      const value = JSON.stringify(now.definitions)
-      const hash = digest(value)
       const system = now.system ?? row.toldSystem
-      if (hash === row.toldTools && system === row.toldSystem) return undefined
+      // The registry hands the same definition objects step after step, so an unchanged step is told apart by
+      // identity, before anything is serialised or hashed.
+      if (system === row.toldSystem && same(held.get(row.toldTools ?? ""), now.definitions)) return undefined
+      const value = json(now.definitions)
+      const hash = digest(value)
+      if (hash === row.toldTools && system === row.toldSystem) {
+        hold(held, hash, now.definitions)
+        return undefined
+      }
       const told =
         hash === row.toldTools
           ? now.definitions
@@ -143,7 +149,8 @@ export const layer = Layer.effect(
       return published && text !== undefined ? { id: SessionMessage.ID.fromEvent(published.id), text } : undefined
     })
 
-    const resolve = Effect.fn("SessionPromptStart.resolve")(function* (input: Input) {
+    // Untraced: it runs on every request, and its span would cost more than its work on a warm step.
+    const resolve = Effect.fnUntraced(function* (input: Input) {
       if (Option.isNone(database) || input.kind === "title") return yield* current(input)
       const db = database.value.db
       const row = yield* read(db, input.sessionID)
@@ -183,10 +190,22 @@ const current = (input: Input) =>
 
 /**
  * The chat's record with, beside it, the `seq` of its latest completed compaction and the time of its latest step:
- * one statement on the chat's row, its record's, and two lookups on the messages' type index.
+ * one statement on the chat's row, its record's, and two lookups on the messages' type index. Prepared once per
+ * database, since building it each request cost several times what running it does.
  */
-export const read = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
-  return yield* db
+export const read = (db: Db, sessionID: SessionSchema.ID) =>
+  (statements.get(db) ?? prepare(db)).get({ sessionID }).pipe(Effect.orDie)
+
+const statements = new WeakMap<Db, ReturnType<typeof statement>>()
+
+function prepare(db: Db) {
+  const prepared = statement(db)
+  statements.set(db, prepared)
+  return prepared
+}
+
+function statement(db: Db) {
+  return db
     .select({
       agent: PromptStartTable.agent,
       provider: PromptStartTable.provider_id,
@@ -206,10 +225,9 @@ export const read = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchem
     })
     .from(SessionTable)
     .leftJoin(PromptStartTable, eq(PromptStartTable.session_id, SessionTable.id))
-    .where(eq(SessionTable.id, sessionID))
-    .get()
-    .pipe(Effect.orDie)
-})
+    .where(eq(SessionTable.id, sql.placeholder("sessionID")))
+    .prepare()
+}
 
 /** The recorded start, its definitions decoded once per process; undefined when they can't be read. */
 const recall = (db: Db, held: Held, row: Row, input: Input) =>
@@ -240,7 +258,7 @@ const store = (db: Db, held: Held, hash: string, value: string, definitions: Rea
 }
 
 const record = Effect.fnUntraced(function* (db: Db, held: Held, input: Input, start: Start, compaction: number | null) {
-  const value = JSON.stringify(start.definitions)
+  const value = json(start.definitions)
   const hash = digest(value)
   const values = {
     agent: input.agent,
@@ -316,6 +334,29 @@ function prompt(before: string, after: string) {
   ].join("\n")
   const whole = `The agent's prompt changed; from now on it is:\n${after}`
   return diff.length < whole.length ? diff : whole
+}
+
+/** Whether two definition lists hold the same objects in the same order. */
+function same(left: ReadonlyArray<ToolDefinition> | undefined, right: ReadonlyArray<ToolDefinition>) {
+  return (
+    left !== undefined && left.length === right.length && left.every((definition, index) => definition === right[index])
+  )
+}
+
+/** Each definition's JSON, once per object: the registry's definitions live across steps and chats. */
+const serialised = new WeakMap<ToolDefinition, string>()
+
+/** The list's JSON, as `JSON.stringify` writes it, from each definition's. */
+function json(definitions: ReadonlyArray<ToolDefinition>) {
+  return `[${definitions
+    .map((definition) => {
+      const found = serialised.get(definition)
+      if (found !== undefined) return found
+      const value = JSON.stringify(definition)
+      serialised.set(definition, value)
+      return value
+    })
+    .join(",")}]`
 }
 
 function digest(value: string) {

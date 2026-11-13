@@ -373,6 +373,19 @@ describe("SessionPromptStart: a warm chat's start between two steps", () => {
     }),
   )
 
+  it.live("gives no reminder when a reload hands new definitions that read the same", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("one")
+      yield* h.tools((editor) => editor.update("echo", (tool) => (tool.description = "Echo text, loudly")))
+      yield* h.tools((editor) => editor.update("echo", (tool) => (tool.description = "Echo text")))
+      yield* h.prompt("two")
+      yield* h.prompt("three")
+      for (const request of h.requests().slice(1)) expect(startOf(request)).toBe(startOf(h.requests()[0]))
+      expect(yield* h.reminders()).toEqual([])
+    }),
+  )
+
   it.live("gives two changes before one step in one reminder", () =>
     Effect.gen(function* () {
       const h = yield* setup()

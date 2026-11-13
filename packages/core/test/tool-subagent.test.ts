@@ -1,5 +1,7 @@
-import { describe, expect } from "bun:test"
+import { afterAll, describe, expect } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { FetchHttpClient } from "effect/http"
+import { eq } from "drizzle-orm"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
@@ -32,6 +34,13 @@ import { SessionMessage } from "@opencode/core/session/message"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionStore } from "@opencode/core/session/store"
 import { SubagentJob } from "@opencode/core/session/subagent-job"
+import { MemoryTask } from "@opencode/core/memory/task"
+import { MemoryClient } from "@opencode/core/memory/client"
+import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerHttp } from "@opencode/core/pacer/http"
+import { PacerModels } from "@opencode/core/pacer/models"
+import { SessionTable } from "@opencode/core/session/sql"
+import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
@@ -130,6 +139,7 @@ const subagentPluginSupervisor = makeLocationNode({
     Session.node,
     Job.node,
     SubagentJob.node,
+    MemoryTask.node,
     Tool.node,
     PluginHooks.node,
     SessionContinuity.node,
@@ -173,6 +183,35 @@ const completionIt = testEffect(
             ),
           ),
       }),
+    ),
+  ]),
+)
+
+// Tasks: the small memory server behind its proxy, and a catalog that says it has tasks.
+const tasksServer = startProxied()
+afterAll(() => tasksServer.stop())
+const tasksEndpoint = Layer.succeed(
+  PacerEndpoint.Service,
+  PacerEndpoint.Service.of({ get: () => Effect.succeed(endpointAt(tasksServer.origin)), changes: () => Stream.empty }),
+)
+const tasksIt = testEffect(
+  AppNodeBuilder.build(nodes, [
+    ...replacements,
+    PluginSupervisor.node.replace(subagentPluginSupervisor),
+    MemoryClient.node.replace(
+      MemoryClient.layer.pipe(
+        Layer.provide(PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(tasksEndpoint))),
+      ),
+    ),
+    PacerModels.node.replace(
+      Layer.succeed(
+        PacerModels.Service,
+        PacerModels.Service.of({
+          get: () => Effect.succeed(catalogOf(true)),
+          changes: () => Stream.empty,
+          refresh: () => Effect.void,
+        }),
+      ),
     ),
   ]),
 )
@@ -915,4 +954,218 @@ describe("SubagentTool", () => {
       ),
     ),
   )
+
+  describe("with a task", () => {
+    const maker = { role: "build", chat: "ses_maker" }
+    /** Calls the memory server itself, as another chat would. */
+    const store = (method: string, path: string, body?: unknown) =>
+      fetch(`${tasksServer.store.url}${path}`, {
+        method,
+        headers: { authorization: "Bearer memory-client-key-f1", "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }).then((response) => response.json() as Promise<{ task: MemoryClient.Task }>)
+
+    const prepare = Effect.fnUntraced(function* (dir: { readonly path: string }) {
+      const project = `subagent-tasks-${crypto.randomUUID().slice(0, 8)}`
+      yield* Effect.promise(() =>
+        Bun.write(path.join(dir.path, "opencode.json"), JSON.stringify({ memory: { project } })),
+      )
+      const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ location, model: parentModel })
+      yield* withSubagent(parent.location)
+      const locations = yield* LocationServiceMap.Service
+      const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+      const base = `/pacer/v1/memory/${project}`
+      const make = (title: string, parentID?: string) =>
+        Effect.promise(() => store("POST", `${base}/tasks`, { title, parent: parentID ?? null, by: maker })).pipe(
+          Effect.map((answer) => answer.task),
+        )
+      const read = (id: string) =>
+        Effect.promise(() => store("GET", `${base}/tasks/${id}`)).pipe(Effect.map((answer) => answer.task))
+      /** What the child does with its task while it runs: the state set right after openforge set it active. */
+      const meanwhile = (next: { readonly state: string; readonly note?: string } | undefined) => {
+        tasksServer.control.answer = async (request) => {
+          const answer = await fetch(`${tasksServer.store.url}${request.path}`, {
+            method: request.method,
+            headers: { authorization: "Bearer memory-client-key-f1", "content-type": "application/json" },
+            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+          })
+          const body = request.body as { state?: string; by?: { chat?: string } } | undefined
+          if (next && request.path.endsWith("/state") && body?.state === "active")
+            await store("POST", request.path, { ...next, by: body.by })
+          return answer
+        }
+      }
+      const run = (input: Record<string, unknown>, id = "call-task-subagent") =>
+        executeTool(registry, {
+          sessionID: parent.id,
+          ...toolIdentity,
+          call: { type: "tool-call", id, name: SubagentTool.name, input },
+        })
+      const children = Effect.gen(function* () {
+        const database = yield* Database.Service
+        return yield* database.db
+          .select({ id: SessionTable.id })
+          .from(SessionTable)
+          .where(eq(SessionTable.parent_id, parent.id))
+          .all()
+          .pipe(Effect.orDie)
+      })
+      return { sessions, parent, make, read, meanwhile, run, children, base }
+    })
+    const withDir = <A, E, R>(body: (dir: { readonly path: string }) => Effect.Effect<A, E, R>) =>
+      Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (dir) =>
+          Effect.promise(() => dir[Symbol.asyncDispose]()).pipe(
+            Effect.ensuring(Effect.sync(() => tasksServer.reset())),
+          ),
+      ).pipe(Effect.flatMap(body))
+
+    tasksIt.live(
+      "a child started with taskID is inside the task, which is active in its name before its first step",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            const task = yield* h.make("Move the checks")
+            const bus = yield* Bus.Service
+            // The child's prompt is admitted only after its task is active: its first step comes after that.
+            const before: string[] = []
+            yield* bus.project(SessionEvent.InboxEnqueued, (event) =>
+              Effect.sync(() => {
+                if (event.data.sessionID === h.parent.id) return
+                before.push(
+                  ...tasksServer
+                    .calls()
+                    .filter((call) => call.path === `${h.base}/tasks/${task.id}/state`)
+                    .map((call) => (call.body as { state: string }).state),
+                )
+              }),
+            )
+            h.meanwhile(undefined)
+            const settled = yield* h.run({ agent: "reviewer", description: "checks", prompt: "do it", taskID: task.id })
+            const child = yield* h.sessions.get(outputSessionID(settled.metadata))
+            expect(settled.content).toEqual([{ type: "text", text: completedOutput(child.id) }])
+            expect(child.metadata).toEqual({ memory: { task: task.id } })
+            expect(before).toEqual(["active"])
+            expect(yield* h.read(task.id)).toMatchObject({
+              state: "active",
+              worker: { person: "floris", role: "reviewer", chat: child.id },
+            })
+          }),
+        ),
+    )
+
+    tasksIt.live("on a subtask's id the child is inside its task and the subtask, and the subtask is active", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("The task")
+          const sub = yield* h.make("A part", task.id)
+          h.meanwhile(undefined)
+          const settled = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: sub.id })
+          const child = yield* h.sessions.get(outputSessionID(settled.metadata))
+          expect(child.metadata).toEqual({ memory: { task: task.id, subtask: sub.id } })
+          expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: child.id } })
+          expect((yield* h.read(task.id)).state).toBe("todo")
+        }),
+      ),
+    )
+
+    tasksIt.live("an unknown task id is refused and no child is made", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const settled = yield* h.run({ agent: "reviewer", description: "x", prompt: "x", taskID: "000000000000" })
+          expect(settled.status).toBe("error")
+          expect(settled.error?.message).toBe("There is no task 000000000000 in this project's memory.")
+          expect(yield* h.children).toEqual([])
+        }),
+      ),
+    )
+
+    tasksIt.live(
+      "the maker's answer ends with the task's state when it is blocked, review or done, and not when active",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            for (const [next, line] of [
+              [
+                { state: "blocked", note: "the file is not there" },
+                (id: string) => `Task ${id} is now blocked: the file is not there.`,
+              ],
+              [{ state: "review" }, (id: string) => `Task ${id} is now review.`],
+              [{ state: "done", note: "merged" }, (id: string) => `Task ${id} is now done: merged.`],
+              [undefined, undefined],
+            ] as const) {
+              const task = yield* h.make(`Ends ${next?.state ?? "active"}`)
+              h.meanwhile(next)
+              const settled = yield* h.run(
+                { agent: "reviewer", description: "work", prompt: "do it", taskID: task.id },
+                `call-${next?.state ?? "active"}`,
+              )
+              const childID = outputSessionID(settled.metadata)
+              expect(settled.content).toEqual([
+                {
+                  type: "text",
+                  text: line
+                    ? `<subagent sessionID="${childID}" state="completed">\n${childText}\n${line(task.id)}\n</subagent>`
+                    : completedOutput(childID),
+                },
+              ])
+            }
+          }),
+        ),
+    )
+
+    tasksIt.live("a background child's notice ends with the task's state", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("In the background")
+          const bus = yield* Bus.Service
+          const admitted = yield* bus.subscribe(SessionEvent.InboxEnqueued).pipe(
+            Stream.filter((event) => event.data.sessionID === h.parent.id && event.data.item.type === "synthetic"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped({ startImmediately: true }),
+          )
+          h.meanwhile({ state: "review", note: "ready" })
+          const settled = yield* h.run({
+            agent: "reviewer",
+            description: "background work",
+            prompt: "do it",
+            taskID: task.id,
+            background: true,
+          })
+          const childID = outputSessionID(settled.metadata)
+          const admission = Array.from(yield* Fiber.join(admitted))[0]
+          if (admission?.data.item.type !== "synthetic") return yield* Effect.die("Expected synthetic inbox item")
+          expect(admission.data.item.payload.text).toBe(
+            `<subagent sessionID="${childID}" state="completed" description="background work">\n${childText}\nTask ${task.id} is now review: ready.\n</subagent>`,
+          )
+        }),
+      ),
+    )
+
+    tasksIt.live("a child started without taskID inherits its parent's task, and nothing is set or added", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("The parent's task")
+          yield* h.sessions.setMetadata({ sessionID: h.parent.id, metadata: { memory: { task: task.id } } })
+          h.meanwhile(undefined)
+          const settled = yield* h.run({ agent: "reviewer", description: "helper", prompt: "help" })
+          const child = yield* h.sessions.get(outputSessionID(settled.metadata))
+          expect(child.metadata).toEqual({ memory: { task: task.id } })
+          expect(settled.content).toEqual([{ type: "text", text: completedOutput(child.id) }])
+          expect((yield* h.read(task.id)).state).toBe("todo")
+          expect(tasksServer.calls().filter((call) => call.path.includes(task.id))).toEqual([])
+        }),
+      ),
+    )
+  })
 })

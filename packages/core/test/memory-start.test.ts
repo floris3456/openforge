@@ -207,7 +207,14 @@ const it = testEffect(layer)
 const by = (role: string) => ({ role, chat: "ses_memory_preparing" })
 
 /** A chat in a project of its own, a lead or a child of another, with what it runs and what the model got. */
-const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; readonly child?: boolean } = {}) {
+const setup = Effect.fnUntraced(function* (
+  input: {
+    readonly agent?: string
+    readonly child?: boolean
+    /** The task the chat is inside: `inside` makes it from the chat's project before the chat is stored. */
+    readonly inside?: (project: string) => Effect.Effect<{ task: string; subtask?: string }>
+  } = {},
+) {
   pacer.endpoint = endpointAt(server.origin)
   pacer.catalog = catalogOf(true)
   server.reset()
@@ -233,12 +240,15 @@ const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; rea
     .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
+  const memory = yield* Effect.provide(MemoryClient.Service, client)
+  const inside = input.inside ? yield* input.inside(project) : undefined
   const insert = (id: Session.ID, parent?: Session.ID, agent?: string) =>
     db
       .insert(SessionTable)
       .values({
         id,
         ...(parent ? { parent_id: parent } : {}),
+        ...(inside ? { metadata: { memory: inside } } : {}),
         ...(agent ? { agent: Agent.ID.make(agent) } : {}),
         project_id: project,
         slug: id,
@@ -256,7 +266,6 @@ const setup = Effect.fnUntraced(function* (input: { readonly agent?: string; rea
   const llm = yield* TestLLM.Test
   const requests = yield* LLMRequests
   const started = requests.length
-  const memory = yield* Effect.provide(MemoryClient.Service, client)
   return {
     project,
     sessionID,
@@ -579,6 +588,130 @@ describe("MemoryStart through the runner", () => {
           "Memory holds 0 global entries and 1 of role reader.",
         ].join("\n"),
       )
+    }),
+  )
+})
+
+describe("MemoryStart inside a task", () => {
+  const memoryOf = Effect.provide(MemoryClient.Service, client)
+  const make = (project: string, title: string, description?: string, parent?: string) =>
+    memoryOf.pipe(
+      Effect.flatMap((memory) =>
+        memory.make(project, {
+          title,
+          ...(description === undefined ? {} : { description }),
+          ...(parent ? { parent } : {}),
+          by: by("build"),
+        }),
+      ),
+      Effect.map((made) => made.task),
+      Effect.orDie,
+    )
+  const ids: { task: string; subtask: string } = { task: "", subtask: "" }
+  /** An entry noted in the task. */
+  const note = (project: string, text: string) =>
+    memoryOf.pipe(
+      Effect.flatMap((memory) =>
+        memory.write(project, {
+          kind: "verified",
+          text,
+          basis: "b",
+          scope: "task",
+          by: { ...by("build"), task: ids.task },
+        }),
+      ),
+      Effect.map((written) => written.entry),
+      Effect.orDie,
+    )
+
+  it.live("begins with the task, its description and what was noted in it; the counts say how many", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        inside: (project) =>
+          make(project, "Move the checks", "One script.\nDone when it passes.").pipe(
+            Effect.map((task) => {
+              ids.task = task.id
+              return { task: task.id }
+            }),
+          ),
+      })
+      const noted = yield* note(h.project, "The script is scripts/check.ts.")
+      yield* h.prompt("go on")
+      expect(userTexts(h.requests()[0])[1]).toBe(
+        [
+          `Your task [${ids.task}]: Move the checks (todo)`,
+          "One script.",
+          "Done when it passes.",
+          "What was noted in the task, newest first:",
+          MemoryText.entry(noted),
+          opening,
+          "Memory holds 0 global entries and 0 of role build, 1 of this task; recall finds them.",
+        ].join("\n"),
+      )
+      expect(h.starts()[0]?.body).toMatchObject({
+        scopes: { global: true, roles: ["build"], tasks: [ids.task] },
+        task: ids.task,
+        subtask: null,
+        by: { role: "build", chat: h.sessionID, task: ids.task },
+      })
+    }),
+  )
+
+  it.live("inside a subtask begins with the subtask and the task it is part of", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        child: true,
+        agent: "explore",
+        inside: (project) =>
+          make(project, "Move the checks", "One script.").pipe(
+            Effect.flatMap((task) => make(project, "The first half", "Only the lint part.", task.id)),
+            Effect.map((sub) => {
+              ids.task = sub.parent!
+              ids.subtask = sub.id
+              return { task: sub.parent!, subtask: sub.id }
+            }),
+          ),
+      })
+      yield* h.prompt("go on")
+      expect(userTexts(h.requests()[0])[1]).toBe(
+        [
+          `Your task [${ids.subtask}]: The first half (todo)`,
+          `Part of task [${ids.task}]: Move the checks.`,
+          "Only the lint part.",
+          opening,
+          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+        ].join("\n"),
+      )
+      expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
+    }),
+  )
+
+  it.live("keeps the task part within 4,000 characters: the oldest entries go first, then the description's end", () =>
+    Effect.gen(function* () {
+      const long = "d".repeat(1_000)
+      const h = yield* setup({
+        inside: (project) =>
+          make(project, "Long task", long).pipe(
+            Effect.map((task) => {
+              ids.task = task.id
+              return { task: task.id }
+            }),
+          ),
+      })
+      const written: MemoryClient.Entry[] = []
+      for (const n of Array.from({ length: 12 }, (_, index) => index))
+        written.push(yield* note(h.project, `Entry ${n} ${"e".repeat(300)}.`))
+      yield* h.prompt("go on")
+      const block = userTexts(h.requests()[0])[1] ?? ""
+      const part = block.slice(0, block.indexOf(opening) - 1)
+      expect([...part].length).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
+      // The newest entries are there, the oldest are not.
+      // The newest first: at most 20 come from the server, and those that fit are the newest of them.
+      const kept = written.filter((entry) => part.includes(entry.id))
+      expect(kept.length).toBeGreaterThan(0)
+      expect(kept.length).toBeLessThan(written.length)
+      expect(kept).toEqual(written.slice(written.length - kept.length))
+      expect(part).toContain(long)
     }),
   )
 })

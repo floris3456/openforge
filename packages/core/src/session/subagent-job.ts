@@ -8,11 +8,13 @@ import { Session } from "../session.js"
 import { SubagentCompletion } from "./subagent-completion.js"
 
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
+/** What the notice adds to a completed child's answer (memory's task line). */
+type Ended = (output: string) => Effect.Effect<string>
 
 export interface Interface {
   start: (recovery: Recovery) => Effect.Effect<Job.Info>
-  background: (recovery: Recovery) => Effect.Effect<void>
-  notify: (recovery: Recovery, startedAt: number) => Effect.Effect<void>
+  background: (recovery: Recovery, ended?: Ended) => Effect.Effect<void>
+  notify: (recovery: Recovery, startedAt: number, ended?: Ended) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SubagentJob") {}
@@ -27,13 +29,14 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
   // One observer per job generation, including continuations of the same child.
   const notifications = new Set<string>()
 
-  const notify = Effect.fn("SubagentJob.notify")(function* (recovery: Recovery, startedAt: number) {
+  const notify = Effect.fn("SubagentJob.notify")(function* (recovery: Recovery, startedAt: number, ended?: Ended) {
     const key = `${recovery.childSessionID}:${startedAt}`
     if (notifications.has(key)) return
     notifications.add(key)
     yield* Effect.gen(function* () {
       const info = (yield* jobs.wait({ id: recovery.childSessionID })).info
-      if (info) yield* SubagentCompletion.deliver(sessions, jobs, { ...info, recovery })
+      const output = info?.output !== undefined && ended ? yield* ended(info.output) : info?.output
+      if (info) yield* SubagentCompletion.deliver(sessions, jobs, { ...info, output, recovery })
     }).pipe(
       Effect.ensuring(Effect.sync(() => notifications.delete(key))),
       Effect.forkIn(scope, { startImmediately: true }),
@@ -61,9 +64,9 @@ const make: Effect.Effect<Interface, never, Session.Service | Job.Service | Scop
           }),
         })
         .pipe(Effect.setContext(context)),
-    background: Effect.fn("SubagentJob.background")(function* (recovery: Recovery) {
+    background: Effect.fn("SubagentJob.background")(function* (recovery: Recovery, ended?: Ended) {
       const info = yield* jobs.background(recovery.childSessionID)
-      if (info) yield* notify(recovery, info.started_at)
+      if (info) yield* notify(recovery, info.started_at, ended)
     }),
     notify,
   })

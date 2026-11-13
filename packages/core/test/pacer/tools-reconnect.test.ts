@@ -148,31 +148,37 @@ describe("PacerTools across a reconnect of CPP's stream", () => {
     ),
   )
 
-  it.live("leaves out every chat's tools, without a warning, when capabilities answer 429 on the reconnect", () =>
+  it.live("keeps the catalog and every chat's tools, with a warning, when capabilities answer 429 or garble", () =>
     logged((warnings) =>
       Effect.gen(function* () {
         const cpp = yield* serve
         const h = yield* start(cpp.origin)
-        expect((yield* h.tools.list(step(chat)))?.version).toBe(ownerList.version)
-
+        const held = yield* h.tools.list(step(chat))
+        expect(held?.version).toBe(ownerList.version)
         const before = yield* h.catalogs.get()
-        // Any answer to capabilities but a 5xx or no answer is taken for a proxy without the pacer.
-        cpp.answers["/pacer/v1/capabilities"] = () =>
-          Response.json({ error: { type: "rate_limited", message: "slow down" } }, { status: 429 })
-        yield* h.catalogs.refresh()
-        expect((yield* h.catalogs.get())?.pacer).toBeNull()
-        // Its models lose their routes' facts too, so CPP's provider is rebuilt (provider.updated, model.updated).
-        expect((yield* h.catalogs.get())?.models).not.toEqual(before?.models)
-        expect(yield* h.tools.list(step(chat))).toBeUndefined()
-        expect(lists(cpp.seen)).toBe(1)
-        expect(warnings).toEqual([])
 
-        // Whereas a read that fails is logged, and keeps the catalog it had.
-        cpp.answers["/v1/models"] = () => new Response("down", { status: 500 })
-        yield* h.catalogs.refresh()
+        const answers: Array<() => Response> = [
+          () => Response.json({ error: { type: "rate_limited", message: "slow down" } }, { status: 429 }),
+          () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+        ]
+        for (const answer of answers) {
+          cpp.answers["/pacer/v1/capabilities"] = answer
+          yield* h.catalogs.refresh()
+          expect(yield* h.catalogs.get()).toBe(before!)
+        }
+        expect((yield* h.catalogs.get())?.pacer?.webTools).toBe(true)
         expect(warnings.map((item) => (item as ReadonlyArray<unknown>)[0])).toEqual([
           "could not read CLIProxyPacer's models",
+          "could not read CLIProxyPacer's models",
         ])
+        expect(yield* h.tools.list(step(chat))).toBe(held!)
+        expect((yield* h.tools.list(step(other)))?.version).toBe(ownerList.version)
+
+        // A 404 that is not CPP's own is a definite answer: a plain proxy, without the web tools.
+        cpp.answers["/pacer/v1/capabilities"] = () => new Response("404 page not found", { status: 404 })
+        yield* h.catalogs.refresh()
+        expect((yield* h.catalogs.get())?.pacer).toBeNull()
+        expect(yield* h.tools.list(step(chat))).toBeUndefined()
       }),
     ),
   )

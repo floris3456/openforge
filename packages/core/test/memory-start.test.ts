@@ -194,7 +194,7 @@ const counting = Layer.effect(
     db: new Proxy(db, {
       get: (target, key) => {
         if (key === "select") lookups.count++
-        const value = Reflect.get(target, key, target)
+        const value: unknown = target[key as keyof typeof target]
         return typeof value === "function" ? value.bind(target) : value
       },
     }),

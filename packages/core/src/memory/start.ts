@@ -12,6 +12,7 @@ import { SessionEvent } from "../session/event.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
 import { MemoryClient } from "./client.js"
+import { MemoryTask } from "./task.js"
 import { MemoryText } from "./text.js"
 
 // The start block (the workspace's spec `docs/specs/memory.md`, section 3): one durable synthetic message per span of
@@ -34,6 +35,8 @@ export interface Interface {
     readonly recall: boolean
     /** Whether the chat has the `remember` tool: the block then says that memory is its to keep true. */
     readonly remember: boolean
+    /** Whether the chat has the `task` tool: inside a task the block then says what to do with the task's state. */
+    readonly task: boolean
   }) => Effect.Effect<void>
 }
 
@@ -60,22 +63,24 @@ const layer = Layer.effect(
       if (project === undefined) return
       const prompt = yield* newestPrompt(sessionID)
       if (!prompt) return
-      const by = { role: input.agent, chat: sessionID }
+      const inside = MemoryTask.inside(input.session.metadata)
+      const by = { role: input.agent, chat: sessionID, ...inside }
       const block = yield* client
         .start(
           project,
           // Cut as the server counts, in code points.
           {
             prompt: [...prompt].slice(0, 2_000).join(""),
-            scopes: { global: true, roles: [by.role] },
+            scopes: { global: true, roles: [by.role], ...(inside ? { tasks: [inside.task] } : {}) },
             limit: LIMIT,
+            ...inside,
             by,
           },
           { timeout: TIMEOUT },
         )
         .pipe(
           Effect.map((started) => ({
-            text: MemoryText.block(started, by.role, input),
+            text: MemoryText.block(started, by.role, input, inside !== undefined),
             description: "Memory nearest to the prompt",
             memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id) },
           })),

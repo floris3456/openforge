@@ -14,7 +14,13 @@ import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-searc
  * [--embedding-url <url> --embedding-model <name> [--embedding-key <key>]]`.
  */
 
-export const capabilities = { version: 1, entry_characters: 800, query_characters: 2000, search_limit: 20 }
+export const capabilities = {
+  version: 1,
+  entry_characters: 800,
+  query_characters: 2000,
+  search_limit: 20,
+  tasks: true,
+}
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 const BODY_BYTES = 64 * 1024
@@ -27,6 +33,10 @@ const BATCH = 16
 /** How many of the nearest entries a write answers. */
 const NEAR = 3
 const SCOPES = ["global", "role", "task"]
+const STATES = ["todo", "active", "blocked", "review", "done"]
+/** How many tasks a list answers, and how many changes and entries a read. */
+const LIST = 200
+const READ = 20
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
 const REFUSED = [
@@ -87,6 +97,29 @@ const SCHEMA = [
     by text not null,
     at integer not null
   )`,
+  `create table if not exists task (
+    seq integer primary key autoincrement,
+    id text not null unique,
+    project text not null,
+    parent text,
+    title text not null,
+    description text not null,
+    state text not null,
+    note text,
+    by text not null,
+    worker text,
+    at integer not null,
+    changed integer not null
+  )`,
+  `create table if not exists task_change (
+    seq integer primary key autoincrement,
+    project text not null,
+    task text not null,
+    state text not null,
+    note text,
+    by text not null,
+    at integer not null
+  )`,
 ]
 
 /** A stored entry: `by` and `deleted` are JSON, `vector` a Float32Array of length 1 as bytes. */
@@ -108,6 +141,32 @@ type Row = {
   deleted: string | null
   vector: Uint8Array | null
   vector_model: string | null
+}
+
+/** A stored task: `by` and `worker` are JSON. */
+type TaskRow = {
+  seq: number
+  id: string
+  project: string
+  parent: string | null
+  title: string
+  description: string
+  state: string
+  note: string | null
+  by: string
+  worker: string | null
+  at: number
+  changed: number
+}
+
+type ChangeRow = {
+  seq: number
+  project: string
+  task: string
+  state: string
+  note: string | null
+  by: string
+  at: number
 }
 
 /** An OpenAI-style embedding endpoint: `url` is its base, such as `http://127.0.0.1:18433/v1`. */
@@ -175,6 +234,22 @@ export function startMemoryServer(input: {
           store.start(projectOf(request.params.project), await bodyOf(request), person),
         ),
       },
+      "/pacer/v1/memory/:project/tasks": {
+        POST: guarded(async (request, person) =>
+          store.make(projectOf(request.params.project), await bodyOf(request), person),
+        ),
+        GET: guarded((request) =>
+          store.tasks(projectOf(request.params.project), new URL(request.url).searchParams.get("all") === "1"),
+        ),
+      },
+      "/pacer/v1/memory/:project/tasks/:id": {
+        GET: guarded((request) => store.task(projectOf(request.params.project), request.params.id)),
+      },
+      "/pacer/v1/memory/:project/tasks/:id/state": {
+        POST: guarded(async (request, person) =>
+          store.change(projectOf(request.params.project), request.params.id, await bodyOf(request), person),
+        ),
+      },
       "/pacer/v1/memory/:project/export": {
         GET: guarded((request) => store.export(projectOf(request.params.project))),
       },
@@ -203,6 +278,37 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   const get = (project: string, id: string) =>
     db.query<Row, string[]>("select * from entry where project = ? and id = ?").get(project, id)
   const live = "superseded_by is null and deleted is null"
+  const getTask = (project: string, id: string) =>
+    db.query<TaskRow, string[]>("select * from task where project = ? and id = ?").get(project, id)
+  /** What `GET …/tasks/{id}` answers for a task, and `start` for the chat's task and subtask. */
+  const readOf = (row: TaskRow) => ({
+    task: taskOf(row),
+    changes: db
+      .query<
+        ChangeRow,
+        [string, string]
+      >(`select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`)
+      .all(row.project, row.id)
+      .map(changeOf),
+    subtasks: subtasksOf(row),
+    entries: taskEntries(row),
+  })
+  const subtasksOf = (row: TaskRow) =>
+    row.parent !== null
+      ? []
+      : db
+          .query<TaskRow, string[]>("select * from task where project = ? and parent = ? order by seq")
+          .all(row.project, row.id)
+          .map(taskOf)
+  /** The live task entries of a task, those written in its subtasks too; of a subtask only its own. */
+  const taskEntries = (row: TaskRow) =>
+    db
+      .query<Row, string[]>(
+        `select * from entry where project = ? and scope = 'task' and ${live} and ${row.parent === null ? "task = ?" : "subtask = ?"}
+         order by seq desc limit ${READ}`,
+      )
+      .all(row.project, row.id)
+      .map(entryOf)
   // `catching` keeps one background catch-up at a time; `stopped` keeps a late answer off a closed database.
   let catching = false
   let stopped = false
@@ -348,6 +454,8 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const limit = limitOf(body.limit)
       if (body.task !== undefined && body.task !== null && typeof body.task !== "string")
         refuse("task: must be a task id or null")
+      if (body.subtask !== undefined && body.subtask !== null && typeof body.subtask !== "string")
+        refuse("subtask: must be a task id or null")
       const by = { person, ...byOf(body.by) }
       const answer = await found({ project, query: prompt, scopes, kinds, limit })
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
@@ -360,10 +468,15 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           .get(project, scope, list === "all" ? 1 : 0, JSON.stringify(list === "all" ? [] : list))?.n ?? 0
       const recall = logged(project, prompt, scopes, kinds, answer.entries, by)
       catchUp()
+      // Only a task that has no parent is a chat's task; its subtask only when it is one of that task's.
+      const task = typeof body.task === "string" ? getTask(project, body.task) : null
+      const own = task && task.parent === null ? task : null
+      const subtask = own && typeof body.subtask === "string" ? getTask(project, body.subtask) : null
       return Response.json({
         recall,
         ...answer,
-        task: null,
+        task: own ? readOf(own) : null,
+        subtask: subtask && subtask.parent === own!.id ? readOf(subtask) : null,
         counts: {
           global: count("global", "all"),
           role: count("role", scopes === "all" ? "all" : scopes.roles),
@@ -373,11 +486,118 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
     },
 
     export(project: string) {
-      const lines = db
+      const tasks = db
+        .query<TaskRow, string[]>("select * from task where project = ? order by seq")
+        .all(project)
+        .map((row) => ({ type: "task", ...taskOf(row) }))
+      const changes = db
+        .query<ChangeRow, string[]>("select * from task_change where project = ? order by seq")
+        .all(project)
+        .map((row) => ({ type: "task_change", task: row.task, ...changeOf(row) }))
+      const entries = db
         .query<Row, string[]>("select * from entry where project = ? order by seq")
         .all(project)
-        .map((row) => JSON.stringify({ type: "entry", ...entryOf(row) }) + "\n")
+        .map((row) => ({ type: "entry", ...entryOf(row) }))
+      const lines = [...tasks, ...changes, ...entries].map((line) => JSON.stringify(line) + "\n")
       return new Response(lines.join(""), { headers: { "content-type": "application/x-ndjson" } })
+    },
+
+    make(project: string, body: Fields, person: string) {
+      const title = visible(body.title, "title").trim()
+      if (!title || [...title].length > 200) refuse("title: must be 1 to 200 characters")
+      const description =
+        body.description === undefined || body.description === null
+          ? ""
+          : visible(body.description, "description", true).trim()
+      if ([...description].length > 2000) refuse("description: must be at most 2000 characters")
+      if (body.parent !== undefined && body.parent !== null && typeof body.parent !== "string")
+        refuse("parent: must be a task id or null")
+      const parentID = typeof body.parent === "string" ? body.parent : null
+      const by = byOf(body.by)
+      return db
+        .transaction(() => {
+          const parent = parentID === null ? null : getTask(project, parentID)
+          if (parentID !== null && !parent) refuse(`parent: no task ${parentID} in this project`, 404, "not_found")
+          if (parent?.parent) refuse(`parent: task ${parent.id} is a subtask, and a subtask has no subtasks`)
+          // A task that is not done with the same title and parent is the one a call sent twice made.
+          const copy = db
+            .query<
+              TaskRow,
+              (string | null)[]
+            >("select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1")
+            .get(project, title, parentID)
+          if (copy) return Response.json({ task: taskOf(copy), existing: true })
+          const now = Date.now()
+          const row = db
+            .query<TaskRow, (string | number | null)[]>(
+              `insert into task (id, project, parent, title, description, state, note, by, worker, at, changed)
+               values (?, ?, ?, ?, ?, 'todo', null, ?, null, ?, ?) returning *`,
+            )
+            .get(
+              newID(),
+              project,
+              parentID,
+              title,
+              description,
+              JSON.stringify({ person, role: by.role, chat: by.chat }),
+              now,
+              now,
+            )!
+          return Response.json({ task: taskOf(row) }, { status: 201 })
+        })
+        .immediate()
+    },
+
+    tasks(project: string, all: boolean) {
+      // Not done, and the done subtasks of a task that is not; with all, every task.
+      const rows = db
+        .query<TaskRow, [string, number]>(
+          `select * from task where project = ? and (? or state != 'done' or (parent is not null and
+           (select state from task as owner where owner.project = task.project and owner.id = task.parent) != 'done'))
+           order by seq desc limit ${LIST + 1}`,
+        )
+        .all(project, all ? 1 : 0)
+      return Response.json({ tasks: rows.slice(0, LIST).map(taskOf), more: rows.length > LIST })
+    },
+
+    task(project: string, id: string) {
+      const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
+      return Response.json(readOf(row))
+    },
+
+    change(project: string, id: string, body: Fields, person: string) {
+      const state = oneOf(body.state, STATES, "state")
+      // A note that is empty once cut counts as none.
+      const note = body.note === undefined || body.note === null ? null : visible(body.note, "note").trim() || null
+      if (note !== null && [...note].length > 500) refuse("note: must be at most 500 characters")
+      if (state === "blocked" && !note) refuse("note: blocked needs a note of at least 1 character")
+      const by = byOf(body.by)
+      const caller = { person, role: by.role, chat: by.chat }
+      return db
+        .transaction(() => {
+          const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
+          const worker = state === "active" ? JSON.stringify(caller) : row.worker
+          // The same state and note again changes nothing, unless another caller sets it active.
+          if (row.state === state && row.note === note && row.worker === worker)
+            return Response.json({ task: taskOf(row) })
+          const now = Date.now()
+          db.run("insert into task_change (project, task, state, note, by, at) values (?, ?, ?, ?, ?, ?)", [
+            project,
+            row.id,
+            state,
+            note,
+            JSON.stringify(caller),
+            now,
+          ])
+          const changed = db
+            .query<
+              TaskRow,
+              (string | number | null)[]
+            >("update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *")
+            .get(state, note, worker, now, row.seq)!
+          return Response.json({ task: taskOf(changed) })
+        })
+        .immediate()
     },
 
     stop() {
@@ -486,6 +706,25 @@ function entryOf(row: Row) {
   }
 }
 
+function taskOf(row: TaskRow) {
+  return {
+    id: row.id,
+    parent: row.parent,
+    title: row.title,
+    description: row.description,
+    state: row.state,
+    note: row.note,
+    by: JSON.parse(row.by),
+    worker: row.worker === null ? null : JSON.parse(row.worker),
+    at: row.at,
+    changed: row.changed,
+  }
+}
+
+function changeOf(row: ChangeRow) {
+  return { state: row.state, note: row.note, by: JSON.parse(row.by), at: row.at }
+}
+
 /** What a new entry belongs to, from its `scope` and who writes it. */
 function homeOf(scope: unknown, by: { role: string; task: string | null; subtask: string | null }) {
   const value = oneOf(scope, SCOPES, "scope")
@@ -580,14 +819,16 @@ function names(value: unknown, field: string) {
   return value.filter((item): item is string => typeof item === "string")
 }
 
-/** A string without a refused character. */
-function visible(value: unknown, field: string) {
+/** A string without a refused character; a line feed is allowed where `lines` says so. */
+function visible(value: unknown, field: string, lines = false) {
   if (typeof value !== "string") refuse(`${field}: must be a string`)
   const points = [...value].map((char) => char.codePointAt(0)!)
-  const at = points.findIndex((point) => REFUSED.some((range) => point >= range[0] && point <= range[1]))
+  const at = points.findIndex(
+    (point) => !(lines && point === 0x0a) && REFUSED.some((range) => point >= range[0] && point <= range[1]),
+  )
   if (at >= 0)
     refuse(
-      `${field}: refused character U+${points[at].toString(16).toUpperCase().padStart(4, "0")} at position ${at + 1}; characters a reader cannot see and line breaks are not allowed`,
+      `${field}: refused character U+${points[at].toString(16).toUpperCase().padStart(4, "0")} at position ${at + 1}; ${lines ? "characters a reader cannot see are not allowed" : "characters a reader cannot see and line breaks are not allowed"}`,
     )
   return value
 }

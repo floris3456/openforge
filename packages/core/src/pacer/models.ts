@@ -31,6 +31,8 @@ export interface Memory {
   readonly searchLimit: number
   /** The embedding model the server asks for vectors; null when it searches by word only. */
   readonly embedding: string | null
+  /** Whether the server has tasks (the memory API's section "Tasks"). */
+  readonly tasks: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -185,6 +187,7 @@ const MemoryBlock = Schema.Struct({
   query_characters: Limit,
   search_limit: Limit,
   embedding: Schema.NullOr(Schema.String),
+  tasks: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -337,6 +340,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           queryCharacters: memory.query_characters,
           searchLimit: memory.search_limit,
           embedding: memory.embedding,
+          tasks: memory.tasks === true,
         },
       }),
     }),

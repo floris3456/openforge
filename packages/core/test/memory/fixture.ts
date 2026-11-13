@@ -35,6 +35,7 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
                   queryCharacters: capabilities.query_characters,
                   searchLimit: capabilities.search_limit,
                   embedding: null,
+                  tasks: capabilities.tasks,
                 },
               }
             : {}),

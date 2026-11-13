@@ -55,6 +55,7 @@ import { Location } from "../location.js"
 import { ModelsDev } from "../models-dev.js"
 import { Mcp } from "../mcp/index.js"
 import { MemoryClient } from "../memory/client.js"
+import { MemoryTask } from "../memory/task.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerModels } from "../pacer/models.js"
@@ -151,6 +152,7 @@ const services = [
   ModelsDev.Service,
   Mcp.Service,
   MemoryClient.Service,
+  MemoryTask.Service,
   Npm.Service,
   PacerEndpoint.Service,
   PacerModels.Service,
@@ -212,6 +214,7 @@ export const requirements = LayerNode.group([
   ModelsDev.node,
   Mcp.node,
   MemoryClient.node,
+  MemoryTask.node,
   Npm.node,
   PacerEndpoint.node,
   PacerModels.node,

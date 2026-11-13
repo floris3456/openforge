@@ -1,0 +1,228 @@
+import { describe, expect, test } from "bun:test"
+import type { MemoryClient } from "@opencode/core/memory/client"
+import { MemoryTask } from "@opencode/core/memory/task"
+import { MemoryText } from "@opencode/core/memory/text"
+
+const at = Date.UTC(2026, 10, 13)
+const who = { person: "floris", role: "build", chat: "ses_lead" }
+const task = (fields: Partial<MemoryClient.Task> = {}): MemoryClient.Task => ({
+  id: "t8n2k4m7q9xz",
+  parent: null,
+  title: "Move the checks",
+  description: "",
+  state: "todo",
+  note: null,
+  by: who,
+  worker: null,
+  at,
+  changed: at,
+  ...fields,
+})
+const change = (note: string | null, state: MemoryClient.State = "review"): MemoryClient.Change => ({
+  state,
+  note,
+  by: { ...who, role: "general", chat: "ses_child" },
+  at,
+})
+const said = (note: string, state = "review") => `- 2026-11-13 ${state} by floris as general: ${note}`
+const SAID = "Said with the task's changes of state, newest first:"
+const NOTED = "What was noted in the task, newest first:"
+const entry = (id: string, text: string): MemoryClient.Entry => ({
+  id,
+  kind: "verified",
+  text,
+  basis: "ls",
+  scope: "task",
+  role: null,
+  task: "t8n2k4m7q9xz",
+  subtask: null,
+  by: who,
+  at,
+  supersedes: null,
+  superseded_by: null,
+  deleted: null,
+})
+
+describe("MemoryTask", () => {
+  test("reads the chat's task from the metadata, and nothing from anything else", () => {
+    expect(MemoryTask.inside({ memory: { task: "a" } })).toEqual({ task: "a" })
+    expect(MemoryTask.inside({ memory: { task: "a", subtask: "b" }, other: 1 })).toEqual({ task: "a", subtask: "b" })
+    const others: Array<Parameters<typeof MemoryTask.inside>[0]> = [
+      undefined,
+      {},
+      { memory: "a" },
+      { memory: { subtask: "b" } },
+      { memory: { task: 1 } },
+    ]
+    for (const metadata of others) expect(MemoryTask.inside(metadata)).toBeUndefined()
+  })
+
+  test("places a chat inside a task or none, keeping the other metadata", () => {
+    expect(MemoryTask.placed({ other: 1, memory: { task: "a" } }, { task: "b", subtask: "c" })).toEqual({
+      other: 1,
+      memory: { task: "b", subtask: "c" },
+    })
+    expect(MemoryTask.placed({ other: 1, memory: { task: "a" } }, undefined)).toEqual({ other: 1 })
+    expect(MemoryTask.placed(undefined, { task: "b" })).toEqual({ memory: { task: "b" } })
+    expect(MemoryTask.placeOf(task())).toEqual({ task: "t8n2k4m7q9xz" })
+    expect(MemoryTask.placeOf(task({ id: "s", parent: "t8n2k4m7q9xz" }))).toEqual({
+      task: "t8n2k4m7q9xz",
+      subtask: "s",
+    })
+  })
+})
+
+describe("MemoryText tasks", () => {
+  test("a task entry's scope names the task, and the subtask it was written in", () => {
+    expect(MemoryText.scopeOf(entry("e1", "x"))).toBe("task t8n2k4m7q9xz")
+    expect(MemoryText.scopeOf({ ...entry("e1", "x"), subtask: "s" })).toBe("task t8n2k4m7q9xz, subtask s")
+  })
+
+  test("the task part leaves out the oldest entries first, then cuts the description from its end", () => {
+    const entries = Array.from({ length: 4 }, (_, index) => entry(`e${index}`, "x".repeat(900)))
+    const part = MemoryText.task({ task: task({ description: "d".repeat(300) }), changes: [], entries })
+    expect([...part].length).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
+    expect(part).toContain("d".repeat(300))
+    expect(["e0", "e1", "e2", "e3"].filter((id) => part.includes(`[${id}]`))).toEqual(["e0", "e1", "e2"])
+
+    const long = MemoryText.task({ task: task({ description: "d".repeat(5_000) }), changes: [], entries })
+    expect([...long].length).toBe(MemoryText.TASK_CHARACTERS)
+    expect(long).toBe(
+      [
+        `Your task [t8n2k4m7q9xz]: Move the checks (todo)`,
+        "d".repeat(4_000 - 51 - MemoryText.states.length) + "…",
+        MemoryText.states,
+      ].join("\n"),
+    )
+    expect(long).not.toContain("What was noted")
+  })
+
+  test("in the start block the assignment comes before the opening and the notes after it, cut together", () => {
+    const started = (description: string, entries: MemoryClient.Entry[]): MemoryClient.Started => ({
+      recall: "r",
+      entries: [],
+      meaning: false,
+      counts: { global: 0, role: 0, task: entries.length },
+      task: { task: task({ description }), changes: [], subtasks: [], entries },
+      subtask: null,
+    })
+    const tools = { recall: true, remember: false, task: true }
+    const lines = MemoryText.block(started("One script.", [entry("e1", "Noted.")]), "build", tools, true).split("\n")
+    expect(lines.slice(0, 3)).toEqual([
+      "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+      "One script.",
+      "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review.",
+    ])
+    expect(lines[3]).toStartWith("Memory: what agents and people of this project noted earlier.")
+    expect(lines.slice(4, 6)).toEqual([
+      "What was noted in the task, newest first:",
+      MemoryText.entry(entry("e1", "Noted.")),
+    ])
+    const cut = MemoryText.block(
+      started("d".repeat(5_000), [entry("e1", "x".repeat(900))]),
+      "build",
+      tools,
+      true,
+    ).split("\n")
+    // The line on the task's state counts into the 4,000 characters and is never cut.
+    expect(cut[1]).toBe("d".repeat(4_000 - 51 - MemoryText.states.length) + "…")
+    expect(cut[2]).toBe(MemoryText.states)
+    expect(cut[3]).toStartWith("Memory: what agents")
+    expect([...cut.slice(0, 3).join("\n")].length).toBe(MemoryText.TASK_CHARACTERS)
+    expect(cut.join("\n")).not.toContain("What was noted")
+    // Without the task tool there is no such line, and the description has its room.
+    const without = MemoryText.block(started("d".repeat(5_000), []), "build", { ...tools, task: false }, true).split(
+      "\n",
+    )
+    expect(without[1]).toBe("d".repeat(4_000 - 50) + "…")
+    expect(without[2]).toStartWith("Memory: what agents")
+  })
+
+  test("what was said with the changes: only those with a note, at most 5, newest first; none leaves the part out", () => {
+    const changes = [
+      change(null, "active"),
+      ...Array.from({ length: 6 }, (_, index) => change(`n${index}`)),
+      change("blocked once", "blocked"),
+    ]
+    expect(MemoryText.task({ task: task({ description: "One script." }), changes, entries: [] })).toBe(
+      [
+        "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+        "One script.",
+        MemoryText.states,
+        SAID,
+        ...["n0", "n1", "n2", "n3", "n4"].map((note) => said(note)),
+      ].join("\n"),
+    )
+    expect(MemoryText.task({ task: task(), changes: [change(null, "active"), change("", "todo")], entries: [] })).toBe(
+      ["Your task [t8n2k4m7q9xz]: Move the checks (todo)", MemoryText.states].join("\n"),
+    )
+  })
+
+  test("inside a subtask the subtask's own changes come first, then the task's, 5 in all", () => {
+    const sub = task({ id: "s1", parent: "t8n2k4m7q9xz", title: "The first half", state: "active" })
+    const part = MemoryText.task(
+      { task: task(), changes: ["t0", "t1", "t2", "t3"].map((note) => change(note)), entries: [entry("e1", "Noted.")] },
+      { task: sub, changes: [change(null, "active"), change("s0"), change("s1")] },
+    )
+    expect(part).toBe(
+      [
+        "Your task [s1]: The first half (active)",
+        "Part of task [t8n2k4m7q9xz]: Move the checks.",
+        MemoryText.states,
+        SAID,
+        ...["s0", "s1", "t0", "t1", "t2"].map((note) => said(note)),
+        NOTED,
+        MemoryText.entry(entry("e1", "Noted.")),
+      ].join("\n"),
+    )
+  })
+
+  test("cut at 4,000: the noted entries from the oldest, then the said lines from the oldest, then the description", () => {
+    const entries = Array.from({ length: 4 }, (_, index) => entry(`e${index}`, "x".repeat(900)))
+    const notes = (size: number) => Array.from({ length: 5 }, (_, index) => change(`n${index} ${"y".repeat(size)}`))
+    const length = (text: string) => [...text].length
+    // Short said lines: they all stay, and the newest entries that fit.
+    const first = MemoryText.task({ task: task({ description: "d".repeat(300) }), changes: notes(100), entries })
+    expect(length(first)).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
+    expect(["e0", "e1", "e2", "e3"].filter((id) => first.includes(`[${id}]`))).toEqual(["e0", "e1"])
+    expect(first.split("\n").filter((line) => line.startsWith("- 2026-11-13 review"))).toHaveLength(5)
+    // Long ones: the entries go first, then the oldest said lines.
+    const second = MemoryText.task({ task: task({ description: "d".repeat(1_500) }), changes: notes(500), entries })
+    const lines = second.split("\n")
+    expect(length(second)).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
+    expect(second).not.toContain(NOTED)
+    expect(lines.slice(0, 4)).toEqual([
+      "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+      "d".repeat(1_500),
+      MemoryText.states,
+      SAID,
+    ])
+    expect(lines.slice(4)).toEqual(["n0", "n1", "n2", "n3"].map((note) => said(`${note} ${"y".repeat(500)}`)))
+    // Then the description is cut from its end; the task line and the line on the state stay.
+    const third = MemoryText.task({ task: task({ description: "d".repeat(5_000) }), changes: notes(500), entries })
+    expect(third).toBe(
+      [
+        "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+        "d".repeat(4_000 - 51 - MemoryText.states.length) + "…",
+        MemoryText.states,
+      ].join("\n"),
+    )
+  })
+
+  test("a subtask of a task not listed stands on its own in the list", () => {
+    const sub = task({ id: "s1", parent: "gone", title: "Left over", state: "active", worker: who })
+    expect(MemoryText.tasks({ tasks: [sub], more: false }, () => false)).toBe(
+      [
+        "Open tasks of this project:",
+        "- [s1] Left over (active; made by floris as build; worked on by floris as build)",
+      ].join("\n"),
+    )
+  })
+
+  test("the maker's line, with the note when there is one", () => {
+    expect(MemoryText.ended(task({ state: "blocked", note: "wrong file" }))).toBe(
+      "Task t8n2k4m7q9xz is now blocked: wrong file.",
+    )
+    expect(MemoryText.ended(task({ state: "done" }))).toBe("Task t8n2k4m7q9xz is now done.")
+  })
+})

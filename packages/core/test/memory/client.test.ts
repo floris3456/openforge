@@ -57,6 +57,91 @@ describe("MemoryClient", () => {
     }),
   )
 
+  it.live("makes, lists, reads and changes tasks, and start answers the chat's task and subtask", () =>
+    Effect.gen(function* () {
+      const h = yield* setup
+      const made = yield* h.client.make(project, { title: "Move the checks", description: "One script.", by })
+      expect(made.existing).toBe(false)
+      expect(made.task).toMatchObject({
+        title: "Move the checks",
+        state: "todo",
+        parent: null,
+        by: { person: "floris" },
+      })
+      const sub = (yield* h.client.make(project, { title: "The first part", parent: made.task.id, by })).task
+      expect((yield* h.client.make(project, { title: "Move the checks", by })).existing).toBe(true)
+      const active = yield* h.client.change(project, sub.id, {
+        state: "active",
+        by: { role: "general", chat: "ses_w" },
+      })
+      expect(active.worker).toEqual({ person: "floris", role: "general", chat: "ses_w" })
+      const entry = yield* h.client.write(project, {
+        kind: "unverified",
+        text: "The part starts in scripts/.",
+        basis: "read the tree",
+        scope: "task",
+        by: { ...by, task: made.task.id, subtask: sub.id },
+      })
+      expect(entry.entry).toMatchObject({ scope: "task", task: made.task.id, subtask: sub.id })
+      expect((yield* h.client.tasks(project)).tasks.map((task) => task.id)).toEqual([sub.id, made.task.id])
+      const read = yield* h.client.task(project, made.task.id)
+      expect(read.subtasks.map((task) => task.id)).toEqual([sub.id])
+      expect(read.entries.map((item) => item.id)).toEqual([entry.entry.id])
+      const started = yield* h.client.start(project, {
+        prompt: "the checks",
+        scopes: { global: true, roles: ["build"], tasks: [made.task.id] },
+        limit: 5,
+        task: made.task.id,
+        subtask: sub.id,
+        by,
+      })
+      // The task and the subtask as reading them answers.
+      expect(started.task).toEqual(read)
+      expect(started.subtask).toEqual(yield* h.client.task(project, sub.id))
+      expect(started.counts.task).toBe(1)
+
+      // An older server answers the task without changes and the subtask as a task alone: no changes, nothing noted.
+      yield* h.client.change(project, sub.id, { state: "review", note: "half done", by })
+      h.server.control.answer = async (request) => {
+        const answer = await fetch(`${h.server.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify(request.body),
+        })
+        const body = (await answer.json()) as {
+          task: { task: unknown; subtasks: unknown; entries: unknown } | null
+          subtask: { task: unknown } | null
+        }
+        return Response.json(
+          {
+            ...body,
+            task: body.task && { task: body.task.task, subtasks: body.task.subtasks, entries: body.task.entries },
+            subtask: body.subtask && body.subtask.task,
+          },
+          { status: answer.status },
+        )
+      }
+      const older = yield* h.client.start(project, {
+        prompt: "the checks",
+        scopes: { global: true, roles: ["build"], tasks: [made.task.id] },
+        limit: 5,
+        task: made.task.id,
+        subtask: sub.id,
+        by,
+      })
+      h.server.control.answer = undefined
+      const subRead = yield* h.client.task(project, sub.id)
+      expect(subRead.changes[0]).toMatchObject({ state: "review", note: "half done" })
+      expect(older.task).toEqual({ ...(yield* h.client.task(project, made.task.id)), changes: [] })
+      expect(older.subtask).toEqual({ task: subRead.task, changes: [], subtasks: [], entries: [] })
+      const missing = yield* h.client.task(project, "000000000000").pipe(Effect.flip)
+      expect(missing.message).toBe("There is no task 000000000000 in this project's memory.")
+      expect((yield* h.client.change("other-project", sub.id, { state: "done", by }).pipe(Effect.flip))._tag).toBe(
+        "MemoryClient.MissingTask",
+      )
+    }),
+  )
+
   it.live(
     "answers a write's near entries with their scores, none for a copy, and none from a server without near",
     () =>

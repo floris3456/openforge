@@ -8,6 +8,7 @@ import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
 import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
+import { MemoryTask } from "../../memory/task.js"
 import { Model } from "../../model.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
@@ -50,6 +51,9 @@ export const Input = Schema.Struct({
     description:
       "Run the subagent in the background and return immediately. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress.",
   }),
+  taskID: Schema.optionalKey(Schema.String).annotate({
+    description: "The id of a task (the task tool) this subagent is to work on; give it whenever the work is a task",
+  }),
 })
 
 export const Output = Schema.Struct({
@@ -77,6 +81,7 @@ export const Plugin = {
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
     const continuity = yield* SessionContinuity.Service
+    const tasks = yield* MemoryTask.Service
 
     // A foreground call waits in a way that survives a stop: the child rests and resumes itself, and the rerun of
     // this call waits for it again.
@@ -84,6 +89,7 @@ export const Plugin = {
       recovery: Extract<Job.Recovery, { kind: "subagent" }>,
       sessionID: SessionSchema.ID,
       callID: string,
+      ended?: (output: string) => Effect.Effect<string>,
     ) {
       const child = recovery.childSessionID
       const result = yield* continuity
@@ -96,7 +102,7 @@ export const Plugin = {
           ),
         )
       if (result?.type === "backgrounded") {
-        yield* subagents.notify(recovery, result.info.started_at)
+        yield* subagents.notify(recovery, result.info.started_at, ended)
         return backgroundResult(child)
       }
       // The stop interrupted the child first; the next process waits for it again.
@@ -108,11 +114,8 @@ export const Plugin = {
         })
       if (result?.info.status === "cancelled")
         return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child})` })
-      return {
-        sessionID: child,
-        status: "completed" as const,
-        output: result?.info.output ?? SubagentCompletion.NO_TEXT,
-      }
+      const output = result?.info.output ?? SubagentCompletion.NO_TEXT
+      return { sessionID: child, status: "completed" as const, output: ended ? yield* ended(output) : output }
     })
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
@@ -156,6 +159,15 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              // A new child started on a task: its maker gets the task's state when it ends.
+              const ended =
+                input.taskID === undefined || input.sessionID !== undefined
+                  ? undefined
+                  : (output: string) =>
+                      sessions.get(context.sessionID).pipe(
+                        Effect.flatMap((parent) => tasks.ended(parent, input.taskID!, output)),
+                        Effect.orElseSucceed(() => output),
+                      )
               const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
               if (attached) {
                 const recovery = {
@@ -167,7 +179,7 @@ export const Plugin = {
                 }
                 yield* context.progress({ sessionID: attached.childSessionID, status: "running" })
                 yield* subagents.start(recovery)
-                return yield* follow(recovery, context.sessionID, context.id)
+                return yield* follow(recovery, context.sessionID, context.id, ended)
               }
               const parent = yield* sessions
                 .get(context.sessionID)
@@ -244,6 +256,7 @@ export const Plugin = {
               }
 
               const model = override ?? agent.model ?? parent.model
+              const assigned = ended ? yield* tasks.assign(parent, input.taskID!) : undefined
               const child =
                 existing ??
                 (yield* sessions
@@ -252,6 +265,7 @@ export const Plugin = {
                     title: input.description,
                     agent: agent.id,
                     model,
+                    ...(assigned ? { metadata: assigned.metadata } : {}),
                   })
                   .pipe(
                     Effect.mapError(
@@ -259,6 +273,8 @@ export const Plugin = {
                     ),
                   ))
 
+              // Known and left so: when setting the task active fails, the child session made above already exists.
+              if (assigned) yield* tasks.activate(assigned, { id: child.id, role: agent.id })
               const background = input.background === true
               yield* context.progress({ sessionID: child.id, status: "running" })
 
@@ -289,11 +305,13 @@ export const Plugin = {
               yield* subagents.start(recovery)
 
               if (background) {
-                yield* subagents.background(recovery)
+                // Known and left so: the task line of a background child is lost when the process restarts before the
+                // notice is delivered (`SessionRestart` delivers it without `ended`).
+                yield* subagents.background(recovery, ended)
                 return backgroundResult(child.id)
               }
 
-              return yield* follow(recovery, context.sessionID, context.id)
+              return yield* follow(recovery, context.sessionID, context.id, ended)
             }).pipe(
               Effect.map((output) => ({
                 output,

@@ -20,9 +20,17 @@ afterAll(async () => {
   await fake.stop()
 })
 
+// The group "tasks" runs only against a server whose capabilities say `tasks`, as openforge offers the task tool.
+const url = server?.url ?? process.env.MEMORY_CONTRACT_URL!
+const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
+  headers: { authorization: `Bearer ${server ? "contract-key-one" : process.env.MEMORY_CONTRACT_KEY}` },
+}).then((response) => response.json() as Promise<{ pacer?: { memory?: { tasks?: unknown } } }>)
+const tasks = capabilities.pacer?.memory?.tasks === true
+
 memoryContract(
   server
     ? {
+        tasks,
         url: server.url,
         key: "contract-key-one",
         person: "floris",
@@ -41,5 +49,6 @@ memoryContract(
             }
           : undefined,
         embedding: { fake, key: process.env.MEMORY_CONTRACT_EMBEDDING_KEY },
+        tasks,
       },
 )

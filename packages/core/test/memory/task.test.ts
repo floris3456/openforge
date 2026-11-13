@@ -82,6 +82,34 @@ describe("MemoryText tasks", () => {
     expect(long).not.toContain("What was noted")
   })
 
+  test("in the start block the assignment comes before the opening and the notes after it, cut together", () => {
+    const started = (description: string, entries: MemoryClient.Entry[]): MemoryClient.Started => ({
+      recall: "r",
+      entries: [],
+      meaning: false,
+      counts: { global: 0, role: 0, task: entries.length },
+      task: { task: task({ description }), subtasks: [], entries },
+      subtask: null,
+    })
+    const tools = { recall: true, remember: false }
+    const lines = MemoryText.block(started("One script.", [entry("e1", "Noted.")]), "build", tools, true).split("\n")
+    expect(lines.slice(0, 2)).toEqual(["Your task [t8n2k4m7q9xz]: Move the checks (todo)", "One script."])
+    expect(lines[2]).toStartWith("Memory: what agents and people of this project noted earlier.")
+    expect(lines.slice(3, 5)).toEqual([
+      "What was noted in the task, newest first:",
+      MemoryText.entry(entry("e1", "Noted.")),
+    ])
+    const cut = MemoryText.block(
+      started("d".repeat(5_000), [entry("e1", "x".repeat(900))]),
+      "build",
+      tools,
+      true,
+    ).split("\n")
+    expect(cut[1]).toBe("d".repeat(4_000 - 50) + "…")
+    expect(cut[2]).toStartWith("Memory: what agents")
+    expect(cut.join("\n")).not.toContain("What was noted")
+  })
+
   test("a subtask of a task not listed stands on its own in the list", () => {
     const sub = task({ id: "s1", parent: "gone", title: "Left over", state: "active", worker: who })
     expect(MemoryText.tasks({ tasks: [sub], more: false }, () => false)).toBe(

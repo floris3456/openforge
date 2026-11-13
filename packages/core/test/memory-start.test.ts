@@ -666,38 +666,79 @@ describe("MemoryStart inside a task", () => {
       Effect.orDie,
     )
 
-  it.live("begins with the task, its description and what was noted in it; the counts say how many", () =>
+  it.live(
+    "begins with the task and its description; what was noted in it and the nearest entries come under the opening",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({
+          inside: (project) =>
+            make(project, "Move the checks", "One script.\nDone when it passes.").pipe(
+              Effect.map((task) => {
+                ids.task = task.id
+                return { task: task.id }
+              }),
+            ),
+        })
+        const noted = yield* note(h.project, "The script is scripts/check.ts.")
+        const global = yield* h.write({
+          kind: "verified",
+          text: "Zebra deploys run at noon.",
+          basis: "cron",
+          scope: "global",
+        })
+        yield* h.prompt("zebra deploys")
+        expect(userTexts(h.requests()[0])[1]).toBe(
+          [
+            `Your task [${ids.task}]: Move the checks (todo)`,
+            "One script.",
+            "Done when it passes.",
+            opening,
+            "What was noted in the task, newest first:",
+            MemoryText.entry(noted),
+            "What memory holds nearest to this prompt; it may not be about it:",
+            MemoryText.entry(global),
+            `Memory holds 1 global entry and 0 of role build, 1 of this task${look}`,
+            keep,
+          ].join("\n"),
+        )
+        expect(h.starts()[0]?.body).toMatchObject({
+          scopes: { global: true, roles: ["build"], tasks: [ids.task] },
+          task: ids.task,
+          subtask: null,
+          by: { role: "build", chat: h.sessionID, task: ids.task },
+        })
+      }),
+  )
+
+  it.live("with nothing noted in the task, the notes are left out with their heading", () =>
     Effect.gen(function* () {
       const h = yield* setup({
         inside: (project) =>
-          make(project, "Move the checks", "One script.\nDone when it passes.").pipe(
+          make(project, "Move the checks", "One script.").pipe(
             Effect.map((task) => {
               ids.task = task.id
               return { task: task.id }
             }),
           ),
       })
-      const noted = yield* note(h.project, "The script is scripts/check.ts.")
-      yield* h.prompt("go on")
+      const global = yield* h.write({
+        kind: "verified",
+        text: "Zebra deploys run at noon.",
+        basis: "cron",
+        scope: "global",
+      })
+      yield* h.prompt("zebra deploys")
       expect(userTexts(h.requests()[0])[1]).toBe(
         [
           `Your task [${ids.task}]: Move the checks (todo)`,
           "One script.",
-          "Done when it passes.",
-          "What was noted in the task, newest first:",
-          MemoryText.entry(noted),
           opening,
-          // The task's entry counts for when to recall.
-          `Memory holds 0 global entries and 0 of role build, 1 of this task${look}`,
+          "What memory holds nearest to this prompt; it may not be about it:",
+          MemoryText.entry(global),
+          `Memory holds 1 global entry and 0 of role build, 0 of this task${look}`,
           keep,
         ].join("\n"),
       )
-      expect(h.starts()[0]?.body).toMatchObject({
-        scopes: { global: true, roles: ["build"], tasks: [ids.task] },
-        task: ids.task,
-        subtask: null,
-        by: { role: "build", chat: h.sessionID, task: ids.task },
-      })
     }),
   )
 
@@ -748,10 +789,15 @@ describe("MemoryStart inside a task", () => {
         written.push(yield* note(h.project, `Entry ${n} ${"e".repeat(300)}.`))
       yield* h.prompt("go on")
       const block = userTexts(h.requests()[0])[1] ?? ""
-      const part = block.slice(0, block.indexOf(opening) - 1)
+      // The assignment above the opening and the notes under it are bounded together.
+      const assignment = block.slice(0, block.indexOf(`\n${opening}\n`))
+      const notes = block.slice(block.indexOf(`${opening}\n`) + opening.length + 1, block.indexOf("\nMemory holds "))
+      expect(assignment).toBe(`Your task [${ids.task}]: Long task (todo)\n${long}`)
+      expect(notes).toStartWith("What was noted in the task, newest first:\n")
+      const part = `${assignment}\n${notes}`
       expect([...part].length).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
+      expect([...part].length).toBeGreaterThan(MemoryText.TASK_CHARACTERS - 400)
       // The newest entries are there, the oldest are not.
-      // The newest first: at most 20 come from the server, and those that fit are the newest of them.
       const kept = written.filter((entry) => part.includes(entry.id))
       expect(kept.length).toBeGreaterThan(0)
       expect(kept.length).toBeLessThan(written.length)

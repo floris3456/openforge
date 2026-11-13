@@ -56,14 +56,16 @@ export function block(
   tools: { readonly recall: boolean; readonly remember: boolean },
   inside?: boolean,
 ) {
-  const part = started.task ? [task(started.task, started.subtask ?? undefined)] : []
+  // The task's title and description are the chat's assignment; what was noted in it is memory, under the opening.
+  const part = started.task ? taskParts(started.task, started.subtask ?? undefined) : { assignment: [], notes: [] }
   const tasked = inside ? `, ${started.counts.task} of this task` : ""
   const held = started.counts.global + started.counts.role + (inside ? started.counts.task : 0)
   const finds = held > 0 ? `; recall finds them: ${look}` : "; recall finds them"
   const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tasked}${tools.recall ? finds : ""}.`
   return [
-    ...part,
+    ...part.assignment,
     opening,
+    ...part.notes,
     ...(started.entries.length === 0
       ? []
       : ["What memory holds nearest to this prompt; it may not be about it:", ...started.entries.map(entry)]),
@@ -76,10 +78,23 @@ export function block(
 export const TASK_CHARACTERS = 4_000
 
 /**
- * The task part of a start block: the chat's task, or its subtask with the task it is part of, and what was noted in
- * the task. Within {@link TASK_CHARACTERS}: the entries go from the oldest, then the description is cut from its end.
+ * The task part as `task` answers it when a chat sets a task active: the chat's task, or its subtask with the task it
+ * is part of, then what was noted in the task.
  */
 export function task(
+  started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
+  subtask?: MemoryClient.Task,
+) {
+  const part = taskParts(started, subtask)
+  return [...part.assignment, ...part.notes].join("\n")
+}
+
+/**
+ * The task part's lines: the assignment (the task or subtask, the task it is part of, the description) and the notes
+ * (what was noted in the task). Together within {@link TASK_CHARACTERS}: the notes go from the oldest, then the
+ * description is cut from its end.
+ */
+function taskParts(
   started: { readonly task: MemoryClient.Task; readonly entries: ReadonlyArray<MemoryClient.Entry> },
   subtask?: MemoryClient.Task,
 ) {
@@ -88,22 +103,19 @@ export function task(
     `Your task [${own.id}]: ${own.title} (${own.state})`,
     ...(subtask ? [`Part of task [${started.task.id}]: ${started.task.title}.`] : []),
   ]
-  const text = (description: string, entries: ReadonlyArray<MemoryClient.Entry>) =>
-    [
-      ...head,
-      ...(description ? [description] : []),
-      ...(entries.length ? ["What was noted in the task, newest first:", ...entries.map(entry)] : []),
-    ].join("\n")
-  const length = (value: string) => [...value].length
+  const parts = (description: string, entries: ReadonlyArray<MemoryClient.Entry>) => ({
+    assignment: [...head, ...(description ? [description] : [])],
+    notes: entries.length ? ["What was noted in the task, newest first:", ...entries.map(entry)] : [],
+  })
+  const length = (part: ReturnType<typeof parts>) => [...[...part.assignment, ...part.notes].join("\n")].length
   const kept = started.entries.findLastIndex(
-    (_, index) => length(text(own.description, started.entries.slice(0, index + 1))) <= TASK_CHARACTERS,
+    (_, index) => length(parts(own.description, started.entries.slice(0, index + 1))) <= TASK_CHARACTERS,
   )
-  if (kept >= 0) return text(own.description, started.entries.slice(0, kept + 1))
-  const bare = text("", [])
-  if (length(text(own.description, [])) <= TASK_CHARACTERS) return text(own.description, [])
+  if (kept >= 0) return parts(own.description, started.entries.slice(0, kept + 1))
+  if (length(parts(own.description, [])) <= TASK_CHARACTERS) return parts(own.description, [])
   // What is left for the description, with its line break and the cut's mark.
-  const room = TASK_CHARACTERS - length(bare) - 2
-  return text(room > 0 ? [...own.description].slice(0, room).join("") + "…" : "", [])
+  const room = TASK_CHARACTERS - length(parts("", [])) - 2
+  return parts(room > 0 ? [...own.description].slice(0, room).join("") + "…" : "", [])
 }
 
 /** `task`'s list: each task with its subtasks indented under it. */

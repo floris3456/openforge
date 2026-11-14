@@ -26,6 +26,7 @@ import { SourcesChip } from "../sources/sources-chip"
 import type { TurnSources } from "../sources/sources"
 import { ImagePreview } from "@opencode/ui/image-preview"
 import { getFilename } from "@opencode/util/path"
+import { EarlierMessages } from "@opencode/util/earlier-messages"
 import { AttachmentCard } from "./attachment-card"
 import { CommentCard, commentCardTarget, quoteTooltip } from "./comment-card"
 import { TimelineSeparator } from "../components/timeline-separator"
@@ -946,7 +947,13 @@ function CompactionDivider(props: { label: string }) {
 export function SessionCompactionMessage(props: { message: SessionMessageCompaction; error: string }) {
   const i18n = useI18n()
   const data = useData()
-  const summary = () => (props.message.status === "failed" ? "" : props.message.summary)
+
+  // CLIProxyPacer's list of the person's earlier messages shows as a list below the summary (spec checkpoint, section 5).
+  const earlier = createMemo(() =>
+    props.message.status === "completed" ? EarlierMessages.split(props.message.summary) : undefined,
+  )
+
+  const summary = () => (props.message.status === "failed" ? "" : (earlier()?.summary ?? props.message.summary))
 
   const error = () => {
     if (props.message.status !== "failed") return ""
@@ -999,6 +1006,7 @@ export function SessionCompactionMessage(props: { message: SessionMessageCompact
           created={props.message.time.created}
           running={props.message.status === "running"}
           summary={summary()}
+          earlier={earlier()?.entries ?? []}
           usage={usage()}
         />
       }
@@ -1016,6 +1024,7 @@ export function SessionCompactionMessage(props: { message: SessionMessageCompact
             </div>
           </div>
         </Show>
+        <EarlierMessageList entries={earlier()?.entries ?? []} />
         <Show when={props.message.status === "running"}>
           <div role="status" class="py-2">
             <BasicTool
@@ -1046,7 +1055,14 @@ export function SessionCompactionMessage(props: { message: SessionMessageCompact
  * An automatic compaction, drawn as one divider that reads Compacting, then Compacted. Its height never changes, and
  * clicking it opens the summary.
  */
-function QuietCompaction(props: { id: string; created: number; running: boolean; summary: string; usage: string }) {
+function QuietCompaction(props: {
+  id: string
+  created: number
+  running: boolean
+  summary: string
+  earlier: ReadonlyArray<EarlierMessages.Entry>
+  usage: string
+}) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   // A new one waits out the grace (400 ms, matched in session-compaction.css) before showing Compacting; one that
@@ -1113,12 +1129,51 @@ function QuietCompaction(props: { id: string; created: number; running: boolean;
               <PacedMarkdown text={props.summary} cacheKey={props.id} streaming={false} />
             </div>
           </div>
+          <EarlierMessageList entries={props.earlier} />
           <Show when={props.usage}>
             <div class="mt-2 text-[13px] leading-text-compact text-v2-text-text-faint tabular-nums">{props.usage}</div>
           </Show>
         </div>
       </Show>
     </div>
+  )
+}
+
+/** "Your earlier messages": one line per message, `n. text`, and per gap, `n–m: see the summary`. */
+function EarlierMessageList(props: { entries: ReadonlyArray<EarlierMessages.Entry> }) {
+  const i18n = useI18n()
+
+  return (
+    <Show when={props.entries.length > 0}>
+      <div data-slot="session-compaction-earlier" class="mt-3 text-[13px] leading-text-compact">
+        <div class="text-v2-text-text-base">{i18n.t("ui.messagePart.compaction.earlier")}</div>
+        <ol class="mt-1 flex flex-col gap-1">
+          <For each={props.entries}>
+            {(entry) => (
+              <li class="flex gap-2">
+                <span class="shrink-0 tabular-nums text-v2-text-text-faint">
+                  {entry.type === "message"
+                    ? i18n.t("ui.messagePart.compaction.earlier.message", { n: entry.n })
+                    : i18n.t(
+                        entry.from === entry.to
+                          ? "ui.messagePart.compaction.earlier.gapOne"
+                          : "ui.messagePart.compaction.earlier.gap",
+                        { from: entry.from, to: entry.to },
+                      )}
+                </span>
+                <span
+                  class={
+                    entry.type === "message" ? "min-w-0 break-words text-v2-text-text-base" : "text-v2-text-text-faint"
+                  }
+                >
+                  {entry.type === "message" ? entry.text : i18n.t("ui.messagePart.compaction.earlier.gapText")}
+                </span>
+              </li>
+            )}
+          </For>
+        </ol>
+      </div>
+    </Show>
   )
 }
 

@@ -215,6 +215,7 @@ export type SessionPromptInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly pastes?: ReadonlyArray<{ readonly start: number; readonly end: number }> | undefined
   readonly metadata?: { readonly [x: string]: unknown } | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
   readonly resume?: boolean | undefined
@@ -230,6 +231,7 @@ export type SessionCommandInput = {
   readonly files?: ReadonlyArray<PromptInput.FileAttachment> | undefined
   readonly agents?: ReadonlyArray<AgentAttachment> | undefined
   readonly skills?: ReadonlyArray<PromptInput.SkillAttachment> | undefined
+  readonly pastes?: ReadonlyArray<{ readonly start: number; readonly end: number }> | undefined
   readonly delivery?: SessionInbox.Delivery | undefined
 }
 export type SessionCommandOutput = void
@@ -912,6 +914,7 @@ export type ExperimentalSessionLogOutput =
             readonly text: string
             readonly description?: string | undefined
             readonly metadata?: { readonly [x: string]: unknown } | undefined
+            readonly reminder?: boolean | undefined
           }
         }
       | {

@@ -249,6 +249,8 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
       ...message,
       metadata: meta,
       text: redact("text", message.id, message.text),
+      // The paste spans point into the text the redaction replaced.
+      pastes: undefined,
       files: message.files?.map((file, index) => ({
         ...file,
         data: "",

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-search"
+import { close, nearest, search, tokenizer, waiting, words, type Scopes } from "./memory-search"
 
 /**
  * The small memory server: the memory API (the workspace's `docs/reference/memory-api.md`) on `Bun.serve` and
@@ -29,6 +29,8 @@ export const capabilities = {
   tasks: true,
   recalls: true,
   projects: true,
+  prompt: true,
+  summary: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -53,6 +55,18 @@ const PERSON = 2000
 const JUDGES = 10
 const LABELS = ["used", "beside", "unsure"]
 const ACTS = ["superseded", "forgotten"]
+/** How many ids a prompt's `exclude` names at most, and the cosine an entry needs by default to pass. */
+const EXCLUDE = 100
+const PROMPT_FLOOR = 0.86
+/** How many parts a start's `summary` holds at most, and how many entries close to them it answers. */
+const PARTS = 16
+const SUMMARY_LIMIT = 5
+/**
+ * The cosine an entry needs to come back for a part of a summary, and the share of its text's words among the parts'
+ * at which it is left out, by default (the lead's measurement, `run/evidence/memory/summary-recall`).
+ */
+const SUMMARY_FLOOR = 0.85
+const SUMMARY_COVER = 0.55
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
 const REFUSED = [
@@ -228,13 +242,26 @@ export function startMemoryServer(input: {
   readonly port?: number
   readonly file?: string
   readonly embedding?: Embedding
+  /** The setting `memory.prompt_floor`: the cosine an entry needs to come back for a prompt. */
+  readonly promptFloor?: number
+  /** The setting `memory.summary_floor`: the cosine an entry needs to come back for a part of a start's summary. */
+  readonly summaryFloor?: number
+  /**
+   * The setting `memory.summary_cover`: an entry close to a part is left out when at least this share of its text's
+   * words are among the words of all the parts, as it then says what the summary already says.
+   */
+  readonly summaryCover?: number
 }) {
   const people = new Map(input.keys.map((item) => [item.key, item.label ?? `key-${item.key.slice(-4)}`]))
   const db = new Database(input.file ?? ":memory:", { create: true })
   db.run("pragma journal_mode = wal")
   db.run("pragma busy_timeout = 5000")
   SCHEMA.forEach((statement) => db.run(statement))
-  const store = storeOf(db, input.embedding)
+  const store = storeOf(db, input.embedding, {
+    prompt: input.promptFloor ?? PROMPT_FLOOR,
+    summary: input.summaryFloor ?? SUMMARY_FLOOR,
+    cover: input.summaryCover ?? SUMMARY_COVER,
+  })
   /** The projects switched by `project()`; `keys` null for every key. */
   const projects = new Map<
     string,
@@ -315,6 +342,11 @@ export function startMemoryServer(input: {
       "/pacer/v1/memory/:project/start": {
         POST: guarded(async (request, person, project) =>
           store.start(projectOf(project), await bodyOf(request), person),
+        ),
+      },
+      "/pacer/v1/memory/:project/prompt": {
+        POST: guarded(async (request, person, project) =>
+          store.prompt(projectOf(project), await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/tasks": {
@@ -404,7 +436,11 @@ export function startMemoryServer(input: {
   }
 }
 
-function storeOf(db: Database, embedding: Embedding | undefined) {
+function storeOf(
+  db: Database,
+  embedding: Embedding | undefined,
+  floors: { readonly prompt: number; readonly summary: number; readonly cover: number },
+) {
   const get = (project: string, id: string) =>
     db.query<Row, string[]>("select * from entry where project = ? and id = ?").get(project, id)
   const live = "superseded_by is null and deleted is null"
@@ -581,13 +617,20 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const prompt = queryOf(body.prompt, "prompt")
       const scopes = scopesOf(body.scopes)
       const kinds = kindsOf(body.kinds)
-      const limit = limitOf(body.limit)
+      // 0: the prompt's entries come from `prompt`, so no search runs and nothing is logged.
+      const limit = body.limit === 0 ? 0 : limitOf(body.limit)
       if (body.task !== undefined && body.task !== null && typeof body.task !== "string")
         refuse("task: must be a task id or null")
       if (body.subtask !== undefined && body.subtask !== null && typeof body.subtask !== "string")
         refuse("subtask: must be a task id or null")
+      const summary = summaryOf(body.summary)
+      const exclude = excludeOf(body.exclude)
       const by = { person, ...byOf(body.by) }
-      const answer = await found({ project, query: prompt, scopes, kinds, limit })
+      const answer = summary
+        ? { ...(await closeToSummary({ project, summary, scopes, exclude })), waiting: 0 }
+        : limit === 0
+          ? { entries: [], meaning: false, waiting: 0 }
+          : await found({ project, query: prompt, scopes, kinds, limit })
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
       const count = (scope: string, list: string[] | "all") =>
         db
@@ -596,7 +639,11 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
              and (? or coalesce(role, task) in (select value from json_each(?)))`,
           )
           .get(project, scope, list === "all" ? 1 : 0, JSON.stringify(list === "all" ? [] : list))?.n ?? 0
-      const recall = logged(project, "start", prompt, body, answer, by)
+      const recall = summary
+        ? logged(project, "summary", summary.join("\n\n"), body, answer, by)
+        : limit === 0
+          ? null
+          : logged(project, "start", prompt, body, answer, by)
       catchUp()
       // Only a task that has no parent is a chat's task; its subtask only when it is one of that task's.
       const task = typeof body.task === "string" ? getTask(project, body.task) : null
@@ -613,6 +660,32 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           task: count("task", scopes === "all" ? "all" : scopes.tasks),
         },
       })
+    },
+
+    /** The entries that match a person's prompt closely: first 2 by meaning and by words, at the floor; or none. */
+    async prompt(project: string, body: Fields, person: string) {
+      const prompt = queryOf(body.prompt, "prompt")
+      const scopes = scopesOf(body.scopes)
+      const exclude = excludeOf(body.exclude)
+      const by = { person, ...byOf(body.by) }
+      const vector = (await embed([prompt], QUERY_MS))?.[0]
+      const entries =
+        vector && embedding
+          ? close<Row>(db, {
+              project,
+              query: prompt,
+              scopes,
+              kinds: KINDS,
+              exclude,
+              vector,
+              model: embedding.model,
+              floor: floors.prompt,
+            }).map((row) => ({ ...entryOf(row), score: row.score }))
+          : []
+      const answer = { entries, meaning: vector !== undefined }
+      const recall = logged(project, "prompt", prompt, body, answer, by)
+      catchUp()
+      return Response.json({ recall, ...answer })
     },
 
     export(project: string) {
@@ -745,7 +818,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const kind = cursor
         ? cursor.kind
         : params.has("kind")
-          ? oneOf(params.get("kind"), ["search", "start"], "kind")
+          ? oneOf(params.get("kind"), ["search", "start", "prompt", "summary"], "kind")
           : null
       const rows = db
         .query<RecallRow, (string | number | null)[]>(
@@ -853,6 +926,48 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   }
 
   /** Vectors of length 1 for `inputs`, in their order, or undefined when the endpoint fails or is too slow. */
+  /**
+   * The entries close to any part of a start's summary, each part by the rule of a prompt with the summary's floor:
+   * without repeats, each with its best score, best first, at most 5; none without the parts' vectors. An entry whose
+   * text's words are at least the cover's share among the parts' words is left out.
+   */
+  async function closeToSummary(input: {
+    readonly project: string
+    readonly summary: string[]
+    readonly scopes: Scopes
+    readonly exclude: string[]
+  }) {
+    const vectors = await embed(input.summary, QUERY_MS)
+    if (!vectors || !embedding) return { entries: [], meaning: false }
+    const said = new Set(input.summary.flatMap(words))
+    const covered = (row: Row) => {
+      const own = words(row.text ?? "")
+      return own.length > 0 && own.filter((word) => said.has(word)).length / own.length >= floors.cover
+    }
+    const best = new Map<string, Row & { score: number }>()
+    input.summary.forEach((part, index) =>
+      close<Row>(db, {
+        project: input.project,
+        query: part,
+        scopes: input.scopes,
+        kinds: KINDS,
+        exclude: input.exclude,
+        vector: vectors[index]!,
+        model: embedding.model,
+        floor: floors.summary,
+      }).forEach((row) => {
+        if (!covered(row) && (best.get(row.id)?.score ?? -Infinity) < row.score) best.set(row.id, row)
+      }),
+    )
+    return {
+      entries: [...best.values()]
+        .toSorted((a, b) => b.score - a.score)
+        .slice(0, SUMMARY_LIMIT)
+        .map((row) => ({ ...entryOf(row), score: row.score })),
+      meaning: true,
+    }
+  }
+
   async function embed(inputs: string[], ms: number) {
     if (!embedding) return undefined
     const response = await fetch(`${embedding.url.replace(/\/+$/, "")}/embeddings`, {
@@ -904,7 +1019,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   /** Logs a search or a start: its scopes and kinds as the request sent them. */
   function logged(
     project: string,
-    kind: "search" | "start",
+    kind: "search" | "start" | "prompt" | "summary",
     query: string,
     body: Fields,
     answer: { entries: { id: string }[]; meaning: boolean },
@@ -985,6 +1100,26 @@ function said(value: unknown, field: string, most: number) {
   if (typeof value !== "string" || ![...value].length || [...value].length > most)
     refuse(`${field}: must be 1 to ${most} characters`)
   return value
+}
+
+/** A start's `summary`: absent, or 1 to 16 parts of 1 to 2,000 characters. */
+function summaryOf(value: unknown) {
+  if (value === undefined || value === null) return undefined
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > PARTS ||
+    !value.every((part) => typeof part === "string" && part && [...part].length <= capabilities.query_characters)
+  )
+    refuse(`summary: must be a list of 1 to ${PARTS} parts of 1 to ${capabilities.query_characters} characters`)
+  return value.filter((part): part is string => typeof part === "string")
+}
+
+function excludeOf(value: unknown) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > EXCLUDE || !value.every((item) => typeof item === "string"))
+    refuse(`exclude: must be a list of at most ${EXCLUDE} entry ids`)
+  return value.filter((item): item is string => typeof item === "string")
 }
 
 function actedOf(value: unknown) {

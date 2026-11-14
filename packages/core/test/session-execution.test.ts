@@ -281,6 +281,8 @@ describe("SessionExecution lifecycle", () => {
           text: "The server restarted while you were working. Continue from where you left off without repeating completed work.",
           description: "Continuing after restart",
           metadata: { notice: "restart" },
+          // Marked when published, so the model gets it inside `<system-reminder>` (spec checkpoint).
+          reminder: true,
         })),
       )
       // Drains completed naturally, so claims are released and counters reset.

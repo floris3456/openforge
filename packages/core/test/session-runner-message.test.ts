@@ -52,6 +52,62 @@ describe("toLLMMessages", () => {
     ])
   })
 
+  // Spec checkpoint, sections 1 and 2.
+  test("a marked synthetic message reaches the model inside <system-reminder>; an unmarked one as it always did", () => {
+    const synthetic = (value: string, text: string, reminder?: boolean) =>
+      SessionMessage.Synthetic.make({
+        id: id(value),
+        type: "synthetic",
+        text,
+        ...(reminder ? { reminder } : {}),
+        time: { created },
+      })
+    expect(
+      toLLMMessages(
+        [
+          synthetic("old", "Memory: an old block"),
+          synthetic("new", "Memory: a new block", true),
+          synthetic("wrapped", "<system-reminder>\nPlan mode is active.\n</system-reminder>", true),
+        ],
+        model,
+      ),
+    ).toEqual([
+      Message.make({ id: id("old"), role: "user", content: "Memory: an old block" }),
+      Message.make({
+        id: id("new"),
+        role: "user",
+        content: "<system-reminder>\nMemory: a new block\n</system-reminder>",
+      }),
+      // Its publisher wrapped it already: not twice.
+      Message.make({
+        id: id("wrapped"),
+        role: "user",
+        content: "<system-reminder>\nPlan mode is active.\n</system-reminder>",
+      }),
+    ])
+  })
+
+  test("each pasted span of a user message reaches the model inside <paste>; a message without spans unchanged", () => {
+    const user = (value: string, text: string, pastes?: ReadonlyArray<{ start: number; end: number }>) =>
+      SessionMessage.User.make({ id: id(value), type: "user", text, ...(pastes ? { pastes } : {}), time: { created } })
+    const text = "see A\nB and C\nD end"
+    expect(
+      toLLMMessages(
+        [
+          user("old", text),
+          user("new", text, [
+            { start: 4, end: 7 },
+            { start: 12, end: 15 },
+          ]),
+        ],
+        model,
+      ).map((message) => message.content),
+    ).toEqual([
+      [{ type: "text", text }],
+      [{ type: "text", text: "see <paste>A\nB</paste> and <paste>C\nD</paste> end" }],
+    ])
+  })
+
   test("omits empty assistant turns", () => {
     const assistant = (value: string, content: SessionMessage.Assistant["content"]) =>
       SessionMessage.Assistant.make({

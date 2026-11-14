@@ -20,6 +20,7 @@ import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryStart } from "@opencode/core/memory/start"
 import { MemoryText } from "@opencode/core/memory/text"
+import { MemoryPromptTable } from "@opencode/core/memory/prompt.sql"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -50,6 +51,7 @@ import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { eq } from "drizzle-orm"
 import { Context, Effect, Fiber, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
@@ -60,19 +62,23 @@ import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin } from "./lib/tool"
 import { settle, until } from "./pacer/fake-tools"
 import { catalogOf, endpointAt, key, startProxied } from "./memory/fixture"
+import { startFakeEmbedding } from "./pacer/memory-embedding"
 
 // The start block through the real runner: what each model request holds, over the small memory server. One server
 // for the file; each test works in a project of its own.
 
 const server = startProxied()
+const defaultServer = server
 afterAll(() => server.stop())
+/** A server with memory as before prompts were answered: the start block holds the entries nearest the prompt. */
+const today = () => catalogOf(true, { prompt: false })
 
 /**
  * What the memory side sees, in the test's hands, as openforge's own services give it: each change is announced, as
  * a live service's catalog read is.
  */
 const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
-const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(catalogOf(true)))
+const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(today()))
 const pacer = {
   get endpoint() {
     return Effect.runSync(SubscriptionRef.get(endpointRef))
@@ -284,10 +290,14 @@ const setup = Effect.fnUntraced(function* (
     readonly child?: boolean
     /** The task the chat is inside: `inside` makes it from the chat's project before the chat is stored. */
     readonly inside?: (project: string) => Effect.Effect<{ task: string; subtask?: string }>
+    /** The server the chat's memory is on, and its catalog: the file's one, as before prompts were answered. */
+    readonly served?: ReturnType<typeof startProxied>
+    readonly catalog?: PacerModels.Catalog
   } = {},
 ) {
+  const server = input.served ?? defaultServer
   pacer.endpoint = endpointAt(server.origin)
-  pacer.catalog = catalogOf(true)
+  pacer.catalog = input.catalog ?? today()
   server.reset()
   server.control.answer = undefined
   const { db } = yield* Database.Service
@@ -391,6 +401,11 @@ const setup = Effect.fnUntraced(function* (
         .stage({ sessionID, messageID, files: false })
         .pipe(Effect.andThen(session.revert.commit(sessionID)), Effect.orDie),
     starts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/start`),
+    /** The prompt calls of this chat's project. */
+    prompts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/prompt`),
+    /** The prompts recorded as asked without a message. */
+    asked: () =>
+      db.select().from(MemoryPromptTable).where(eq(MemoryPromptTable.session_id, sessionID)).all().pipe(Effect.orDie),
     /** What followed a search that was sent, for one row or all. */
     afters: (recall?: string) =>
       server
@@ -430,13 +445,21 @@ const setup = Effect.fnUntraced(function* (
 
 const names = (request: LLMRequest | undefined) =>
   (request?.tools ?? []).map((tool) => tool.name).filter((name) => name !== "execute")
-const blocksIn = (request: LLMRequest | undefined) => userTexts(request).filter((text) => text.startsWith("Memory"))
+const blocksIn = (request: LLMRequest | undefined) =>
+  userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory"))
 
 /** The texts of a request's user-role messages, in order: prompts and synthetic messages alike. */
 const userTexts = (request: LLMRequest | undefined) =>
   (request?.messages ?? []).flatMap((message) =>
     message.role === "user" ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])) : [],
   )
+// Memory's blocks are synthetic messages, which the model gets inside `<system-reminder>` (spec checkpoint, section 1).
+const sent = (text: string) => `<system-reminder>\n${text}\n</system-reminder>`
+const unsent = (text: string | undefined) => {
+  expect(text).toStartWith("<system-reminder>\n")
+  expect(text).toEndWith("\n</system-reminder>")
+  return (text ?? "").slice("<system-reminder>\n".length, -"\n</system-reminder>".length)
+}
 const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
@@ -476,7 +499,7 @@ describe("MemoryStart through the runner", () => {
         `Memory holds 1 global entry and 1 of role build; recall finds them.`,
         keep,
       ].join("\n")
-      expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", block])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", sent(block)])
       expect(yield* h.blocks()).toEqual([block])
       for (const id of [otherRole.id, otherProject.id]) expect(block).not.toContain(id)
       expect(h.starts().map((call) => call.body)).toEqual([
@@ -498,14 +521,14 @@ describe("MemoryStart through the runner", () => {
       for (const n of [1, 2, 3, 4, 5, 6, 7])
         yield* h.write({ kind: "unverified", text: `Quokka note ${n}.`, basis: "b", scope: "role" })
       yield* h.prompt("quokka ".repeat(400))
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       expect(block.split("\n").filter((line) => line.startsWith("- ["))).toHaveLength(5)
       expect((h.starts()[0]?.body as { prompt: string }).prompt).toBe("quokka ".repeat(400).slice(0, 2_000))
 
       const empty = yield* setup()
       yield* empty.prompt("nothing is stored here")
       expect(userTexts(empty.requests()[0])[1]).toBe(
-        [opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n"),
+        sent([opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n")),
       )
     }),
   )
@@ -522,11 +545,13 @@ describe("MemoryStart through the runner", () => {
       yield* h.prompt("echo twice")
       const requests = h.requests()
       expect(requests).toHaveLength(3)
-      const blocks = requests.map((request) => userTexts(request).filter((text) => text.startsWith("Memory:")))
+      const blocks = requests.map((request) =>
+        userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:")),
+      )
       expect(blocks[0]).toHaveLength(1)
       expect(blocks[1]).toEqual(blocks[0])
       expect(blocks[2]).toEqual(blocks[0])
-      expect(yield* h.blocks()).toEqual(blocks[0])
+      expect((yield* h.blocks()).map(sent)).toEqual(blocks[0]!)
       expect(h.starts()).toHaveLength(1)
     }),
   )
@@ -556,7 +581,7 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(zebra.id)
       expect(blocks[1]).toContain(quokka.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last.filter((text) => text.startsWith("Memory:"))).toEqual([blocks[1]])
+      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual(blocks.slice(1, 2).map(sent))
     }),
   )
 
@@ -588,7 +613,7 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(walrus.id)
       expect(blocks[0]).not.toContain(zebra.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last).toEqual(["zebra deploys?", "walrus lint?", blocks[0]])
+      expect(last).toEqual(["zebra deploys?", "walrus lint?", ...blocks.slice(0, 1).map(sent)])
     }),
   )
 
@@ -602,7 +627,7 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* h.prompt("walrus lint?")
       expect(yield* h.blocks()).toEqual([MemoryText.unavailable])
-      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(MemoryText.unavailable)
+      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(sent(MemoryText.unavailable))
     }),
   )
 
@@ -612,7 +637,7 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () =>
         Response.json({ error: { type: "unavailable", message: "store not open" } }, { status: 503 })
       yield* h.prompt("zebra?")
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
       expect(MemoryText.unavailable).toBe("Memory is unavailable right now, so this chat starts without it.")
 
       const k = yield* setup()
@@ -625,7 +650,9 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* k.prompt("quokka?")
       expect(yield* k.blocks()).toEqual([first, first])
-      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("Memory:"))).toEqual([first])
+      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([
+        sent(first ?? ""),
+      ])
     }),
   )
 
@@ -639,7 +666,7 @@ describe("MemoryStart through the runner", () => {
       expect(h.requests()).toHaveLength(0)
       yield* TestClock.adjust("2 seconds")
       yield* Fiber.join(run)
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
     }),
   )
 
@@ -672,7 +699,7 @@ describe("MemoryStart through the runner", () => {
         const gate = yield* h.llm.gate()
         const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
         yield* gate.started
-        pacer.catalog = catalogOf(true)
+        pacer.catalog = today()
         yield* gate.release
         yield* Fiber.join(run)
         // Whether the server has tasks is known only once its catalog is read: till the next compaction, none.
@@ -693,7 +720,7 @@ describe("MemoryStart through the runner", () => {
       )
       const lead = yield* h.write({ kind: "unverified", text: "Zebra builds are slow.", basis: "felt", scope: "role" })
       yield* h.prompt("where are the zebra files?")
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       expect(block).toContain(own.id)
       expect(block).not.toContain(lead.id)
       expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore; recall finds them.\n${keep}`)
@@ -715,13 +742,15 @@ describe("MemoryStart through the runner", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("recall")
       expect(userTexts(request)[1]).toBe(
-        [
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
-          "Memory holds 0 global entries and 1 of role reader.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
+            "Memory holds 0 global entries and 1 of role reader.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -738,12 +767,14 @@ describe("MemoryStart through the runner", () => {
       expect(request?.tools.map((tool) => tool.name)).toContain("recall")
       expect(request?.tools.map((tool) => tool.name)).not.toContain("remember")
       expect(userTexts(request)[1]).toBe(
-        [
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
-          `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
-        ].join("\n"),
+        sent(
+          [
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
+            `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -751,7 +782,7 @@ describe("MemoryStart through the runner", () => {
 
 describe("MemoryStart while the server's memory comes and goes", () => {
   const withTasks = (tasks: boolean) => {
-    const catalog = catalogOf(true)
+    const catalog = today()
     return { ...catalog, pacer: { ...catalog.pacer!, memory: { ...catalog.pacer!.memory!, tasks } } }
   }
   const compact = (h: Effect.Success<ReturnType<typeof setup>>) =>
@@ -773,7 +804,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
         yield* start.ensure(input)
         // 0.0.31 looked up the chat's block and steps at every step boundary first: three lookups a step.
         expect(lookups.count).toBe(0)
-        pacer.catalog = catalogOf(true)
+        pacer.catalog = today()
         yield* start.ensure(input)
         expect(lookups.count).toBeGreaterThan(0)
       }).pipe(Effect.provide(AppNodeBuilder.build(MemoryStart.node, replacements)))
@@ -789,7 +820,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
       const first = h.requests()[0]
       expect(names(first)).toEqual(["echo"])
 
-      pacer.catalog = catalogOf(true)
+      pacer.catalog = today()
       yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
       yield* h.prompt("and on fridays?")
       for (const request of h.requests().slice(1)) {
@@ -879,7 +910,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
       pacer.catalog = catalogOf(false)
       yield* h.llm.push(TestLLM.text("in src", "text-src"))
       yield* h.prompt("where are the zebra files?")
-      pacer.catalog = catalogOf(true)
+      pacer.catalog = today()
       yield* h.prompt("and the quokka ones?")
       for (const request of h.requests()) expect(names(request)).toEqual(["echo"])
     }),
@@ -984,7 +1015,7 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
         const h = yield* setup()
         server.control.answer = answer
         yield* h.prompt("zebra?")
-        expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+        expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
         expect(names(h.requests()[0])).toEqual(["echo", "forget", "recall", "remember", "task"])
       }
     }),
@@ -1061,21 +1092,23 @@ describe("MemoryStart inside a task", () => {
         })
         yield* h.prompt("zebra deploys")
         expect(userTexts(h.requests()[0])[1]).toBe(
-          [
-            `Your task [${ids.task}]: Move the checks (active)`,
-            "One script.",
-            "Done when it passes.",
-            states,
-            opening,
-            "Said with the task's changes of state, newest first:",
-            `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
-            "What was noted in the task, newest first:",
-            MemoryText.entry(noted),
-            "What memory holds nearest to this prompt; it may not be about it:",
-            MemoryText.entry(global),
-            `Memory holds 1 global entry and 0 of role build, 1 of this task; recall finds them.`,
-            keep,
-          ].join("\n"),
+          sent(
+            [
+              `Your task [${ids.task}]: Move the checks (active)`,
+              "One script.",
+              "Done when it passes.",
+              states,
+              opening,
+              "Said with the task's changes of state, newest first:",
+              `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
+              "What was noted in the task, newest first:",
+              MemoryText.entry(noted),
+              "What memory holds nearest to this prompt; it may not be about it:",
+              MemoryText.entry(global),
+              `Memory holds 1 global entry and 0 of role build, 1 of this task; recall finds them.`,
+              keep,
+            ].join("\n"),
+          ),
         )
         expect(h.starts()[0]?.body).toMatchObject({
           scopes: { global: true, roles: ["build"], tasks: [ids.task] },
@@ -1105,16 +1138,18 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("zebra deploys")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.task}]: Move the checks (todo)`,
-          "One script.",
-          states,
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          MemoryText.entry(global),
-          `Memory holds 1 global entry and 0 of role build, 0 of this task; recall finds them.`,
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.task}]: Move the checks (todo)`,
+            "One script.",
+            states,
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            MemoryText.entry(global),
+            `Memory holds 1 global entry and 0 of role build, 0 of this task; recall finds them.`,
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1136,15 +1171,17 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (todo)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          "Only the lint part.",
-          states,
-          opening,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (todo)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            "Only the lint part.",
+            states,
+            opening,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
       expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
     }),
@@ -1175,18 +1212,20 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (review)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          "Only the lint part.",
-          states,
-          opening,
-          "Said with the task's changes of state, newest first:",
-          `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
-          `${said[0]} by floris as general: The old script is gone.`,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (review)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            "Only the lint part.",
+            states,
+            opening,
+            "Said with the task's changes of state, newest first:",
+            `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
+            `${said[0]} by floris as general: The old script is gone.`,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1208,14 +1247,16 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (todo)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          states,
-          opening,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (todo)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            states,
+            opening,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1237,13 +1278,15 @@ describe("MemoryStart inside a task", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("task")
       expect(userTexts(request)[1]).toBe(
-        [
-          `Your task [${ids.task}]: Move the checks (todo)`,
-          "One script.",
-          opening,
-          "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.task}]: Move the checks (todo)`,
+            "One script.",
+            opening,
+            "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1264,7 +1307,7 @@ describe("MemoryStart inside a task", () => {
       for (const n of Array.from({ length: 12 }, (_, index) => index))
         written.push(yield* note(h.project, `Entry ${n} ${"e".repeat(300)}.`))
       yield* h.prompt("go on")
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       // The assignment above the opening and the notes under it are bounded together.
       const assignment = block.slice(0, block.indexOf(`\n${opening}\n`))
       const notes = block.slice(block.indexOf(`${opening}\n`) + opening.length + 1, block.indexOf("\nMemory holds "))
@@ -1280,6 +1323,423 @@ describe("MemoryStart inside a task", () => {
       expect(kept.length).toBeLessThan(written.length)
       expect(kept).toEqual(written.slice(written.length - kept.length))
       expect(part).toContain(long)
+    }),
+  )
+})
+
+describe("MemoryPrompt through the runner", () => {
+  // A server that answers prompts, with meaning: the fake endpoint's vectors make "release" and "ship" one concept.
+  const embedding = startFakeEmbedding()
+  const prompted = startProxied({ embedding: embedding.url })
+  afterAll(() => prompted.stop().then(() => embedding.stop()))
+  const near = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ ...input, served: prompted, catalog: catalogOf(true) })
+  const line = "Memory holds these entries close to this prompt; they may be wrong or out of date:"
+  /** The user-role texts of a request as a provider gets them, roles and texts only, up to and with `prompt`. */
+  const upTo = (request: LLMRequest | undefined, prompt: string) => {
+    const messages = (request?.messages ?? []).map((message) => ({ role: message.role, content: message.content }))
+    const at = messages.findIndex((message) =>
+      JSON.stringify(message.content).includes(JSON.stringify(prompt).slice(1, -1)),
+    )
+    return JSON.stringify({ system: request?.system, tools: request?.tools, messages: messages.slice(0, at + 1) })
+  }
+
+  it.live("the start asks for no entries and the block holds none; a close entry comes right after the prompt", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const close = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.write({ kind: "verified", text: "Zebra lint is strict.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+      yield* h.prompt("how do we release")
+
+      const block = [opening, "Memory holds 2 global entries and 0 of role build; recall finds them.", keep].join("\n")
+      const message = [line, MemoryText.entry(close)].join("\n")
+      expect(message).toBe(
+        `${line}\n- [${close.id}] Releases ship through the train. (verified by floris as build; global; ${day(close)}; basis: b)`,
+      )
+      const requests = h.requests()
+      expect(requests).toHaveLength(2)
+      // The step that answers no new prompt sends the same, and asks nothing.
+      for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
+      expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
+      expect(h.prompts().map((call) => call.body)).toEqual([
+        {
+          prompt: "how do we release",
+          scopes: { global: true, roles: ["build"] },
+          exclude: [],
+          by: { role: "build", chat: h.sessionID },
+        },
+      ])
+      expect(h.prompts().map((call) => call.pacer)).toEqual([
+        {
+          "x-pacer-project": h.project,
+          "x-pacer-project-name": "project",
+          "x-pacer-session": PacerSessionID.make(h.sessionID),
+        },
+      ])
+      // Recorded by its message: no row of its own.
+      expect(yield* h.asked()).toEqual([])
+    }),
+  )
+
+  it.live("asks once for each prompt, leaves out the entries in view, and puts nothing in when none is close", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const first = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("how do we release")
+      yield* h.prompt("zebra lint")
+      const second = yield* h.write({
+        kind: "verified",
+        text: "A release is tagged first.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("and the release tag?")
+
+      expect(h.prompts().map((call) => (call.body as { exclude: string[] }).exclude)).toEqual([
+        [],
+        [first.id],
+        [first.id],
+      ])
+      const last = userTexts(h.requests().at(-1))
+      expect(last.filter((text) => text.startsWith(`<system-reminder>\n${line}`))).toEqual([
+        sent([line, MemoryText.entry(first)].join("\n")),
+        sent([line, MemoryText.entry(second)].join("\n")),
+      ])
+      // Nothing after the prompt no entry was close to: the next text is the prompt after it.
+      expect(last[last.indexOf("zebra lint") + 1]).toBe("and the release tag?")
+      expect((yield* h.asked()).map((row) => row.project)).toEqual([h.project])
+    }),
+  )
+
+  it.live("the request's bytes up to the prompt are the same with the message after it and without", () =>
+    Effect.gen(function* () {
+      const twins = []
+      for (const answer of [true, false]) {
+        const h = yield* near()
+        yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+        yield* h.llm.push(TestLLM.text("Looked.", "looked"))
+        yield* h.prompt("zebra lint")
+        if (!answer)
+          prompted.control.answer = (request) =>
+            request.path.endsWith("/prompt")
+              ? Response.json({ recall: null, entries: [], meaning: true })
+              : fetch(`${prompted.store.url}${request.path}`, {
+                  method: request.method,
+                  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+                  ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+                })
+        yield* h.prompt("how do we release")
+        prompted.control.answer = undefined
+        const request = h.requests().at(-1)
+        expect(userTexts(request).some((text) => text.startsWith(`<system-reminder>\n${line}`))).toBe(answer)
+        twins.push(upTo(request, "how do we release"))
+        // Nothing earlier changes: the step before sent what this one sends before its new messages.
+        const before = h.requests().at(-2)
+        expect(JSON.stringify(request?.messages.slice(0, before?.messages.length ?? 0).map((m) => m.content))).toBe(
+          JSON.stringify(before?.messages.map((m) => m.content)),
+        )
+      }
+      expect(twins[0]).toBe(twins[1])
+    }),
+  )
+
+  it.live("a prompt is asked once however often a step for it starts again, as after a restart", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      // A reply with nothing in it leaves no step in the chat, so the prompt stays the newest: what the record is for.
+      yield* h.prompt("zebra lint")
+      yield* h.session.resume(h.sessionID)
+      yield* h.session.resume(h.sessionID)
+      expect(h.requests()).toHaveLength(3)
+      expect(h.prompts()).toHaveLength(1)
+      expect((yield* h.asked()).length).toBe(1)
+    }),
+  )
+
+  it.effect("waits at most 2 seconds, and a timeout, an error or memory closed put nothing in", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* h.prompt("zebra lint")
+      const forward = (request: { method: string; path: string; body: unknown }) =>
+        fetch(`${prompted.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        })
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? hung.promise : forward(request))
+      const run = yield* h.prompt("how do we release").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the prompt call arrived", () => h.prompts().length === 2)
+      expect(h.requests()).toHaveLength(1)
+      yield* TestClock.adjust("2 seconds")
+      yield* Fiber.join(run)
+      for (const answer of [
+        () => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }),
+        () =>
+          Response.json(
+            { error: { type: "project_memory_off", message: "memory is off for this project" } },
+            { status: 404 },
+          ),
+      ]) {
+        prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? answer() : forward(request))
+        yield* h.prompt("how do we release again")
+      }
+      prompted.control.answer = undefined
+      expect(h.prompts()).toHaveLength(4)
+      expect(h.requests()).toHaveLength(4)
+      for (const request of h.requests())
+        expect(userTexts(request).some((text) => text.startsWith(`<system-reminder>\n${line}`))).toBe(false)
+      expect((yield* h.asked()).map((row) => row.recall)).toEqual([expect.any(String), null, null, null])
+    }),
+  )
+
+  it.live("what followed goes to the prompt's row, with a message or without", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.text("By train.", "train"))
+      yield* h.prompt("how do we release")
+      yield* h.llm.push(TestLLM.text("No idea.", "idea"))
+      yield* h.prompt("zebra lint")
+      const messaged = (yield* h.session.messages({ sessionID: h.sessionID, order: "asc" })).flatMap((message) =>
+        message.type === "synthetic" && message.metadata?.memoryPrompt
+          ? [(message.metadata.memoryPrompt as { recall: string }).recall]
+          : [],
+      )
+      const rows = (yield* h.asked()).map((row) => row.recall!)
+      expect(messaged).toHaveLength(1)
+      expect(rows).toHaveLength(1)
+      const afters = (recall: string) =>
+        prompted.calls().filter((call) => call.path.endsWith(`/recalls/${recall}/after`))
+      yield* eventually(
+        "both rows got their step",
+        () => afters(messaged[0]!).length >= 1 && afters(rows[0]!).length === 1,
+      )
+      yield* eventually("the first row got the person's next message", () => afters(messaged[0]!).length === 2)
+      expect(afters(messaged[0]!).map((call) => call.body)).toEqual([
+        { step: "By train.", acted: [], by: { role: "build", chat: h.sessionID } },
+        { person: "zebra lint", by: { role: "build", chat: h.sessionID } },
+      ])
+      expect(afters(rows[0]!).map((call) => call.body)).toEqual([
+        { step: "No idea.", acted: [], by: { role: "build", chat: h.sessionID } },
+      ])
+    }),
+  )
+
+  it.live("asks nothing on a server without prompt, in a chat without memory, or with memory closed", () =>
+    Effect.gen(function* () {
+      const old = yield* setup({ served: prompted, catalog: today() })
+      yield* old.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* old.prompt("how do we release")
+      expect(old.prompts()).toEqual([])
+      expect(userTexts(old.requests()[0])[1]).toContain("What memory holds nearest to this prompt")
+      expect((old.starts()[0]?.body as { limit: number }).limit).toBe(5)
+
+      const closed = yield* near()
+      prompted.store.project(closed.project, { memory: false })
+      yield* closed.prompt("how do we release")
+      expect(closed.starts()).toHaveLength(1)
+      expect(closed.prompts()).toEqual([])
+
+      const none = yield* near()
+      pacer.catalog = catalogOf(false)
+      yield* none.prompt("how do we release")
+      expect(prompted.calls().filter((call) => call.path.includes(none.project))).toEqual([])
+    }),
+  )
+})
+
+describe("MemoryStart after a compaction: the summary", () => {
+  // A server that answers prompts and summaries, with meaning: the fake endpoint's vectors make "release" and "ship" one
+  // concept, so the summary's part on shipping is close to the entry on releases and its other part to nothing.
+  const embedding = startFakeEmbedding()
+  const summarized = startProxied({ embedding: embedding.url })
+  afterAll(() => summarized.stop().then(() => embedding.stop()))
+  const near = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ served: summarized, catalog: catalogOf(true), ...input })
+  const line = "Memory holds these entries close to this chat's summary:"
+  const summary = "Before any heading.\n\n## Objective\nShip it soon.\n\n## Empty\n\n## Next\n- zebra lint"
+  const counts = (global: number) =>
+    `Memory holds ${global} global ${global === 1 ? "entry" : "entries"} and 0 of role build; recall finds them.`
+  type Started = { prompt: string; limit: number; summary?: string[]; exclude?: string[] }
+  const bodies = (h: Effect.Success<ReturnType<typeof setup>>) => h.starts().map((call) => call.body as Started)
+  /** A chat that had a first prompt and a compaction with `summary`, and the entry close to it. */
+  const compacted = Effect.fnUntraced(function* (input: Parameters<typeof setup>[0] = {}) {
+    const h = yield* near(input)
+    const close = yield* h.write({
+      kind: "verified",
+      text: "Releases ship through the train.",
+      basis: "b",
+      scope: "global",
+    })
+    yield* h.prompt("zebra lint?")
+    yield* h.llm.push(TestLLM.text(summary, "summary"))
+    yield* h.session.compact({ sessionID: h.sessionID })
+    return { h, close }
+  })
+
+  it.live("the block after a compaction holds the entries close to its summary, the same in every later step", () =>
+    Effect.gen(function* () {
+      const { h, close } = yield* compacted()
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+
+      const [first, again] = bodies(h)
+      // A chat's first block has no summary to search.
+      expect(first).not.toHaveProperty("summary")
+      expect(first).not.toHaveProperty("exclude")
+      expect(again).toMatchObject({
+        limit: 0,
+        summary: ["Before any heading.", "## Objective\nShip it soon.", "## Next\n- zebra lint"],
+        exclude: [],
+      })
+      const blocks = yield* h.blocks()
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0]).not.toContain(line)
+      expect(blocks[1]).toBe([opening, line, MemoryText.entry(close), counts(1), keep].join("\n"))
+      // Every step after the compaction sends the block as it was built.
+      const after = h.requests().filter((request) => userTexts(request).includes(sent(blocks[1]!)))
+      expect(after.length).toBeGreaterThanOrEqual(2)
+      for (const request of after)
+        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([sent(blocks[1]!)])
+      // Its entries are in view: a later prompt leaves them out.
+      expect(
+        h
+          .prompts()
+          .map((call) => (call.body as { exclude: string[] }).exclude)
+          .at(-1),
+      ).toContain(close.id)
+      // The summary's row is the block's.
+      const recall = yield* h.blockRecall()
+      const read = yield* Effect.promise(() =>
+        fetch(`${summarized.store.url}/pacer/v1/memory/${h.project}/recalls/${recall}`, {
+          headers: { authorization: `Bearer ${key}` },
+        }).then((response) => response.json() as Promise<{ recall: { kind: string; entries: string[] } }>),
+      )
+      expect(read.recall).toMatchObject({ kind: "summary", entries: [close.id] })
+    }),
+  )
+
+  it.live("without an entry close to the summary the block has no line", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Zebra lint is strict.", basis: "b", scope: "global" })
+      yield* h.prompt("hello")
+      yield* h.llm.push(TestLLM.text("## Objective\nPaint the shed.", "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      expect(bodies(h)[1]?.summary).toEqual(["## Objective\nPaint the shed."])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("leaves out the entries the chat still has in view among the messages the compaction kept", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const close = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("zebra lint?")
+      yield* h.llm.push(TestLLM.text("By train.", "train"))
+      // Its prompt message puts the entry in view, in the latest exchange, which the compaction keeps.
+      yield* h.prompt("how do we release")
+      yield* h.llm.push(TestLLM.text(summary, "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      const kept = (yield* h.session.messages({ sessionID: h.sessionID, order: "asc" })).find(
+        (message) => message.type === "compaction",
+      )?.metadata?.keepID
+      expect(kept).toBeDefined()
+      expect(bodies(h)[1]?.exclude).toEqual([close.id])
+      expect((yield* h.blocks())[1]).not.toContain(line)
+    }),
+  )
+
+  it.effect("waits at most 5 seconds for the summary; a timeout or an error give the block without the line", () =>
+    Effect.gen(function* () {
+      const forward = (request: { method: string; path: string; body: unknown }) =>
+        fetch(`${summarized.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        })
+      const withSummary = (request: { path: string; body: unknown }) =>
+        request.path.endsWith("/start") && (request.body as Started).summary !== undefined
+      const { h } = yield* compacted()
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      summarized.control.answer = (request) => (withSummary(request) ? hung.promise : forward(request))
+      const run = yield* h.prompt("what now?").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the start with the summary arrived", () => h.starts().length === 2)
+      yield* TestClock.adjust("2 seconds")
+      expect(h.starts()).toHaveLength(2)
+      yield* TestClock.adjust("3 seconds")
+      yield* Fiber.join(run)
+      // Asked again without the summary: the block as without one.
+      expect(bodies(h).map((body) => body.summary !== undefined)).toEqual([false, true, false])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+
+      const { h: k } = yield* compacted()
+      summarized.control.answer = (request) =>
+        withSummary(request)
+          ? Response.json({ error: { type: "invalid_request", message: "summary: no" } }, { status: 400 })
+          : forward(request)
+      yield* k.prompt("what now?")
+      summarized.control.answer = undefined
+      expect(bodies(k).map((body) => body.summary !== undefined)).toEqual([false, true, false])
+      expect((yield* k.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("a server without summary gets no parts", () =>
+    Effect.gen(function* () {
+      const { h } = yield* compacted({ catalog: catalogOf(true, { summary: false }) })
+      yield* h.prompt("what now?")
+      expect(bodies(h).map((body) => [body.limit, body.summary, body.exclude])).toEqual([
+        [0, undefined, undefined],
+        [0, undefined, undefined],
+      ])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("what followed the block goes to the summary's row, with the entry the step replaced", () =>
+    Effect.gen(function* () {
+      const { h, close } = yield* compacted()
+      const remember = {
+        text: "Releases ship by train, corrected.",
+        kind: "verified",
+        basis: "b",
+        supersedes: close.id,
+      }
+      yield* h.llm.push(step("It is stale.", ["remember", remember]), TestLLM.text("Done.", "done"))
+      yield* h.prompt("what now?")
+      const recall = yield* h.blockRecall()
+      yield* eventually("the summary's row got its step", () => h.afters(recall).length >= 1)
+      expect(h.afters(recall)[0]?.body).toEqual({
+        step: `It is stale.\nremember ${json(remember)}`,
+        acted: [{ id: close.id, how: "superseded" }],
+        by: { role: "build", chat: h.sessionID },
+      })
     }),
   )
 })
@@ -1489,10 +1949,10 @@ describe("MemoryFollowed through the runner", () => {
   it.live("sends nothing while capabilities do not say recalls", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const memory = catalogOf(true).pacer!.memory!
+      const memory = today().pacer!.memory!
       pacer.catalog = {
-        ...catalogOf(true),
-        pacer: { ...catalogOf(true).pacer!, memory: { ...memory, recalls: false } },
+        ...today(),
+        pacer: { ...today().pacer!, memory: { ...memory, recalls: false } },
       }
       yield* h.llm.push(step("Looking.", ["recall", { query: "zebra" }]), TestLLM.text("Done.", "done"))
       yield* h.prompt("zebra?")

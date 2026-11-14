@@ -12,8 +12,19 @@ const TOOL_OUTPUT_MAX_CHARS = 1_250
 export const kept = (message: SessionMessage.CompactionCompleted) =>
   typeof message.metadata?.recent === "string" ? message.metadata.recent : ""
 
-/** One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. */
-export const messageToText = (message: SessionMessage.Info | SessionStored.User): string => {
+/**
+ * Set on a compaction's metadata when it is written: its recent part cuts a tool call's input as it cuts a tool's
+ * output (spec checkpoint, section 4). A compaction written before keeps its recent part as it was.
+ */
+export const CUT_INPUTS = "recentInputs"
+
+export const cutsInputs = (message: SessionMessage.CompactionCompleted) => message.metadata?.[CUT_INPUTS] === "cut"
+
+/**
+ * One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. `cutInputs`
+ * cuts a tool call's input to the length a tool's output is cut to.
+ */
+export const messageToText = (message: SessionMessage.Info | SessionStored.User, cutInputs: boolean): string => {
   switch (message.type) {
     // Earlier summaries and instruction updates are handled outside the recent part.
     case "compaction":
@@ -45,7 +56,7 @@ export const messageToText = (message: SessionMessage.Info | SessionStored.User)
           if (part.type === "reasoning") return []
 
           const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
-          const call = `[Assistant tool call]: ${part.name}(${input})`
+          const call = `[Assistant tool call]: ${part.name}(${cutInputs ? truncateToolOutput(input) : input})`
           if (part.state.status === "completed") {
             return [call, `[Tool result]: ${truncateToolOutput(serializeToolContent(part.state.content))}`]
           }

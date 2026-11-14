@@ -80,6 +80,7 @@ export const User = Schema.Struct({
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
   skills: Prompt.fields.skills,
+  pastes: Prompt.fields.pastes,
   type: Schema.tag("user"),
 }).annotate({ identifier: "Session.Message.User" })
 
@@ -95,6 +96,11 @@ export const Synthetic = Schema.Struct({
   ...Base,
   text: Schema.String,
   description: Schema.String.pipe(optional),
+  /**
+   * Reaches the model inside `<system-reminder>` tags. Recorded when the message is created; a message from before
+   * the mark has none and reaches the model as it always did.
+   */
+  reminder: Schema.Boolean.pipe(optional),
   type: Schema.tag("synthetic"),
 }).annotate({ identifier: "Session.Message.Synthetic" })
 

@@ -45,8 +45,9 @@ const keep =
   "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
 /**
- * The start block: the opening line, the entries nearest to the prompt when there are any, what else there is, and,
- * for a chat that can save, that memory is its to keep true. It names `recall` and `remember` only for a chat that
+ * The start block: the opening line, the entries nearest to the prompt when there are any (after a compaction, with
+ * `summary`, those close to its summary), what else there is, and, for a chat that can save, that memory is its to keep
+ * true. It names `recall` and `remember` only for a chat that
  * has the tool: an agent's permissions may leave one out.
  */
 export function block(
@@ -54,6 +55,7 @@ export function block(
   role: string,
   tools: { readonly recall: boolean; readonly remember: boolean; readonly task: boolean },
   inside?: boolean,
+  summary?: boolean,
 ) {
   // The task's title and description are the chat's assignment; what was noted in it is memory, under the opening.
   const part = started.task
@@ -67,9 +69,22 @@ export function block(
     ...part.notes,
     ...(started.entries.length === 0
       ? []
-      : ["What memory holds nearest to this prompt; it may not be about it:", ...started.entries.map(entry)]),
+      : [
+          summary
+            ? "Memory holds these entries close to this chat's summary:"
+            : "What memory holds nearest to this prompt; it may not be about it:",
+          ...started.entries.map(entry),
+        ]),
     counts,
     ...(tools.remember ? [keep] : []),
+  ].join("\n")
+}
+
+/** The message after a person's prompt that memory holds entries close to. */
+export function prompt(entries: ReadonlyArray<MemoryClient.Entry>) {
+  return [
+    "Memory holds these entries close to this prompt; they may be wrong or out of date:",
+    ...entries.map(entry),
   ].join("\n")
 }
 

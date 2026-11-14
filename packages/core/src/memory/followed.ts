@@ -1,6 +1,6 @@
 export * as MemoryFollowed from "./followed.js"
 
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm"
+import { and, desc, eq, gt, gte, isNotNull, lt, sql } from "drizzle-orm"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
@@ -14,11 +14,13 @@ import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable, SessionPartTable } from "../session/sql.js"
 import { SessionStore } from "../session/store.js"
 import { MemoryClient } from "./client.js"
+import { MemoryPromptTable } from "./prompt.sql.js"
 import { MemorySecrets } from "./secrets.js"
 
 // What followed a search (the workspace's spec `docs/specs/memory.md`, section 9): openforge adds to a search's row of
 // the recall log the step that followed it and the person's next message. The ledger is the chat itself: a start
-// block's message and a `recall` call's result keep their search in their metadata (`project`, `recall`, `entries`), and
+// block's message, a prompt's message of close entries and a `recall` call's result keep their search in their metadata
+// (`project`, `recall`, `entries`), a prompt that got none in its `memory_prompt` row (`MemoryPrompt`), and
 // which step followed which search, or which message of the person, is read from the order of the chat's messages. It
 // runs only while capabilities say `recalls`, beside the chat and never in its way: each row gets one try in the
 // background, dropped on failure; a restart may lose some.
@@ -209,12 +211,15 @@ const layer = Layer.effect(
           Effect.map((row) => row?.seq),
         )
 
-    /** The start blocks after `from` and before `to` that hold a search. */
-    const blocks = (sessionID: SessionSchema.ID, from: number, to: number) =>
-      db
+    /**
+     * The searches of the start blocks and the prompts' messages after `from` and before `to`, and of the prompts there
+     * (from `from` on) that got no message (`MemoryPrompt`).
+     */
+    const blocks = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, from: number, to: number) {
+      const messages = yield* db
         .select({
           seq: SessionMessageTable.seq,
-          memory: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory')`,
+          memory: sql<unknown>`coalesce(json_extract(${SessionMessageTable.data}, '$.metadata.memory'), json_extract(${SessionMessageTable.data}, '$.metadata.memoryPrompt'))`,
         })
         .from(SessionMessageTable)
         .where(
@@ -223,21 +228,39 @@ const layer = Layer.effect(
             eq(SessionMessageTable.type, "synthetic"),
             gt(SessionMessageTable.seq, from),
             lt(SessionMessageTable.seq, to),
-            sql`json_extract(${SessionMessageTable.data}, '$.metadata.memory.recall') is not null`,
+            sql`coalesce(json_extract(${SessionMessageTable.data}, '$.metadata.memory.recall'), json_extract(${SessionMessageTable.data}, '$.metadata.memoryPrompt.recall')) is not null`,
           ),
         )
         .all()
-        .pipe(
-          Effect.orDie,
-          Effect.map((rows) =>
-            rows.flatMap((row) =>
-              Option.match(searchedOf(typeof row.memory === "string" ? JSON.parse(row.memory) : row.memory), {
-                onNone: () => [],
-                onSome: (searched) => [{ seq: row.seq, ordinal: -1, searched }],
-              }),
-            ),
+        .pipe(Effect.orDie)
+      const asked = yield* db
+        .select({ seq: SessionMessageTable.seq, project: MemoryPromptTable.project, recall: MemoryPromptTable.recall })
+        .from(MemoryPromptTable)
+        .innerJoin(SessionMessageTable, eq(SessionMessageTable.id, MemoryPromptTable.message_id))
+        .where(
+          and(
+            eq(MemoryPromptTable.session_id, sessionID),
+            gte(SessionMessageTable.seq, from),
+            lt(SessionMessageTable.seq, to),
+            isNotNull(MemoryPromptTable.recall),
           ),
         )
+        .all()
+        .pipe(Effect.orDie)
+      return [
+        ...messages.flatMap((row) =>
+          Option.match(searchedOf(typeof row.memory === "string" ? JSON.parse(row.memory) : row.memory), {
+            onNone: () => [],
+            onSome: (searched) => [{ seq: row.seq, ordinal: -1, searched }],
+          }),
+        ),
+        ...asked.flatMap((row) =>
+          row.recall === null
+            ? []
+            : [{ seq: row.seq, ordinal: -1, searched: { project: row.project, recall: row.recall, entries: [] } }],
+        ),
+      ]
+    })
 
     /** The completed `recall` calls of one step, or of the steps after `from` and before `to`. */
     const recallParts = Effect.fnUntraced(function* (

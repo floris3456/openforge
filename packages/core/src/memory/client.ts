@@ -79,7 +79,7 @@ export interface TaskList extends Schema.Schema.Type<typeof TaskList> {}
 /** A row of the recall log: one search or start, what followed it in the chat, and its labels. */
 export const Recall = Schema.Struct({
   id: Schema.String,
-  kind: Schema.NullOr(Schema.Literals(["search", "start"])),
+  kind: Schema.NullOr(Schema.Literals(["search", "start", "prompt", "summary"])),
   query: Schema.String,
   entries: Schema.Array(Schema.String),
   meaning: Schema.NullOr(Schema.Boolean),
@@ -115,15 +115,23 @@ const StartedTask = Schema.Struct({
   entries: Schema.Array(Entry),
 })
 const StartedAnswer = Schema.Struct({
-  recall: Schema.String,
+  /** Null when `limit` was 0: no search ran, and nothing is read of `meaning`. */
+  recall: Schema.NullOr(Schema.String),
   entries: Schema.Array(Entry),
-  meaning: Schema.Boolean,
+  meaning: Schema.optional(Schema.Boolean),
   counts: Schema.Struct({ global: Schema.Number, role: Schema.Number, task: Schema.Number }),
   // A server without tasks may answer neither.
   task: maybe(StartedTask),
   subtask: maybe(Schema.Union([StartedTask, Task])),
 })
 type StartedAnswer = typeof StartedAnswer.Type
+/** `prompt`'s answer: the entries that match a prompt closely, at most 2, or none. */
+const Prompted = Schema.Struct({
+  recall: Schema.NullOr(Schema.String),
+  entries: Schema.Array(Entry),
+  meaning: Schema.Boolean,
+})
+export interface Prompted extends Schema.Schema.Type<typeof Prompted> {}
 /** `start`'s answer, its task and subtask as reading them answers (`changes` empty from an older server). */
 export interface Started extends Omit<StartedAnswer, "task" | "subtask"> {
   readonly task?: TaskRead | null
@@ -184,10 +192,27 @@ export interface SearchInput {
 export interface StartInput {
   readonly prompt: string
   readonly scopes: Scopes
+  /** 0 on a server with `prompt`: no search runs, and the answer has no entries and no recall. */
   readonly limit: number
+  /**
+   * After a compaction, on a server with `summary`: the parts of its summary (1 to 16, each 1 to 2,000 characters),
+   * whose close entries the answer then holds; `limit` is 0.
+   */
+  readonly summary?: ReadonlyArray<string>
+  /** With `summary`: the entries the chat still has in view, which are not answered again; at most 100. */
+  readonly exclude?: ReadonlyArray<string>
   /** The chat's task (one without a parent) and its subtask, whose parts the answer then holds. */
   readonly task?: string
   readonly subtask?: string
+  readonly by: By
+}
+
+export interface PromptInput {
+  /** The person's prompt, cut to its first 2,000 characters. */
+  readonly prompt: string
+  readonly scopes: Scopes
+  /** The entries the chat has in view, which are not answered again; at most 100. */
+  readonly exclude: ReadonlyArray<string>
   readonly by: By
 }
 
@@ -306,6 +331,12 @@ export interface Interface {
     input: StartInput,
     options?: { readonly timeout?: Duration.Input },
   ) => Effect.Effect<Started, Error>
+  /** The entries that match a person's prompt closely, or none. */
+  readonly prompt: (
+    project: string,
+    input: PromptInput,
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<Prompted, Error>
   /** Makes a task, or a subtask of `parent`; `existing` when a task that is not done had that title and parent. */
   readonly make: (
     project: string,
@@ -405,6 +436,11 @@ export const layer = Layer.effect(
             Effect.map((answer) => started(answer.body)),
             Effect.mapError(failure()),
           ),
+      prompt: (project, input, options) =>
+        http.post(`${base(project)}/prompt`, input, Prompted, { ...options, headers }).pipe(
+          Effect.map((answer) => answer.body),
+          Effect.mapError(failure()),
+        ),
       make: (project, input) =>
         http
           .post(

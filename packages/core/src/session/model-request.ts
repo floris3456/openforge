@@ -49,7 +49,7 @@ import { SessionProxyRequest } from "./proxy-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
-import { toLLMMessages } from "./runner/to-llm-message.js"
+import { systemReminder, toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
 
 const IMAGE_BYTES_TRIGGER = 25 * 1024 * 1024 // 25 MiB
@@ -334,7 +334,8 @@ export const layer = Layer.effect(
       const messages = reminder
         ? [
             ...input.messages.slice(0, end),
-            Message.make({ id: reminder.id, role: "user", content: reminder.text }),
+            // As the next step's history sends it: a synthetic message, marked (spec checkpoint, section 1).
+            Message.make({ id: reminder.id, role: "user", content: systemReminder(reminder.text) }),
             ...input.messages.slice(end),
           ]
         : input.messages

@@ -32,6 +32,7 @@ export type Input = {
   files?: PromptInput.Prompt["files"]
   agents?: PromptInput.Prompt["agents"]
   skills?: PromptInput.Prompt["skills"]
+  pastes?: PromptInput.Prompt["pastes"]
   metadata?: Record<string, unknown>
   delivery?: SessionInbox.Delivery
 }
@@ -92,6 +93,7 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
       agents: input.agents,
       files,
       skills: selected?.length ? selected : undefined,
+      pastes: pastes(request.input, input.text),
       metadata: arrived?.lines ? { ...event.metadata, imageLines: arrived.lines } : event.metadata,
     }),
     delivery: event.delivery,
@@ -284,6 +286,19 @@ const readFileAttachment = Effect.fn("SessionPrompt.readFileAttachment")(functio
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 // A data URL is the whole file; errors and logs must name the attachment, not echo its bytes.
+/**
+ * The paste spans of a prompt, when they still describe its text: in order, apart, and inside it. A hook that changed
+ * the text leaves none, as does any span that does not fit.
+ */
+function pastes(input: Input, text: string) {
+  if (!input.pastes?.length || text !== input.text) return undefined
+  const fit = input.pastes.every(
+    (paste, index) =>
+      paste.start < paste.end && paste.end <= text.length && paste.start >= (input.pastes?.[index - 1]?.end ?? 0),
+  )
+  return fit ? input.pastes : undefined
+}
+
 function attachmentLabel(input: PromptInput.FileAttachment) {
   return input.name ?? (input.uri.startsWith("data:") ? "inline attachment" : input.uri)
 }

@@ -1,9 +1,13 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "a33c3edb-02a0-4d12-873b-66a7b31439ed",
-  "prevIds": ["733b4770-e19d-4b1e-91a0-f87da3b0719b"],
+  "id": "063c005d-4e4c-4bd5-be28-45bba5878e66",
+  "prevIds": ["a33c3edb-02a0-4d12-873b-66a7b31439ed"],
   "ddl": [
+    {
+      "name": "memory_prompt",
+      "entityType": "tables"
+    },
     {
       "name": "session_prompt_start",
       "entityType": "tables"
@@ -115,6 +119,56 @@
     {
       "name": "worktree",
       "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message_id",
+      "entityType": "columns",
+      "table": "memory_prompt"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "table": "memory_prompt"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "project",
+      "entityType": "columns",
+      "table": "memory_prompt"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "recall",
+      "entityType": "columns",
+      "table": "memory_prompt"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "memory_prompt"
     },
     {
       "type": "text",
@@ -2397,6 +2451,28 @@
       "table": "worktree"
     },
     {
+      "columns": ["message_id"],
+      "tableTo": "session_message",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_memory_prompt_message_id_session_message_id_fk",
+      "entityType": "fks",
+      "table": "memory_prompt"
+    },
+    {
+      "columns": ["session_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_memory_prompt_session_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "memory_prompt"
+    },
+    {
       "columns": ["session_id"],
       "tableTo": "session_v2",
       "columnsTo": ["id"],
@@ -2660,6 +2736,13 @@
       "name": "worktree_pk",
       "entityType": "pks",
       "table": "worktree"
+    },
+    {
+      "columns": ["message_id"],
+      "nameExplicit": false,
+      "name": "memory_prompt_pk",
+      "table": "memory_prompt",
+      "entityType": "pks"
     },
     {
       "columns": ["session_id"],

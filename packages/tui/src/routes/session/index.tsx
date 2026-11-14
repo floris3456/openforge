@@ -123,6 +123,7 @@ import { stringWidth } from "../../util/string-width"
 import { useArgs } from "../../context/args"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { SessionTurn } from "@opencode/util/session-turn"
+import { EarlierMessages } from "@opencode/util/earlier-messages"
 import { useSessionTabs, type ScrollAnchor } from "../../context/session-tabs"
 import { createSingleFlight } from "../../util/single-flight"
 import { createDelayedPresence } from "../../util/delayed-presence"
@@ -2197,7 +2198,12 @@ function CompactionMessage(props: { message: Extract<SessionMessageInfo, { type:
   const cancelled = () => props.message.status === "failed" && props.message.error.type === "aborted"
   const text = () =>
     props.message.status === "failed" ? (cancelled() ? "" : props.message.error.message) : props.message.summary
-  const content = createMemo(() => text().trim())
+  // CLIProxyPacer's list of the person's earlier messages, shown as a list below the summary (spec checkpoint,
+  // section 5); the model still gets the summary as written.
+  const earlier = createMemo(() =>
+    props.message.status === "completed" ? EarlierMessages.split(props.message.summary) : undefined,
+  )
+  const content = createMemo(() => (earlier()?.summary ?? text()).trim())
   const color = () => (status() === "failed" && !cancelled() ? theme.text.feedback.error.base : theme.text.muted)
   // Usage of the compaction request itself; the resulting context size only shows on the next assistant step.
   const usage = () => {
@@ -2258,6 +2264,27 @@ function CompactionMessage(props: { message: Extract<SessionMessageInfo, { type:
             fg={theme.markdown.text}
             bg={theme.background.base}
           />
+        </box>
+      </Show>
+      <Show when={earlier()?.entries.length}>
+        <box paddingTop={1} paddingLeft={3} flexDirection="column">
+          <text fg={theme.text.base}>Your earlier messages</text>
+          <For each={earlier()?.entries}>
+            {(entry) => (
+              <box flexDirection="row" gap={1}>
+                <text fg={theme.text.muted} flexShrink={0}>
+                  {entry.type === "message"
+                    ? `${entry.n}.`
+                    : entry.from === entry.to
+                      ? `${entry.from}:`
+                      : `${entry.from}–${entry.to}:`}
+                </text>
+                <text fg={entry.type === "message" ? theme.markdown.text : theme.text.muted} flexShrink={1}>
+                  {entry.type === "message" ? entry.text : "see the summary"}
+                </text>
+              </box>
+            )}
+          </For>
         </box>
       </Show>
     </box>

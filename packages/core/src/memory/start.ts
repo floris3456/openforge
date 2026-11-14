@@ -137,27 +137,29 @@ const layer = Layer.effect(
           : undefined
       const summary = compaction ? MemorySummary.parts(compaction.summary) : []
       const plain = memory.start(project, request, { timeout: TIMEOUT })
-      const answered = summary.length
-        ? memory
-            .start(
-              project,
-              { ...request, summary, exclude: yield* MemoryOffer.inView(db, sessionID) },
-              { timeout: SUMMARY_TIMEOUT },
-            )
-            .pipe(
-              Effect.map((started) => ({ started, summary: true })),
-              // Without the summary's entries the block is built as it would be without a summary.
-              Effect.catch((error) =>
-                error._tag === "MemoryClient.Closed"
-                  ? Effect.fail(error)
-                  : Effect.logInfo("memory gave no entries for the summary", { reason: error.message }).pipe(
-                      Effect.andThen(plain),
-                      Effect.map((started) => ({ started, summary: false })),
-                    ),
-              ),
-            )
-        : plain.pipe(Effect.map((started) => ({ started, summary: false })))
-      const block = yield* Effect.all([answered, others], { concurrency: "unbounded" }).pipe(
+      const block = yield* (
+        summary.length
+          ? memory
+              .start(
+                project,
+                { ...request, summary, exclude: yield* MemoryOffer.inView(db, sessionID) },
+                { timeout: SUMMARY_TIMEOUT },
+              )
+              .pipe(
+                Effect.map((started) => ({ started, summary: true })),
+                // Without the summary's entries the block is built as it would be without a summary.
+                Effect.catch((error) =>
+                  error._tag === "MemoryClient.Closed"
+                    ? Effect.fail(error)
+                    : Effect.logInfo("memory gave no entries for the summary", { reason: error.message }).pipe(
+                        Effect.andThen(plain),
+                        Effect.map((started) => ({ started, summary: false })),
+                      ),
+                ),
+              )
+          : plain.pipe(Effect.map((started) => ({ started, summary: false })))
+      ).pipe(
+        Effect.zip(others, { concurrent: true }),
         Effect.map(([answer, listed]) => ({
           text: [
             MemoryText.block(answer.started, by.role, offered, inside !== undefined, answer.summary),

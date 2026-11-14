@@ -50,12 +50,20 @@ test.each([44, 120])("a notice opens to its text, memory's entries laid out, at 
       time: { created: 2 },
     },
     {
+      id: "notice-instructions",
+      type: "synthetic",
+      description: "Loaded AGENTS.md",
+      text: `Instructions from: ${directory}/AGENTS.md\nIndent with tabs in this project.`,
+      metadata: { instruction: { paths: [`${directory}/AGENTS.md`] } },
+      time: { created: 3 },
+    },
+    {
       id: "notice-images",
       type: "synthetic",
       description: IMAGES,
       text: IMAGES,
       metadata: { source: "images" },
-      time: { created: 3 },
+      time: { created: 4 },
     },
   ]
   const calls = createFetch((url) => {
@@ -118,6 +126,12 @@ test.each([44, 120])("a notice opens to its text, memory's entries laid out, at 
     await click(REMINDER)
     await setup.waitForFrame((frame) => frame.replace(/\s+/g, "").includes("Thetoolread'sdescriptionchanged."))
     expect(flat()).not.toContain("system-reminder")
+
+    await click("Instructions: 1 file")
+    await setup.waitForFrame((frame) => frame.includes("Loaded AGENTS.md"))
+    expect(flat()).not.toContain("Indentwithtabsinthisproject.")
+    await click("Loaded AGENTS.md")
+    await setup.waitForFrame((frame) => frame.replace(/\s+/g, "").includes("Indentwithtabsinthisproject."))
 
     await setup.waitForVisualIdle()
     const before = setup.captureCharFrame()

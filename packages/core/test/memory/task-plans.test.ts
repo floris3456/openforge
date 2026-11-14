@@ -46,6 +46,7 @@ import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
+import { PromptStartTable } from "@opencode/core/session/prompt-start.sql"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { SkillInstructions } from "@opencode/core/skill/instructions"
@@ -57,7 +58,9 @@ import { PatchTool } from "@opencode/core/tool/plugin/patch"
 import { WriteTool } from "@opencode/core/tool/plugin/write"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Deferred, Effect, Layer, Schema, SubscriptionRef } from "effect"
+import { Document, Info } from "@opencode/schema/config"
+import { eq } from "drizzle-orm"
+import { Context, Deferred, Effect, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { promptLocationNode } from "../fixture/prompt-location"
 import { testEffect } from "../lib/effect"
@@ -77,6 +80,9 @@ afterAll(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 const planned = () => catalogOf(true, { prompt: false, plans: true })
+/** openforge's config, in the test's hands: `freeze_prompt` off leaves a chat's start unrecorded. */
+const configs = Effect.runSync(Layer.build(Config.testLayer()).pipe(Effect.scoped))
+const config = Context.get(configs, Config.Test)
 
 const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
 const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(planned()))
@@ -206,7 +212,7 @@ const replacements: LayerNode.Replacements = [
   ReferenceInstructions.node.replace(Layer.mock(ReferenceInstructions.Service, none)),
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),
   Location.node.replace(Location.boundNode({ directory: AbsolutePath.make(root) })),
-  Config.node.replace(Config.testLayer()),
+  Config.node.replace(Layer.succeedContext(configs)),
   Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
   Formatter.node.replace(Layer.mock(Formatter.Service, { file: () => Effect.succeed(false) })),
   PluginSupervisor.node.replace(Layer.empty),
@@ -509,6 +515,35 @@ describe("an edit outside a task", () => {
           results: ["edit", "write", "patch"].map((name) => ({ name, status: "completed", error: undefined })),
         })
         expect([edited.read(), written.read(), patched.read()]).toEqual(["after\n", "new", "after\n"])
+      }
+    }),
+  )
+
+  it.live("with the start unrecorded (freeze_prompt off), goes by whether the agent may call the task tool", () =>
+    Effect.gen(function* () {
+      yield* config.setEntries([new Document({ type: "document", info: new Info({ freeze_prompt: false }) })])
+      yield* Effect.addFinalizer(() => config.setEntries([]))
+      for (const [input, refused] of [
+        [{}, true],
+        [{ child: true, agent: "untasked" }, false],
+      ] as const) {
+        const h = yield* setup(input)
+        const written = file("written.txt")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-write", "write", { path: written.name, content: "new" }),
+          TestLLM.text("Done.", "after"),
+        )
+        yield* h.prompt("write the file")
+        expect({ input, written: written.read() }).toEqual({ input, written: refused ? undefined : "new" })
+        const { db } = yield* Database.Service
+        expect(
+          yield* db
+            .select()
+            .from(PromptStartTable)
+            .where(eq(PromptStartTable.session_id, h.sessionID))
+            .all()
+            .pipe(Effect.orDie),
+        ).toEqual([])
       }
     }),
   )

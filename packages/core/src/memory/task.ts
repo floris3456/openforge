@@ -3,8 +3,8 @@ export * as MemoryTask from "./task.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import { Context, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { Config } from "../config.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerProject } from "../pacer/project.js"
 import type { SessionSchema } from "../session/schema.js"
 import { MemoryClient } from "./client.js"
 import { MemoryText } from "./text.js"
@@ -71,17 +71,18 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const client = yield* MemoryClient.Service
-    const config = yield* Config.Service
+    const projects = yield* PacerProject.Service
     const catalogs = yield* PacerModels.Service
 
     const projectOf = Effect.fnUntraced(function* (parent: SessionSchema.Info) {
-      const project = MemoryClient.project(yield* config.entries(), parent.projectID)
+      const project = (yield* projects.chat(parent.projectID)).project
       if (project === undefined)
         return yield* new ToolFailure({
           message: "This chat is in no project, so it has no memory; the setting memory.project can name one.",
         })
       return project
     })
+    const named = (project: string) => client.withHeaders(projects.headers(project))
 
     return Service.of({
       assign: Effect.fn("MemoryTask.assign")(function* (parent, taskID) {
@@ -91,12 +92,12 @@ const layer = Layer.effect(
             message: `There is no task ${taskID}: memory on this server has no tasks, so no subagent was started.`,
           })
         const project = yield* projectOf(parent)
-        const task = (yield* client.task(project, taskID).pipe(Effect.mapError(fail))).task
+        const task = (yield* named(project).task(project, taskID).pipe(Effect.mapError(fail))).task
         const place = placeOf(task)
         return { project, task, inside: place, metadata: placed(parent.metadata, place) }
       }),
       activate: Effect.fn("MemoryTask.activate")(function* (assigned, child) {
-        yield* client
+        yield* named(assigned.project)
           .change(assigned.project, assigned.task.id, {
             state: "active",
             by: { role: child.role, chat: child.id, ...assigned.inside },
@@ -104,9 +105,9 @@ const layer = Layer.effect(
           .pipe(Effect.mapError(fail))
       }),
       ended: Effect.fn("MemoryTask.ended")(function* (parent, taskID, output) {
-        const project = MemoryClient.project(yield* config.entries(), parent.projectID)
+        const project = (yield* projects.chat(parent.projectID)).project
         if (project === undefined) return output
-        const read = yield* client.task(project, taskID).pipe(Effect.option)
+        const read = yield* named(project).task(project, taskID).pipe(Effect.option)
         if (read._tag === "None" || read.value.task.state === "active") return output
         return `${output}\n${MemoryText.ended(read.value.task)}`
       }),
@@ -117,7 +118,7 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [MemoryClient.node, Config.node, PacerModels.node],
+  deps: [MemoryClient.node, PacerProject.node, PacerModels.node],
 })
 
 /** Not as the failure's cause, which would make it an unknown error rather than the tool's. */

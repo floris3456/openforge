@@ -21,19 +21,26 @@ afterAll(async () => {
 })
 
 // The groups "tasks" and "recall log" run only against a server whose capabilities say `tasks` and `recalls`, as
-// openforge offers the task tool and sends what followed a search only then.
+// openforge offers the task tool and sends what followed a search only then. The group "projects" runs only against
+// the small server, which switches a project's memory in process; CLIProxyPacer's switch is its Projects page.
 const url = server?.url ?? process.env.MEMORY_CONTRACT_URL!
 const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
   headers: { authorization: `Bearer ${server ? "contract-key-one" : process.env.MEMORY_CONTRACT_KEY}` },
-}).then((response) => response.json() as Promise<{ pacer?: { memory?: { tasks?: unknown; recalls?: unknown } } }>)
+}).then(
+  (response) =>
+    response.json() as Promise<{ pacer?: { memory?: { tasks?: unknown; recalls?: unknown; projects?: unknown } } }>,
+)
 const tasks = capabilities.pacer?.memory?.tasks === true
 const recalls = capabilities.pacer?.memory?.recalls === true
+const projects = capabilities.pacer?.memory?.projects === true
 
 memoryContract(
   server
     ? {
         tasks,
         recalls,
+        projects,
+        setProject: async (identity, setting) => server.project(identity, setting),
         url: server.url,
         key: "contract-key-one",
         person: "floris",
@@ -54,5 +61,6 @@ memoryContract(
         embedding: { fake, key: process.env.MEMORY_CONTRACT_EMBEDDING_KEY },
         tasks,
         recalls,
+        projects,
       },
 )

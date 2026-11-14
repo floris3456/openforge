@@ -28,6 +28,8 @@ export class Unreachable extends Schema.TaggedError<Unreachable>()("PacerHttp.Un
 /** CPP refused the key (401 or 403). */
 export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", {
   status: Schema.Number,
+  /** The answer's `error.type`, such as memory's `project_forbidden`. */
+  type: Schema.optional(Schema.String),
   reason: Schema.String,
 }) {
   override get message() {
@@ -36,12 +38,15 @@ export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", 
 }
 
 /**
- * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API). Capabilities that say
+ * The proxy has no pacer: a 404 that is not CPP's own (a proxy without CPP's client API), or one whose `type` says
+ * what is off (memory's `project_memory_off`). Capabilities that say
  * `pacer: null` make the catalog's `pacer` null (`PacerModels`) rather than this error. CPP's 503 `unavailable` (its
  * pacer store not open yet) is {@link Unreachable}: it passes.
  */
 export class NoPacer extends Schema.TaggedError<NoPacer>()("PacerHttp.NoPacer", {
   status: Schema.optional(Schema.Number),
+  /** The answer's `error.type`, such as memory's `project_memory_off`. */
+  type: Schema.optional(Schema.String),
   reason: Schema.String,
 }) {
   override get message() {
@@ -242,9 +247,10 @@ function refusal(response: HttpClientResponse.HttpClientResponse, text: string) 
   const error = Option.getOrUndefined(decodeApiError(text))?.error
   const reason = error?.message ?? error?.type ?? `HTTP ${status}`
   if (status >= 300 && status < 400) return new Unexpected({ status, reason: `redirect (${status}) refused` })
-  if (status === 401 || status === 403) return new Refused({ status, reason })
+  const type = error?.type === undefined ? {} : { type: error.type }
+  if (status === 401 || status === 403) return new Refused({ status, ...type, reason })
   if (status === 404 && error?.type === "not_found") return new NotFound({ reason })
-  if (status === 404) return new NoPacer({ status, reason })
+  if (status === 404) return new NoPacer({ status, ...type, reason })
   if (status >= 500) return new Unreachable({ status, retryAfter: retryAfter(response.headers["retry-after"]), reason })
   return new Unexpected({ status, reason })
 }

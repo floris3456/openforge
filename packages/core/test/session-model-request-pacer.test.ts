@@ -11,10 +11,12 @@ import { TestClock } from "effect/testing"
 import { Message } from "@opencode/ai/effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Bus } from "@opencode/core/bus"
+import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerTools } from "@opencode/core/pacer/tools"
@@ -35,6 +37,7 @@ import { PacerWebTools } from "@opencode/core/tool/plugin/pacer-web"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
+import { location, locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin, toolIdentity } from "./lib/tool"
@@ -92,17 +95,35 @@ const snapshot = (
       }),
   }) satisfies Tool.Snapshot
 
-/** SessionModelRequest with PacerTools over a fake CPP. */
-const setup = Effect.fnUntraced(function* (webTools = true) {
+/** The chat's project as PacerProject names it, for a location whose project has `remote`. */
+const placedAt = (remote?: string) =>
+  Layer.fresh(PacerProject.layer).pipe(
+    Layer.provide(
+      Layer.succeed(
+        Location.Service,
+        Location.Service.of(
+          location(Location.Ref.make({ directory: AbsolutePath.make("/home/floris/Café") }), { remote }),
+        ),
+      ),
+    ),
+    Layer.provide(Config.testLayer()),
+  )
+
+/** SessionModelRequest with PacerTools over a fake CPP; the chat `session`, in a location with `place`'s remote. */
+const setup = Effect.fnUntraced(function* (
+  webTools = true,
+  options: { readonly session?: Session.Info; readonly remote?: string } = {},
+) {
   const cpp = yield* fakeCpp
   const started = yield* startTools(endpointOf(cpp.origin), catalogOf(webTools))
   const requests = yield* SessionModelRequest.Service.pipe(
     Effect.provide(SessionModelRequest.layer),
     Effect.provideService(SessionModelTransport.Service, transport),
     Effect.provideService(PacerTools.Service, started.tools),
+    Effect.provide(placedAt(options.remote)),
   )
   const input = (tools: Tool.Snapshot, model: string | LanguageModel = "claude-haiku-5-5") => ({
-    session,
+    session: options.session ?? session,
     agent: Agent.ID.make("build"),
     model: resolved(model),
     tools,
@@ -471,7 +492,7 @@ const sessions = Layer.mock(Sessions.Service, {
 const pluginNode = makeLocationNode({
   name: "test/model-request-pacer-web-tool-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(PacerWebTools.Plugin)),
-  deps: [Tool.node, Permission.node, PacerEndpoint.node, PacerTools.node, Sessions.node],
+  deps: [Tool.node, Permission.node, PacerEndpoint.node, PacerTools.node, PacerProject.node, Sessions.node],
 })
 /** The real tool registry with CPP's web tools as built-in tools, over the setup's PacerTools; every ask allowed. */
 const registryOf = Effect.fnUntraced(function* (started: Effect.Success<ReturnType<typeof startTools>>) {
@@ -490,6 +511,7 @@ const registryOf = Effect.fnUntraced(function* (started: Effect.Success<ReturnTy
       PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
       Sessions.node.replace(sessions),
       Image.node.replace(imagePassthrough),
+      locationNode("/project"),
     ]),
   )
   return Context.get(context, Tool.Service)
@@ -633,6 +655,88 @@ describe("SessionModelRequest for a chat on another provider, with a CPP set up"
             key: "Bearer client-key-test",
           },
         ])
+      }
+    }),
+  )
+})
+
+describe("SessionModelRequest naming the chat's project to CPP", () => {
+  const identity = Project.ID.make("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+  const lead = Session.Info.make({
+    ...session,
+    id: Session.ID.make("ses_model_request_project"),
+    parentID: undefined,
+    projectID: identity,
+  })
+  const child = Session.Info.make({ ...session, projectID: identity })
+  const named = {
+    "X-Pacer-Project": identity,
+    "X-Pacer-Project-Name": "github.com%2Fowner%2Fcaf%C3%A9",
+    "X-Pacer-Project-Remote": "github.com%2Fowner%2Fcaf%C3%A9",
+  }
+  const project = (headers: Readonly<Record<string, string>> | undefined) =>
+    Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => /^x-pacer-project/i.test(name)))
+  const read = (cpp: Effect.Success<typeof fakeCpp>) =>
+    cpp.lists().map((list) => project(Object.fromEntries(list.headers)))
+
+  it.effect(
+    "on a turn, a title, a generation and a compaction, and on the chat's tool list read; a subagent's too",
+    () =>
+      Effect.gen(function* () {
+        for (const chat of [lead, child]) {
+          const h = yield* setup(true, { session: chat, remote: "github.com/owner/café" })
+          const input = h.input(snapshot(all))
+          const prepared = [
+            yield* h.requests.primary(input),
+            yield* h.requests.title(input),
+            yield* h.requests.generate(input),
+            yield* h.requests.compaction(input),
+          ]
+          expect(prepared.map((item) => project(item.request.http?.headers))).toEqual([named, named, named, named])
+          expect(prepared[0]?.request.http?.headers).toMatchObject({
+            "X-Pacer-Session": PacerSessionID.make(chat.id),
+            ...(chat.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(chat.parentID) } : {}),
+          })
+          expect(read(h.cpp)).toEqual([
+            {
+              "x-pacer-project": identity,
+              "x-pacer-project-name": named["X-Pacer-Project-Name"],
+              "x-pacer-project-remote": named["X-Pacer-Project-Remote"],
+            },
+          ])
+        }
+      }),
+  )
+
+  it.effect("names the folder without a remote, and no project for a chat outside any", () =>
+    Effect.gen(function* () {
+      const h = yield* setup(true, { session: lead })
+      expect(project((yield* h.requests.primary(h.input(snapshot(all)))).request.http?.headers)).toEqual({
+        "X-Pacer-Project": identity,
+        "X-Pacer-Project-Name": "Caf%C3%A9",
+      })
+
+      const k = yield* setup(true, { remote: "github.com/owner/café" })
+      expect(session.projectID).toBe(Project.ID.global)
+      const prepared = yield* k.requests.primary(k.input(snapshot(all)))
+      expect(pacerHeaders(prepared)).toEqual(["X-Pacer-Session", "X-Pacer-Parent-Session", "X-Pacer-Compact"])
+      expect(read(k.cpp)).toEqual([{}])
+    }),
+  )
+
+  it.effect("sends a plain provider's model requests none, and CPP's tool list read for them its own", () =>
+    Effect.gen(function* () {
+      for (const other of others) {
+        const h = yield* setup(true, { session: child, remote: "github.com/owner/café" })
+        const input = h.input(snapshot(all), other.model)
+        for (const prepared of [
+          yield* h.requests.primary(input),
+          yield* h.requests.title(input),
+          yield* h.requests.compaction(input),
+        ])
+          expect({ model: other.label, pacer: pacerHeaders(prepared) }).toEqual({ model: other.label, pacer: [] })
+        expect(read(h.cpp)).toHaveLength(1)
+        expect(read(h.cpp)[0]).toMatchObject({ "x-pacer-project": identity })
       }
     }),
   )

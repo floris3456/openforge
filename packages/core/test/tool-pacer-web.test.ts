@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Permission } from "@opencode/core/permission"
@@ -18,6 +19,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { DateTime } from "effect"
 import { testEffect } from "./lib/effect"
+import { locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
@@ -28,7 +30,7 @@ const sessionID = SessionInfo.ID.make("ses_pacer_web_child")
 const info = SessionInfo.Info.make({
   id: sessionID,
   parentID,
-  projectID: Project.ID.global,
+  projectID: Project.ID.make("4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
   cost: Money.USD.zero,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
@@ -48,7 +50,7 @@ const sessions = Layer.mock(Session.Service, {
 const pluginNode = makeLocationNode({
   name: "test/pacer-web-tool-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(PacerWebTools.Plugin)),
-  deps: [Tool.node, Permission.node, PacerEndpoint.node, PacerTools.node, Session.node],
+  deps: [Tool.node, Permission.node, PacerEndpoint.node, PacerTools.node, PacerProject.node, Session.node],
 })
 
 const it = testEffect(Layer.empty)
@@ -77,6 +79,7 @@ const setup = Effect.fnUntraced(function* (set = true) {
       PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
       Session.node.replace(sessions),
       Image.node.replace(imagePassthrough),
+      locationNode("/project"),
     ]),
   )
   const registry = Context.get(context, Tool.Service)
@@ -138,6 +141,7 @@ describe("PacerWebTools registration", () => {
           PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
           Session.node.replace(sessions),
           Image.node.replace(imagePassthrough),
+          locationNode("/project"),
         ]),
       )
       const registry = Context.get(context, Tool.Service)
@@ -213,6 +217,9 @@ describe("PacerWebTools calls", () => {
       for (const call of h.cpp.calls()) {
         expect(call.headers.get("x-pacer-session")).toBe(PacerSessionID.make(sessionID))
         expect(call.headers.get("x-pacer-parent-session")).toBe(PacerSessionID.make(parentID))
+        // And its project, named by the location's folder.
+        expect(call.headers.get("x-pacer-project")).toBe(info.projectID)
+        expect(call.headers.get("x-pacer-project-name")).toBe("project")
       }
     }),
   )
@@ -241,6 +248,7 @@ describe("PacerWebTools calls", () => {
           PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
           Session.node.replace(sessions),
           Image.node.replace(imagePassthrough),
+          locationNode("/project"),
         ]),
       )
       const result = yield* executeTool(Context.get(context, Tool.Service), {

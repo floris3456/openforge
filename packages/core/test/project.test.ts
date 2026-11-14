@@ -536,6 +536,8 @@ describe("Project.resolve", () => {
       expect(result.id).not.toBe(Project.ID.make(yield* Effect.promise(() => rootCommit(tmp.path))))
       expect(result.directory).toBe(yield* real(tmp.path))
       expect(result.vcs?.type).toBe("git")
+      // The remote it is named by, for CLIProxyPacer's project headers.
+      expect(result.remote).toBe("github.com/Acme/App")
     }),
   )
 
@@ -558,6 +560,7 @@ describe("Project.resolve", () => {
 
       expect(a.id).toBe(remoteID("github.com/owner/repo"))
       expect(b.id).toBe(a.id)
+      expect([a.remote, b.remote]).toEqual(["github.com/owner/repo", "github.com/owner/repo"])
     }),
   )
 
@@ -573,6 +576,7 @@ describe("Project.resolve", () => {
       const result = yield* project.resolve(abs(tmp.path))
 
       expect(result.id).toBe(Project.ID.make(yield* Effect.promise(() => rootCommit(tmp.path))))
+      expect(result.remote).toBeUndefined()
     }),
   )
 

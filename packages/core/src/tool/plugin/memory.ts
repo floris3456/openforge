@@ -3,7 +3,6 @@ export * as MemoryTools from "./memory.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { Effect, Schema, Stream } from "effect"
-import { Config } from "../../config.js"
 import { KV } from "../../kv.js"
 import { MemoryClient } from "../../memory/client.js"
 import { MemoryKnown } from "../../memory/known.js"
@@ -13,6 +12,7 @@ import { MemoryText } from "../../memory/text.js"
 import { MemoryWords } from "../../memory/words.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
 import { PacerModels } from "../../pacer/models.js"
+import { PacerProject } from "../../pacer/project.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
@@ -112,7 +112,7 @@ export const Plugin = {
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
     const sessions = yield* Session.Service
-    const config = yield* Config.Service
+    const projects = yield* PacerProject.Service
     const kv = yield* KV.Service
 
     const state = { enabled: (yield* endpoints.get()) !== undefined }
@@ -153,7 +153,8 @@ export const Plugin = {
       if (catalog && !catalog.pacer?.memory)
         return yield* new ToolFailure({ message: new MemoryClient.Unavailable({ reason: "no memory" }).message })
       const session = yield* sessions.get(context.sessionID).pipe(Effect.mapError(fail))
-      const project = MemoryClient.project(yield* config.entries(), session.projectID)
+      const chat = yield* projects.chat(session.projectID)
+      const project = chat.project
       if (project === undefined)
         return yield* new ToolFailure({
           message: "This chat is in no project, so it has no memory; the setting memory.project can name one.",
@@ -162,6 +163,7 @@ export const Plugin = {
       return {
         lead: session.parentID === undefined,
         project,
+        client: client.withHeaders(chat.headers),
         session,
         inside,
         by: { role: String(context.agent), chat: String(context.sessionID), ...inside },
@@ -170,7 +172,7 @@ export const Plugin = {
 
     /** Reads the entry a change names, and refuses when this chat may not change it. */
     const changeable = Effect.fnUntraced(function* (who: Effect.Success<ReturnType<typeof caller>>, id: string) {
-      const entry = yield* client.read(who.project, id).pipe(Effect.mapError(fail))
+      const entry = yield* who.client.read(who.project, id).pipe(Effect.mapError(fail))
       const refusal = mayChange(who, entry)
       if (refusal) return yield* new ToolFailure({ message: refusal })
       return entry
@@ -218,7 +220,7 @@ export const Plugin = {
                   })
               }
               const replaced = input.supersedes === undefined ? undefined : yield* changeable(who, input.supersedes)
-              const written = yield* client
+              const written = yield* who.client
                 .write(who.project, {
                   kind: input.kind,
                   text: input.text,
@@ -256,7 +258,7 @@ export const Plugin = {
                         entry.by.chat === who.by.chat,
                     ),
                     (twin) =>
-                      client
+                      who.client
                         .forget(who.project, twin.id, {
                           reason: `written again as ${id}, which replaces ${replaced.id}`,
                           by: who.by,
@@ -300,7 +302,7 @@ export const Plugin = {
               if (scope === "task" && !who.inside)
                 return yield* new ToolFailure({ message: "This chat is in no task." })
               const tasks = who.inside ? { tasks: [who.inside.task] } : {}
-              const found = yield* client
+              const found = yield* who.client
                 .search(who.project, {
                   query: input.query,
                   scopes:
@@ -339,7 +341,7 @@ export const Plugin = {
             Effect.gen(function* () {
               const who = yield* caller(context, "forget", input)
               const entry = yield* changeable(who, input.id)
-              yield* client
+              yield* who.client
                 .forget(who.project, entry.id, { reason: input.reason, by: who.by })
                 .pipe(Effect.mapError(fail))
               return { content: `Deleted the text of ${entry.id} for good.`, metadata: { id: entry.id } }
@@ -360,7 +362,7 @@ export const Plugin = {
               const form = formOf(input)
               if (form === undefined) return yield* new ToolFailure({ message: forms })
               if (form === "list") {
-                const list = yield* client.tasks(who.project).pipe(Effect.mapError(fail))
+                const list = yield* who.client.tasks(who.project).pipe(Effect.mapError(fail))
                 const running = yield* sessions.active
                 // A worker's chat of this openforge that runs no more; a chat it does not know may run elsewhere.
                 const known = yield* Effect.forEach(
@@ -384,7 +386,7 @@ export const Plugin = {
                   return yield* new ToolFailure({
                     message: "Only a lead chat makes a task; a chat inside a task makes its subtasks.",
                   })
-                const made = yield* client
+                const made = yield* who.client
                   .make(who.project, {
                     title: input.title!,
                     ...(input.description === undefined ? {} : { description: input.description }),
@@ -403,7 +405,7 @@ export const Plugin = {
                 }
               }
               if (form === "read") {
-                const read = yield* client.task(who.project, input.id!).pipe(Effect.mapError(fail))
+                const read = yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))
                 return { content: MemoryText.read(read), metadata: { id: read.task.id } }
               }
               const next = input.state!
@@ -411,7 +413,7 @@ export const Plugin = {
                 return yield* new ToolFailure({
                   message: "blocked needs a note that says what is wrong with the task as given.",
                 })
-              const current = (yield* client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
+              const current = (yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
               const own =
                 who.inside !== undefined && (current.id === who.inside.task || current.id === who.inside.subtask)
               const allowed =
@@ -422,7 +424,7 @@ export const Plugin = {
                 return yield* new ToolFailure({
                   message: `Only a lead chat or the chat that made it sets ${next} on ${current.id}.`,
                 })
-              const changed = yield* client
+              const changed = yield* who.client
                 .change(who.project, current.id, {
                   state: next,
                   ...(input.note === undefined ? {} : { note: input.note }),
@@ -452,9 +454,9 @@ export const Plugin = {
                   metadata,
                 }
               if (next !== "active") return { content: `Task ${changed.id} is now ${changed.state}.`, metadata }
-              const read = yield* client.task(who.project, changed.id).pipe(Effect.mapError(fail))
+              const read = yield* who.client.task(who.project, changed.id).pipe(Effect.mapError(fail))
               const top = changed.parent
-                ? yield* client.task(who.project, changed.parent).pipe(Effect.mapError(fail))
+                ? yield* who.client.task(who.project, changed.parent).pipe(Effect.mapError(fail))
                 : read
               return {
                 content: [

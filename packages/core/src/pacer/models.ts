@@ -40,6 +40,11 @@ export interface Memory {
   readonly tasks: boolean
   /** Whether the server keeps the recall log, to which openforge adds what followed a search. */
   readonly recalls: boolean
+  /**
+   * Whether the server keeps memory per project, each switched on or off on its Projects page (workspace spec
+   * `docs/specs/cpp-projects.md`). Nothing reads it yet.
+   */
+  readonly projects: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -197,6 +202,7 @@ const MemoryBlock = Schema.Struct({
   embedding: Schema.NullOr(Schema.String),
   tasks: Schema.optional(Schema.Unknown),
   recalls: Schema.optional(Schema.Unknown),
+  projects: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -358,6 +364,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           embedding: memory.embedding,
           tasks: memory.tasks === true,
           recalls: memory.recalls === true,
+          projects: memory.projects === true,
         },
       }),
     }),

@@ -5,6 +5,7 @@ import type { Context } from "@opencode/plugin/effect/plugin"
 import { isRecord } from "@opencode/util/record"
 import { Effect, Stream } from "effect"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
+import { PacerProject } from "../../pacer/project.js"
 import { PacerTools } from "../../pacer/tools.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
@@ -48,6 +49,7 @@ export const Plugin = {
     const endpoints = yield* PacerEndpoint.Service
     const calls = yield* PacerTools.Service
     const sessions = yield* Session.Service
+    const projects = yield* PacerProject.Service
 
     const state = { enabled: (yield* endpoints.get()) !== undefined }
     yield* endpoints.changes().pipe(
@@ -85,12 +87,16 @@ export const Plugin = {
                   })
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message, error })))
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
-                const parentID = yield* sessions.get(context.sessionID).pipe(
-                  Effect.map((session) => session.parentID),
-                  Effect.orElseSucceed(() => undefined),
-                )
+                const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
+                const project = session ? (yield* projects.chat(session.projectID)).headers : undefined
                 const answer = yield* calls
-                  .call({ sessionID: context.sessionID, parentID, name: tool.name, args: input })
+                  .call({
+                    sessionID: context.sessionID,
+                    parentID: session?.parentID,
+                    project,
+                    name: tool.name,
+                    args: input,
+                  })
                   // Not as the failure's cause, which would make it an unknown error rather than the tool's.
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
                 // A failed call is still CPP's answer, whose text tells the model to go on without it.

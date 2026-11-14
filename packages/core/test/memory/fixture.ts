@@ -16,6 +16,8 @@ export interface Received {
   readonly method: string
   readonly path: string
   readonly body: unknown
+  /** CPP's own headers it got (`x-pacer-*`), by their lower-case names. */
+  readonly pacer: Readonly<Record<string, string>>
 }
 
 /** A catalog of a server with memory (`true`), with the pacer but no memory (`false`), or a plain proxy. */
@@ -37,6 +39,7 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
                   embedding: null,
                   tasks: capabilities.tasks,
                   recalls: capabilities.recalls,
+                  projects: capabilities.projects,
                 },
               }
             : {}),
@@ -66,7 +69,12 @@ export function startProxied(options: { readonly embedding?: string } = {}) {
     fetch: async (request) => {
       const url = new URL(request.url)
       const text = await request.text()
-      const item = { method: request.method, path: url.pathname, body: text ? JSON.parse(text) : undefined }
+      const item = {
+        method: request.method,
+        path: url.pathname,
+        body: text ? JSON.parse(text) : undefined,
+        pacer: Object.fromEntries([...request.headers].filter(([name]) => name.startsWith("x-pacer-"))),
+      }
       received.push(item)
       if (control.held) await control.held
       if (control.answer) return control.answer(item)

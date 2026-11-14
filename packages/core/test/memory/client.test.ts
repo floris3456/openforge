@@ -244,6 +244,80 @@ describe("MemoryClient", () => {
     }),
   )
 
+  it.live("is closed when CPP says the project's memory is off or the key may not use it, on every route", () =>
+    Effect.gen(function* () {
+      const h = yield* setup
+      const off = `client-off-${crypto.randomUUID().slice(0, 8)}`
+      const forbidden = `client-forbidden-${crypto.randomUUID().slice(0, 8)}`
+      h.server.store.project(off, { memory: false })
+      h.server.store.project(forbidden, { memory: true, keys: ["another-key"] })
+      const every = (where: string) =>
+        (
+          [
+            h.client.write(where, { kind: "verified", text: "t", basis: "b", scope: "role", by }),
+            h.client.read(where, "k3f9x2m7q4tz"),
+            h.client.forget(where, "k3f9x2m7q4tz", { reason: "r", by }),
+            h.client.search(where, { query: "q", scopes: "all", limit: 5, by }),
+            h.client.start(where, { prompt: "q", scopes: "all", limit: 5, by }),
+            h.client.make(where, { title: "t", by }),
+            h.client.tasks(where),
+            h.client.task(where, "k3f9x2m7q4tz"),
+            h.client.change(where, "k3f9x2m7q4tz", { state: "done", by }),
+            h.client.after(where, "k3f9x2m7q4tz", { person: "p", by }),
+            h.client.recall(where, "k3f9x2m7q4tz"),
+          ] as ReadonlyArray<Effect.Effect<unknown, MemoryClient.Error>>
+        ).map((call) => call.pipe(Effect.flip))
+      for (const [where, type] of [
+        [off, "project_memory_off"],
+        [forbidden, "project_forbidden"],
+      ] as const)
+        for (const error of yield* Effect.all(every(where))) expect(error).toEqual(new MemoryClient.Closed({ type }))
+      expect(new MemoryClient.Closed({ type: "project_memory_off" }).message).toBe(
+        "Memory is off for this project on CLIProxyPacer, so the work goes on without it.",
+      )
+
+      // Memory off for the whole server (CPP's `not_found` on a route naming no entry) stays unavailable.
+      h.server.control.answer = () =>
+        Response.json({ error: { type: "not_found", message: "memory is off" } }, { status: 404 })
+      expect(
+        yield* h.client.start(project, { prompt: "q", scopes: "all", limit: 5, by }).pipe(Effect.flip),
+      ).toBeInstanceOf(MemoryClient.Unavailable)
+      // So does a refused key with no project type.
+      h.server.control.answer = () => Response.json({ error: { type: "forbidden", message: "no" } }, { status: 403 })
+      expect(
+        yield* h.client.start(project, { prompt: "q", scopes: "all", limit: 5, by }).pipe(Effect.flip),
+      ).toBeInstanceOf(MemoryClient.Unavailable)
+    }),
+  )
+
+  it.live("sends the headers it is given on every route, and none without them", () =>
+    Effect.gen(function* () {
+      const h = yield* setup
+      const named = h.client.withHeaders({ "X-Pacer-Project": project, "X-Pacer-Project-Name": "openforge" })
+      yield* Effect.all(
+        [
+          named.write(project, { kind: "verified", text: "Named.", basis: "b", scope: "role", by }),
+          named.read(project, "k3f9x2m7q4tz"),
+          named.forget(project, "k3f9x2m7q4tz", { reason: "r", by }),
+          named.search(project, { query: "q", scopes: "all", limit: 5, by }),
+          named.start(project, { prompt: "q", scopes: "all", limit: 5, by }, { timeout: "2 seconds" }),
+          named.make(project, { title: "Named", by }),
+          named.tasks(project),
+          named.task(project, "k3f9x2m7q4tz"),
+          named.change(project, "k3f9x2m7q4tz", { state: "done", by }),
+          named.after(project, "k3f9x2m7q4tz", { person: "p", by }),
+          named.recall(project, "k3f9x2m7q4tz"),
+        ].map((call) => Effect.ignore(call)),
+      )
+      const calls = h.server.calls()
+      expect(calls).toHaveLength(11)
+      for (const call of calls)
+        expect(call.pacer).toEqual({ "x-pacer-project": project, "x-pacer-project-name": "openforge" })
+      yield* Effect.ignore(h.client.tasks(project))
+      expect(h.server.calls().at(-1)?.pacer).toEqual({})
+    }),
+  )
+
   it.effect("is unavailable when start gets no answer within its timeout", () =>
     Effect.gen(function* () {
       const h = yield* setup

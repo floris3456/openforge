@@ -255,7 +255,21 @@ export class MissingRecall extends Schema.TaggedError<MissingRecall>()("MemoryCl
   }
 }
 
-export type Error = Unavailable | Refused | Missing | MissingTask | MissingRecall
+/**
+ * CPP keeps this project's memory from the asking key: memory is off for the project (`project_memory_off`), or the key
+ * may not use it (`project_forbidden`) (workspace spec `docs/specs/cpp-projects.md`, "Memory follows the project").
+ */
+export class Closed extends Schema.TaggedError<Closed>()("MemoryClient.Closed", {
+  type: Schema.Literals(["project_memory_off", "project_forbidden"]),
+}) {
+  override get message() {
+    return this.type === "project_memory_off"
+      ? "Memory is off for this project on CLIProxyPacer, so the work goes on without it."
+      : "This key may not use this project's memory on CLIProxyPacer, so the work goes on without it."
+  }
+}
+
+export type Error = Unavailable | Refused | Missing | MissingTask | MissingRecall | Closed
 
 export interface Interface {
   /**
@@ -301,6 +315,8 @@ export interface Interface {
   ) => Effect.Effect<Recall, Error>
   /** Reads one row of the recall log. */
   readonly recall: (project: string, id: string) => Effect.Effect<Recall, Error>
+  /** The same client, its requests carrying `headers`: the chat's project as CPP knows it (`PacerProject`). */
+  readonly withHeaders: (headers: Readonly<Record<string, string>>) => Interface
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MemoryClient") {}
@@ -314,7 +330,7 @@ export const layer = Layer.effect(
     const task = (project: string, id: string) => `${base(project)}/tasks/${encodeURIComponent(id)}`
     const recall = (project: string, id: string) => `${base(project)}/recalls/${encodeURIComponent(id)}`
 
-    return Service.of({
+    const make = (headers: Readonly<Record<string, string>>): Interface => ({
       write: (project, input) =>
         http
           .post(
@@ -329,6 +345,7 @@ export const layer = Layer.effect(
               ...(input.move === undefined ? {} : { move: input.move }),
             },
             Written,
+            { headers },
           )
           .pipe(
             Effect.map((answer) => ({
@@ -339,12 +356,12 @@ export const layer = Layer.effect(
             Effect.mapError(failure(input.supersedes)),
           ),
       read: (project, id) =>
-        http.get(entry(project, id), EntryAnswer).pipe(
+        http.get(entry(project, id), EntryAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.entry),
           Effect.mapError(failure(id)),
         ),
       forget: (project, id, input) =>
-        http.post(`${entry(project, id)}/forget`, input, EntryAnswer).pipe(
+        http.post(`${entry(project, id)}/forget`, input, EntryAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.entry),
           Effect.mapError(failure(id)),
         ),
@@ -360,6 +377,7 @@ export const layer = Layer.effect(
               by: input.by,
             },
             Found,
+            { headers },
           )
           .pipe(
             Effect.map((answer) => answer.body),
@@ -371,7 +389,7 @@ export const layer = Layer.effect(
             `${base(project)}/start`,
             { ...input, task: input.task ?? null, subtask: input.subtask ?? null },
             StartedAnswer,
-            options,
+            { ...options, headers },
           )
           .pipe(
             Effect.map((answer) => started(answer.body)),
@@ -388,37 +406,41 @@ export const layer = Layer.effect(
               by: input.by,
             },
             TaskAnswer,
+            { headers },
           )
           .pipe(
             Effect.map((answer) => ({ task: answer.body.task, existing: answer.body.existing === true })),
             Effect.mapError(failure(input.parent, "task")),
           ),
       tasks: (project) =>
-        http.get(`${base(project)}/tasks`, TaskList).pipe(
+        http.get(`${base(project)}/tasks`, TaskList, { headers }).pipe(
           Effect.map((answer) => answer.body),
           Effect.mapError(failure()),
         ),
       task: (project, id) =>
-        http.get(task(project, id), TaskRead).pipe(
+        http.get(task(project, id), TaskRead, { headers }).pipe(
           Effect.map((answer) => answer.body),
           Effect.mapError(failure(id, "task")),
         ),
       change: (project, id, input) =>
-        http.post(`${task(project, id)}/state`, input, TaskAnswer).pipe(
+        http.post(`${task(project, id)}/state`, input, TaskAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.task),
           Effect.mapError(failure(id, "task")),
         ),
       after: (project, id, input, options) =>
-        http.post(`${recall(project, id)}/after`, input, RecallAnswer, options).pipe(
+        http.post(`${recall(project, id)}/after`, input, RecallAnswer, { ...options, headers }).pipe(
           Effect.map((answer) => answer.body.recall),
           Effect.mapError(failure(id, "recall")),
         ),
       recall: (project, id) =>
-        http.get(recall(project, id), RecallAnswer).pipe(
+        http.get(recall(project, id), RecallAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.recall),
           Effect.mapError(failure(id, "recall")),
         ),
+      withHeaders: make,
     })
+
+    return Service.of(make({}))
   }),
 )
 
@@ -437,10 +459,15 @@ export function project(entries: Parameters<typeof Config.latest>[0], projectID:
 
 /**
  * How an answer that is not the entry reads to an agent. A 404 of the server's own (`not_found`) on a route naming an
- * entry is that entry missing; on any other route, or without the server's type, the proxy has no memory.
+ * entry is that entry missing; on any other route, or without the server's type, the proxy has no memory. A project's
+ * memory kept from the key is {@link Closed}.
  */
 function failure(id?: string, thing: "entry" | "task" | "recall" = "entry") {
   return (error: PacerHttp.Error): Error => {
+    if (error._tag === "PacerHttp.NoPacer" && error.type === "project_memory_off")
+      return new Closed({ type: error.type })
+    if (error._tag === "PacerHttp.Refused" && error.type === "project_forbidden")
+      return new Closed({ type: error.type })
     if (error._tag === "PacerHttp.NotFound" && id !== undefined)
       return thing === "task"
         ? new MissingTask({ id })

@@ -10,6 +10,10 @@ import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-searc
  * Every write is one SQLite transaction (`BEGIN IMMEDIATE`), and Bun's SQLite is synchronous, so the exact-copy rule
  * and a replacement hold for writers that arrive at once, in this process or another one on the same file.
  *
+ * Every project has memory, for every key, until `project()` switches it off or names the keys that may use it; its
+ * routes then answer as CLIProxyPacer's projects do (the workspace's spec `docs/specs/cpp-projects.md`, "Memory routes"):
+ * `404 project_memory_off`, or `403 project_forbidden`, before anything else is checked.
+ *
  * As a script: `bun memory-server.ts --port <n> --key <key>[=<label>] [--key …] [--file <path>]
  * [--embedding-url <url> --embedding-model <name> [--embedding-key <key>]]`.
  */
@@ -21,6 +25,7 @@ export const capabilities = {
   search_limit: 20,
   tasks: true,
   recalls: true,
+  projects: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -227,6 +232,8 @@ export function startMemoryServer(input: {
   db.run("pragma busy_timeout = 5000")
   SCHEMA.forEach((statement) => db.run(statement))
   const store = storeOf(db, input.embedding)
+  /** The projects switched by `project()`; `keys` null for every key. */
+  const projects = new Map<string, { readonly memory: boolean; readonly keys: ReadonlySet<string> | null }>()
 
   const guarded =
     <R extends Request>(handle: (request: R, person: string) => Response | Promise<Response>) =>
@@ -235,6 +242,20 @@ export function startMemoryServer(input: {
       if (!key) return Response.json({ error: "Missing API key" }, { status: 401 })
       const person = people.get(key)
       if (!person) return Response.json({ error: "Invalid API key" }, { status: 401 })
+      const project = (request as Request & { params?: Record<string, string> }).params?.project
+      const setting = project === undefined ? undefined : projects.get(project)
+      if (setting && !setting.memory)
+        return failure(
+          404,
+          "project_memory_off",
+          "memory is off for this project: turn memory on for this project on CLIProxyPacer's Projects page",
+        )
+      if (setting?.keys && !setting.keys.has(key))
+        return failure(
+          403,
+          "project_forbidden",
+          "this key may not use this project's memory: allow it for this project on CLIProxyPacer's Projects page",
+        )
       return handle(request, person)
     }
 
@@ -322,6 +343,9 @@ export function startMemoryServer(input: {
 
   return {
     url: `http://127.0.0.1:${server.port}`,
+    /** Switches a project's memory, and names the keys that may use it (all when left out or null). */
+    project: (identity: string, setting: { readonly memory: boolean; readonly keys?: ReadonlyArray<string> | null }) =>
+      void projects.set(identity, { memory: setting.memory, keys: setting.keys ? new Set(setting.keys) : null }),
     stop: async () => {
       store.stop()
       await server.stop(true)

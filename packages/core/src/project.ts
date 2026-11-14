@@ -45,6 +45,8 @@ export interface Resolved {
   // This checkout's main directory; the stored project canonical may be another clone.
   readonly canonical: AbsolutePath
   readonly vcs?: Vcs
+  /** The normalised `origin` remote (`host/path`, no user part or `.git`), when the repository has one. */
+  readonly remote?: string
 }
 
 // Keep this filesystem-only; permission checks use it and should not execute VCS commands.
@@ -301,10 +303,7 @@ const layer = Layer.effect(
 
     const remote = Effect.fnUntraced(function* (repo: Git.Repository) {
       const origin = yield* git.remote.get(repo)
-      if (!origin) return undefined
-      const normalized = url(origin)
-      if (!normalized) return undefined
-      return ID.make(Hash.fast(`git-remote:${normalized}`))
+      return origin ? url(origin) : undefined
     })
 
     function url(input: string) {
@@ -346,8 +345,9 @@ const layer = Layer.effect(
           return value
         })
       const previous = yield* cached(repo.commonDirectory)
+      const origin = yield* remote(repo).pipe(fallback(undefined))
       const id =
-        (yield* remote(repo).pipe(fallback(undefined))) ??
+        (origin ? ID.make(Hash.fast(`git-remote:${origin}`)) : undefined) ??
         previous ??
         (yield* rootCommit(repo).pipe(fallback(undefined)))
       const canonical =
@@ -363,6 +363,7 @@ const layer = Layer.effect(
         directory: repo.worktree,
         canonical,
         vcs: { type: "git" as const, store: repo.commonDirectory },
+        ...(origin ? { remote: origin } : {}),
       }
       return { resolved, cacheable }
     })

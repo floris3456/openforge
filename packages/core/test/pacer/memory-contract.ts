@@ -20,6 +20,16 @@ export type Target = {
   readonly tasks: boolean
   /** Whether they say `recalls`: the group "recall log" runs only then. */
   readonly recalls: boolean
+  /** Whether they say `projects`. */
+  readonly projects: boolean
+  /**
+   * Switches a project's memory and names the keys that may use it (all when left out or null), as CLIProxyPacer's
+   * Projects page does; the group "projects" runs only with it.
+   */
+  readonly setProject?: (
+    identity: string,
+    setting: { readonly memory: boolean; readonly keys?: ReadonlyArray<string> | null },
+  ) => Promise<void>
 }
 
 type Task = {
@@ -318,6 +328,87 @@ export function memoryContract(target: Target) {
       expect(name.length).toBe(128)
       expect(answer.status).toBe(201)
     })
+  })
+
+  describe.if(target.setProject !== undefined)("projects", () => {
+    const switched = (identity: string, setting: Parameters<NonNullable<Target["setProject"]>>[1]) =>
+      target.setProject!(identity, setting)
+    /** Every route of a project, with a body no check would let through, so only the gate can answer. */
+    const routes = (id: string) => {
+      const base = `/pacer/v1/memory/${id}`
+      const none = "000000000000"
+      const route = (method: string, path: string, body?: object) => [method, `${base}${path}`, body] as const
+      return [
+        route("POST", "/entries", {}),
+        route("GET", `/entries/${none}`),
+        route("POST", `/entries/${none}/forget`, {}),
+        route("POST", "/search", {}),
+        route("POST", "/start", {}),
+        route("GET", "/export"),
+        ...(target.tasks
+          ? [
+              route("POST", "/tasks", {}),
+              route("GET", "/tasks"),
+              route("GET", `/tasks/${none}`),
+              route("POST", `/tasks/${none}/state`, {}),
+            ]
+          : []),
+        ...(target.recalls
+          ? [
+              route("GET", "/recalls"),
+              route("GET", `/recalls/${none}`),
+              route("POST", `/recalls/${none}/after`, {}),
+              route("POST", `/recalls/${none}/labels`, {}),
+            ]
+          : []),
+      ]
+    }
+
+    test("a project with memory off answers 404 project_memory_off on every route, before any check", async () => {
+      const memory = project("off")
+      await switched(memory.id, { memory: false })
+      const answers = await Promise.all(routes(memory.id).map(([method, path, body]) => send(method, path, body)))
+      answers.forEach((answer) => {
+        expect(answer.status).toBe(404)
+        expect(answer.body.error.type).toBe("project_memory_off")
+        expect(answer.body.error.message).toContain("Projects page")
+      })
+      expect((await memory.verified("Written while memory is off.")).status).toBe(404)
+      await switched(memory.id, { memory: true })
+      expect((await memory.export()).lines).toEqual([])
+    })
+
+    test("what is stored stays while memory is off, and comes back when it is on", async () => {
+      const memory = project("kept")
+      await switched(memory.id, { memory: true })
+      const written = await created(memory.verified("The pump runs at night."))
+      await switched(memory.id, { memory: false })
+      const off = await memory.read(written.entry.id)
+      expect([off.status, off.body.error.type]).toEqual([404, "project_memory_off"])
+      await switched(memory.id, { memory: true })
+      expect((await answered(memory.read(written.entry.id))).entry).toEqual(written.entry)
+    })
+
+    test.if(target.second !== undefined)(
+      "a key the project does not allow answers 403 project_forbidden on every route; an allowed one gets through",
+      async () => {
+        const memory = project("forbidden")
+        await switched(memory.id, { memory: true, keys: [target.key] })
+        const answers = await Promise.all(
+          routes(memory.id).map(([method, path, body]) => send(method, path, body, target.second!.key)),
+        )
+        answers.forEach((answer) => {
+          expect(answer.status).toBe(403)
+          expect(answer.body.error.type).toBe("project_forbidden")
+          expect(answer.body.error.message).toContain("Projects page")
+        })
+        expect((await memory.verified("Only the allowed key writes this.")).status).toBe(201)
+        // Off comes first: a key not allowed to use a project whose memory is off hears that memory is off.
+        await switched(memory.id, { memory: false, keys: [target.key] })
+        const both = await memory.read("000000000000", target.second!.key)
+        expect([both.status, both.body.error.type]).toEqual([404, "project_memory_off"])
+      },
+    )
   })
 
   describe("write and read back", () => {
@@ -2794,6 +2885,7 @@ export function memoryContract(target: Target) {
       embedding: "test-embedding",
       ...(target.tasks ? { tasks: true } : {}),
       ...(target.recalls ? { recalls: true } : {}),
+      ...(target.projects ? { projects: true } : {}),
     })
   })
 

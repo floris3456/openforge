@@ -16,6 +16,7 @@ import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryText } from "@opencode/core/memory/text"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { Permission } from "@opencode/core/permission"
 import { Project } from "@opencode/core/project"
@@ -26,6 +27,7 @@ import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
+import { locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
@@ -99,6 +101,7 @@ const pluginNode = makeLocationNode({
     PacerEndpoint.node,
     PacerModels.node,
     MemoryClient.node,
+    PacerProject.node,
     Session.node,
     Config.node,
     KV.node,
@@ -173,6 +176,7 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
       Config.node.replace(Config.testLayer([...(options.config ?? [])])),
       Image.node.replace(imagePassthrough),
       KV.node.replace(kvOf(kv)),
+      locationNode("/project"),
     ]),
   )
   const registry = Context.get(context, Tool.Service)
@@ -1468,6 +1472,25 @@ describe("MemoryTools project", () => {
         ["POST", "/pacer/v1/memory/openforge-workspace/search"],
         ["POST", "/pacer/v1/memory/openforge-workspace/search"],
         ["POST", "/pacer/v1/memory/openforge-workspace/entries"],
+      ])
+    }),
+  )
+
+  it.live("names the project it calls to CPP on each call, a child's and a task's too", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const id = yield* h.save({ text: "The pump runs at night.", kind: "unverified", basis: "b" })
+      yield* h.read("recall", { query: "pump" }, child)
+      yield* h.read("forget", { id, reason: "gone" })
+      yield* h.read("task", {})
+      const naming = { "x-pacer-project": projectID, "x-pacer-project-name": "project" }
+      expect(h.server.calls().map((call) => call.pacer)).toEqual(h.server.calls().map(() => naming))
+      expect(h.server.calls().length).toBeGreaterThanOrEqual(4)
+
+      const configured = yield* setup({ config: named("openforge-workspace") })
+      yield* configured.read("recall", { query: "q" }, outside)
+      expect(configured.server.calls().map((call) => call.pacer)).toEqual([
+        { "x-pacer-project": "openforge-workspace", "x-pacer-project-name": "project" },
       ])
     }),
   )

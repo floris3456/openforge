@@ -6,6 +6,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerProject } from "../pacer/project.js"
 import { SessionEvent } from "../session/event.js"
 import type { SessionMessage } from "../session/message.js"
 import type { SessionSchema } from "../session/schema.js"
@@ -54,17 +55,21 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
+    const projects = yield* PacerProject.Service
     const scope = yield* Effect.scope
 
     const recalls = catalogs.get().pipe(Effect.map((catalog) => catalog?.pacer?.memory?.recalls === true))
 
     const send = (searched: Searched, input: Omit<MemoryClient.AfterInput, "by">, by: MemoryClient.By) =>
-      client.after(searched.project, searched.recall, { ...input, by }, { timeout: TIMEOUT }).pipe(
-        Effect.asVoid,
-        Effect.catch((error) =>
-          Effect.logDebug("what followed a search was not added", { recall: searched.recall, reason: error.message }),
-        ),
-      )
+      client
+        .withHeaders(projects.headers(searched.project))
+        .after(searched.project, searched.recall, { ...input, by }, { timeout: TIMEOUT })
+        .pipe(
+          Effect.asVoid,
+          Effect.catch((error) =>
+            Effect.logDebug("what followed a search was not added", { recall: searched.recall, reason: error.message }),
+          ),
+        )
 
     /** After a step: its text and calls go to the searches it was the first to see. */
     const stepped = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, messageID: SessionMessage.ID) {
@@ -289,5 +294,5 @@ function cut(text: string, most: number) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, Database.node, SessionStore.node, PacerModels.node, MemoryClient.node],
+  deps: [Bus.node, Database.node, SessionStore.node, PacerModels.node, PacerProject.node, MemoryClient.node],
 })

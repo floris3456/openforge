@@ -130,7 +130,8 @@ const SCHEMA = [
     by text not null,
     at integer not null,
     after text,
-    labels text not null
+    labels text not null,
+    said text
   )`,
   `create table if not exists task (
     seq integer primary key autoincrement,
@@ -209,6 +210,7 @@ type RecallRow = {
   at: number
   after: string | null
   labels: string
+  said: string | null
 }
 
 type After = {
@@ -929,7 +931,8 @@ function storeOf(
   /**
    * The entries close to any part of a start's summary, each part by the rule of a prompt with the summary's floor:
    * without repeats, each with its best score, best first, at most 5; none without the parts' vectors. An entry whose
-   * text's words are at least the cover's share among the parts' words is left out.
+   * text's words are at least the cover's share among the parts' words is left out, and named in `said`, as long as
+   * fewer than 5 have passed.
    */
   async function closeToSummary(input: {
     readonly project: string
@@ -938,11 +941,11 @@ function storeOf(
     readonly exclude: string[]
   }) {
     const vectors = await embed(input.summary, QUERY_MS)
-    if (!vectors || !embedding) return { entries: [], meaning: false }
-    const said = new Set(input.summary.flatMap(words))
+    if (!vectors || !embedding) return { entries: [], said: [], meaning: false }
+    const spoken = new Set(input.summary.flatMap(words))
     const covered = (row: Row) => {
       const own = words(row.text ?? "")
-      return own.length > 0 && own.filter((word) => said.has(word)).length / own.length >= floors.cover
+      return own.length > 0 && own.filter((word) => spoken.has(word)).length / own.length >= floors.cover
     }
     const best = new Map<string, Row & { score: number }>()
     input.summary.forEach((part, index) =>
@@ -956,14 +959,19 @@ function storeOf(
         model: embedding.model,
         floor: floors.summary,
       }).forEach((row) => {
-        if (!covered(row) && (best.get(row.id)?.score ?? -Infinity) < row.score) best.set(row.id, row)
+        if ((best.get(row.id)?.score ?? -Infinity) < row.score) best.set(row.id, row)
       }),
     )
+    const passed: (Row & { score: number })[] = []
+    const left: string[] = []
+    for (const row of [...best.values()].toSorted((a, b) => b.score - a.score)) {
+      if (passed.length === SUMMARY_LIMIT) break
+      if (covered(row)) left.push(row.id)
+      else passed.push(row)
+    }
     return {
-      entries: [...best.values()]
-        .toSorted((a, b) => b.score - a.score)
-        .slice(0, SUMMARY_LIMIT)
-        .map((row) => ({ ...entryOf(row), score: row.score })),
+      entries: passed.map((row) => ({ ...entryOf(row), score: row.score })),
+      said: left,
       meaning: true,
     }
   }
@@ -1022,13 +1030,13 @@ function storeOf(
     kind: "search" | "start" | "prompt" | "summary",
     query: string,
     body: Fields,
-    answer: { entries: { id: string }[]; meaning: boolean },
+    answer: { entries: { id: string }[]; said?: string[]; meaning: boolean },
     by: { person: string },
   ) {
     const id = newID()
     db.run(
-      `insert into recall (id, project, kind, query, scopes, kinds, entries, meaning, by, at, after, labels)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, '[]')`,
+      `insert into recall (id, project, kind, query, scopes, kinds, entries, meaning, by, at, after, labels, said)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, '[]', ?)`,
       [
         id,
         project,
@@ -1040,6 +1048,7 @@ function storeOf(
         answer.meaning ? 1 : 0,
         JSON.stringify(by),
         Date.now(),
+        JSON.stringify(answer.said ?? []),
       ],
     )
     return id
@@ -1087,6 +1096,7 @@ function recallOf(row: RecallRow) {
     scopes: JSON.parse(row.scopes),
     kinds: JSON.parse(row.kinds),
     entries: JSON.parse(row.entries),
+    said: row.said === null ? null : JSON.parse(row.said),
     meaning: row.meaning === 1,
     by: JSON.parse(row.by),
     at: row.at,

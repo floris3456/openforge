@@ -118,6 +118,8 @@ const StartedAnswer = Schema.Struct({
   /** Null when `limit` was 0: no search ran, and nothing is read of `meaning`. */
   recall: Schema.NullOr(Schema.String),
   entries: Schema.Array(Entry),
+  /** With `summary`: the entries close to it that it already says, left out; absent on a server before it. */
+  said: Schema.optional(Schema.Array(Schema.String)),
   meaning: Schema.optional(Schema.Boolean),
   counts: Schema.Struct({ global: Schema.Number, role: Schema.Number, task: Schema.Number }),
   // A server without tasks may answer neither.

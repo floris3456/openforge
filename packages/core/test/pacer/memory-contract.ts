@@ -194,6 +194,8 @@ type Recall = {
   scopes: unknown
   kinds: string[] | null
   entries: string[]
+  /** Kind `summary`: what it left out as already said; `null` for a row stored before it was logged. */
+  said: string[] | null
   meaning: boolean | null
   by: { person: string; role: string; chat: string; task: string | null; subtask: string | null }
   at: number
@@ -240,6 +242,8 @@ type Body = {
   near: Found[]
   recall: string
   entries: Found[]
+  /** A start with `summary`: the entries close to it left out as already said. */
+  said?: string[]
   meaning: boolean
   waiting: number
   task: null
@@ -1894,20 +1898,24 @@ export function memoryContract(target: Target) {
       expect(one.entries.map((entry) => entry.id)).not.toContain(all.entries[0]!.id)
     })
 
-    test("an entry whose words the parts mostly say already is left out: under 0.55 of them it comes back", async () => {
+    test("an entry whose words the parts mostly say already is left out and named in said: under 0.55 of them it comes back", async () => {
       const memory = project("summary-cover")
       const term = word()
       // Its words: releases, the term, ship, train.
       const near = (await created(memory.verified(`Releases of ${term} ship through the train.`))).entry
       const parts = [`Release ${term}.`]
       // One of its 4 words in the parts, then 2 (the words of all the parts count), then 3.
-      expect((await answered(start(memory, { summary: parts }))).entries).toEqual([scored(near)])
-      expect((await answered(start(memory, { summary: [...parts, "The train is late."] }))).entries).toEqual([
-        scored(near),
-      ])
-      expect(
-        (await answered(start(memory, { summary: [...parts, "The train is late.", "Ship it."] }))).entries,
-      ).toEqual([])
+      expect(await answered(start(memory, { summary: parts }))).toMatchObject({ entries: [scored(near)], said: [] })
+      expect(await answered(start(memory, { summary: [...parts, "The train is late."] }))).toMatchObject({
+        entries: [scored(near)],
+        said: [],
+      })
+      expect(await answered(start(memory, { summary: [...parts, "The train is late.", "Ship it."] }))).toMatchObject({
+        entries: [],
+        said: [near.id],
+      })
+      // A start without a summary names nothing said.
+      expect(await answered(start(memory, {}))).not.toHaveProperty("said")
     })
 
     describe("without meaning", () => {
@@ -1920,6 +1928,7 @@ export function memoryContract(target: Target) {
         const answer = await answered(start(memory, { summary: [`Release ${term}.`] }))
         expect(answer.meaning).toBe(false)
         expect(answer.entries).toEqual([])
+        expect(answer.said).toEqual([])
         expect(answer.counts).toEqual({ global: 1, role: 0, task: 0 })
       })
     })
@@ -1957,6 +1966,7 @@ export function memoryContract(target: Target) {
         kind: "summary",
         query: parts.join("\n\n"),
         entries: [near.id],
+        said: [],
         meaning: true,
       })
       const after = await send("POST", `/pacer/v1/memory/${memory.id}/recalls/${answer.recall}/after`, {
@@ -3017,6 +3027,7 @@ export function memoryContract(target: Target) {
           scopes,
           kinds: null,
           entries: found.entries.map((entry) => entry.id),
+          said: [],
           meaning: found.meaning,
           by: { person: target.person, role: by.role, chat: by.chat, task: "t-recall", subtask: "s-recall" },
           at: expect.any(Number),

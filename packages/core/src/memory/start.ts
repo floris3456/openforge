@@ -141,11 +141,12 @@ const layer = Layer.effect(
       ).pipe(
         Effect.map((answer) => ({
           text: MemoryText.block(answer.started, by.role, offered, inside !== undefined, answer.summary),
-          description: answer.summary ? "Memory close to the summary" : "Memory nearest to the prompt",
+          description: lineOf(answer.started, answer.summary),
           memory: {
             project,
             recall: answer.started.recall,
             entries: answer.started.entries.map((entry) => entry.id),
+            ...(answer.started.said ? { said: answer.started.said } : {}),
             // What the task part may show, so that a prompt's entries leave them out.
             shown: [...(answer.started.task?.entries ?? []), ...(answer.started.subtask?.entries ?? [])].map(
               (entry) => entry.id,
@@ -221,3 +222,16 @@ export const node = makeLocationNode({
     MemoryPrompt.node,
   ],
 })
+
+/**
+ * The block's line in the chat's view (spec notice-view, section 4): what it holds, as the TUI shows it. The model gets
+ * the block's text only, never this.
+ */
+function lineOf(started: MemoryClient.Started, summary: boolean) {
+  if (started.entries.length > 0) return summary ? "Memory close to the summary" : "Memory nearest to the prompt"
+  // A server that names no `said`, or a summary without vectors, cannot tell why none came.
+  if (!summary || !started.meaning || started.said === undefined) return "Memory"
+  const said = started.said.length
+  if (said === 0) return "Memory · nothing close to the summary"
+  return `Memory · the summary already says the ${said} ${said === 1 ? "entry" : "entries"} close to it`
+}

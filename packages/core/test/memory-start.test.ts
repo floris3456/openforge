@@ -384,6 +384,17 @@ const setup = Effect.fnUntraced(function* (
             ),
           ),
         ),
+    /** The start blocks' lines in the chat's view (spec notice-view, section 4), in order. */
+    lines: () =>
+      session
+        .messages({ sessionID, order: "asc" })
+        .pipe(
+          Effect.map((messages) =>
+            messages.flatMap((message) =>
+              message.type === "synthetic" && message.metadata?.memory !== undefined ? [message.description] : [],
+            ),
+          ),
+        ),
     /** The ids of the start blocks the chat holds, in order. */
     blockIDs: () =>
       session
@@ -501,6 +512,7 @@ describe("MemoryStart through the runner", () => {
       ].join("\n")
       expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", sent(block)])
       expect(yield* h.blocks()).toEqual([block])
+      expect(yield* h.lines()).toEqual(["Memory nearest to the prompt"])
       for (const id of [otherRole.id, otherProject.id]) expect(block).not.toContain(id)
       expect(h.starts().map((call) => call.body)).toEqual([
         {
@@ -530,6 +542,7 @@ describe("MemoryStart through the runner", () => {
       expect(userTexts(empty.requests()[0])[1]).toBe(
         sent([opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n")),
       )
+      expect(yield* empty.lines()).toEqual(["Memory"])
     }),
   )
 
@@ -1367,6 +1380,7 @@ describe("MemoryPrompt through the runner", () => {
       // The step that answers no new prompt sends the same, and asks nothing.
       for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
       expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
+      expect(yield* h.lines()).toEqual(["Memory"])
       expect(h.prompts().map((call) => call.body)).toEqual([
         {
           prompt: "how do we release",
@@ -1611,6 +1625,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       expect(blocks).toHaveLength(2)
       expect(blocks[0]).not.toContain(line)
       expect(blocks[1]).toBe([opening, line, MemoryText.entry(close), counts(1), keep].join("\n"))
+      expect(yield* h.lines()).toEqual(["Memory", "Memory close to the summary"])
       // Every step after the compaction sends the block as it was built.
       const after = h.requests().filter((request) => userTexts(request).includes(sent(blocks[1]!)))
       expect(after.length).toBeGreaterThanOrEqual(2)
@@ -1630,7 +1645,7 @@ describe("MemoryStart after a compaction: the summary", () => {
           headers: { authorization: `Bearer ${key}` },
         }).then((response) => response.json() as Promise<{ recall: { kind: string; entries: string[] } }>),
       )
-      expect(read.recall).toMatchObject({ kind: "summary", entries: [close.id] })
+      expect(read.recall).toMatchObject({ kind: "summary", entries: [close.id], said: [] })
     }),
   )
 
@@ -1645,6 +1660,55 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* h.prompt("what now?")
       expect(bodies(h)[1]?.summary).toEqual(["## Objective\nPaint the shed."])
       expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.lines())[1]).toBe("Memory · nothing close to the summary")
+    }),
+  )
+
+  it.live("an entry close to the summary that it already says is left out, and the line says so", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const said = yield* h.write({ kind: "verified", text: "Ship it soon.", basis: "b", scope: "global" })
+      yield* h.prompt("hello")
+      yield* h.llm.push(TestLLM.text(summary, "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      // The model gets the block as when nothing is close: only the line in the chat's view tells them apart.
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.lines())[1]).toBe("Memory · the summary already says the 1 entry close to it")
+      expect(bodies(h)[1]?.summary).toBeDefined()
+      const recall = yield* h.blockRecall()
+      const read = yield* Effect.promise(() =>
+        fetch(`${summarized.store.url}/pacer/v1/memory/${h.project}/recalls/${recall}`, {
+          headers: { authorization: `Bearer ${key}` },
+        }).then((response) => response.json() as Promise<{ recall: { kind: string; entries: string[] } }>),
+      )
+      expect(read.recall).toMatchObject({ kind: "summary", entries: [], said: [said.id] })
+    }),
+  )
+
+  it.live("a server that names no said entries gives the line without saying why none came", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Ship it soon.", basis: "b", scope: "global" })
+      // As CLIProxyPacer before it answered `said`.
+      summarized.control.answer = (request) =>
+        fetch(`${summarized.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        }).then(async (response) => {
+          if (!request.path.endsWith("/start")) return response
+          const { said: _, ...rest } = (await response.json()) as Record<string, unknown>
+          return Response.json(rest, { status: response.status })
+        })
+      yield* h.prompt("hello")
+      yield* h.llm.push(TestLLM.text(summary, "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      expect(bodies(h)[1]?.summary).toBeDefined()
+      expect(yield* h.lines()).toEqual(["Memory", "Memory"])
     }),
   )
 
@@ -1697,6 +1761,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       // Asked again without the summary: the block as without one.
       expect(bodies(h).map((body) => body.summary !== undefined)).toEqual([false, true, false])
       expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.lines())[1]).toBe("Memory")
 
       const { h: k } = yield* compacted()
       summarized.control.answer = (request) =>

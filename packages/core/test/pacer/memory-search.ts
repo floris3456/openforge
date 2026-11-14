@@ -37,8 +37,16 @@ didn isn aren wasn weren won wouldn couldn shouldn`.split(/\s+/),
 /** Which live entries a search looks in: every one of the project, or the union of the global ones, those of the listed roles and those of the listed tasks. */
 export type Scopes = "all" | { readonly global: boolean; readonly roles: string[]; readonly tasks: string[] }
 
-/** The live entries of a project in `scopes` whose kind is one of `kinds`. */
-export type Selection = { readonly project: string; readonly scopes: Scopes; readonly kinds: string[] }
+/** The live entries of a project in `scopes` whose kind is one of `kinds`, without those `exclude` names. */
+export type Selection = {
+  readonly project: string
+  readonly scopes: Scopes
+  readonly kinds: string[]
+  readonly exclude?: ReadonlyArray<string>
+}
+
+/** How many of the first of each order an entry must be among to come back for a prompt, and at most how many do. */
+export const PROMPT_FIRST = 2
 
 /** What the ranking reads of a stored entry. `vector` is a Float32Array of length 1, as bytes. */
 type Ranked = {
@@ -127,6 +135,44 @@ export function search<Row extends Ranked>(
 }
 
 /**
+ * The entries that match a person's prompt closely (the contract's "Prompt"): those of the selection among the first
+ * {@link PROMPT_FIRST} of the keyword list and among the first {@link PROMPT_FIRST} of the meaning list, whose cosine
+ * with the prompt's vector is at least `floor`; best by meaning first, each with its cosine as `score`.
+ */
+export function close<Row extends Ranked>(
+  db: Database,
+  input: Selection & {
+    readonly query: string
+    readonly vector: Float32Array
+    readonly model: string
+    readonly floor: number
+  },
+) {
+  const selection = selected(input)
+  const list = words(input.query)
+  const keyword = list.length
+    ? db
+        .query<{ id: string }, (string | number)[]>(
+          `select entry.id from entry_fts join entry on entry.seq = entry_fts.rowid
+           where entry_fts match ? and ${selection.where}
+           order by -bm25(entry_fts) desc, ${NEARER_SQL}, entry.at desc, entry.seq desc
+           limit ${PROMPT_FIRST}`,
+        )
+        .all(list.map((word) => `"${word.replaceAll('"', '""')}"`).join(" OR "), ...selection.values)
+        .map((row) => row.id)
+    : []
+  return db
+    .query<Row, (string | number)[]>(
+      `select entry.* from entry where ${selection.where} and entry.vector is not null and entry.vector_model = ?`,
+    )
+    .all(...selection.values, input.model)
+    .map((row) => ({ ...row, score: cosine(input.vector, row.vector!) }))
+    .toSorted(order)
+    .slice(0, PROMPT_FIRST)
+    .filter((row) => keyword.includes(row.id) && row.score >= input.floor)
+}
+
+/**
  * The live entries of a project nearest to the entry `id`, whose vector (length 1, of `model`) is `vector`: those with
  * a vector of that model, of every scope and kind, by cosine best first, equal ones as in the keyword list; at most
  * `limit`, each with its cosine as `score`. Answered by a write as `near`.
@@ -156,10 +202,9 @@ export function nearest<Row extends Ranked>(
 export function waiting(db: Database, input: Selection & { readonly model: string }) {
   const selection = selected(input)
   return db
-    .query<
-      { n: number },
-      (string | number)[]
-    >(`select count(*) as n from entry where ${selection.where} and (entry.vector is null or entry.vector_model is not ?)`)
+    .query<{ n: number }, (string | number)[]>(
+      `select count(*) as n from entry where ${selection.where} and (entry.vector is null or entry.vector_model is not ?)`,
+    )
     .get(...selection.values, input.model)!.n
 }
 
@@ -190,7 +235,8 @@ function selected(input: Selection) {
       and entry.kind in (select value from json_each(?))
       and (? or (entry.scope = 'global' and ?)
         or (entry.scope = 'role' and entry.role in (select value from json_each(?)))
-        or (entry.scope = 'task' and entry.task in (select value from json_each(?))))`,
+        or (entry.scope = 'task' and entry.task in (select value from json_each(?))))
+      and entry.id not in (select value from json_each(?))`,
     values: [
       input.project,
       JSON.stringify(input.kinds),
@@ -198,6 +244,7 @@ function selected(input: Selection) {
       input.scopes !== "all" && input.scopes.global ? 1 : 0,
       JSON.stringify(input.scopes === "all" ? [] : input.scopes.roles),
       JSON.stringify(input.scopes === "all" ? [] : input.scopes.tasks),
+      JSON.stringify(input.exclude ?? []),
     ],
   }
 }

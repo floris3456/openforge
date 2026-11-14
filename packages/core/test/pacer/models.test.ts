@@ -427,6 +427,7 @@ describe("PacerModels", () => {
             tasks: false,
             recalls: false,
             projects: false,
+            prompt: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -442,6 +443,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, projects: true }))?.pacer?.memory).toMatchObject({
           recalls: false,
           projects: true,
+        })
+        // A server that answers each prompt's close entries says so.
+        expect((yield* told({ ...block, embedding: null, prompt: true }))?.pacer?.memory).toMatchObject({
+          projects: false,
+          prompt: true,
         })
         // Left out, or in a version or shape this one cannot read: no memory, and the rest stands.
         for (const unread of [

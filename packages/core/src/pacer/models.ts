@@ -45,6 +45,11 @@ export interface Memory {
    * `docs/specs/cpp-projects.md`). Nothing reads it yet.
    */
   readonly projects: boolean
+  /**
+   * Whether the server answers each prompt's close entries (`POST …/prompt`, the memory API's section "Prompt"); a
+   * start then asks for no entries.
+   */
+  readonly prompt: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -203,6 +208,7 @@ const MemoryBlock = Schema.Struct({
   tasks: Schema.optional(Schema.Unknown),
   recalls: Schema.optional(Schema.Unknown),
   projects: Schema.optional(Schema.Unknown),
+  prompt: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -365,6 +371,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           tasks: memory.tasks === true,
           recalls: memory.recalls === true,
           projects: memory.projects === true,
+          prompt: memory.prompt === true,
         },
       }),
     }),

@@ -21,7 +21,11 @@ export interface Received {
 }
 
 /** A catalog of a server with memory (`true`), with the pacer but no memory (`false`), or a plain proxy. */
-export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => ({
+export const catalogOf = (
+  memory: boolean | "no pacer",
+  /** `prompt`: whether the server answers prompts; as the small server says when left out. */
+  options: { readonly prompt?: boolean } = {},
+): PacerModels.Catalog => ({
   at: 0,
   pacer:
     memory === "no pacer"
@@ -40,6 +44,7 @@ export const catalogOf = (memory: boolean | "no pacer"): PacerModels.Catalog => 
                   tasks: capabilities.tasks,
                   recalls: capabilities.recalls,
                   projects: capabilities.projects,
+                  prompt: options.prompt ?? capabilities.prompt,
                 },
               }
             : {}),

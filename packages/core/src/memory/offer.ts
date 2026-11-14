@@ -44,6 +44,7 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
       seq: SessionMessageTable.seq,
       text: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.text')`,
       tasks: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.tasks')`,
+      unavailable: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.unavailable')`,
     })
     .from(SessionMessageTable)
     .where(
@@ -64,6 +65,8 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
     text: typeof block.text === "string" ? block.text : undefined,
     // SQLite's JSON true; a block written before tasks were recorded offers none.
     tasks: block.tasks === 1 || block.tasks === true,
+    /** Built while memory could not be reached. */
+    unavailable: block.unavailable === 1 || block.unavailable === true,
   }
 })
 
@@ -86,7 +89,8 @@ export const stepped = Effect.fnUntraced(function* (db: Db, sessionID: SessionSc
   return row !== undefined
 })
 
-const latestCompaction = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
+/** The `seq` of the chat's latest completed compaction, which the model's view starts after. */
+export const latestCompaction = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
   const row = yield* db
     .select({ seq: SessionMessageTable.seq })
     .from(SessionMessageTable)

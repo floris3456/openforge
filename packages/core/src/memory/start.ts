@@ -17,6 +17,7 @@ import { MemoryClient } from "./client.js"
 import { MemoryFollowed } from "./followed.js"
 import { MemoryKnown } from "./known.js"
 import { MemoryOffer } from "./offer.js"
+import { MemoryPrompt } from "./prompt.js"
 import { MemoryTask } from "./task.js"
 import { MemoryText } from "./text.js"
 
@@ -30,11 +31,14 @@ import { MemoryText } from "./text.js"
 
 /** How long the start call may take before the chat goes on without it. */
 const TIMEOUT = "2 seconds"
-/** How many entries the block holds at most. */
+/** How many entries the block holds at most, on a server that answers no prompts (`MemoryPrompt`). */
 const LIMIT = 5
 
 export interface Interface {
-  /** Puts a start block in the chat when none is in view. Never fails, and waits at most {@link TIMEOUT} for memory. */
+  /**
+   * Puts a start block in the chat when none is in view, then the entries close to each new prompt (`MemoryPrompt`).
+   * Never fails, and waits at most {@link TIMEOUT} for memory, for each call.
+   */
   readonly ensure: (input: {
     readonly session: SessionSchema.Info
     /** The agent the chat runs as: its role. */
@@ -63,6 +67,7 @@ const layer = Layer.effect(
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
+    const prompts = yield* MemoryPrompt.Service
     // What followed a search is added beside the chat; built with the start block, it runs wherever chats run.
     yield* MemoryFollowed.Service
 
@@ -80,6 +85,8 @@ const layer = Layer.effect(
       if (last?.visible) return
       if (yield* MemoryOffer.stepped(db, sessionID)) return
       const tasks = catalog?.pacer?.memory?.tasks === true
+      // A server that answers each prompt gives the block no entries: they come with the prompts.
+      const limit = catalog?.pacer?.memory?.prompt === true ? 0 : LIMIT
       const chat = yield* projects.chat(input.session.projectID)
       const project = chat.project
       if (project === undefined) return
@@ -96,7 +103,7 @@ const layer = Layer.effect(
           {
             prompt: [...prompt].slice(0, 2_000).join(""),
             scopes: { global: true, roles: [by.role], ...(inside ? { tasks: [inside.task] } : {}) },
-            limit: LIMIT,
+            limit,
             ...inside,
             by,
           },
@@ -106,7 +113,14 @@ const layer = Layer.effect(
           Effect.map((started) => ({
             text: MemoryText.block(started, by.role, offered, inside !== undefined),
             description: "Memory nearest to the prompt",
-            memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id), tasks },
+            memory: {
+              project,
+              recall: started.recall,
+              entries: started.entries.map((entry) => entry.id),
+              // What the task part may show, so that a prompt's entries leave them out.
+              shown: [...(started.task?.entries ?? []), ...(started.subtask?.entries ?? [])].map((entry) => entry.id),
+              tasks,
+            },
           })),
           // CPP keeps the project's memory from this key: no block, so no memory tools, till the chat's next cold point.
           Effect.catchTag("MemoryClient.Closed", (closed) =>
@@ -155,6 +169,7 @@ const layer = Layer.effect(
       ensure: (input) =>
         ensure(input).pipe(
           Effect.catchDefect((defect) => Effect.logWarning("memory's start block failed", { defect: String(defect) })),
+          Effect.andThen(prompts.ask({ session: input.session, agent: input.agent })),
         ),
     })
   }),
@@ -172,5 +187,6 @@ export const node = makeLocationNode({
     PacerProject.node,
     MemoryClient.node,
     MemoryFollowed.node,
+    MemoryPrompt.node,
   ],
 })

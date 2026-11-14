@@ -22,6 +22,8 @@ export type Target = {
   readonly recalls: boolean
   /** Whether they say `projects`. */
   readonly projects: boolean
+  /** Whether they say `prompt`: the group "prompt" and a start's `limit: 0` run only then. */
+  readonly prompt: boolean
   /**
    * Switches a project's memory and names the keys that may use it (all when left out or null), as CLIProxyPacer's
    * Projects page does; the group "projects" runs only with it.
@@ -362,6 +364,8 @@ export function memoryContract(target: Target) {
         send("POST", `${base}/search`, { by, ...body }, key, url, headers),
       start: (body: Record<string, unknown>) =>
         send("POST", `${base}/start`, { by, task: null, ...body }, undefined, url, headers),
+      prompt: (body: Record<string, unknown>) =>
+        send("POST", `${base}/prompt`, { by, ...body }, undefined, url, headers),
       export: async () => {
         const answer = await send("GET", `${base}/export`, undefined, undefined, url, headers)
         return {
@@ -493,6 +497,7 @@ export function memoryContract(target: Target) {
         route("POST", `/entries/${none}/forget`, {}),
         route("POST", "/search", {}),
         route("POST", "/start", {}),
+        ...(target.prompt ? [route("POST", "/prompt", {})] : []),
         route("GET", "/export"),
         ...(target.tasks
           ? [
@@ -1687,7 +1692,9 @@ export function memoryContract(target: Target) {
       expect(three.body.entries).toEqual(
         (await memory.search({ query: `${term} again`, scopes: "all", limit: 3 })).body.entries,
       )
-      expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: 0 }), "limit")
+      // 0 is the start of a server that answers prompts (the group "prompt").
+      if (!target.prompt) expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: 0 }), "limit")
+      expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: -1 }), "limit")
       expectInvalid(await memory.start({ prompt: term, scopes: "all", limit: 21 }), "limit")
     })
 
@@ -1717,6 +1724,120 @@ export function memoryContract(target: Target) {
         scopes: { global: true, roles: ["review"], tasks: ["t3"] },
       })
       expect(narrow.body.counts).toEqual({ global: 2, role: 1, task: 1 })
+    })
+  })
+
+  describe.if(target.prompt)("prompt", () => {
+    /** The fake endpoint's vectors make release, deploy, publish and ship one concept, and terminal another. */
+    const close = (name: string) => {
+      const memory = project(name)
+      const term = word()
+      return { memory, term, ask: `how do we release ${term}` }
+    }
+
+    test("start with limit 0 runs no search: recall null, no entries, counts as always", async () => {
+      const { memory, term } = close("prompt-start")
+      await created(memory.verified(`Releases of ${term} ship through the train.`))
+      const start = await answered(memory.start({ prompt: term, scopes: { global: true, roles: ["build"] }, limit: 0 }))
+      expect(start.recall).toBeNull()
+      expect(start.entries).toEqual([])
+      expect(start.task).toBeNull()
+      expect(start.counts).toEqual({ global: 1, role: 0, task: 0 })
+    })
+
+    test("an entry first by meaning and by words, at the floor, comes back with its cosine; the rest does not", async () => {
+      const { memory, term, ask } = close("prompt-close")
+      const near = (await created(memory.verified(`Releases of ${term} ship through the train.`))).entry
+      // Among the first by words, below the floor by meaning.
+      await created(memory.verified(`Release notes of ${term} mention the terminal.`))
+      // First by meaning, without a word of the prompt.
+      await created(memory.verified("Ship it on fridays."))
+      await created(
+        memory.verified(`An explore entry: ${term} releases ship.`, { scope: "role", by: { ...by, role: "explore" } }),
+      )
+      const answer = await answered(
+        memory.prompt({ prompt: ask, scopes: { global: true, roles: ["build"] }, exclude: [] }),
+      )
+      expect(answer.meaning).toBe(true)
+      expect(answer.recall === null || ID.test(answer.recall)).toBe(true)
+      expect(answer.entries).toEqual([scored(near)])
+      expect(answer.entries[0]!.score).toBeGreaterThanOrEqual(0.86)
+      expect(answer.entries[0]!.score).toBeLessThanOrEqual(1.000001)
+    })
+
+    test("at most 2, best by meaning first; exclude leaves entries out", async () => {
+      const { memory, term, ask } = close("prompt-most")
+      const written = []
+      for (const text of [`Releases of ${term} ship.`, `Release ${term} by deploy.`, `Release ${term} and publish.`])
+        written.push((await created(memory.verified(text))).entry)
+      const all = await answered(memory.prompt({ prompt: ask, scopes: "all", exclude: [] }))
+      expect(all.entries.length).toBeGreaterThan(0)
+      expect(all.entries.length).toBeLessThanOrEqual(2)
+      const scores = all.entries.map((entry) => entry.score)
+      expect(scores).toEqual(scores.toSorted((a, b) => b - a))
+      const left = await answered(
+        memory.prompt({ prompt: ask, scopes: "all", exclude: written.map((entry) => entry.id) }),
+      )
+      expect(left.entries).toEqual([])
+      const one = await answered(memory.prompt({ prompt: ask, scopes: "all", exclude: [all.entries[0]!.id] }))
+      expect(one.entries.map((entry) => entry.id)).not.toContain(all.entries[0]!.id)
+    })
+
+    describe("without meaning", () => {
+      keywordOnly()
+
+      test("nothing passes", async () => {
+        const { memory, term, ask } = close("prompt-words")
+        await created(memory.verified(`Releases of ${term} ship through the train.`))
+        const answer = await answered(memory.prompt({ prompt: ask, scopes: "all", exclude: [] }))
+        expect(answer.meaning).toBe(false)
+        expect(answer.entries).toEqual([])
+      })
+    })
+
+    test("a bad prompt, scopes, exclude or by is 400", async () => {
+      const memory = project("prompt-checks")
+      const ok = { prompt: "release", scopes: "all", exclude: [] }
+      expectInvalid(await memory.prompt({ ...ok, prompt: "" }), "prompt")
+      expectInvalid(await memory.prompt({ ...ok, prompt: "x".repeat(2001) }), "prompt")
+      expectInvalid(await memory.prompt({ ...ok, scopes: { global: false } }), "scopes")
+      expectInvalid(await memory.prompt({ ...ok, exclude: [1] }), "exclude")
+      expectInvalid(
+        await memory.prompt({
+          ...ok,
+          exclude: Array.from({ length: 101 }, (_, index) => `${index}`.padStart(12, "0")),
+        }),
+        "exclude",
+      )
+      expectInvalid(await memory.prompt({ ...ok, by: { role: "" } }), "by")
+      expect((await memory.prompt({ ...ok, exclude: Array.from({ length: 100 }, () => "000000000000") })).status).toBe(
+        200,
+      )
+    })
+
+    test.if(target.recalls)("is a row of the recall log of kind prompt, whether or not an entry passed", async () => {
+      const { memory, term, ask } = close("prompt-row")
+      const near = (await created(memory.verified(`Releases of ${term} ship through the train.`))).entry
+      const passed = await answered(memory.prompt({ prompt: ask, scopes: "all", exclude: [] }))
+      const none = await answered(memory.prompt({ prompt: ask, scopes: "all", exclude: [near.id] }))
+      const row = async (id: string) => {
+        const deadline = Date.now() + 1500
+        while (true) {
+          const answer = await send("GET", `/pacer/v1/memory/${memory.id}/recalls/${id}`)
+          if (answer.status !== 404 || Date.now() > deadline) return (answer.body as unknown as RecallBody).recall
+          await Bun.sleep(50)
+        }
+      }
+      expect(await row(passed.recall)).toMatchObject({ kind: "prompt", query: ask, entries: [near.id], meaning: true })
+      expect(await row(none.recall)).toMatchObject({ kind: "prompt", entries: [] })
+      const after = await send("POST", `/pacer/v1/memory/${memory.id}/recalls/${passed.recall}/after`, {
+        step: "Looked.",
+        by,
+      })
+      expect(after.status).toBe(200)
+      const rows = (await send("GET", `/pacer/v1/memory/${memory.id}/recalls?kind=prompt`))
+        .body as unknown as RecallBody
+      expect(rows.recalls.map((item) => item.id)).toEqual([passed.recall, none.recall])
     })
   })
 
@@ -3187,6 +3308,7 @@ export function memoryContract(target: Target) {
       ...(target.tasks ? { tasks: true } : {}),
       ...(target.recalls ? { recalls: true } : {}),
       ...(target.projects ? { projects: true } : {}),
+      ...(target.prompt ? { prompt: true } : {}),
     })
   })
 

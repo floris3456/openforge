@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-search"
+import { close, nearest, search, tokenizer, waiting, type Scopes } from "./memory-search"
 
 /**
  * The small memory server: the memory API (the workspace's `docs/reference/memory-api.md`) on `Bun.serve` and
@@ -29,6 +29,7 @@ export const capabilities = {
   tasks: true,
   recalls: true,
   projects: true,
+  prompt: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -53,6 +54,9 @@ const PERSON = 2000
 const JUDGES = 10
 const LABELS = ["used", "beside", "unsure"]
 const ACTS = ["superseded", "forgotten"]
+/** How many ids a prompt's `exclude` names at most, and the cosine an entry needs by default to pass. */
+const EXCLUDE = 100
+const PROMPT_FLOOR = 0.86
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
 const REFUSED = [
@@ -228,13 +232,15 @@ export function startMemoryServer(input: {
   readonly port?: number
   readonly file?: string
   readonly embedding?: Embedding
+  /** The setting `memory.prompt_floor`: the cosine an entry needs to come back for a prompt. */
+  readonly promptFloor?: number
 }) {
   const people = new Map(input.keys.map((item) => [item.key, item.label ?? `key-${item.key.slice(-4)}`]))
   const db = new Database(input.file ?? ":memory:", { create: true })
   db.run("pragma journal_mode = wal")
   db.run("pragma busy_timeout = 5000")
   SCHEMA.forEach((statement) => db.run(statement))
-  const store = storeOf(db, input.embedding)
+  const store = storeOf(db, input.embedding, input.promptFloor ?? PROMPT_FLOOR)
   /** The projects switched by `project()`; `keys` null for every key. */
   const projects = new Map<
     string,
@@ -315,6 +321,11 @@ export function startMemoryServer(input: {
       "/pacer/v1/memory/:project/start": {
         POST: guarded(async (request, person, project) =>
           store.start(projectOf(project), await bodyOf(request), person),
+        ),
+      },
+      "/pacer/v1/memory/:project/prompt": {
+        POST: guarded(async (request, person, project) =>
+          store.prompt(projectOf(project), await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/tasks": {
@@ -404,7 +415,7 @@ export function startMemoryServer(input: {
   }
 }
 
-function storeOf(db: Database, embedding: Embedding | undefined) {
+function storeOf(db: Database, embedding: Embedding | undefined, floor: number) {
   const get = (project: string, id: string) =>
     db.query<Row, string[]>("select * from entry where project = ? and id = ?").get(project, id)
   const live = "superseded_by is null and deleted is null"
@@ -414,10 +425,9 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   const readOf = (row: TaskRow) => ({
     task: taskOf(row),
     changes: db
-      .query<
-        ChangeRow,
-        [string, string]
-      >(`select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`)
+      .query<ChangeRow, [string, string]>(
+        `select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`,
+      )
       .all(row.project, row.id)
       .map(changeOf),
     subtasks: subtasksOf(row),
@@ -480,10 +490,9 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           // An exact copy is looked for before the replaced entry's state, so a retried replacement answers the entry it
           // made. The replaced entry is never its own copy: the same text with another kind or basis replaces it.
           const copy = db
-            .query<
-              Row,
-              (string | null)[]
-            >(`select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live} and id is not ?`)
+            .query<Row, (string | null)[]>(
+              `select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live} and id is not ?`,
+            )
             .get(project, target.scope, target.role, target.task, text, replaced?.id ?? null)
           if (copy) {
             // The text that was to take the replaced entry's place is there already: the copy replaces it.
@@ -581,13 +590,17 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const prompt = queryOf(body.prompt, "prompt")
       const scopes = scopesOf(body.scopes)
       const kinds = kindsOf(body.kinds)
-      const limit = limitOf(body.limit)
+      // 0: the prompt's entries come from `prompt`, so no search runs and nothing is logged.
+      const limit = body.limit === 0 ? 0 : limitOf(body.limit)
       if (body.task !== undefined && body.task !== null && typeof body.task !== "string")
         refuse("task: must be a task id or null")
       if (body.subtask !== undefined && body.subtask !== null && typeof body.subtask !== "string")
         refuse("subtask: must be a task id or null")
       const by = { person, ...byOf(body.by) }
-      const answer = await found({ project, query: prompt, scopes, kinds, limit })
+      const answer =
+        limit === 0
+          ? { entries: [], meaning: false, waiting: 0 }
+          : await found({ project, query: prompt, scopes, kinds, limit })
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
       const count = (scope: string, list: string[] | "all") =>
         db
@@ -596,7 +609,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
              and (? or coalesce(role, task) in (select value from json_each(?)))`,
           )
           .get(project, scope, list === "all" ? 1 : 0, JSON.stringify(list === "all" ? [] : list))?.n ?? 0
-      const recall = logged(project, "start", prompt, body, answer, by)
+      const recall = limit === 0 ? null : logged(project, "start", prompt, body, answer, by)
       catchUp()
       // Only a task that has no parent is a chat's task; its subtask only when it is one of that task's.
       const task = typeof body.task === "string" ? getTask(project, body.task) : null
@@ -613,6 +626,32 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           task: count("task", scopes === "all" ? "all" : scopes.tasks),
         },
       })
+    },
+
+    /** The entries that match a person's prompt closely: first 2 by meaning and by words, at the floor; or none. */
+    async prompt(project: string, body: Fields, person: string) {
+      const prompt = queryOf(body.prompt, "prompt")
+      const scopes = scopesOf(body.scopes)
+      const exclude = excludeOf(body.exclude)
+      const by = { person, ...byOf(body.by) }
+      const vector = (await embed([prompt], QUERY_MS))?.[0]
+      const entries =
+        vector && embedding
+          ? close<Row>(db, {
+              project,
+              query: prompt,
+              scopes,
+              kinds: KINDS,
+              exclude,
+              vector,
+              model: embedding.model,
+              floor,
+            }).map((row) => ({ ...entryOf(row), score: row.score }))
+          : []
+      const answer = { entries, meaning: vector !== undefined }
+      const recall = logged(project, "prompt", prompt, body, answer, by)
+      catchUp()
+      return Response.json({ recall, ...answer })
     },
 
     export(project: string) {
@@ -651,10 +690,9 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
           if (parent?.parent) refuse(`parent: task ${parent.id} is a subtask, and a subtask has no subtasks`)
           // A task that is not done with the same title and parent is the one a call sent twice made.
           const copy = db
-            .query<
-              TaskRow,
-              (string | null)[]
-            >("select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1")
+            .query<TaskRow, (string | null)[]>(
+              "select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1",
+            )
             .get(project, title, parentID)
           if (copy) return Response.json({ task: taskOf(copy), existing: true })
           const now = Date.now()
@@ -720,10 +758,9 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
             now,
           ])
           const changed = db
-            .query<
-              TaskRow,
-              (string | number | null)[]
-            >("update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *")
+            .query<TaskRow, (string | number | null)[]>(
+              "update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *",
+            )
             .get(state, note, worker, now, row.seq)!
           return Response.json({ task: taskOf(changed) })
         })
@@ -745,7 +782,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
       const kind = cursor
         ? cursor.kind
         : params.has("kind")
-          ? oneOf(params.get("kind"), ["search", "start"], "kind")
+          ? oneOf(params.get("kind"), ["search", "start", "prompt"], "kind")
           : null
       const rows = db
         .query<RecallRow, (string | number | null)[]>(
@@ -883,10 +920,9 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
     catching = true
     const next = async (): Promise<void> => {
       const rows = db
-        .query<
-          Row,
-          [string]
-        >(`select * from entry where ${live} and (vector is null or vector_model is not ?) order by seq limit ${BATCH}`)
+        .query<Row, [string]>(
+          `select * from entry where ${live} and (vector is null or vector_model is not ?) order by seq limit ${BATCH}`,
+        )
         .all(embedding.model)
       if (!rows.length) return
       const vectors = await embed(rows.map(source), ENTRY_MS)
@@ -904,7 +940,7 @@ function storeOf(db: Database, embedding: Embedding | undefined) {
   /** Logs a search or a start: its scopes and kinds as the request sent them. */
   function logged(
     project: string,
-    kind: "search" | "start",
+    kind: "search" | "start" | "prompt",
     query: string,
     body: Fields,
     answer: { entries: { id: string }[]; meaning: boolean },
@@ -985,6 +1021,13 @@ function said(value: unknown, field: string, most: number) {
   if (typeof value !== "string" || ![...value].length || [...value].length > most)
     refuse(`${field}: must be 1 to ${most} characters`)
   return value
+}
+
+function excludeOf(value: unknown) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > EXCLUDE || !value.every((item) => typeof item === "string"))
+    refuse(`exclude: must be a list of at most ${EXCLUDE} entry ids`)
+  return value.filter((item): item is string => typeof item === "string")
 }
 
 function actedOf(value: unknown) {

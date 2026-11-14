@@ -73,6 +73,14 @@ export function block(
   ].join("\n")
 }
 
+/** The message after a person's prompt that memory holds entries close to. */
+export function prompt(entries: ReadonlyArray<MemoryClient.Entry>) {
+  return [
+    "Memory holds these entries close to this prompt; they may be wrong or out of date:",
+    ...entries.map(entry),
+  ].join("\n")
+}
+
 /** How long the task part of a start block may be, in characters. */
 export const TASK_CHARACTERS = 4_000
 

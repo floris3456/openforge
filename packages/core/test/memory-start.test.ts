@@ -20,6 +20,7 @@ import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryStart } from "@opencode/core/memory/start"
 import { MemoryText } from "@opencode/core/memory/text"
+import { MemoryPromptTable } from "@opencode/core/memory/prompt.sql"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -50,6 +51,7 @@ import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { eq } from "drizzle-orm"
 import { Context, Effect, Fiber, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
@@ -60,19 +62,23 @@ import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin } from "./lib/tool"
 import { settle, until } from "./pacer/fake-tools"
 import { catalogOf, endpointAt, key, startProxied } from "./memory/fixture"
+import { startFakeEmbedding } from "./pacer/memory-embedding"
 
 // The start block through the real runner: what each model request holds, over the small memory server. One server
 // for the file; each test works in a project of its own.
 
 const server = startProxied()
+const defaultServer = server
 afterAll(() => server.stop())
+/** A server with memory as before prompts were answered: the start block holds the entries nearest the prompt. */
+const today = () => catalogOf(true, { prompt: false })
 
 /**
  * What the memory side sees, in the test's hands, as openforge's own services give it: each change is announced, as
  * a live service's catalog read is.
  */
 const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
-const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(catalogOf(true)))
+const catalogRef = Effect.runSync(SubscriptionRef.make<PacerModels.Catalog | undefined>(today()))
 const pacer = {
   get endpoint() {
     return Effect.runSync(SubscriptionRef.get(endpointRef))
@@ -284,10 +290,14 @@ const setup = Effect.fnUntraced(function* (
     readonly child?: boolean
     /** The task the chat is inside: `inside` makes it from the chat's project before the chat is stored. */
     readonly inside?: (project: string) => Effect.Effect<{ task: string; subtask?: string }>
+    /** The server the chat's memory is on, and its catalog: the file's one, as before prompts were answered. */
+    readonly served?: ReturnType<typeof startProxied>
+    readonly catalog?: PacerModels.Catalog
   } = {},
 ) {
+  const server = input.served ?? defaultServer
   pacer.endpoint = endpointAt(server.origin)
-  pacer.catalog = catalogOf(true)
+  pacer.catalog = input.catalog ?? today()
   server.reset()
   server.control.answer = undefined
   const { db } = yield* Database.Service
@@ -391,6 +401,11 @@ const setup = Effect.fnUntraced(function* (
         .stage({ sessionID, messageID, files: false })
         .pipe(Effect.andThen(session.revert.commit(sessionID)), Effect.orDie),
     starts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/start`),
+    /** The prompt calls of this chat's project. */
+    prompts: () => server.calls().filter((call) => call.path === `/pacer/v1/memory/${project}/prompt`),
+    /** The prompts recorded as asked without a message. */
+    asked: () =>
+      db.select().from(MemoryPromptTable).where(eq(MemoryPromptTable.session_id, sessionID)).all().pipe(Effect.orDie),
     /** What followed a search that was sent, for one row or all. */
     afters: (recall?: string) =>
       server
@@ -672,7 +687,7 @@ describe("MemoryStart through the runner", () => {
         const gate = yield* h.llm.gate()
         const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
         yield* gate.started
-        pacer.catalog = catalogOf(true)
+        pacer.catalog = today()
         yield* gate.release
         yield* Fiber.join(run)
         // Whether the server has tasks is known only once its catalog is read: till the next compaction, none.
@@ -751,7 +766,7 @@ describe("MemoryStart through the runner", () => {
 
 describe("MemoryStart while the server's memory comes and goes", () => {
   const withTasks = (tasks: boolean) => {
-    const catalog = catalogOf(true)
+    const catalog = today()
     return { ...catalog, pacer: { ...catalog.pacer!, memory: { ...catalog.pacer!.memory!, tasks } } }
   }
   const compact = (h: Effect.Success<ReturnType<typeof setup>>) =>
@@ -773,7 +788,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
         yield* start.ensure(input)
         // 0.0.31 looked up the chat's block and steps at every step boundary first: three lookups a step.
         expect(lookups.count).toBe(0)
-        pacer.catalog = catalogOf(true)
+        pacer.catalog = today()
         yield* start.ensure(input)
         expect(lookups.count).toBeGreaterThan(0)
       }).pipe(Effect.provide(AppNodeBuilder.build(MemoryStart.node, replacements)))
@@ -789,7 +804,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
       const first = h.requests()[0]
       expect(names(first)).toEqual(["echo"])
 
-      pacer.catalog = catalogOf(true)
+      pacer.catalog = today()
       yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
       yield* h.prompt("and on fridays?")
       for (const request of h.requests().slice(1)) {
@@ -879,7 +894,7 @@ describe("MemoryStart while the server's memory comes and goes", () => {
       pacer.catalog = catalogOf(false)
       yield* h.llm.push(TestLLM.text("in src", "text-src"))
       yield* h.prompt("where are the zebra files?")
-      pacer.catalog = catalogOf(true)
+      pacer.catalog = today()
       yield* h.prompt("and the quokka ones?")
       for (const request of h.requests()) expect(names(request)).toEqual(["echo"])
     }),
@@ -1284,6 +1299,240 @@ describe("MemoryStart inside a task", () => {
   )
 })
 
+describe("MemoryPrompt through the runner", () => {
+  // A server that answers prompts, with meaning: the fake endpoint's vectors make "release" and "ship" one concept.
+  const embedding = startFakeEmbedding()
+  const prompted = startProxied({ embedding: embedding.url })
+  afterAll(() => prompted.stop().then(() => embedding.stop()))
+  const near = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ ...input, served: prompted, catalog: catalogOf(true) })
+  const line = "Memory holds these entries close to this prompt; they may be wrong or out of date:"
+  /** The user-role texts of a request as a provider gets them, roles and texts only, up to and with `prompt`. */
+  const upTo = (request: LLMRequest | undefined, prompt: string) => {
+    const messages = (request?.messages ?? []).map((message) => ({ role: message.role, content: message.content }))
+    const at = messages.findIndex((message) =>
+      JSON.stringify(message.content).includes(JSON.stringify(prompt).slice(1, -1)),
+    )
+    return JSON.stringify({ system: request?.system, tools: request?.tools, messages: messages.slice(0, at + 1) })
+  }
+
+  it.live("the start asks for no entries and the block holds none; a close entry comes right after the prompt", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const close = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.write({ kind: "verified", text: "Zebra lint is strict.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+      yield* h.prompt("how do we release")
+
+      const block = [opening, "Memory holds 2 global entries and 0 of role build; recall finds them.", keep].join("\n")
+      const message = [line, MemoryText.entry(close)].join("\n")
+      expect(message).toBe(
+        `${line}\n- [${close.id}] Releases ship through the train. (verified by floris as build; global; ${day(close)}; basis: b)`,
+      )
+      const requests = h.requests()
+      expect(requests).toHaveLength(2)
+      // The step that answers no new prompt sends the same, and asks nothing.
+      for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", block, message])
+      expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
+      expect(h.prompts().map((call) => call.body)).toEqual([
+        {
+          prompt: "how do we release",
+          scopes: { global: true, roles: ["build"] },
+          exclude: [],
+          by: { role: "build", chat: h.sessionID },
+        },
+      ])
+      expect(h.prompts().map((call) => call.pacer)).toEqual([
+        {
+          "x-pacer-project": h.project,
+          "x-pacer-project-name": "project",
+          "x-pacer-session": PacerSessionID.make(h.sessionID),
+        },
+      ])
+      // Recorded by its message: no row of its own.
+      expect(yield* h.asked()).toEqual([])
+    }),
+  )
+
+  it.live("asks once for each prompt, leaves out the entries in view, and puts nothing in when none is close", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const first = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("how do we release")
+      yield* h.prompt("zebra lint")
+      const second = yield* h.write({
+        kind: "verified",
+        text: "A release is tagged first.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("and the release tag?")
+
+      expect(h.prompts().map((call) => (call.body as { exclude: string[] }).exclude)).toEqual([
+        [],
+        [first.id],
+        [first.id],
+      ])
+      const last = userTexts(h.requests().at(-1))
+      expect(last.filter((text) => text.startsWith(line))).toEqual([
+        [line, MemoryText.entry(first)].join("\n"),
+        [line, MemoryText.entry(second)].join("\n"),
+      ])
+      // Nothing after the prompt no entry was close to: the next text is the prompt after it.
+      expect(last[last.indexOf("zebra lint") + 1]).toBe("and the release tag?")
+      expect((yield* h.asked()).map((row) => row.project)).toEqual([h.project])
+    }),
+  )
+
+  it.live("the request's bytes up to the prompt are the same with the message after it and without", () =>
+    Effect.gen(function* () {
+      const twins = []
+      for (const answer of [true, false]) {
+        const h = yield* near()
+        yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+        yield* h.llm.push(TestLLM.text("Looked.", "looked"))
+        yield* h.prompt("zebra lint")
+        if (!answer)
+          prompted.control.answer = (request) =>
+            request.path.endsWith("/prompt")
+              ? Response.json({ recall: null, entries: [], meaning: true })
+              : fetch(`${prompted.store.url}${request.path}`, {
+                  method: request.method,
+                  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+                  ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+                })
+        yield* h.prompt("how do we release")
+        prompted.control.answer = undefined
+        const request = h.requests().at(-1)
+        expect(userTexts(request).some((text) => text.startsWith(line))).toBe(answer)
+        twins.push(upTo(request, "how do we release"))
+        // Nothing earlier changes: the step before sent what this one sends before its new messages.
+        const before = h.requests().at(-2)
+        expect(JSON.stringify(request?.messages.slice(0, before?.messages.length ?? 0).map((m) => m.content))).toBe(
+          JSON.stringify(before?.messages.map((m) => m.content)),
+        )
+      }
+      expect(twins[0]).toBe(twins[1])
+    }),
+  )
+
+  it.live("a prompt is asked once however often a step for it starts again, as after a restart", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      // A reply with nothing in it leaves no step in the chat, so the prompt stays the newest: what the record is for.
+      yield* h.prompt("zebra lint")
+      yield* h.session.resume(h.sessionID)
+      yield* h.session.resume(h.sessionID)
+      expect(h.requests()).toHaveLength(3)
+      expect(h.prompts()).toHaveLength(1)
+      expect((yield* h.asked()).length).toBe(1)
+    }),
+  )
+
+  it.effect("waits at most 2 seconds, and a timeout, an error or memory closed put nothing in", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* h.prompt("zebra lint")
+      const forward = (request: { method: string; path: string; body: unknown }) =>
+        fetch(`${prompted.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        })
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? hung.promise : forward(request))
+      const run = yield* h.prompt("how do we release").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the prompt call arrived", () => h.prompts().length === 2)
+      expect(h.requests()).toHaveLength(1)
+      yield* TestClock.adjust("2 seconds")
+      yield* Fiber.join(run)
+      for (const answer of [
+        () => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }),
+        () =>
+          Response.json(
+            { error: { type: "project_memory_off", message: "memory is off for this project" } },
+            { status: 404 },
+          ),
+      ]) {
+        prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? answer() : forward(request))
+        yield* h.prompt("how do we release again")
+      }
+      prompted.control.answer = undefined
+      expect(h.prompts()).toHaveLength(4)
+      expect(h.requests()).toHaveLength(4)
+      for (const request of h.requests()) expect(userTexts(request).some((text) => text.startsWith(line))).toBe(false)
+      expect((yield* h.asked()).map((row) => row.recall)).toEqual([expect.any(String), null, null, null])
+    }),
+  )
+
+  it.live("what followed goes to the prompt's row, with a message or without", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.text("By train.", "train"))
+      yield* h.prompt("how do we release")
+      yield* h.llm.push(TestLLM.text("No idea.", "idea"))
+      yield* h.prompt("zebra lint")
+      const messaged = (yield* h.session.messages({ sessionID: h.sessionID, order: "asc" })).flatMap((message) =>
+        message.type === "synthetic" && message.metadata?.memoryPrompt
+          ? [(message.metadata.memoryPrompt as { recall: string }).recall]
+          : [],
+      )
+      const rows = (yield* h.asked()).map((row) => row.recall!)
+      expect(messaged).toHaveLength(1)
+      expect(rows).toHaveLength(1)
+      const afters = (recall: string) =>
+        prompted.calls().filter((call) => call.path.endsWith(`/recalls/${recall}/after`))
+      yield* eventually(
+        "both rows got their step",
+        () => afters(messaged[0]!).length >= 1 && afters(rows[0]!).length === 1,
+      )
+      yield* eventually("the first row got the person's next message", () => afters(messaged[0]!).length === 2)
+      expect(afters(messaged[0]!).map((call) => call.body)).toEqual([
+        { step: "By train.", acted: [], by: { role: "build", chat: h.sessionID } },
+        { person: "zebra lint", by: { role: "build", chat: h.sessionID } },
+      ])
+      expect(afters(rows[0]!).map((call) => call.body)).toEqual([
+        { step: "No idea.", acted: [], by: { role: "build", chat: h.sessionID } },
+      ])
+    }),
+  )
+
+  it.live("asks nothing on a server without prompt, in a chat without memory, or with memory closed", () =>
+    Effect.gen(function* () {
+      const old = yield* setup({ served: prompted, catalog: today() })
+      yield* old.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
+      yield* old.prompt("how do we release")
+      expect(old.prompts()).toEqual([])
+      expect(userTexts(old.requests()[0])[1]).toContain("What memory holds nearest to this prompt")
+      expect((old.starts()[0]?.body as { limit: number }).limit).toBe(5)
+
+      const closed = yield* near()
+      prompted.store.project(closed.project, { memory: false })
+      yield* closed.prompt("how do we release")
+      expect(closed.starts()).toHaveLength(1)
+      expect(closed.prompts()).toEqual([])
+
+      const none = yield* near()
+      pacer.catalog = catalogOf(false)
+      yield* none.prompt("how do we release")
+      expect(prompted.calls().filter((call) => call.path.includes(none.project))).toEqual([])
+    }),
+  )
+})
+
 /** Waits, in real time, until `check` holds; at most 5 seconds. */
 const eventually = (label: string, check: () => boolean) =>
   Effect.gen(function* () {
@@ -1489,10 +1738,10 @@ describe("MemoryFollowed through the runner", () => {
   it.live("sends nothing while capabilities do not say recalls", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const memory = catalogOf(true).pacer!.memory!
+      const memory = today().pacer!.memory!
       pacer.catalog = {
-        ...catalogOf(true),
-        pacer: { ...catalogOf(true).pacer!, memory: { ...memory, recalls: false } },
+        ...today(),
+        pacer: { ...today().pacer!, memory: { ...memory, recalls: false } },
       }
       yield* h.llm.push(step("Looking.", ["recall", { query: "zebra" }]), TestLLM.text("Done.", "done"))
       yield* h.prompt("zebra?")

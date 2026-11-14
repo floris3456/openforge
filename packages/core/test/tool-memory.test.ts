@@ -311,7 +311,9 @@ describe("MemoryTools offering", () => {
       expect(description("task")).toBe(
         "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first: its title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask. When a subtask is done, set it done: the next one starts and the answer gives it; after the last, the task goes to review. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
       )
-      expect(fields("recall").task).toBe("Another task's id: search only what was noted in that task")
+      expect(fields("recall").task).toBe(
+        "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
+      )
       expect(fields("remember").scope).toBe(
         "task: for the task you are in (the default there); role: for your role (the default elsewhere); global: for the whole project",
       )
@@ -1398,7 +1400,11 @@ describe("MemoryTools task", () => {
         const task = made(yield* h.read("task", { title: "The lead's plan", subtasks: steps("A", "B") }))
         const [, b] = yield* subtasksOf(h, task)
         h.place(child, { task, subtask: b })
-        yield* h.read("task", { id: b, state: "active" }, child, "general")
+        // On a subtask its lead made, the child sets it review, not done: the line on the state is the one without
+        // plans.
+        const active = yield* h.read("task", { id: b, state: "active" }, child, "general")
+        expect(active).toContain(MemoryText.states)
+        expect(active).not.toContain(MemoryText.planStates)
         const posts = () => h.server.calls().filter((call) => call.method === "POST").length
         const before = posts()
         expect(yield* h.read("task", { id: task, plan: steps("Mine"), note: "a better way" }, child, "general")).toBe(

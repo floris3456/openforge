@@ -68,7 +68,10 @@ export const RecallInput = Schema.Struct({
     }),
   ),
   task: Schema.optional(
-    Schema.String.annotate({ description: "Another task's id: search only what was noted in that task" }),
+    Schema.String.annotate({
+      description:
+        "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
+    }),
   ),
 })
 
@@ -344,7 +347,11 @@ export const Plugin = {
       return {
         content: [
           `Task ${changed.id} is now active; you are inside it.`,
-          MemoryText.task(top, changed.parent ? read : undefined, plans),
+          MemoryText.task(
+            top,
+            changed.parent ? read : undefined,
+            plans ? { chat: who.by.chat, lead: who.lead } : undefined,
+          ),
         ].join("\n"),
         metadata,
       }

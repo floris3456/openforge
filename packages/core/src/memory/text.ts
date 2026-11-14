@@ -56,12 +56,16 @@ export function block(
   tools: { readonly recall: boolean; readonly remember: boolean; readonly task: boolean },
   inside?: boolean,
   summary?: boolean,
-  /** Whether the server's tasks are plans: the line on the task's state is then {@link planStates}. */
-  plans = false,
+  /** Given when the server's tasks are plans: the line on the task's state is then as {@link Plans} says. */
+  plans?: Plans,
 ) {
   // The task's title and description are the chat's assignment; what was noted in it is memory, under the opening.
   const part = started.task
-    ? taskParts(started.task, started.subtask ?? undefined, tools.task ? statesOf(plans) : undefined)
+    ? taskParts(
+        started.task,
+        started.subtask ?? undefined,
+        tools.task ? statesOf(plans, started.subtask?.task) : undefined,
+      )
     : { assignment: [], notes: [] }
   const tasked = inside ? `, ${started.counts.task} of this task` : ""
   const counts = `Memory holds ${started.counts.global} global ${plural(started.counts.global)} and ${started.counts.role} of role ${role}${tasked}${tools.recall ? "; recall finds them" : ""}.`
@@ -97,8 +101,8 @@ export const TASK_CHARACTERS = 4_000
  * The task part as `task` answers it when a chat sets a task active: the chat's task, or its subtask with the task it
  * is part of, then what was said with their changes of state and what was noted in the task.
  */
-export function task(started: Read, subtask?: Said, plans = false) {
-  const part = taskParts(started, subtask, statesOf(plans))
+export function task(started: Read, subtask?: Said, plans?: Plans) {
+  const part = taskParts(started, subtask, statesOf(plans, subtask?.task))
   return [...part.assignment, ...part.notes].join("\n")
 }
 
@@ -106,12 +110,28 @@ export function task(started: Read, subtask?: Said, plans = false) {
 export const states =
   "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
 
-/** The same on a server whose tasks are plans (workspace spec `docs/specs/task-plans.md`, sections 3 and 6). */
+/**
+ * The same on a server whose tasks are plans (workspace spec `docs/specs/task-plans.md`, sections 3 and 6), for a chat
+ * that finishes its current subtask itself.
+ */
 export const planStates =
-  "With the task tool: set a subtask done when it is done, and the next one starts; after the last, the task goes to review (without subtasks, set it review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
+  "With the task tool: when a subtask of your own plan is done, set it done, and the next one of your plan starts; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
 
-function statesOf(plans: boolean) {
-  return plans ? planStates : states
+/** On a server whose tasks are plans: the chat the task part is for, and whether it is a lead. */
+export interface Plans {
+  readonly chat: string
+  readonly lead: boolean
+}
+
+/**
+ * The line on the task's state: {@link planStates} when the chat may finish its current subtask itself, as a lead, a
+ * chat inside a task without a subtask, or one on a subtask it made. On a subtask another chat made, {@link states}:
+ * the chat sets it review and its maker sets it done, so that the maker's next subtask does not start with this chat
+ * as its worker.
+ */
+function statesOf(plans: Plans | undefined, subtask: MemoryClient.Task | undefined) {
+  if (plans && (plans.lead || !subtask || subtask.by.chat === plans.chat)) return planStates
+  return states
 }
 
 /** How many changes of state the task part shows the notes of. */

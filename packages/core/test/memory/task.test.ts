@@ -259,7 +259,9 @@ describe("MemoryText tasks", () => {
   test("with plans the task part says what to do with a plan's subtasks, and an edit's note is said as an edit", () => {
     const edit = { ...change("named the file", "active"), title: "Move the checks: one script" }
     const cleared = { ...change("too long", "active"), description: "" }
-    expect(MemoryText.task({ task: task(), changes: [edit, cleared], entries: [] }, undefined, true)).toBe(
+    // Inside a task without a subtask: its steps are the chat's own to plan.
+    const plans = { chat: "ses_child", lead: false }
+    expect(MemoryText.task({ task: task(), changes: [edit, cleared], entries: [] }, undefined, plans)).toBe(
       [
         "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
         MemoryText.planStates,
@@ -268,8 +270,40 @@ describe("MemoryText tasks", () => {
         "- 2026-11-13 description cleared by floris as general: too long",
       ].join("\n"),
     )
-    // The start block's line is as before unless the caller says plans.
+    // The line is as before unless the caller says plans.
     expect(MemoryText.task({ task: task(), changes: [], entries: [] })).toContain(MemoryText.states)
+  })
+
+  test("with plans, a child on a subtask its lead made gets the review line, a chat on its own subtask the plan's", () => {
+    const child = { chat: "ses_child", lead: false }
+    const lead = { chat: "ses_lead", lead: true }
+    const subtask = (maker: string) => ({
+      task: task({ id: "s1", parent: "t8n2k4m7q9xz", title: "The first half", by: { ...who, chat: maker } }),
+      changes: [],
+    })
+    const line = (part: string) => part.split("\n")[2]
+    const read = { task: task(), changes: [], entries: [] }
+    // The answer when a task is set active.
+    expect(line(MemoryText.task(read, subtask("ses_lead"), child))).toBe(MemoryText.states)
+    expect(line(MemoryText.task(read, subtask("ses_child"), child))).toBe(MemoryText.planStates)
+    // A lead finishes any subtask it is on.
+    expect(line(MemoryText.task(read, subtask("ses_child"), lead))).toBe(MemoryText.planStates)
+    // The start block, the same; without plans, the review line.
+    const started = (maker: string): MemoryClient.Started => ({
+      recall: "r",
+      entries: [],
+      meaning: false,
+      counts: { global: 0, role: 0, task: 0 },
+      task: { ...read, subtasks: [] },
+      subtask: { ...subtask(maker), subtasks: [], entries: [] },
+    })
+    const tools = { recall: true, remember: false, task: true }
+    const block = (maker: string, plans?: { chat: string; lead: boolean }) =>
+      line(MemoryText.block(started(maker), "general", tools, true, false, plans))
+    expect(block("ses_lead", child)).toBe(MemoryText.states)
+    expect(block("ses_child", child)).toBe(MemoryText.planStates)
+    expect(block("ses_child", lead)).toBe(MemoryText.planStates)
+    expect(block("ses_child")).toBe(MemoryText.states)
   })
 
   test("the maker's line, with the note when there is one", () => {

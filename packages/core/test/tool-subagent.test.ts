@@ -39,6 +39,7 @@ import { MemoryClient } from "@opencode/core/memory/client"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { SessionTable } from "@opencode/core/session/sql"
 import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
 import { Plugin } from "@opencode/core/plugin"
@@ -1062,6 +1063,37 @@ describe("SubagentTool", () => {
             })
           }),
         ),
+    )
+
+    tasksIt.live("reads the task as the parent, and sets it active as the child with its parent's", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("Name the chats")
+          h.meanwhile({ state: "done" })
+          const settled = yield* h.run({ agent: "reviewer", description: "names", prompt: "do it", taskID: task.id })
+          const child = yield* h.sessions.get(outputSessionID(settled.metadata))
+          const chats = (sessionID: Session.ID, parentID?: Session.ID) => ({
+            "x-pacer-session": PacerSessionID.make(sessionID),
+            ...(parentID ? { "x-pacer-parent-session": PacerSessionID.make(parentID) } : {}),
+          })
+          const calls = tasksServer.calls().filter((call) => call.path.startsWith(`${h.base}/tasks/${task.id}`))
+          expect(
+            calls.map((call) => [
+              call.method,
+              call.path.slice(h.base.length),
+              Object.fromEntries(Object.entries(call.pacer).filter(([name]) => name.endsWith("session"))),
+            ]),
+          ).toEqual([
+            ["GET", `/tasks/${task.id}`, chats(h.parent.id)],
+            ["POST", `/tasks/${task.id}/state`, chats(child.id, h.parent.id)],
+            ["GET", `/tasks/${task.id}`, chats(h.parent.id)],
+          ])
+          expect(calls.every((call) => call.pacer["x-pacer-project"] !== undefined)).toBe(true)
+          // `by.chat` stays the child's own ID.
+          expect((calls[1]?.body as { by: { chat: string } }).by.chat).toBe(child.id)
+        }),
+      ),
     )
 
     tasksIt.live("on a subtask's id the child is inside its task and the subtask, and the subtask is active", () =>

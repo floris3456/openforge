@@ -49,6 +49,8 @@ export interface List {
 export interface ListInput {
   readonly sessionID: SessionID
   readonly parentID?: SessionID
+  /** The chat's project headers (`PacerProject`). */
+  readonly project?: Readonly<Record<string, string>>
   /** The model the request goes to, as CPP's `model`. */
   readonly model: string
   /**
@@ -66,6 +68,8 @@ export interface ListInput {
 export interface CallInput {
   readonly sessionID: SessionID
   readonly parentID?: SessionID
+  /** The chat's project headers (`PacerProject`). */
+  readonly project?: Readonly<Record<string, string>>
   readonly name: string
   /** The model's arguments, sent as the body as they are. */
   readonly args: unknown
@@ -206,7 +210,7 @@ export const layer = Layer.effect(
         yield* http
           .get(`/pacer/v1/tools?model=${encodeURIComponent(input.model)}`, ListAnswer, {
             timeout: READ_TIMEOUT,
-            headers: PacerHeaders.chat({ sessionID: input.sessionID, parentID: chat.parentID }),
+            headers: PacerHeaders.chat({ sessionID: input.sessionID, parentID: chat.parentID, project: input.project }),
           })
           .pipe(
             Effect.flatMap((answer) =>

@@ -20,6 +20,73 @@ export type Target = {
   readonly tasks: boolean
   /** Whether they say `recalls`: the group "recall log" runs only then. */
   readonly recalls: boolean
+  /** Whether they say `projects`. */
+  readonly projects: boolean
+  /**
+   * Switches a project's memory and names the keys that may use it (all when left out or null), as CLIProxyPacer's
+   * Projects page does; the group "projects" runs only with it.
+   */
+  readonly setProject?: (
+    identity: string,
+    setting: { readonly memory: boolean; readonly keys?: ReadonlyArray<string> | null },
+  ) => Promise<void>
+  /**
+   * Turns a project's memory on before its first call, on a server where every new project starts with it off
+   * (CLIProxyPacer); the small server's projects start on.
+   */
+  readonly open?: (identity: string) => Promise<void>
+}
+
+/**
+ * CLIProxyPacer's Projects page as the contract uses it (its API.md, "Projects"), with its management key: a project is
+ * made by the client key's `GET /pacer/v1/projects/{identity}`, which answers its id, and switched by the page's
+ * `PATCH`; the keys it allows are named by their ids, found by their last four characters.
+ */
+export function cppProjects(input: { readonly url: string; readonly key: string; readonly management: string }) {
+  const json = async (path: string, init: { method?: string; key: string; body?: unknown }) => {
+    const response = await fetch(`${input.url}${path}`, {
+      method: init.method ?? "GET",
+      headers: {
+        authorization: `Bearer ${init.key}`,
+        ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`${init.method ?? "GET"} ${path} answered ${response.status}: ${text}`)
+    return JSON.parse(text) as unknown
+  }
+  const made = new Map<string, Promise<string>>()
+  /** The id of the project `identity` names, made by the client key's read the first time. */
+  const idOf = (identity: string) => {
+    const found = made.get(identity)
+    if (found) return found
+    const id = json(`/pacer/v1/projects/${identity}`, { key: input.key }).then(
+      (answer) => (answer as { project: { id: string } }).project.id,
+    )
+    made.set(identity, id)
+    return id
+  }
+  const keyIDs = async (keys: ReadonlyArray<string>) => {
+    const rows = (await json("/v0/management/pacer/keys", { key: input.management })) as {
+      id: number | string | null
+      hint: string
+    }[]
+    return keys.map((key) => {
+      const row = rows.find((row) => row.id !== null && row.hint === key.slice(-4))
+      if (!row) throw new Error(`no key ending ${key.slice(-4)} has a row on ${input.url}`)
+      return row.id
+    })
+  }
+  const setProject: NonNullable<Target["setProject"]> = async (identity, setting) => {
+    const id = await idOf(identity)
+    await json(`/v0/management/pacer/projects/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      key: input.management,
+      body: { memory: setting.memory, allowed_keys: setting.keys ? await keyIDs(setting.keys) : null },
+    })
+  }
+  return { setProject, open: (identity: string) => setProject(identity, { memory: true }) }
 }
 
 type Task = {
@@ -131,6 +198,25 @@ const REFUSED = [
 
 export function memoryContract(target: Target) {
   const fake = target.embedding.fake
+  /** The projects turned on, or switched by a case, or left as they start: a call turns on any other first. */
+  const opened = new Map<string, Promise<void>>()
+  const open = (path: string, url: string) => {
+    if (!target.open || url !== target.url) return
+    const identity = /^\/pacer\/v1\/memory\/([A-Za-z0-9._-]{1,128})(?:\/|$)/.exec(path)?.[1]
+    if (identity === undefined) return
+    const found = opened.get(identity)
+    if (found) return found
+    const turned = target.open(identity)
+    opened.set(identity, turned)
+    return turned
+  }
+  const setProject =
+    target.setProject &&
+    ((identity: string, setting: Parameters<NonNullable<Target["setProject"]>>[1]) => {
+      const switched = target.setProject!(identity, setting)
+      opened.set(identity, switched)
+      return switched
+    })
   const send = async (
     method: string,
     path: string,
@@ -138,6 +224,7 @@ export function memoryContract(target: Target) {
     key: string | null = target.key,
     url = target.url,
   ) => {
+    await open(path, url)
     const response = await fetch(`${url}${path}`, {
       method,
       headers: {
@@ -181,9 +268,13 @@ export function memoryContract(target: Target) {
     return answers
   }
 
-  /** One fresh project and its routes, on the target or on another server (`url`). */
-  const project = (name: string, url = target.url) => {
+  /**
+   * One fresh project and its routes, on the target or on another server (`url`); its memory turned on before its first
+   * call, unless `left` keeps it as a new project starts.
+   */
+  const project = (name: string, url = target.url, left = false) => {
     const id = `contract-${name}-${random()}`
+    if (left) opened.set(id, Promise.resolve())
     const base = `/pacer/v1/memory/${id}`
     return {
       id,
@@ -318,6 +409,97 @@ export function memoryContract(target: Target) {
       expect(name.length).toBe(128)
       expect(answer.status).toBe(201)
     })
+  })
+
+  describe.if(setProject !== undefined)("projects", () => {
+    const switched = (identity: string, setting: Parameters<NonNullable<Target["setProject"]>>[1]) =>
+      setProject!(identity, setting)
+    /** Every route of a project, with a body no check would let through, so only the gate can answer. */
+    const routes = (id: string) => {
+      const base = `/pacer/v1/memory/${id}`
+      const none = "000000000000"
+      const route = (method: string, path: string, body?: object) => [method, `${base}${path}`, body] as const
+      return [
+        route("POST", "/entries", {}),
+        route("GET", `/entries/${none}`),
+        route("POST", `/entries/${none}/forget`, {}),
+        route("POST", "/search", {}),
+        route("POST", "/start", {}),
+        route("GET", "/export"),
+        ...(target.tasks
+          ? [
+              route("POST", "/tasks", {}),
+              route("GET", "/tasks"),
+              route("GET", `/tasks/${none}`),
+              route("POST", `/tasks/${none}/state`, {}),
+            ]
+          : []),
+        ...(target.recalls
+          ? [
+              route("GET", "/recalls"),
+              route("GET", `/recalls/${none}`),
+              route("POST", `/recalls/${none}/after`, {}),
+              route("POST", `/recalls/${none}/labels`, {}),
+            ]
+          : []),
+      ]
+    }
+
+    test("a project with memory off answers 404 project_memory_off on every route, before any check", async () => {
+      const memory = project("off")
+      await switched(memory.id, { memory: false })
+      const answers = await Promise.all(routes(memory.id).map(([method, path, body]) => send(method, path, body)))
+      answers.forEach((answer) => {
+        expect(answer.status).toBe(404)
+        expect(answer.body.error.type).toBe("project_memory_off")
+        expect(answer.body.error.message).toContain("Projects page")
+      })
+      expect((await memory.verified("Written while memory is off.")).status).toBe(404)
+      await switched(memory.id, { memory: true })
+      expect((await memory.export()).lines).toEqual([])
+    })
+
+    test.if(target.open !== undefined)(
+      "a project never turned on answers project_memory_off on its first call",
+      async () => {
+        const memory = project("never", target.url, true)
+        const answer = await memory.search({ query: "anything", scopes: "all" })
+        expect([answer.status, answer.body.error.type]).toEqual([404, "project_memory_off"])
+        expect(answer.body.error.message).toContain("Projects page")
+      },
+    )
+
+    test("what is stored stays while memory is off, and comes back when it is on", async () => {
+      const memory = project("kept")
+      await switched(memory.id, { memory: true })
+      const written = await created(memory.verified("The pump runs at night."))
+      await switched(memory.id, { memory: false })
+      const off = await memory.read(written.entry.id)
+      expect([off.status, off.body.error.type]).toEqual([404, "project_memory_off"])
+      await switched(memory.id, { memory: true })
+      expect((await answered(memory.read(written.entry.id))).entry).toEqual(written.entry)
+    })
+
+    test.if(target.second !== undefined)(
+      "a key the project does not allow answers 403 project_forbidden on every route; an allowed one gets through",
+      async () => {
+        const memory = project("forbidden")
+        await switched(memory.id, { memory: true, keys: [target.key] })
+        const answers = await Promise.all(
+          routes(memory.id).map(([method, path, body]) => send(method, path, body, target.second!.key)),
+        )
+        answers.forEach((answer) => {
+          expect(answer.status).toBe(403)
+          expect(answer.body.error.type).toBe("project_forbidden")
+          expect(answer.body.error.message).toContain("Projects page")
+        })
+        expect((await memory.verified("Only the allowed key writes this.")).status).toBe(201)
+        // Off comes first: a key not allowed to use a project whose memory is off hears that memory is off.
+        await switched(memory.id, { memory: false, keys: [target.key] })
+        const both = await memory.read("000000000000", target.second!.key)
+        expect([both.status, both.body.error.type]).toEqual([404, "project_memory_off"])
+      },
+    )
   })
 
   describe("write and read back", () => {
@@ -2794,6 +2976,7 @@ export function memoryContract(target: Target) {
       embedding: "test-embedding",
       ...(target.tasks ? { tasks: true } : {}),
       ...(target.recalls ? { recalls: true } : {}),
+      ...(target.projects ? { projects: true } : {}),
     })
   })
 

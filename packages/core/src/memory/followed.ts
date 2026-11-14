@@ -5,7 +5,9 @@ import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
+import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerProject } from "../pacer/project.js"
 import { SessionEvent } from "../session/event.js"
 import type { SessionMessage } from "../session/message.js"
 import type { SessionSchema } from "../session/schema.js"
@@ -54,17 +56,30 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
+    const projects = yield* PacerProject.Service
     const scope = yield* Effect.scope
 
     const recalls = catalogs.get().pipe(Effect.map((catalog) => catalog?.pacer?.memory?.recalls === true))
 
-    const send = (searched: Searched, input: Omit<MemoryClient.AfterInput, "by">, by: MemoryClient.By) =>
-      client.after(searched.project, searched.recall, { ...input, by }, { timeout: TIMEOUT }).pipe(
-        Effect.asVoid,
-        Effect.catch((error) =>
-          Effect.logDebug("what followed a search was not added", { recall: searched.recall, reason: error.message }),
-        ),
-      )
+    /** The chat's parent, for a subagent's calls; none for a lead or a chat no longer there. */
+    const parentOf = (sessionID: SessionSchema.ID) =>
+      store.get(sessionID).pipe(Effect.map((session) => session?.parentID))
+
+    const send = (
+      searched: Searched,
+      input: Omit<MemoryClient.AfterInput, "by">,
+      by: MemoryClient.By & { readonly chat: SessionSchema.ID },
+      parentID: SessionSchema.ID | undefined,
+    ) =>
+      client
+        .withHeaders(PacerHeaders.chat({ sessionID: by.chat, parentID, project: projects.headers(searched.project) }))
+        .after(searched.project, searched.recall, { ...input, by }, { timeout: TIMEOUT })
+        .pipe(
+          Effect.asVoid,
+          Effect.catch((error) =>
+            Effect.logDebug("what followed a search was not added", { recall: searched.recall, reason: error.message }),
+          ),
+        )
 
     /** After a step: its text and calls go to the searches it was the first to see. */
     const stepped = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, messageID: SessionMessage.ID) {
@@ -108,6 +123,7 @@ const layer = Layer.effect(
         STEP,
       )
       if (!step) return
+      const parentID = yield* parentOf(sessionID)
       const acts = message.content.flatMap((part): NonNullable<MemoryClient.AfterInput["acted"]> => {
         if (part.type !== "tool" || part.state.status !== "completed") return []
         const input = part.state.input
@@ -123,7 +139,7 @@ const layer = Layer.effect(
             (act, index) =>
               searched.entries.includes(act.id) && acts.findIndex((other) => other.id === act.id) === index,
           )
-          return send(searched, { step, acted }, { role: message.agent, chat: sessionID })
+          return send(searched, { step, acted }, { role: message.agent, chat: sessionID }, parentID)
         },
         { concurrency: "unbounded", discard: true },
       )
@@ -174,10 +190,12 @@ const layer = Layer.effect(
       // Who answers is the chat's agent as it last ran; a chat that has not run since has nobody to add it for.
       const agent = (yield* newest("assistant"))?.agent
       if (!searches.length || typeof agent !== "string") return
-      yield* Effect.forEach(searches, (search) => send(search.searched, { person }, { role: agent, chat: sessionID }), {
-        concurrency: "unbounded",
-        discard: true,
-      })
+      const parentID = yield* parentOf(sessionID)
+      yield* Effect.forEach(
+        searches,
+        (search) => send(search.searched, { person }, { role: agent, chat: sessionID }, parentID),
+        { concurrency: "unbounded", discard: true },
+      )
     })
 
     const seqOf = (messageID: SessionMessage.ID) =>
@@ -289,5 +307,5 @@ function cut(text: string, most: number) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Bus.node, Database.node, SessionStore.node, PacerModels.node, MemoryClient.node],
+  deps: [Bus.node, Database.node, SessionStore.node, PacerModels.node, PacerProject.node, MemoryClient.node],
 })

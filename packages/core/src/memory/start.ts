@@ -4,11 +4,12 @@ import { and, desc, eq, sql } from "drizzle-orm"
 import { Context, Effect, Layer } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
-import { Config } from "../config.js"
 import { Database } from "../database/database.js"
 import { KV } from "../kv.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerProject } from "../pacer/project.js"
 import { SessionEvent } from "../session/event.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
@@ -24,7 +25,8 @@ import { MemoryText } from "./text.js"
 // (`SessionInstructions`), the message's metadata is the only ledger: a block that a compaction or a revert took out
 // of view is built again, from the chat's newest prompt. It is stored, so every step of the span sends the same bytes.
 // It goes in only where the chat's prompt cache is new anyway, before the span's first step: a chat that stepped
-// without one gets none, nor the memory tools (`MemoryOffer`), until its next compaction.
+// without one gets none, nor the memory tools (`MemoryOffer`), until its next compaction. So does a chat whose project
+// CPP keeps memory from (`MemoryClient.Closed`, workspace spec `docs/specs/cpp-projects.md`).
 
 /** How long the start call may take before the chat goes on without it. */
 const TIMEOUT = "2 seconds"
@@ -57,7 +59,7 @@ const layer = Layer.effect(
     const bus = yield* Bus.Service
     const db = (yield* Database.Service).db
     const kv = yield* KV.Service
-    const config = yield* Config.Service
+    const projects = yield* PacerProject.Service
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
@@ -78,7 +80,8 @@ const layer = Layer.effect(
       if (last?.visible) return
       if (yield* MemoryOffer.stepped(db, sessionID)) return
       const tasks = catalog?.pacer?.memory?.tasks === true
-      const project = MemoryClient.project(yield* config.entries(), input.session.projectID)
+      const chat = yield* projects.chat(input.session.projectID)
+      const project = chat.project
       if (project === undefined) return
       const prompt = yield* newestPrompt(sessionID)
       if (!prompt) return
@@ -86,6 +89,7 @@ const layer = Layer.effect(
       const by = { role: input.agent, chat: sessionID, ...inside }
       const offered = { ...input, task: input.task && tasks }
       const block = yield* client
+        .withHeaders(PacerHeaders.chat({ sessionID, parentID: input.session.parentID, project: chat.headers }))
         .start(
           project,
           // Cut as the server counts, in code points.
@@ -104,6 +108,12 @@ const layer = Layer.effect(
             description: "Memory nearest to the prompt",
             memory: { project, recall: started.recall, entries: started.entries.map((entry) => entry.id), tasks },
           })),
+          // CPP keeps the project's memory from this key: no block, so no memory tools, till the chat's next cold point.
+          Effect.catchTag("MemoryClient.Closed", (closed) =>
+            Effect.logInfo("memory is closed to this chat's project", { project, type: closed.type }).pipe(
+              Effect.as(undefined),
+            ),
+          ),
           Effect.catch((error) =>
             Effect.logWarning("memory's start block could not be read", { reason: error.message }).pipe(
               // A chat that had a block before keeps it: after a compaction its message is still stored. A revert deletes
@@ -116,6 +126,7 @@ const layer = Layer.effect(
             ),
           ),
         )
+      if (block === undefined) return
       yield* bus.publish(SessionEvent.Synthetic, {
         sessionID,
         text: block.text,
@@ -152,10 +163,10 @@ export const node = makeLocationNode({
   deps: [
     Bus.node,
     Database.node,
-    Config.node,
     KV.node,
     PacerEndpoint.node,
     PacerModels.node,
+    PacerProject.node,
     MemoryClient.node,
     MemoryFollowed.node,
   ],

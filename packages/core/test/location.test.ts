@@ -22,6 +22,7 @@ const projectLayer = Layer.succeed(
         directory: AbsolutePath.make("/repo"),
         canonical: AbsolutePath.make("/main/repo"),
         vcs: { type: "git", store: AbsolutePath.make("/repo/.git") },
+        remote: "github.com/owner/repo",
       }),
   }),
 )
@@ -41,6 +42,7 @@ describe("Location", () => {
         type: "git",
         store: AbsolutePath.make("/repo/.git"),
       })
+      expect(location.remote).toBe("github.com/owner/repo")
     }),
   )
 })

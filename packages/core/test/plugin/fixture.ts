@@ -22,6 +22,7 @@ import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { Mcp } from "@opencode/core/mcp/index"
 import { Model } from "@opencode/core/model"
+import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Npm } from "@opencode/util/npm"
 import { Plugin } from "@opencode/core/plugin"
@@ -115,6 +116,7 @@ export const makePluginTestLayer = (permission = permissionLayer, generate = gen
       KV.node,
       Mcp.node,
       PacerTools.node,
+      PacerProject.node,
       Session.node,
       InstructionEntry.node,
       PersistentPty.node,

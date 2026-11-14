@@ -35,6 +35,7 @@ import { ImageFit } from "../image/fit.js"
 import { MemoryOffer } from "../memory/offer.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerOffer } from "../pacer/offer.js"
+import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
 import { Instructions } from "../instructions/index.js"
 import { Permission } from "../permission.js"
@@ -262,6 +263,7 @@ export const layer = Layer.effect(
     const transport = yield* SessionModelTransport.Service
     const app = yield* App.Metadata
     const pacerTools = yield* PacerTools.Service
+    const pacerProject = yield* PacerProject.Service
     const database = yield* Effect.serviceOption(Database.Service)
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     // openforge: the tool's images arrive whole in its result and are fitted once, here (ImageBank).
@@ -287,6 +289,7 @@ export const layer = Layer.effect(
       const session = input.session
       const model = input.model
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
+      const project = (yield* pacerProject.chat(session.projectID)).headers
       const tools = input.tools ?? {
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
@@ -304,6 +307,7 @@ export const layer = Layer.effect(
           yield* pacerTools.list({
             sessionID: session.id,
             parentID: session.parentID,
+            project,
             model: model.ref.id,
             step: kind === "primary",
             continues: input.messages.some((message) => message.role === "assistant"),
@@ -399,6 +403,7 @@ export const layer = Layer.effect(
               sessionID: session.id,
               parentID: session.parentID,
               auto: input.autoCompaction === true,
+              project,
             }),
           },
         },
@@ -406,9 +411,7 @@ export const layer = Layer.effect(
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
         system: shaped.system,
-        messages: images
-          ? ImageBudget.bound(supported, ImageFit.requestLimits(images))
-          : boundImages(supported),
+        messages: images ? ImageBudget.bound(supported, ImageFit.requestLimits(images)) : boundImages(supported),
         tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
@@ -550,6 +553,7 @@ export const node = makeLocationNode({
     SessionModelTransport.node,
     App.node,
     PacerTools.node,
+    PacerProject.node,
     Database.node,
     SessionPromptStart.node,
   ],

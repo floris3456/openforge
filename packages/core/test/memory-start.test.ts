@@ -23,6 +23,8 @@ import { MemoryText } from "@opencode/core/memory/text"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
@@ -181,6 +183,7 @@ const memoryTools = makeLocationNode({
     PacerEndpoint.node,
     PacerModels.node,
     MemoryClient.node,
+    PacerProject.node,
     SessionStore.node,
     Config.node,
     KV.node,
@@ -347,6 +350,7 @@ const setup = Effect.fnUntraced(function* (
   const started = requests.length
   return {
     project,
+    lead,
     sessionID,
     session,
     llm,
@@ -398,19 +402,21 @@ const setup = Effect.fnUntraced(function* (
         ),
     /** The searches of the chat's `recall` calls, in order, as the tool keeps them in its results' metadata. */
     searches: () =>
-      session.messages({ sessionID, order: "asc" }).pipe(
-        Effect.map((messages) =>
-          messages.flatMap((message) =>
-            message.type === "assistant"
-              ? message.content.flatMap((part) =>
-                  part.type === "tool" && part.name === "recall" && part.state.status === "completed"
-                    ? [part.state.metadata as { project: string; recall: string; entries: string[] }]
-                    : [],
-                )
-              : [],
+      session
+        .messages({ sessionID, order: "asc" })
+        .pipe(
+          Effect.map((messages) =>
+            messages.flatMap((message) =>
+              message.type === "assistant"
+                ? message.content.flatMap((part) =>
+                    part.type === "tool" && part.name === "recall" && part.state.status === "completed"
+                      ? [part.state.metadata as { project: string; recall: string; entries: string[] }]
+                      : [],
+                  )
+                : [],
+            ),
           ),
         ),
-      ),
     /** The search of the chat's newest start block. */
     blockRecall: () =>
       session.messages({ sessionID, order: "desc" }).pipe(
@@ -880,6 +886,111 @@ describe("MemoryStart while the server's memory comes and goes", () => {
   )
 })
 
+describe("MemoryStart when CLIProxyPacer keeps the project's memory from the chat", () => {
+  const compact = (h: Effect.Success<ReturnType<typeof setup>>) =>
+    Effect.gen(function* () {
+      yield* h.llm.push(TestLLM.text("## Objective\n- summary", "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+    })
+  const closed = [
+    ["memory off for the project", { memory: false }],
+    ["the key not allowed", { memory: true, keys: ["a-key-of-someone-else"] }],
+  ] as const
+
+  it.live("names the chat's project and the chat on the start call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("zebra?")
+      expect(h.starts().map((call) => call.pacer)).toEqual([
+        {
+          "x-pacer-project": h.project,
+          "x-pacer-project-name": "project",
+          "x-pacer-session": PacerSessionID.make(h.sessionID),
+        },
+      ])
+    }),
+  )
+
+  it.live("gives no block and no memory tools at that step, and the next steps of the span keep them away", () =>
+    Effect.gen(function* () {
+      for (const [label, setting] of closed) {
+        const h = yield* setup()
+        yield* h.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
+        server.store.project(h.project, setting)
+        yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+        yield* h.prompt("zebra deploys?")
+        yield* h.prompt("and on fridays?")
+        const requests = h.requests()
+        expect({ label, steps: requests.length }).toEqual({ label, steps: 3 })
+        for (const request of requests) {
+          expect({ label, tools: names(request) }).toEqual({ label, tools: ["echo"] })
+          expect({ label, blocks: blocksIn(request) }).toEqual({ label, blocks: [] })
+        }
+        expect({ label, stored: yield* h.blocks() }).toEqual({ label, stored: [] })
+        // Asked once, at the chat's cold point.
+        expect({ label, starts: h.starts().length }).toEqual({ label, starts: 1 })
+      }
+    }),
+  )
+
+  it.live("a project turned on reaches the chat only at its next cold point, with the block and the tools", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
+      server.store.project(h.project, { memory: false })
+      yield* h.llm.push(TestLLM.text("no zebras", "text-zebra"))
+      yield* h.prompt("zebra deploys?")
+      server.store.project(h.project, { memory: true })
+      yield* h.prompt("and on fridays?")
+      expect(h.requests().map(names)).toEqual([["echo"], ["echo"]])
+      expect(h.starts()).toHaveLength(1)
+
+      yield* compact(h)
+      yield* h.prompt("when do zebra deploys run?")
+      const after = h.requests().at(-1)
+      expect(names(after)).toEqual(["echo", "forget", "recall", "remember", "task"])
+      expect(blocksIn(after)).toHaveLength(1)
+      expect(blocksIn(after)[0]).toContain("Zebra deploys run at noon.")
+      expect(h.starts()).toHaveLength(2)
+    }),
+  )
+
+  it.live("a project turned off reaches a chat with memory only at its next cold point, which then has none", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.llm.push(TestLLM.text("zebras", "text-zebra"))
+      yield* h.prompt("zebra?")
+      const first = h.requests()[0]
+      expect(names(first)).toEqual(["echo", "forget", "recall", "remember", "task"])
+      server.store.project(h.project, { memory: false })
+      yield* h.prompt("and on fridays?")
+      expect(JSON.stringify(h.requests().at(-1)?.tools)).toBe(JSON.stringify(first?.tools))
+
+      yield* compact(h)
+      yield* h.prompt("quokka?")
+      const after = h.requests().at(-1)
+      expect(names(after)).toEqual(["echo"])
+      expect(blocksIn(after)).toEqual([])
+    }),
+  )
+
+  it.live("a 500, or memory off for the whole server, gives the unavailable block as before", () =>
+    Effect.gen(function* () {
+      for (const answer of [
+        () => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }),
+        () => Response.json({ error: { type: "not_found", message: "memory is off" } }, { status: 404 }),
+      ]) {
+        const h = yield* setup()
+        server.control.answer = answer
+        yield* h.prompt("zebra?")
+        expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+        expect(names(h.requests()[0])).toEqual(["echo", "forget", "recall", "remember", "task"])
+      }
+    }),
+  )
+})
+
 describe("MemoryStart inside a task", () => {
   const memoryOf = Effect.provide(MemoryClient.Service, client)
   const make = (project: string, title: string, description?: string, parent?: string) =>
@@ -1196,6 +1307,47 @@ const json = (value: unknown) => JSON.stringify(value)
 const fill = (length: number) => "Q7x".repeat(length).slice(0, length)
 
 describe("MemoryFollowed through the runner", () => {
+  it.live("names the chat to CPP on the start call and what followed, a subagent's with its lead's", () =>
+    Effect.gen(function* () {
+      const lead = yield* setup()
+      let project = lead.project
+      const as = (sessionID: Session.ID, parentID?: Session.ID) => ({
+        "x-pacer-project": project,
+        "x-pacer-project-name": "project",
+        "x-pacer-session": PacerSessionID.make(sessionID),
+        ...(parentID ? { "x-pacer-parent-session": PacerSessionID.make(parentID) } : {}),
+      })
+      yield* lead.llm.push(TestLLM.text("Looking.", "looking"))
+      yield* lead.prompt("zebra?")
+      const block = yield* lead.blockRecall()
+      yield* eventually("the step's row was added to", () => lead.afters(block).length === 1)
+      yield* lead.llm.push(TestLLM.text("Ok.", "ok"))
+      yield* lead.prompt("The other one.")
+      yield* eventually("the person's message was added", () => lead.afters(block).length === 2)
+      expect([...lead.starts(), ...lead.afters()].map((call) => call.pacer)).toEqual([
+        as(lead.sessionID),
+        as(lead.sessionID),
+        as(lead.sessionID),
+      ])
+      // `by.chat` stays the session's own ID.
+      expect(lead.afters().map((call) => (call.body as { by: { chat: string } }).by.chat)).toEqual([
+        lead.sessionID,
+        lead.sessionID,
+      ])
+
+      const child = yield* setup({ child: true, agent: "explore" })
+      project = child.project
+      yield* child.llm.push(TestLLM.text("In src.", "src"))
+      yield* child.prompt("where are the zebra files?")
+      const its = yield* child.blockRecall()
+      yield* eventually("the subagent's step was added", () => child.afters(its).length === 1)
+      expect([...child.starts(), ...child.afters()].map((call) => call.pacer)).toEqual([
+        as(child.sessionID, child.lead),
+        as(child.sessionID, child.lead),
+      ])
+    }),
+  )
+
   it.live(
     "after the step that reads a recall's result, its text and calls go to the search's row, with the entries it replaced or deleted",
     () =>

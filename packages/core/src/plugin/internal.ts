@@ -59,6 +59,7 @@ import { MemoryTask } from "../memory/task.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerModels } from "../pacer/models.js"
+import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
 import { Permission } from "../permission.js"
 import { Reference } from "../reference.js"
@@ -156,6 +157,7 @@ const services = [
   Npm.Service,
   PacerEndpoint.Service,
   PacerModels.Service,
+  PacerProject.Service,
   PacerTools.Service,
   Permission.Service,
   Form.Service,
@@ -218,6 +220,7 @@ export const requirements = LayerNode.group([
   Npm.node,
   PacerEndpoint.node,
   PacerModels.node,
+  PacerProject.node,
   PacerTools.node,
   Permission.node,
   Form.node,

@@ -10,6 +10,8 @@ export { Info, Ref, response }
 
 export interface Interface extends Info {
   readonly vcs?: Project.Vcs
+  /** The project's normalised `origin` remote (`Project.Resolved`), worked out once with the location. */
+  readonly remote?: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Location") {}
@@ -27,6 +29,7 @@ const layer = (ref: Ref) =>
         workspaceID: ref.workspaceID,
         project: { id: resolved.id, directory: resolved.directory, canonical: resolved.canonical },
         vcs: resolved.vcs,
+        ...(resolved.remote ? { remote: resolved.remote } : {}),
       })
     }),
   )

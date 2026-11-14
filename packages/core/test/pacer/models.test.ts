@@ -426,6 +426,7 @@ describe("PacerModels", () => {
             embedding: "granite-embedding-english-r2",
             tasks: false,
             recalls: false,
+            projects: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -436,6 +437,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, recalls: true }))?.pacer?.memory).toMatchObject({
           tasks: false,
           recalls: true,
+        })
+        // A server that keeps memory per project says so.
+        expect((yield* told({ ...block, embedding: null, projects: true }))?.pacer?.memory).toMatchObject({
+          recalls: false,
+          projects: true,
         })
         // Left out, or in a version or shape this one cannot read: no memory, and the rest stands.
         for (const unread of [

@@ -162,7 +162,14 @@ const layer = Layer.effect(
         Effect.zip(others, { concurrent: true }),
         Effect.map(([answer, listed]) => ({
           text: [
-            MemoryText.block(answer.started, by.role, offered, inside !== undefined, answer.summary),
+            MemoryText.block(
+              answer.started,
+              by.role,
+              offered,
+              inside !== undefined,
+              answer.summary,
+              plans ? { chat: sessionID, lead } : undefined,
+            ),
             ...listed,
             ...outside,
           ].join("\n"),

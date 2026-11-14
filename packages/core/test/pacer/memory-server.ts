@@ -939,13 +939,18 @@ function storeOf(
             description: description !== undefined && description !== row.description ? description : null,
           }
           if (edited.title === null && edited.description === null) return Response.json({ task: json(row) })
+          const at = Date.now()
           db.run(
             "insert into task_change (project, task, state, note, by, at, title, description) values (?, ?, ?, ?, ?, ?, ?, ?)",
-            [project, row.id, row.state, note, JSON.stringify(caller), Date.now(), edited.title, edited.description],
+            [project, row.id, row.state, note, JSON.stringify(caller), at, edited.title, edited.description],
           )
+          // As CLIProxyPacer: an edit is a change of the task, so `changed` moves; its `note` stays.
           const changed = db
-            .query<TaskRow, (string | number)[]>("update task set title = ?, description = ? where seq = ? returning *")
-            .get(edited.title ?? row.title, edited.description ?? row.description, row.seq)!
+            .query<
+              TaskRow,
+              (string | number)[]
+            >("update task set title = ?, description = ?, changed = ? where seq = ? returning *")
+            .get(edited.title ?? row.title, edited.description ?? row.description, at, row.seq)!
           return Response.json({ task: json(changed) })
         })
         .immediate()

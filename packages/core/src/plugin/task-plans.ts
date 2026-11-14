@@ -35,6 +35,8 @@ export const Plugin = {
       const session = yield* ctx.session.get({ sessionID })
       if (MemoryTask.inside(session.metadata)) return undefined
       if (!(yield* plans.planned(session))) return undefined
+      // A chat that cannot make a task now is not kept from editing.
+      if (!(yield* plans.reachable(session))) return undefined
       return MemoryPlans.refused
     })
 

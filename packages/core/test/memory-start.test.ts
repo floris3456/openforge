@@ -71,7 +71,8 @@ const server = startProxied()
 const defaultServer = server
 afterAll(() => server.stop())
 /** A server with memory as before prompts were answered: the start block holds the entries nearest the prompt. */
-const today = () => catalogOf(true, { prompt: false })
+// A server before task plans: these blocks are as they were then.
+const today = () => catalogOf(true, { prompt: false, plans: false })
 
 /**
  * What the memory side sees, in the test's hands, as openforge's own services give it: each change is announced, as
@@ -476,6 +477,8 @@ const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
 const states =
   "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
+const planStates =
+  "With the task tool: when a subtask of your own plan is done, set it done, and the next one of your plan starts; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
 const keep =
   "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
@@ -1346,7 +1349,7 @@ describe("MemoryPrompt through the runner", () => {
   const prompted = startProxied({ embedding: embedding.url })
   afterAll(() => prompted.stop().then(() => embedding.stop()))
   const near = (input: Parameters<typeof setup>[0] = {}) =>
-    setup({ ...input, served: prompted, catalog: catalogOf(true) })
+    setup({ ...input, served: prompted, catalog: catalogOf(true, { plans: false }) })
   const line = "Memory holds these entries close to this prompt; they may be wrong or out of date:"
   /** The user-role texts of a request as a provider gets them, roles and texts only, up to and with `prompt`. */
   const upTo = (request: LLMRequest | undefined, prompt: string) => {
@@ -1584,7 +1587,7 @@ describe("MemoryStart after a compaction: the summary", () => {
   const summarized = startProxied({ embedding: embedding.url })
   afterAll(() => summarized.stop().then(() => embedding.stop()))
   const near = (input: Parameters<typeof setup>[0] = {}) =>
-    setup({ served: summarized, catalog: catalogOf(true), ...input })
+    setup({ served: summarized, catalog: catalogOf(true, { plans: false }), ...input })
   const line = "Memory holds these entries close to this chat's summary:"
   const summary = "Before any heading.\n\n## Objective\nShip it soon.\n\n## Empty\n\n## Next\n- zebra lint"
   const counts = (global: number) =>
@@ -1780,7 +1783,7 @@ describe("MemoryStart after a compaction: the summary", () => {
 
   it.live("a server without summary gets no parts", () =>
     Effect.gen(function* () {
-      const { h } = yield* compacted({ catalog: catalogOf(true, { summary: false }) })
+      const { h } = yield* compacted({ catalog: catalogOf(true, { summary: false, plans: false }) })
       yield* h.prompt("what now?")
       expect(bodies(h).map((body) => [body.limit, body.summary, body.exclude])).toEqual([
         [0, undefined, undefined],
@@ -2165,7 +2168,7 @@ describe("MemoryStart with task plans", () => {
         yield* h.prompt("go on")
         const block = [
           `Your task [${own.task}]: Move the checks (todo)`,
-          states,
+          planStates,
           opening,
           counts("build", true),
           keep,
@@ -2247,6 +2250,39 @@ describe("MemoryStart with task plans", () => {
         ),
       )
       expect(yield* metadataOf(child)).toMatchObject([{ plans: true }])
+    }),
+  )
+
+  it.live("a child on a subtask its lead made is told to set it review; on the task itself, to plan its own", () =>
+    Effect.gen(function* () {
+      const subtaskOf = (project: string) =>
+        memoryOf.pipe(
+          Effect.flatMap((memory) =>
+            memory
+              .make(project, { title: "Move the checks", by: by("build") })
+              .pipe(
+                Effect.flatMap((made) =>
+                  memory.make(project, { title: "its test", parent: made.task.id, by: by("build") }),
+                ),
+              ),
+          ),
+          Effect.map((sub) => ({ task: sub.task.parent!, subtask: sub.task.id })),
+          Effect.orDie,
+        )
+      const given = yield* setup({ catalog: planned(), child: true, agent: "explore", inside: subtaskOf })
+      yield* given.prompt("go on")
+      const lines = unsent(userTexts(given.requests()[0])[1]).split("\n")
+      expect(lines).toContain(states)
+      expect(lines).not.toContain(planStates)
+
+      const own = yield* setup({
+        catalog: planned(),
+        child: true,
+        agent: "explore",
+        inside: (project) => make(project, "Move the checks"),
+      })
+      yield* own.prompt("go on")
+      expect(unsent(userTexts(own.requests()[0])[1]).split("\n")).toContain(planStates)
     }),
   )
 

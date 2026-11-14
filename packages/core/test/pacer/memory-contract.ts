@@ -3257,7 +3257,10 @@ export function memoryContract(target: Target) {
         test("changes the title and description, keeps the state, and keeps the change with its note and what it edited", async () => {
           const tasks = planned("plans-edit")
           const made = await tasks.steps("Old title", ["A"])
-          await answered(tasks.edit(made.task.id, { description: "First." }))
+          // So that a `changed` the edit moves differs from the make's.
+          await Bun.sleep(20)
+          const described = await answered(tasks.edit(made.task.id, { description: "First." }))
+          expect(described.task.changed).toBeGreaterThan(made.task.changed)
           const titled = await answered(tasks.edit(made.task.id, { title: "  New title  ", note: "named the file" }))
           expect(titled.task).toMatchObject({ title: "New title", description: "First.", state: "active" })
           const cleared = await answered(tasks.edit(made.task.id, { description: "" }))

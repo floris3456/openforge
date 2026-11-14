@@ -38,7 +38,15 @@ export interface Interface {
     session: SessionSchema.Info,
     inside: MemoryTask.Inside,
   ) => Effect.Effect<MemoryClient.Task | undefined, MemoryClient.Error>
+  /**
+   * Whether the chat could make a task now: one read of its project's tasks within {@link REACH}. An edit is refused
+   * only then, so that a chat is never locked out of editing while memory cannot be reached. Never fails.
+   */
+  readonly reachable: (session: SessionSchema.Info) => Effect.Effect<boolean>
 }
+
+/** How long the read that says whether memory can be reached may take before an edit goes ahead. */
+export const REACH = "2 seconds"
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MemoryPlans") {}
 
@@ -84,6 +92,23 @@ const layer = Layer.effect(
           ? read.subtasks.find((item) => item.id === inside.subtask)
           : read.subtasks.find((item) => item.state === "active")
         return subtask ?? read.task
+      }),
+      reachable: Effect.fn("MemoryPlans.reachable")(function* (session) {
+        const chat = yield* projects.chat(session.projectID)
+        if (chat.project === undefined) return false
+        return yield* client
+          .withHeaders(PacerHeaders.chat({ sessionID: session.id, parentID: session.parentID, project: chat.headers }))
+          .tasks(chat.project)
+          .pipe(
+            Effect.timeout(REACH),
+            Effect.as(true),
+            Effect.catch((error) =>
+              Effect.logWarning("memory cannot be reached, so an edit outside a task goes ahead", {
+                sessionID: session.id,
+                reason: error.message,
+              }).pipe(Effect.as(false)),
+            ),
+          )
       }),
     })
   }),

@@ -467,6 +467,33 @@ describe("an edit outside a task", () => {
     }),
   )
 
+  it.live("goes ahead while memory cannot be reached, as no task could be made then", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      // The start block goes in as on a server with plans; memory is gone by the time of the edit.
+      server.control.answer = (request) =>
+        request.method === "GET" && request.path === `/pacer/v1/memory/${h.project}/tasks`
+          ? Response.json({ error: { type: "internal", message: "down" } }, { status: 503 })
+          : fetch(`${server.store.url}${request.path}`, {
+              method: request.method,
+              headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+              ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+            })
+      const edited = file("unreached.txt", "before\n")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-edit", "edit", { path: edited.name, oldString: "before", newString: "after" }),
+        TestLLM.text("Edited.", "after"),
+      )
+      yield* h.prompt("fix the typo")
+      expect(yield* h.results()).toEqual([{ name: "edit", status: "completed", error: undefined }])
+      expect(edited.read()).toBe("after\n")
+      // The lead's start block reads the list, and so does the edit, to know whether a task could be made.
+      expect(
+        server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/tasks`),
+      ).toHaveLength(2)
+    }),
+  )
+
   it.live("a shell command is never refused", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -495,7 +522,7 @@ describe("an edit outside a task", () => {
     Effect.gen(function* () {
       for (const input of [
         { inside: "task" },
-        { catalog: catalogOf(true, { prompt: false }) },
+        { catalog: catalogOf(true, { prompt: false, plans: false }) },
         { child: true, agent: "untasked" },
       ] as const) {
         const h = yield* setup(input)
@@ -667,7 +694,7 @@ describe("the check at the end of a turn", () => {
       for (const input of [
         // Its subtask, the one it is on, is still todo.
         { inside: "subtask" },
-        { inside: "task", catalog: catalogOf(true, { prompt: false }) },
+        { inside: "task", catalog: catalogOf(true, { prompt: false, plans: false }) },
         { inside: "task", child: true, agent: "untasked" },
       ] as const) {
         const h = yield* setup(input)

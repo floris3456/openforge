@@ -425,6 +425,7 @@ describe("PacerModels", () => {
             searchLimit: 20,
             embedding: "granite-embedding-english-r2",
             tasks: false,
+            plans: false,
             recalls: false,
             projects: false,
             prompt: false,
@@ -434,7 +435,17 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
           embedding: null,
           tasks: true,
+          plans: false,
           recalls: false,
+        })
+        // Plans are a kind of tasks: a server that says plans without tasks has neither.
+        expect((yield* told({ ...block, embedding: null, tasks: true, plans: true }))?.pacer?.memory).toMatchObject({
+          tasks: true,
+          plans: true,
+        })
+        expect((yield* told({ ...block, embedding: null, plans: true }))?.pacer?.memory).toMatchObject({
+          tasks: false,
+          plans: false,
         })
         expect((yield* told({ ...block, embedding: null, recalls: true }))?.pacer?.memory).toMatchObject({
           tasks: false,

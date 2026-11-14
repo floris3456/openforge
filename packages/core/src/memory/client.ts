@@ -39,7 +39,8 @@ export interface Entry extends Schema.Schema.Type<typeof Entry> {}
 export const Near = Schema.Struct({ ...Entry.fields, score: Schema.Number })
 export interface Near extends Schema.Schema.Type<typeof Near> {}
 
-export const State = Schema.Literals(["todo", "active", "blocked", "review", "done"])
+/** `dropped`, given up for a new plan with a note, comes with `plans` (workspace spec `docs/specs/task-plans.md`). */
+export const State = Schema.Literals(["todo", "active", "blocked", "review", "done", "dropped"])
 export type State = typeof State.Type
 
 const Who = Schema.Struct({ person: Schema.String, role: Schema.String, chat: Schema.String })
@@ -58,10 +59,25 @@ export const Task = Schema.Struct({
   /** Unix milliseconds. */
   at: Schema.Number,
   changed: Schema.Number,
+  /**
+   * When the worker's chat last sent a model request through CLIProxyPacer, in Unix milliseconds; null when it is not
+   * known. A server without `plans` answers neither this nor `idle`.
+   */
+  worker_seen: maybe(Schema.Number),
+  /** Active, and no model request from its worker's chat (or no change, when that is not known) for 24 hours. */
+  idle: Schema.optional(Schema.Boolean),
 })
 export interface Task extends Schema.Schema.Type<typeof Task> {}
 
-export const Change = Schema.Struct({ state: State, note: maybe(Schema.String), by: Who, at: Schema.Number })
+export const Change = Schema.Struct({
+  state: State,
+  note: maybe(Schema.String),
+  by: Who,
+  at: Schema.Number,
+  /** Only on a change that edited them: the new title and description. */
+  title: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.String),
+})
 export interface Change extends Schema.Schema.Type<typeof Change> {}
 
 /** One task as `GET …/tasks/{id}` answers it: its changes newest first, its subtasks oldest first, its entries. */

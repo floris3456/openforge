@@ -45,6 +45,7 @@ export const catalogOf = (
                   searchLimit: capabilities.search_limit,
                   embedding: null,
                   tasks: capabilities.tasks,
+                  plans: capabilities.plans,
                   recalls: capabilities.recalls,
                   projects: capabilities.projects,
                   prompt: options.prompt ?? capabilities.prompt,

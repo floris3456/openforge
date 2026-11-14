@@ -38,6 +38,11 @@ export interface Memory {
   readonly embedding: string | null
   /** Whether the server has tasks (the memory API's section "Tasks"). */
   readonly tasks: boolean
+  /**
+   * Whether its tasks are plans (workspace spec `docs/specs/task-plans.md`): `dropped`, a make with subtasks, `done`
+   * that starts the next, `plan`, `edit`, and the worker's last request on each task.
+   */
+  readonly plans: boolean
   /** Whether the server keeps the recall log, to which openforge adds what followed a search. */
   readonly recalls: boolean
   /**
@@ -212,6 +217,7 @@ const MemoryBlock = Schema.Struct({
   search_limit: Limit,
   embedding: Schema.NullOr(Schema.String),
   tasks: Schema.optional(Schema.Unknown),
+  plans: Schema.optional(Schema.Unknown),
   recalls: Schema.optional(Schema.Unknown),
   projects: Schema.optional(Schema.Unknown),
   prompt: Schema.optional(Schema.Unknown),
@@ -382,6 +388,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           searchLimit: memory.search_limit,
           embedding: memory.embedding,
           tasks: memory.tasks === true,
+          plans: memory.tasks === true && memory.plans === true,
           recalls: memory.recalls === true,
           projects: memory.projects === true,
           prompt: memory.prompt === true,

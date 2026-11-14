@@ -27,6 +27,7 @@ export const capabilities = {
   query_characters: 2000,
   search_limit: 20,
   tasks: true,
+  plans: false,
   recalls: true,
   projects: true,
   prompt: true,

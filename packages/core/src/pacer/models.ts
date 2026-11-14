@@ -196,6 +196,7 @@ export const CapabilitiesAnswer = Schema.Struct({
       web_tools: Schema.optional(Schema.Unknown),
       memory: Schema.optional(Schema.Unknown),
       freeze_prompt: Schema.optional(Schema.Unknown),
+      addresses: Schema.optional(Schema.Unknown),
     }),
   ),
   providers: Items,
@@ -311,6 +312,9 @@ export const layer = Layer.effect(
         { concurrency: "unbounded" },
       )
       const pacer = capabilities?.pacer ?? null
+      // Only this keyed answer from an address of the list may say where else CPP is; an older server says nothing.
+      const addresses = PacerEndpoint.addressesOf(pacer?.addresses)
+      if (addresses && endpoints.learn) yield* endpoints.learn(endpoint, addresses)
       prices = pacer ? priced : undefined
       return build(
         yield* Clock.currentTimeMillis,
@@ -325,14 +329,17 @@ export const layer = Layer.effect(
     const refresh = Effect.fn("PacerModels.refresh")(
       function* () {
         const endpoint = yield* endpoints.get()
-        // Another address's models are not this one's, not even while its first read is under way.
-        if (endpoint?.root !== root) {
-          root = endpoint?.root
+        // Another address's models are not this one's, not even while its first read is under way. The other
+        // addresses of the set-up one's list are the same CPP.
+        if ((endpoint?.home ?? endpoint?.root) !== root) {
+          root = endpoint?.home ?? endpoint?.root
           prices = undefined
           if (yield* SubscriptionRef.get(current)) yield* SubscriptionRef.set(current, undefined)
         }
         if (!endpoint) return
         const result = yield* read(endpoint).pipe(Effect.result)
+        // A service started while the address is down reaches CPP at another; the move starts a read of its own.
+        if (Result.isFailure(result) && down(result.failure) && endpoints.failover) yield* endpoints.failover(endpoint)
         // The endpoint changed during the read; the change starts a read of its own.
         if (!PacerEndpoint.same(endpoint, yield* endpoints.get())) return
         if (Result.isFailure(result))
@@ -388,6 +395,14 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
 /** An answer that will not change on its own: a 404, a refused key. Not an unreachable server, a 429 or a redirect. */
 function definite(error: PacerHttp.Error) {
   return error._tag !== "PacerHttp.Unreachable" && error._tag !== "PacerHttp.Unexpected"
+}
+
+/** CPP did not answer at all, or its gateway said it is down: what `PacerAnswers.outage` calls an outage. */
+function down(error: PacerHttp.Error) {
+  return (
+    error._tag === "PacerHttp.Unreachable" &&
+    (error.status === undefined || error.status === 502 || error.status === 504)
+  )
 }
 
 function capable(items: ReadonlyArray<unknown> | null | undefined) {

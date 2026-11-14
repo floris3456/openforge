@@ -9,6 +9,7 @@ import { Bus } from "../../bus.js"
 import type { SessionContinuity } from "../../continuity.js"
 import { ModelRetry } from "../../model-retry.js"
 import { PacerAnswers } from "../../pacer/answers.js"
+import type { PacerEndpoint } from "../../pacer/endpoint.js"
 import type { PluginHooks } from "../../plugin/hooks.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
@@ -36,7 +37,8 @@ export interface Progress extends ModelRetry.Progress {
   readonly outageSince?: number
 }
 
-export const policy = (sessionID: SessionSchema.ID, from?: Progress) =>
+/** With `endpoints`, an outage first moves to another of CPP's addresses that answers, and then retries at once. */
+export const policy = (sessionID: SessionSchema.ID, from?: Progress, endpoints?: PacerEndpoint.Interface) =>
   Effect.gen(function* () {
     const retry = yield* ModelRetry.resume(from)
     // On the CLIProxyPacer provider: whether the last failure was a 502, and when the run of outages began.
@@ -56,20 +58,24 @@ export const policy = (sessionID: SessionSchema.ID, from?: Progress) =>
         })
         badGateway = gateway
         if (!next) return { retry: false as const }
+        const moved =
+          next.retry && outageSince !== undefined && endpoints?.failover ? yield* endpoints.failover() : false
         const event: PluginHooks.Domains["session"]["retry"] = {
           sessionID,
           agent: input.agent,
           model: input.model,
           error: input.error,
           attempt: next.attempt,
-          decision: next.retry ? { retry: true, delay: next.delay } : { retry: false },
+          decision: next.retry ? { retry: true, delay: moved ? 0 : next.delay } : { retry: false },
         }
         yield* input.hook(event)
         if (!event.decision.retry) return event.decision
         const normalized =
           Number.isFinite(event.decision.delay) && event.decision.delay >= 0
             ? Math.ceil(event.decision.delay)
-            : next.delay
+            : moved
+              ? 0
+              : next.delay
         return { retry: true as const, attempt: next.attempt, delay: normalized }
       })
     return Object.assign(decide, { progress: (): Progress => ({ ...retry.progress(), outageSince }) })
@@ -85,9 +91,10 @@ export const make = (
   sessionID: SessionSchema.ID,
   step: number,
   from?: SessionContinuity.RetryRest,
+  endpoints?: PacerEndpoint.Interface,
 ) =>
   Effect.gen(function* () {
-    const decide = yield* policy(sessionID, from)
+    const decide = yield* policy(sessionID, from, endpoints)
     const until = (at: number) =>
       continuity
         .idle(

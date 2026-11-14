@@ -36,6 +36,7 @@ import { PluginHooks } from "../../plugin/hooks.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
 import { ImageBudget } from "../../image/budget.js"
 import { MemoryStart } from "../../memory/start.js"
+import { PacerEndpoint } from "../../pacer/endpoint.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -66,6 +67,7 @@ const layer = Layer.effect(
     const title = yield* SessionTitle.Service
     const continuity = yield* SessionContinuity.Service
     const memory = yield* MemoryStart.Service
+    const endpoints = yield* PacerEndpoint.Service
     const steps = yield* SessionStep.make
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
@@ -299,6 +301,7 @@ const layer = Layer.effect(
         sessionID,
         step,
         resume?.rest.kind === "retry" ? resume.rest : undefined,
+        endpoints,
       )
       let initial: SessionContext.Loaded | undefined = first
       let finishing = resume?.rest.kind === "tools" ? resume.rest : undefined
@@ -593,5 +596,6 @@ export const node = makeLocationNode({
     Database.node,
     SessionContinuity.node,
     MemoryStart.node,
+    PacerEndpoint.node,
   ],
 })

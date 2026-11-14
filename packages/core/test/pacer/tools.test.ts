@@ -507,6 +507,26 @@ describe("PacerTools.list", () => {
     }),
   )
 
+  it.effect("keeps each chat's list when the endpoint moves to another address of the pair", () =>
+    Effect.gen(function* () {
+      const first = yield* fakeCpp
+      const second = yield* fakeCpp
+      const home = endpointOf(first.origin)
+      const { tools, endpoints } = yield* startTools(home)
+      const held = yield* tools.list(step(chat))
+      expect(first.lists()).toHaveLength(1)
+
+      const moved = endpointOf(second.origin)
+      yield* SubscriptionRef.set(endpoints, { ...moved, home: home.root })
+      yield* settle
+      // The chat's list is the same object; nothing is read again for it, and a new chat reads at the new address.
+      expect(yield* tools.list(resumed(chat))).toBe(held)
+      yield* tools.list(step(other))
+      expect(first.lists()).toHaveLength(1)
+      expect(second.lists()).toHaveLength(1)
+    }),
+  )
+
   it.effect("reads nothing without an endpoint, or while the catalog says the server has no web tools", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp

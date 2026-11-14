@@ -118,6 +118,12 @@ export function same(a: Endpoint | undefined, b: Endpoint | undefined) {
   )
 }
 
+/** Whether two endpoints reach the same CPP with the same key: the set-up address the same, whichever of its pair's. */
+export function sameServer(a: Endpoint | undefined, b: Endpoint | undefined) {
+  if (!a || !b) return false
+  return (a.home ?? a.root) === (b.home ?? b.root) && a.key === b.key && a.keyFrom === b.keyFrom
+}
+
 const AddressEntry = Schema.Struct({
   url: Schema.String,
   instance: Schema.optional(Schema.NullOr(Schema.String)),

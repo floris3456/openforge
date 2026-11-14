@@ -332,8 +332,15 @@ export const layer = Layer.effect(
       Stream.runForEach((endpoint) =>
         Effect.sync(() => {
           if (PacerEndpoint.same(endpoint, state.endpoint)) return
-          // Another address or key is another server: nothing read from the last one holds.
+          const previous = state.endpoint
           state.endpoint = endpoint
+          // Another address of the pair is the same CPP with the same lists: each chat keeps the one it read. What
+          // paused reads was the old address's outage.
+          if (PacerEndpoint.sameServer(endpoint, previous)) {
+            state.pausedUntil = 0
+            return
+          }
+          // Another address or key is another server: nothing read from the last one holds.
           state.epoch++
           state.pausedUntil = 0
           state.absent = false

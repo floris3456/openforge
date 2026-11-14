@@ -1,7 +1,7 @@
 export * as MemoryStart from "./start.js"
 
 import { and, desc, eq, sql } from "drizzle-orm"
-import { Context, Effect, Layer } from "effect"
+import { Clock, Context, Effect, Layer } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
@@ -17,6 +17,7 @@ import { MemoryClient } from "./client.js"
 import { MemoryFollowed } from "./followed.js"
 import { MemoryKnown } from "./known.js"
 import { MemoryOffer } from "./offer.js"
+import { MemoryPlans } from "./plans.js"
 import { MemoryPrompt } from "./prompt.js"
 import { MemorySummary } from "./summary.js"
 import { MemoryTask } from "./task.js"
@@ -53,7 +54,8 @@ export interface Interface {
     readonly remember: boolean
     /**
      * Whether the agent may use the `task` tool: when the server has tasks, inside a task the block then says what to
-     * do with the task's state.
+     * do with the task's state; with plans, a lead's block lists the project's other tasks, and a chat in no task is
+     * told to make one first (`MemoryPlans`).
      */
     readonly task: boolean
   }) => Effect.Effect<void>
@@ -102,6 +104,24 @@ const layer = Layer.effect(
       const memory = client.withHeaders(
         PacerHeaders.chat({ sessionID, parentID: input.session.parentID, project: chat.headers }),
       )
+      // Task plans (`MemoryPlans`), for a chat with the task tool: a lead sees the project's other tasks, read beside
+      // the start call and left out when the list fails, and a chat in no task is told to make one first.
+      const plans = catalog?.pacer?.memory?.plans === true
+      const lead = input.session.parentID === undefined
+      const now = yield* Clock.currentTimeMillis
+      const others =
+        offered.task && plans && lead
+          ? memory.tasks(project).pipe(
+              Effect.timeout(TIMEOUT),
+              Effect.map((list) => MemoryPlans.others(list, inside?.task, now)),
+              Effect.catch((error) =>
+                Effect.logInfo("memory's tasks could not be read for the start block", { reason: error.message }).pipe(
+                  Effect.as([]),
+                ),
+              ),
+            )
+          : Effect.succeed([])
+      const outside = offered.task && plans && !inside ? [MemoryPlans.outside(lead)] : []
       const request = {
         // Cut as the server counts, in code points.
         prompt: [...prompt].slice(0, 2_000).join(""),
@@ -117,30 +137,33 @@ const layer = Layer.effect(
           : undefined
       const summary = compaction ? MemorySummary.parts(compaction.summary) : []
       const plain = memory.start(project, request, { timeout: TIMEOUT })
-      const block = yield* (
-        summary.length
-          ? memory
-              .start(
-                project,
-                { ...request, summary, exclude: yield* MemoryOffer.inView(db, sessionID) },
-                { timeout: SUMMARY_TIMEOUT },
-              )
-              .pipe(
-                Effect.map((started) => ({ started, summary: true })),
-                // Without the summary's entries the block is built as it would be without a summary.
-                Effect.catch((error) =>
-                  error._tag === "MemoryClient.Closed"
-                    ? Effect.fail(error)
-                    : Effect.logInfo("memory gave no entries for the summary", { reason: error.message }).pipe(
-                        Effect.andThen(plain),
-                        Effect.map((started) => ({ started, summary: false })),
-                      ),
-                ),
-              )
-          : plain.pipe(Effect.map((started) => ({ started, summary: false })))
-      ).pipe(
-        Effect.map((answer) => ({
-          text: MemoryText.block(answer.started, by.role, offered, inside !== undefined, answer.summary),
+      const answered = summary.length
+        ? memory
+            .start(
+              project,
+              { ...request, summary, exclude: yield* MemoryOffer.inView(db, sessionID) },
+              { timeout: SUMMARY_TIMEOUT },
+            )
+            .pipe(
+              Effect.map((started) => ({ started, summary: true })),
+              // Without the summary's entries the block is built as it would be without a summary.
+              Effect.catch((error) =>
+                error._tag === "MemoryClient.Closed"
+                  ? Effect.fail(error)
+                  : Effect.logInfo("memory gave no entries for the summary", { reason: error.message }).pipe(
+                      Effect.andThen(plain),
+                      Effect.map((started) => ({ started, summary: false })),
+                    ),
+              ),
+            )
+        : plain.pipe(Effect.map((started) => ({ started, summary: false })))
+      const block = yield* Effect.all([answered, others], { concurrency: "unbounded" }).pipe(
+        Effect.map(([answer, listed]) => ({
+          text: [
+            MemoryText.block(answer.started, by.role, offered, inside !== undefined, answer.summary),
+            ...listed,
+            ...outside,
+          ].join("\n"),
           description: lineOf(answer.started, answer.summary),
           memory: {
             project,
@@ -152,6 +175,9 @@ const layer = Layer.effect(
               (entry) => entry.id,
             ),
             tasks,
+            // What the chat works under till its next cold point (`MemoryPlans.planned`). A block built while memory
+            // could not be reached records none: the chat starts without memory, and no task could be made in it.
+            ...(plans ? { plans } : {}),
           },
         })),
         // CPP keeps the project's memory from this key: no block, so no memory tools, till the chat's next cold point.

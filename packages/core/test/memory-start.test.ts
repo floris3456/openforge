@@ -1378,7 +1378,8 @@ describe("MemoryPrompt through the runner", () => {
       const requests = h.requests()
       expect(requests).toHaveLength(2)
       // The step that answers no new prompt sends the same, and asks nothing.
-      for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
+      for (const request of requests)
+        expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
       expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
       expect(yield* h.lines()).toEqual(["Memory"])
       expect(h.prompts().map((call) => call.body)).toEqual([
@@ -1630,7 +1631,9 @@ describe("MemoryStart after a compaction: the summary", () => {
       const after = h.requests().filter((request) => userTexts(request).includes(sent(blocks[1]!)))
       expect(after.length).toBeGreaterThanOrEqual(2)
       for (const request of after)
-        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([sent(blocks[1]!)])
+        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([
+          sent(blocks[1]!),
+        ])
       // Its entries are in view: a later prompt leaves them out.
       expect(
         h
@@ -2064,6 +2067,244 @@ describe("MemoryFollowed through the runner", () => {
       yield* until("the person's message was tried", () => h.afters().length === 4)
       yield* settle
       expect(h.afters()).toHaveLength(4)
+    }),
+  )
+})
+
+describe("MemoryStart with task plans", () => {
+  const planned = () => catalogOf(true, { prompt: false, plans: true })
+  const memoryOf = Effect.provide(MemoryClient.Service, client)
+  const make = (project: string, title: string) =>
+    memoryOf.pipe(
+      Effect.flatMap((memory) => memory.make(project, { title, by: by("build") })),
+      Effect.map((made) => ({ task: made.task.id })),
+      Effect.orDie,
+    )
+  const hours = (count: number) => count * 3_600_000
+  /** A task as the project's list answers it on a server with plans; active, worked on by a lead. */
+  const listed = (id: string, ago: number, fields: Partial<MemoryClient.Task> = {}): MemoryClient.Task => ({
+    id,
+    parent: null,
+    title: `Task ${id}`,
+    description: "",
+    state: "active",
+    note: null,
+    by: { person: "floris", role: "build", chat: "ses_other_lead" },
+    worker: { person: "floris", role: "build", chat: "ses_other_lead" },
+    at: Date.now() - hours(100),
+    // A second more, as the block's time is taken just before the list is asked for.
+    changed: Date.now() - ago - 1_000,
+    worker_seen: Date.now() - ago - 1_000,
+    idle: false,
+    ...fields,
+  })
+  /** The small server, with the project's list as `list` answers it. */
+  const answering = (list: () => Response | Promise<Response>) => {
+    server.control.answer = (request) =>
+      request.method === "GET" && /\/pacer\/v1\/memory\/[^/]+\/tasks$/.test(request.path)
+        ? list()
+        : fetch(`${server.store.url}${request.path}`, {
+            method: request.method,
+            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+          })
+  }
+  /** The list calls of the chat's project. */
+  const lists = (h: Effect.Success<ReturnType<typeof setup>>) =>
+    server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/tasks`)
+  const metadataOf = (h: Effect.Success<ReturnType<typeof setup>>) =>
+    h.session
+      .messages({ sessionID: h.sessionID, order: "asc" })
+      .pipe(
+        Effect.map((messages) =>
+          messages.flatMap((message) =>
+            message.type === "synthetic" && message.metadata?.memory !== undefined ? [message.metadata.memory] : [],
+          ),
+        ),
+      )
+  const counts = (role: string, task?: boolean) =>
+    `Memory holds 0 global entries and 0 of role ${role}${task ? ", 0 of this task" : ""}; recall finds them.`
+  const header = "Other active tasks of this project, the newest changed first:"
+  const idleHeader =
+    "Idle tasks of this project (idle: no model request from its chat for 24 hours; not work in progress; a lead may close it, its note naming the evidence):"
+
+  it.live(
+    "a lead's block lists the other leads' active tasks with their current subtask, the idle ones apart, and leaves its own out",
+    () =>
+      Effect.gen(function* () {
+        const own = { task: "" }
+        const h = yield* setup({
+          catalog: planned(),
+          inside: (project) =>
+            make(project, "Move the checks").pipe(
+              Effect.tap((made) =>
+                Effect.sync(() => {
+                  own.task = made.task
+                }),
+              ),
+            ),
+        })
+        answering(() =>
+          Response.json({
+            tasks: [
+              listed(own.task, hours(1)),
+              listed("other1", hours(5), { title: "memory.ts: plan on the task tool, its test, the API doc" }),
+              listed("sub1", hours(3), { parent: "other1", title: "its test" }),
+              listed("sub0", hours(4), { parent: "other1", title: "plan on the task tool", state: "done" }),
+              listed("other2", 20 * 60_000, {
+                title: "The Tasks page",
+                worker: { person: "anna", role: "plan", chat: "ses_anna" },
+              }),
+              listed("idle1", hours(30), { title: "Release 0.0.40", idle: true }),
+              listed("idle2", hours(80), { title: "Old docs", idle: true, worker_seen: null }),
+              listed("todo1", hours(2), { state: "todo", worker: null }),
+            ],
+            more: false,
+          }),
+        )
+        yield* h.prompt("go on")
+        const block = [
+          `Your task [${own.task}]: Move the checks (todo)`,
+          states,
+          opening,
+          counts("build", true),
+          keep,
+          header,
+          "- [other2] The Tasks page (anna as plan; changed 20 min ago)",
+          "- [other1] memory.ts: plan on the task tool, its test, the API doc (floris as build; now [sub1] its test; changed 3 h ago)",
+          idleHeader,
+          "- [idle1] Release 0.0.40 (floris as build; last model request 30 h ago)",
+          "- [idle2] Old docs (floris as build; changed 3 d ago)",
+        ].join("\n")
+        expect(userTexts(h.requests()[0])[1]).toBe(sent(block))
+        expect(lists(h).map((call) => call.pacer)).toEqual([
+          {
+            "x-pacer-project": h.project,
+            "x-pacer-project-name": "project",
+            "x-pacer-session": PacerSessionID.make(h.sessionID),
+          },
+        ])
+        expect(yield* metadataOf(h)).toMatchObject([{ tasks: true, plans: true }])
+      }),
+  )
+
+  it.live("lists at most 10 tasks a group, the newest changed first, and says how many more there are", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
+      const ids = Array.from({ length: 12 }, (_, index) => `t${index}`)
+      answering(() =>
+        Response.json({
+          tasks: [
+            ...ids.map((id, index) => listed(id, hours(index + 1))),
+            ...ids.map((id, index) => listed(`i${id}`, hours(30 + index), { idle: true })),
+          ],
+          more: false,
+        }),
+      )
+      yield* h.prompt("go on")
+      const lines = unsent(userTexts(h.requests()[0])[1]).split("\n")
+      const active = lines.slice(lines.indexOf(header) + 1, lines.indexOf(idleHeader))
+      expect(active).toEqual([
+        ...ids.slice(0, 10).map((id, index) => `- [${id}] Task ${id} (floris as build; changed ${index + 1} h ago)`),
+        "and 2 more: task() lists them.",
+      ])
+      expect(lines.slice(lines.indexOf(idleHeader) + 1)).toEqual([
+        ...ids
+          .slice(0, 10)
+          .map((id, index) => `- [i${id}] Task i${id} (floris as build; last model request ${30 + index} h ago)`),
+        "and 2 more: task() lists them.",
+      ])
+    }),
+  )
+
+  it.live("a chat in no task is told to make one first; a child, that its lead makes it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ catalog: planned() })
+      yield* h.prompt("fix the typo")
+      expect(userTexts(h.requests()[0])[1]).toBe(
+        sent(
+          [
+            opening,
+            counts("build"),
+            keep,
+            "This chat is in no task: before changing anything, make one with the task tool.",
+          ].join("\n"),
+        ),
+      )
+      // An empty project lists nothing.
+      expect(lists(h)).toHaveLength(1)
+
+      const child = yield* setup({ catalog: planned(), child: true, agent: "explore" })
+      yield* child.prompt("fix the typo")
+      expect(userTexts(child.requests()[0])[1]).toBe(
+        sent(
+          [
+            opening,
+            counts("explore"),
+            keep,
+            "This chat is in no task, and a subagent makes none: before changing anything, answer that your lead must make the task and start you with its taskID.",
+          ].join("\n"),
+        ),
+      )
+      expect(yield* metadataOf(child)).toMatchObject([{ plans: true }])
+    }),
+  )
+
+  it.live("a child's block inside a task holds none of these lines, and its project's list is not read", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        catalog: planned(),
+        child: true,
+        agent: "explore",
+        inside: (project) => make(project, "Move the checks"),
+      })
+      answering(() => Response.json({ tasks: [listed("other1", hours(2))], more: false }))
+      yield* h.prompt("go on")
+      const block = unsent(userTexts(h.requests()[0])[1])
+      expect(block).toEndWith(`${counts("explore", true)}\n${keep}`)
+      expect(lists(h)).toEqual([])
+    }),
+  )
+
+  it.live("the block is as before on a server without plans, and for a chat without the task tool", () =>
+    Effect.gen(function* () {
+      const before = [opening, counts("build"), keep].join("\n")
+      const h = yield* setup()
+      yield* h.prompt("fix the typo")
+      expect(userTexts(h.requests()[0])[1]).toBe(sent(before))
+      expect(lists(h)).toEqual([])
+      const [memory] = yield* metadataOf(h)
+      expect(memory).not.toHaveProperty("plans")
+
+      const untasked = yield* setup({ catalog: planned(), child: true, agent: "untasked" })
+      yield* untasked.prompt("fix the typo")
+      expect(userTexts(untasked.requests()[0])[1]).toBe(sent([opening, counts("untasked"), keep].join("\n")))
+      expect(lists(untasked)).toEqual([])
+    }),
+  )
+
+  it.live("a list that fails leaves the lines out, and the block goes in", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
+      answering(() => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }))
+      yield* h.prompt("go on")
+      expect(lists(h)).toHaveLength(1)
+      expect(unsent(userTexts(h.requests()[0])[1])).toEndWith(`${counts("build", true)}\n${keep}`)
+      expect(yield* metadataOf(h)).toMatchObject([{ plans: true }])
+    }),
+  )
+
+  it.effect("waits at most 2 seconds for the list, beside the start call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      answering(() => hung.promise)
+      const run = yield* h.prompt("go on").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the list was asked for", () => lists(h).length === 1 && h.starts().length === 1)
+      yield* TestClock.adjust("2 seconds")
+      yield* Fiber.join(run)
+      expect(unsent(userTexts(h.requests()[0])[1])).toEndWith(`${counts("build", true)}\n${keep}`)
     }),
   )
 })

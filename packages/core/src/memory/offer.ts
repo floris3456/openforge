@@ -45,6 +45,7 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
       seq: SessionMessageTable.seq,
       text: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.text')`,
       tasks: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.tasks')`,
+      plans: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.plans')`,
       unavailable: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.unavailable')`,
     })
     .from(SessionMessageTable)
@@ -66,6 +67,8 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
     text: typeof block.text === "string" ? block.text : undefined,
     // SQLite's JSON true; a block written before tasks were recorded offers none.
     tasks: block.tasks === 1 || block.tasks === true,
+    /** Built on a server with task plans (`MemoryPlans`). */
+    plans: block.plans === 1 || block.plans === true,
     /** Built while memory could not be reached. */
     unavailable: block.unavailable === 1 || block.unavailable === true,
   }

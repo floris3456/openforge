@@ -35,7 +35,7 @@ export const Plugin = {
       const session = yield* ctx.session.get({ sessionID })
       if (MemoryTask.inside(session.metadata)) return undefined
       if (!(yield* plans.planned(session))) return undefined
-      return MemoryPlans.refused(session.parentID === undefined)
+      return MemoryPlans.refused
     })
 
     yield* ctx.tool.hook("execute.before", (event) =>
@@ -82,7 +82,7 @@ export const Plugin = {
       if (item?.state !== "active") return
       yield* ctx.session.synthetic({
         sessionID,
-        text: MemoryPlans.check(item, session.parentID === undefined),
+        text: MemoryPlans.check(item, session),
         description: "Task check",
         metadata: { source: SOURCE },
       })

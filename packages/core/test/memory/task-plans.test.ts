@@ -291,6 +291,8 @@ const setup = Effect.fnUntraced(function* (
     readonly child?: boolean
     /** Where the chat is, made from its project before the chat is stored: a task, set active, and its subtask. */
     readonly inside?: "task" | "subtask" | "active subtask"
+    /** Which chat made the subtask: this one, its lead, or (left out) another. */
+    readonly subtaskBy?: "self" | "lead"
     readonly catalog?: PacerModels.Catalog
   } = {},
 ) {
@@ -318,16 +320,20 @@ const setup = Effect.fnUntraced(function* (
     .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
+  const lead = Session.ID.make(`ses_plans_${project.slice(0, 12)}`)
+  const sessionID = input.child ? Session.ID.make(`${lead}_child`) : lead
   const tasks = yield* memory
-  const make = (title: string, parent?: string) =>
-    tasks.make(project, { title, ...(parent ? { parent } : {}), by }).pipe(
+  const make = (title: string, parent?: string, maker = by) =>
+    tasks.make(project, { title, ...(parent ? { parent } : {}), by: maker }).pipe(
       Effect.map((made) => made.task),
       Effect.orDie,
     )
   const activate = (id: string) => tasks.change(project, id, { state: "active", by }).pipe(Effect.orDie)
   const task = input.inside ? yield* make("Fix the typo") : undefined
   if (task) yield* activate(task.id)
-  const subtask = task && input.inside !== "task" ? yield* make("The first file", task.id) : undefined
+  const maker =
+    input.subtaskBy === undefined ? by : { role: "build", chat: input.subtaskBy === "self" ? sessionID : lead }
+  const subtask = task && input.inside !== "task" ? yield* make("The first file", task.id, maker) : undefined
   if (subtask && input.inside === "active subtask") yield* activate(subtask.id)
   const inside = task
     ? { task: task.id, ...(input.inside === "subtask" && subtask ? { subtask: subtask.id } : {}) }
@@ -348,9 +354,7 @@ const setup = Effect.fnUntraced(function* (
       })
       .run()
       .pipe(Effect.orDie)
-  const lead = Session.ID.make(`ses_plans_${project.slice(0, 12)}`)
   yield* insert(lead)
-  const sessionID = input.child ? Session.ID.make(`${lead}_child`) : lead
   if (input.child) yield* insert(sessionID, lead, input.agent)
 
   const session = yield* Session.Service
@@ -429,7 +433,7 @@ const file = (name: string, text?: string) => {
   }
 }
 
-const lead = MemoryPlans.refused(true)
+const refused = MemoryPlans.refused
 
 describe("an edit outside a task", () => {
   it.live("an edit, a write and a patch in a chat in no task change nothing and say to make the task first", () =>
@@ -448,14 +452,14 @@ describe("an edit outside a task", () => {
       )
       yield* h.prompt("fix the typo")
       expect(yield* h.results()).toEqual([
-        { name: "edit", status: "error", error: lead },
-        { name: "write", status: "error", error: lead },
-        { name: "patch", status: "error", error: lead },
+        { name: "edit", status: "error", error: refused },
+        { name: "write", status: "error", error: refused },
+        { name: "patch", status: "error", error: refused },
       ])
       expect(edited.read()).toBe("before\n")
       expect(written.read()).toBeUndefined()
       expect(patched.read()).toBe("before\n")
-      expect(lead).toBe(
+      expect(refused).toBe(
         "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), then make the change.",
       )
       // Outside a task there is no check.
@@ -473,16 +477,16 @@ describe("an edit outside a task", () => {
     }),
   )
 
-  it.live("a subagent in no task is refused with what to tell its lead", () =>
+  it.live("a subagent in no task is refused the same way: it may make its own task", () =>
     Effect.gen(function* () {
       const h = yield* setup({ child: true, agent: "explore" })
       const written = file("child.txt")
       yield* h.llm.push(
         TestLLM.toolCall("call-write", "write", { path: written.name, content: "new" }),
-        TestLLM.text("My lead must make the task.", "after"),
+        TestLLM.text("I make the task first next time.", "after"),
       )
       yield* h.prompt("write the file")
-      expect(yield* h.results()).toEqual([{ name: "write", status: "error", error: MemoryPlans.refused(false) }])
+      expect(yield* h.results()).toEqual([{ name: "write", status: "error", error: refused }])
       expect(written.read()).toBeUndefined()
     }),
   )
@@ -550,8 +554,13 @@ describe("an edit outside a task", () => {
 })
 
 describe("the check at the end of a turn", () => {
+  /** The line for what the chat may set done: its task, or a subtask it made. */
   const line = (item: { readonly id: string; readonly title: string }) =>
-    MemoryPlans.check(item as MemoryClient.Task, true)
+    `Task check: [${item.id}] ${item.title} is still active. Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`
+  /** The line for a subtask another chat made, which that chat sets done. */
+  const review = (item: { readonly id: string; readonly title: string }) =>
+    `Task check: [${item.id}] ${item.title} is still active. Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`
+  const again = " Then give your answer again: your lead reads only your last message."
 
   it.live("comes once after a turn that edited without a task call, as the last message, and the model goes on", () =>
     Effect.gen(function* () {
@@ -569,9 +578,6 @@ describe("the check at the end of a turn", () => {
       expect(checks.map((message) => message.type === "synthetic" && [message.text, message.description])).toEqual([
         [line(h.task!), "Task check"],
       ])
-      expect(line(h.task!)).toBe(
-        `Task check: [${h.task!.id}] Fix the typo is still active. Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`,
-      )
       // The step after it got it at the end of the chat, after what came before as it was sent.
       const [, second, third] = h.requests()
       expect(h.requests()).toHaveLength(4)
@@ -615,30 +621,45 @@ describe("the check at the end of a turn", () => {
     }),
   )
 
-  it.live("names the chat's subtask, or else the task's active one; a subagent is told to answer again", () =>
-    Effect.gen(function* () {
-      for (const inside of ["subtask", "active subtask"] as const) {
-        const h = yield* setup({ inside })
-        // Its own subtask is active once it works on it.
-        if (inside === "subtask")
-          yield* memory.pipe(
-            Effect.flatMap((tasks) => tasks.change(h.project, h.subtask!.id, { state: "active", by })),
-            Effect.orDie,
-          )
-        yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-        yield* h.prompt("go on")
-        expect((yield* h.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
-          line(h.subtask!),
-        ])
-      }
+  it.live(
+    "names the chat's subtask, or else the task's active one, and asks for review on a subtask another chat made",
+    () =>
+      Effect.gen(function* () {
+        const cases = [
+          // A subtask it made itself: it sets it done.
+          { input: { inside: "subtask", subtaskBy: "self" }, expected: line },
+          // The task's active subtask, made by another chat: that chat sets it done.
+          { input: { inside: "active subtask" }, expected: review },
+          // A child on the subtask its lead made, told to answer again.
+          {
+            input: { inside: "subtask", subtaskBy: "lead", child: true, agent: "explore" },
+            expected: (item: MemoryClient.Task) => review(item) + again,
+          },
+        ] as const
+        for (const { input, expected } of cases) {
+          const h = yield* setup(input)
+          // Its own subtask is active once it works on it.
+          if (input.inside === "subtask")
+            yield* memory.pipe(
+              Effect.flatMap((tasks) => tasks.change(h.project, h.subtask!.id, { state: "active", by })),
+              Effect.orDie,
+            )
+          yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+          yield* h.prompt("go on")
+          expect({
+            input,
+            checks: (yield* h.checks()).map((message) => message.type === "synthetic" && message.text),
+          }).toEqual({ input, checks: [expected(h.subtask!)] })
+        }
 
-      const child = yield* setup({ inside: "task", child: true, agent: "explore" })
-      yield* child.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-      yield* child.prompt("go on")
-      expect((yield* child.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
-        `${line(child.task!)} Then give your answer again: your lead reads only your last message.`,
-      ])
-    }),
+        // A child inside the task itself sets it done, and is told to answer again.
+        const child = yield* setup({ inside: "task", child: true, agent: "explore" })
+        yield* child.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+        yield* child.prompt("go on")
+        expect((yield* child.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
+          line(child.task!) + again,
+        ])
+      }),
   )
 
   it.live("none while the task is not active, on a server without plans, or for a chat without the task tool", () =>

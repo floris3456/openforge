@@ -111,27 +111,28 @@ const recorded = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.I
   return row === undefined ? undefined : row.task === 1
 })
 
-/** What an edit, a write or a patch answers in a chat in no task: nothing was changed. */
-export function refused(lead: boolean) {
-  return lead
-    ? "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), then make the change."
-    : "This chat is in no task, so nothing was changed, and a subagent makes none: stop and answer that your lead must make the task first and start you with its taskID."
-}
+/** What an edit, a write or a patch answers in a chat in no task, a lead or a child: nothing was changed. */
+export const refused =
+  "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), then make the change."
 
 /** The start block's line for a chat in no task. */
-export function outside(lead: boolean) {
-  return lead
-    ? "This chat is in no task: before changing anything, make one with the task tool."
-    : "This chat is in no task, and a subagent makes none: before changing anything, answer that your lead must make the task and start you with its taskID."
-}
+export const outside = "This chat is in no task: before changing anything, make one with the task tool."
 
 /**
- * The check at the end of a turn that changed something without a task call: one line. A subagent's lead gets only
- * its last message, which would then be its answer to this.
+ * The check at the end of a turn that changed something without a task call: one line, after who may finish `item`.
+ * A subtask another chat made is that chat's to set done, so this one sets it review when the work is there; were it
+ * to set it done, the next subtask would start with it as the worker. A subagent's lead gets only its last message,
+ * which would then be its answer to this.
  */
-export function check(item: MemoryClient.Task, lead: boolean) {
-  const line = `Task check: [${item.id}] ${item.title} is still active. Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`
-  return lead ? line : `${line} Then give your answer again: your lead reads only your last message.`
+export function check(item: MemoryClient.Task, chat: { readonly id: string; readonly parentID?: string }) {
+  const head = `Task check: [${item.id}] ${item.title} is still active.`
+  const line =
+    item.parent && item.by.chat !== chat.id
+      ? `${head} Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`
+      : `${head} Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`
+  return chat.parentID === undefined
+    ? line
+    : `${line} Then give your answer again: your lead reads only your last message.`
 }
 
 /** How many tasks each group of the start block lists at most. */

@@ -121,7 +121,7 @@ const layer = Layer.effect(
               ),
             )
           : Effect.succeed([])
-      const outside = offered.task && plans && !inside ? [MemoryPlans.outside(lead)] : []
+      const outside = offered.task && plans && !inside ? [MemoryPlans.outside] : []
       const request = {
         // Cut as the server counts, in code points.
         prompt: [...prompt].slice(0, 2_000).join(""),

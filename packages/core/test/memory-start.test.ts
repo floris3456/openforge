@@ -2217,7 +2217,7 @@ describe("MemoryStart with task plans", () => {
     }),
   )
 
-  it.live("a chat in no task is told to make one first; a child, that its lead makes it", () =>
+  it.live("a chat in no task, a lead or a child, is told to make one first", () =>
     Effect.gen(function* () {
       const h = yield* setup({ catalog: planned() })
       yield* h.prompt("fix the typo")
@@ -2242,7 +2242,7 @@ describe("MemoryStart with task plans", () => {
             opening,
             counts("explore"),
             keep,
-            "This chat is in no task, and a subagent makes none: before changing anything, answer that your lead must make the task and start you with its taskID.",
+            "This chat is in no task: before changing anything, make one with the task tool.",
           ].join("\n"),
         ),
       )

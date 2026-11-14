@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { close, nearest, search, tokenizer, waiting, type Scopes } from "./memory-search"
+import { close, nearest, search, tokenizer, waiting, words, type Scopes } from "./memory-search"
 
 /**
  * The small memory server: the memory API (the workspace's `docs/reference/memory-api.md`) on `Bun.serve` and
@@ -30,6 +30,7 @@ export const capabilities = {
   recalls: true,
   projects: true,
   prompt: true,
+  summary: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -57,6 +58,15 @@ const ACTS = ["superseded", "forgotten"]
 /** How many ids a prompt's `exclude` names at most, and the cosine an entry needs by default to pass. */
 const EXCLUDE = 100
 const PROMPT_FLOOR = 0.86
+/** How many parts a start's `summary` holds at most, and how many entries close to them it answers. */
+const PARTS = 16
+const SUMMARY_LIMIT = 5
+/**
+ * The cosine an entry needs to come back for a part of a summary, and the share of its text's words among the parts'
+ * at which it is left out, by default (the lead's measurement, `run/evidence/memory/summary-recall`).
+ */
+const SUMMARY_FLOOR = 0.85
+const SUMMARY_COVER = 0.55
 
 /** Characters a reader cannot see and those that end a line: the contract's table, as inclusive ranges. */
 const REFUSED = [
@@ -234,13 +244,24 @@ export function startMemoryServer(input: {
   readonly embedding?: Embedding
   /** The setting `memory.prompt_floor`: the cosine an entry needs to come back for a prompt. */
   readonly promptFloor?: number
+  /** The setting `memory.summary_floor`: the cosine an entry needs to come back for a part of a start's summary. */
+  readonly summaryFloor?: number
+  /**
+   * The setting `memory.summary_cover`: an entry close to a part is left out when at least this share of its text's
+   * words are among the words of all the parts, as it then says what the summary already says.
+   */
+  readonly summaryCover?: number
 }) {
   const people = new Map(input.keys.map((item) => [item.key, item.label ?? `key-${item.key.slice(-4)}`]))
   const db = new Database(input.file ?? ":memory:", { create: true })
   db.run("pragma journal_mode = wal")
   db.run("pragma busy_timeout = 5000")
   SCHEMA.forEach((statement) => db.run(statement))
-  const store = storeOf(db, input.embedding, input.promptFloor ?? PROMPT_FLOOR)
+  const store = storeOf(db, input.embedding, {
+    prompt: input.promptFloor ?? PROMPT_FLOOR,
+    summary: input.summaryFloor ?? SUMMARY_FLOOR,
+    cover: input.summaryCover ?? SUMMARY_COVER,
+  })
   /** The projects switched by `project()`; `keys` null for every key. */
   const projects = new Map<
     string,
@@ -415,7 +436,11 @@ export function startMemoryServer(input: {
   }
 }
 
-function storeOf(db: Database, embedding: Embedding | undefined, floor: number) {
+function storeOf(
+  db: Database,
+  embedding: Embedding | undefined,
+  floors: { readonly prompt: number; readonly summary: number; readonly cover: number },
+) {
   const get = (project: string, id: string) =>
     db.query<Row, string[]>("select * from entry where project = ? and id = ?").get(project, id)
   const live = "superseded_by is null and deleted is null"
@@ -425,9 +450,10 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
   const readOf = (row: TaskRow) => ({
     task: taskOf(row),
     changes: db
-      .query<ChangeRow, [string, string]>(
-        `select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`,
-      )
+      .query<
+        ChangeRow,
+        [string, string]
+      >(`select * from task_change where project = ? and task = ? order by seq desc limit ${READ}`)
       .all(row.project, row.id)
       .map(changeOf),
     subtasks: subtasksOf(row),
@@ -490,9 +516,10 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
           // An exact copy is looked for before the replaced entry's state, so a retried replacement answers the entry it
           // made. The replaced entry is never its own copy: the same text with another kind or basis replaces it.
           const copy = db
-            .query<Row, (string | null)[]>(
-              `select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live} and id is not ?`,
-            )
+            .query<
+              Row,
+              (string | null)[]
+            >(`select * from entry where project = ? and scope = ? and role is ? and task is ? and text = ? and ${live} and id is not ?`)
             .get(project, target.scope, target.role, target.task, text, replaced?.id ?? null)
           if (copy) {
             // The text that was to take the replaced entry's place is there already: the copy replaces it.
@@ -596,9 +623,12 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
         refuse("task: must be a task id or null")
       if (body.subtask !== undefined && body.subtask !== null && typeof body.subtask !== "string")
         refuse("subtask: must be a task id or null")
+      const summary = summaryOf(body.summary)
+      const exclude = excludeOf(body.exclude)
       const by = { person, ...byOf(body.by) }
-      const answer =
-        limit === 0
+      const answer = summary
+        ? { ...(await closeToSummary({ project, summary, scopes, exclude })), waiting: 0 }
+        : limit === 0
           ? { entries: [], meaning: false, waiting: 0 }
           : await found({ project, query: prompt, scopes, kinds, limit })
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
@@ -609,7 +639,11 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
              and (? or coalesce(role, task) in (select value from json_each(?)))`,
           )
           .get(project, scope, list === "all" ? 1 : 0, JSON.stringify(list === "all" ? [] : list))?.n ?? 0
-      const recall = limit === 0 ? null : logged(project, "start", prompt, body, answer, by)
+      const recall = summary
+        ? logged(project, "summary", summary.join("\n\n"), body, answer, by)
+        : limit === 0
+          ? null
+          : logged(project, "start", prompt, body, answer, by)
       catchUp()
       // Only a task that has no parent is a chat's task; its subtask only when it is one of that task's.
       const task = typeof body.task === "string" ? getTask(project, body.task) : null
@@ -645,7 +679,7 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
               exclude,
               vector,
               model: embedding.model,
-              floor,
+              floor: floors.prompt,
             }).map((row) => ({ ...entryOf(row), score: row.score }))
           : []
       const answer = { entries, meaning: vector !== undefined }
@@ -690,9 +724,10 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
           if (parent?.parent) refuse(`parent: task ${parent.id} is a subtask, and a subtask has no subtasks`)
           // A task that is not done with the same title and parent is the one a call sent twice made.
           const copy = db
-            .query<TaskRow, (string | null)[]>(
-              "select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1",
-            )
+            .query<
+              TaskRow,
+              (string | null)[]
+            >("select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1")
             .get(project, title, parentID)
           if (copy) return Response.json({ task: taskOf(copy), existing: true })
           const now = Date.now()
@@ -758,9 +793,10 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
             now,
           ])
           const changed = db
-            .query<TaskRow, (string | number | null)[]>(
-              "update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *",
-            )
+            .query<
+              TaskRow,
+              (string | number | null)[]
+            >("update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *")
             .get(state, note, worker, now, row.seq)!
           return Response.json({ task: taskOf(changed) })
         })
@@ -782,7 +818,7 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
       const kind = cursor
         ? cursor.kind
         : params.has("kind")
-          ? oneOf(params.get("kind"), ["search", "start", "prompt"], "kind")
+          ? oneOf(params.get("kind"), ["search", "start", "prompt", "summary"], "kind")
           : null
       const rows = db
         .query<RecallRow, (string | number | null)[]>(
@@ -890,6 +926,48 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
   }
 
   /** Vectors of length 1 for `inputs`, in their order, or undefined when the endpoint fails or is too slow. */
+  /**
+   * The entries close to any part of a start's summary, each part by the rule of a prompt with the summary's floor:
+   * without repeats, each with its best score, best first, at most 5; none without the parts' vectors. An entry whose
+   * text's words are at least the cover's share among the parts' words is left out.
+   */
+  async function closeToSummary(input: {
+    readonly project: string
+    readonly summary: string[]
+    readonly scopes: Scopes
+    readonly exclude: string[]
+  }) {
+    const vectors = await embed(input.summary, QUERY_MS)
+    if (!vectors || !embedding) return { entries: [], meaning: false }
+    const said = new Set(input.summary.flatMap(words))
+    const covered = (row: Row) => {
+      const own = words(row.text ?? "")
+      return own.length > 0 && own.filter((word) => said.has(word)).length / own.length >= floors.cover
+    }
+    const best = new Map<string, Row & { score: number }>()
+    input.summary.forEach((part, index) =>
+      close<Row>(db, {
+        project: input.project,
+        query: part,
+        scopes: input.scopes,
+        kinds: KINDS,
+        exclude: input.exclude,
+        vector: vectors[index]!,
+        model: embedding.model,
+        floor: floors.summary,
+      }).forEach((row) => {
+        if (!covered(row) && (best.get(row.id)?.score ?? -Infinity) < row.score) best.set(row.id, row)
+      }),
+    )
+    return {
+      entries: [...best.values()]
+        .toSorted((a, b) => b.score - a.score)
+        .slice(0, SUMMARY_LIMIT)
+        .map((row) => ({ ...entryOf(row), score: row.score })),
+      meaning: true,
+    }
+  }
+
   async function embed(inputs: string[], ms: number) {
     if (!embedding) return undefined
     const response = await fetch(`${embedding.url.replace(/\/+$/, "")}/embeddings`, {
@@ -920,9 +998,10 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
     catching = true
     const next = async (): Promise<void> => {
       const rows = db
-        .query<Row, [string]>(
-          `select * from entry where ${live} and (vector is null or vector_model is not ?) order by seq limit ${BATCH}`,
-        )
+        .query<
+          Row,
+          [string]
+        >(`select * from entry where ${live} and (vector is null or vector_model is not ?) order by seq limit ${BATCH}`)
         .all(embedding.model)
       if (!rows.length) return
       const vectors = await embed(rows.map(source), ENTRY_MS)
@@ -940,7 +1019,7 @@ function storeOf(db: Database, embedding: Embedding | undefined, floor: number) 
   /** Logs a search or a start: its scopes and kinds as the request sent them. */
   function logged(
     project: string,
-    kind: "search" | "start" | "prompt",
+    kind: "search" | "start" | "prompt" | "summary",
     query: string,
     body: Fields,
     answer: { entries: { id: string }[]; meaning: boolean },
@@ -1021,6 +1100,19 @@ function said(value: unknown, field: string, most: number) {
   if (typeof value !== "string" || ![...value].length || [...value].length > most)
     refuse(`${field}: must be 1 to ${most} characters`)
   return value
+}
+
+/** A start's `summary`: absent, or 1 to 16 parts of 1 to 2,000 characters. */
+function summaryOf(value: unknown) {
+  if (value === undefined || value === null) return undefined
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > PARTS ||
+    !value.every((part) => typeof part === "string" && part && [...part].length <= capabilities.query_characters)
+  )
+    refuse(`summary: must be a list of 1 to ${PARTS} parts of 1 to ${capabilities.query_characters} characters`)
+  return value.filter((part): part is string => typeof part === "string")
 }
 
 function excludeOf(value: unknown) {

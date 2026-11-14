@@ -24,6 +24,8 @@ export type Target = {
   readonly projects: boolean
   /** Whether they say `prompt`: the group "prompt" and a start's `limit: 0` run only then. */
   readonly prompt: boolean
+  /** Whether they say `summary`: the group "summary" runs only then. */
+  readonly summary: boolean
   /**
    * Switches a project's memory and names the keys that may use it (all when left out or null), as CLIProxyPacer's
    * Projects page does; the group "projects" runs only with it.
@@ -1841,6 +1843,134 @@ export function memoryContract(target: Target) {
     })
   })
 
+  describe.if(target.prompt && target.summary)("summary", () => {
+    // The fake endpoint's vectors put an entry of one concept at a cosine of about 1 to a part of that concept and
+    // near 0 to a part of another: the cases hold for any `memory.summary_floor` below that.
+    const start = (memory: ReturnType<typeof project>, body: Record<string, unknown>) =>
+      memory.start({ prompt: "the newest prompt", scopes: "all", limit: 0, exclude: [], ...body })
+
+    test("entries close to any part come back once, each with its best cosine, best first; the rest does not", async () => {
+      const memory = project("summary-close")
+      const [release, shell] = [word(), word()]
+      const near = (await created(memory.verified(`Releases of ${release} ship through the train.`))).entry
+      const tty = (await created(memory.verified(`The terminal of ${shell} is a tty.`))).entry
+      // Of another concept than either part, and without their words.
+      await created(memory.verified("Screenshots go to the picture folder."))
+      const answer = await answered(
+        start(memory, { summary: [`## Release\nHow we release ${release}.`, `## Shell\nThe ${shell} console.`] }),
+      )
+      expect(answer.meaning).toBe(true)
+      expect(answer.recall === null || ID.test(answer.recall)).toBe(true)
+      expect(answer.entries.map((entry) => entry.id).toSorted()).toEqual([near.id, tty.id].toSorted())
+      const scores = answer.entries.map((entry) => entry.score)
+      expect(scores).toEqual(scores.toSorted((a, b) => b - a))
+      // Two parts that match the same entry answer it once.
+      const twice = await answered(
+        start(memory, { summary: [`Release ${release} soon.`, `Then ship ${release} again.`] }),
+      )
+      expect(twice.entries).toEqual([scored(near)])
+      expect(twice.counts).toEqual({ global: 3, role: 0, task: 0 })
+    })
+
+    test("at most 5; exclude leaves entries out", async () => {
+      const memory = project("summary-most")
+      const parts: string[] = []
+      const written = []
+      for (const concept of [
+        ["screenshot", "Image"],
+        ["console", "Terminal"],
+        ["sqlite", "Database"],
+      ]) {
+        const [a, b] = [word(), word()]
+        parts.push(`The ${concept[0]} of ${a} and ${b}.`)
+        written.push((await created(memory.verified(`${concept[1]} ${a}.`))).entry)
+        written.push((await created(memory.verified(`${concept[1]} ${b}.`))).entry)
+      }
+      const all = await answered(start(memory, { summary: parts }))
+      expect(all.entries.length).toBe(5)
+      const left = await answered(start(memory, { summary: parts, exclude: written.map((entry) => entry.id) }))
+      expect(left.entries).toEqual([])
+      const one = await answered(start(memory, { summary: parts, exclude: [all.entries[0]!.id] }))
+      expect(one.entries.map((entry) => entry.id)).not.toContain(all.entries[0]!.id)
+    })
+
+    test("an entry whose words the parts mostly say already is left out: under 0.55 of them it comes back", async () => {
+      const memory = project("summary-cover")
+      const term = word()
+      // Its words: releases, the term, ship, train.
+      const near = (await created(memory.verified(`Releases of ${term} ship through the train.`))).entry
+      const parts = [`Release ${term}.`]
+      // One of its 4 words in the parts, then 2 (the words of all the parts count), then 3.
+      expect((await answered(start(memory, { summary: parts }))).entries).toEqual([scored(near)])
+      expect((await answered(start(memory, { summary: [...parts, "The train is late."] }))).entries).toEqual([
+        scored(near),
+      ])
+      expect(
+        (await answered(start(memory, { summary: [...parts, "The train is late.", "Ship it."] }))).entries,
+      ).toEqual([])
+    })
+
+    describe("without meaning", () => {
+      keywordOnly()
+
+      test("nothing passes, and the start answers as always", async () => {
+        const memory = project("summary-words")
+        const term = word()
+        await created(memory.verified(`Releases of ${term} ship through the train.`))
+        const answer = await answered(start(memory, { summary: [`Release ${term}.`] }))
+        expect(answer.meaning).toBe(false)
+        expect(answer.entries).toEqual([])
+        expect(answer.counts).toEqual({ global: 1, role: 0, task: 0 })
+      })
+    })
+
+    test("a summary that is not 1 to 16 parts of 1 to 2,000 characters is 400", async () => {
+      const memory = project("summary-checks")
+      for (const summary of [
+        [],
+        "one part",
+        [7],
+        [""],
+        ["x".repeat(2001)],
+        Array.from({ length: 17 }, (_, index) => `part ${index}`),
+      ])
+        expectInvalid(await start(memory, { summary }), "summary")
+      expect((await start(memory, { summary: Array.from({ length: 16 }, () => "x".repeat(2000)) })).status).toBe(200)
+    })
+
+    test.if(target.recalls)("is a row of the recall log of kind summary, whose after takes its entries", async () => {
+      const memory = project("summary-row")
+      const term = word()
+      const near = (await created(memory.verified(`Releases of ${term} ship through the train.`))).entry
+      const parts = [`# Done\nRelease ${term}.`, "# Next\nNothing yet."]
+      const answer = await answered(start(memory, { summary: parts }))
+      expect(answer.entries).toEqual([scored(near)])
+      const deadline = Date.now() + 1500
+      const row = async () => {
+        while (true) {
+          const read = await send("GET", `/pacer/v1/memory/${memory.id}/recalls/${answer.recall}`)
+          if (read.status !== 404 || Date.now() > deadline) return (read.body as unknown as RecallBody).recall
+          await Bun.sleep(50)
+        }
+      }
+      expect(await row()).toMatchObject({
+        kind: "summary",
+        query: parts.join("\n\n"),
+        entries: [near.id],
+        meaning: true,
+      })
+      const after = await send("POST", `/pacer/v1/memory/${memory.id}/recalls/${answer.recall}/after`, {
+        step: "Replaced it.",
+        acted: [{ id: near.id, how: "superseded" }],
+        by,
+      })
+      expect(after.status).toBe(200)
+      const rows = (await send("GET", `/pacer/v1/memory/${memory.id}/recalls?kind=summary`))
+        .body as unknown as RecallBody
+      expect(rows.recalls.map((item) => item.id)).toEqual([answer.recall])
+    })
+  })
+
   describe("keys", () => {
     keywordOnly()
 
@@ -3309,6 +3439,7 @@ export function memoryContract(target: Target) {
       ...(target.recalls ? { recalls: true } : {}),
       ...(target.projects ? { projects: true } : {}),
       ...(target.prompt ? { prompt: true } : {}),
+      ...(target.summary ? { summary: true } : {}),
     })
   })
 

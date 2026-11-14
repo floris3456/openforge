@@ -1533,6 +1533,188 @@ describe("MemoryPrompt through the runner", () => {
   )
 })
 
+describe("MemoryStart after a compaction: the summary", () => {
+  // A server that answers prompts and summaries, with meaning: the fake endpoint's vectors make "release" and "ship" one
+  // concept, so the summary's part on shipping is close to the entry on releases and its other part to nothing.
+  const embedding = startFakeEmbedding()
+  const summarized = startProxied({ embedding: embedding.url })
+  afterAll(() => summarized.stop().then(() => embedding.stop()))
+  const near = (input: Parameters<typeof setup>[0] = {}) =>
+    setup({ served: summarized, catalog: catalogOf(true), ...input })
+  const line = "Memory holds these entries close to this chat's summary:"
+  const summary = "Before any heading.\n\n## Objective\nShip it soon.\n\n## Empty\n\n## Next\n- zebra lint"
+  const counts = (global: number) =>
+    `Memory holds ${global} global ${global === 1 ? "entry" : "entries"} and 0 of role build; recall finds them.`
+  type Started = { prompt: string; limit: number; summary?: string[]; exclude?: string[] }
+  const bodies = (h: Effect.Success<ReturnType<typeof setup>>) => h.starts().map((call) => call.body as Started)
+  /** A chat that had a first prompt and a compaction with `summary`, and the entry close to it. */
+  const compacted = Effect.fnUntraced(function* (input: Parameters<typeof setup>[0] = {}) {
+    const h = yield* near(input)
+    const close = yield* h.write({
+      kind: "verified",
+      text: "Releases ship through the train.",
+      basis: "b",
+      scope: "global",
+    })
+    yield* h.prompt("zebra lint?")
+    yield* h.llm.push(TestLLM.text(summary, "summary"))
+    yield* h.session.compact({ sessionID: h.sessionID })
+    return { h, close }
+  })
+
+  it.live("the block after a compaction holds the entries close to its summary, the same in every later step", () =>
+    Effect.gen(function* () {
+      const { h, close } = yield* compacted()
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+
+      const [first, again] = bodies(h)
+      // A chat's first block has no summary to search.
+      expect(first).not.toHaveProperty("summary")
+      expect(first).not.toHaveProperty("exclude")
+      expect(again).toMatchObject({
+        limit: 0,
+        summary: ["Before any heading.", "## Objective\nShip it soon.", "## Next\n- zebra lint"],
+        exclude: [],
+      })
+      const blocks = yield* h.blocks()
+      expect(blocks).toHaveLength(2)
+      expect(blocks[0]).not.toContain(line)
+      expect(blocks[1]).toBe([opening, line, MemoryText.entry(close), counts(1), keep].join("\n"))
+      // Every step after the compaction sends the block as it was built.
+      const after = h.requests().filter((request) => userTexts(request).includes(blocks[1]!))
+      expect(after.length).toBeGreaterThanOrEqual(2)
+      for (const request of after)
+        expect(userTexts(request).filter((text) => text.startsWith("Memory:"))).toEqual([blocks[1]])
+      // Its entries are in view: a later prompt leaves them out.
+      expect(
+        h
+          .prompts()
+          .map((call) => (call.body as { exclude: string[] }).exclude)
+          .at(-1),
+      ).toContain(close.id)
+      // The summary's row is the block's.
+      const recall = yield* h.blockRecall()
+      const read = yield* Effect.promise(() =>
+        fetch(`${summarized.store.url}/pacer/v1/memory/${h.project}/recalls/${recall}`, {
+          headers: { authorization: `Bearer ${key}` },
+        }).then((response) => response.json() as Promise<{ recall: { kind: string; entries: string[] } }>),
+      )
+      expect(read.recall).toMatchObject({ kind: "summary", entries: [close.id] })
+    }),
+  )
+
+  it.live("without an entry close to the summary the block has no line", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      yield* h.write({ kind: "verified", text: "Zebra lint is strict.", basis: "b", scope: "global" })
+      yield* h.prompt("hello")
+      yield* h.llm.push(TestLLM.text("## Objective\nPaint the shed.", "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      expect(bodies(h)[1]?.summary).toEqual(["## Objective\nPaint the shed."])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("leaves out the entries the chat still has in view among the messages the compaction kept", () =>
+    Effect.gen(function* () {
+      const h = yield* near()
+      const close = yield* h.write({
+        kind: "verified",
+        text: "Releases ship through the train.",
+        basis: "b",
+        scope: "global",
+      })
+      yield* h.prompt("zebra lint?")
+      yield* h.llm.push(TestLLM.text("By train.", "train"))
+      // Its prompt message puts the entry in view, in the latest exchange, which the compaction keeps.
+      yield* h.prompt("how do we release")
+      yield* h.llm.push(TestLLM.text(summary, "summary"))
+      yield* h.session.compact({ sessionID: h.sessionID })
+      yield* h.session.resume(h.sessionID)
+      yield* h.prompt("what now?")
+      const kept = (yield* h.session.messages({ sessionID: h.sessionID, order: "asc" })).find(
+        (message) => message.type === "compaction",
+      )?.metadata?.keepID
+      expect(kept).toBeDefined()
+      expect(bodies(h)[1]?.exclude).toEqual([close.id])
+      expect((yield* h.blocks())[1]).not.toContain(line)
+    }),
+  )
+
+  it.effect("waits at most 5 seconds for the summary; a timeout or an error give the block without the line", () =>
+    Effect.gen(function* () {
+      const forward = (request: { method: string; path: string; body: unknown }) =>
+        fetch(`${summarized.store.url}${request.path}`, {
+          method: request.method,
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+        })
+      const withSummary = (request: { path: string; body: unknown }) =>
+        request.path.endsWith("/start") && (request.body as Started).summary !== undefined
+      const { h } = yield* compacted()
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      summarized.control.answer = (request) => (withSummary(request) ? hung.promise : forward(request))
+      const run = yield* h.prompt("what now?").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the start with the summary arrived", () => h.starts().length === 2)
+      yield* TestClock.adjust("2 seconds")
+      expect(h.starts()).toHaveLength(2)
+      yield* TestClock.adjust("3 seconds")
+      yield* Fiber.join(run)
+      // Asked again without the summary: the block as without one.
+      expect(bodies(h).map((body) => body.summary !== undefined)).toEqual([false, true, false])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+
+      const { h: k } = yield* compacted()
+      summarized.control.answer = (request) =>
+        withSummary(request)
+          ? Response.json({ error: { type: "invalid_request", message: "summary: no" } }, { status: 400 })
+          : forward(request)
+      yield* k.prompt("what now?")
+      summarized.control.answer = undefined
+      expect(bodies(k).map((body) => body.summary !== undefined)).toEqual([false, true, false])
+      expect((yield* k.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("a server without summary gets no parts", () =>
+    Effect.gen(function* () {
+      const { h } = yield* compacted({ catalog: catalogOf(true, { summary: false }) })
+      yield* h.prompt("what now?")
+      expect(bodies(h).map((body) => [body.limit, body.summary, body.exclude])).toEqual([
+        [0, undefined, undefined],
+        [0, undefined, undefined],
+      ])
+      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+    }),
+  )
+
+  it.live("what followed the block goes to the summary's row, with the entry the step replaced", () =>
+    Effect.gen(function* () {
+      const { h, close } = yield* compacted()
+      const remember = {
+        text: "Releases ship by train, corrected.",
+        kind: "verified",
+        basis: "b",
+        supersedes: close.id,
+      }
+      yield* h.llm.push(step("It is stale.", ["remember", remember]), TestLLM.text("Done.", "done"))
+      yield* h.prompt("what now?")
+      const recall = yield* h.blockRecall()
+      yield* eventually("the summary's row got its step", () => h.afters(recall).length >= 1)
+      expect(h.afters(recall)[0]?.body).toEqual({
+        step: `It is stale.\nremember ${json(remember)}`,
+        acted: [{ id: close.id, how: "superseded" }],
+        by: { role: "build", chat: h.sessionID },
+      })
+    }),
+  )
+})
+
 /** Waits, in real time, until `check` holds; at most 5 seconds. */
 const eventually = (label: string, check: () => boolean) =>
   Effect.gen(function* () {

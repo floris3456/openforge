@@ -1,6 +1,6 @@
 export * as MemoryPrompt from "./prompt.js"
 
-import { and, asc, desc, eq, gt, inArray, or, sql } from "drizzle-orm"
+import { and, asc, eq, gt, inArray, sql } from "drizzle-orm"
 import { Context, Effect, Layer } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
@@ -28,8 +28,6 @@ import { MemoryText } from "./text.js"
 
 /** How long the call may take before the step goes on without it. */
 const TIMEOUT = "2 seconds"
-/** How many ids of entries in view are sent to be left out, the newest. */
-const EXCLUDE = 100
 
 export interface Interface {
   /** Asks memory for each prompt since the chat's last step that was not asked yet. Never fails. */
@@ -83,7 +81,7 @@ const layer = Layer.effect(
                   {
                     prompt: text,
                     scopes: { global: true, roles: [by.role], ...(inside ? { tasks: [inside.task] } : {}) },
-                    exclude: yield* inView(sessionID),
+                    exclude: yield* MemoryOffer.inView(db, sessionID),
                     by,
                   },
                   { timeout: TIMEOUT },
@@ -178,39 +176,6 @@ const layer = Layer.effect(
       )
     })
 
-    /** The ids of the entries the chat has in view: its start block's and those of the prompts' messages, the newest. */
-    const inView = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
-      const compaction = yield* MemoryOffer.latestCompaction(db, sessionID)
-      const rows = yield* db
-        .select({
-          block: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory')`,
-          prompt: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memoryPrompt.entries')`,
-        })
-        .from(SessionMessageTable)
-        .where(
-          and(
-            eq(SessionMessageTable.session_id, sessionID),
-            eq(SessionMessageTable.type, "synthetic"),
-            compaction === undefined ? undefined : gt(SessionMessageTable.seq, compaction),
-            or(
-              sql`json_extract(${SessionMessageTable.data}, '$.metadata.memory') is not null`,
-              sql`json_extract(${SessionMessageTable.data}, '$.metadata.memoryPrompt') is not null`,
-            ),
-          ),
-        )
-        .orderBy(desc(SessionMessageTable.seq))
-        .all()
-        .pipe(Effect.orDie)
-      const ids = rows.flatMap((row) => {
-        if (row.prompt !== null) return strings(row.prompt)
-        const block = parsed(row.block)
-        return typeof block === "object" && block !== null && "entries" in block
-          ? [...strings(block.entries), ...("shown" in block ? strings(block.shown) : [])]
-          : []
-      })
-      return [...new Set(ids)].slice(0, EXCLUDE)
-    })
-
     return Service.of({
       // A help, never a condition of the step: a defect here is logged and the step goes on.
       ask: (input) =>
@@ -222,16 +187,6 @@ const layer = Layer.effect(
     })
   }),
 )
-
-/** SQLite's `json_extract` answers an object or an array as its JSON text. */
-function parsed(value: unknown): unknown {
-  return typeof value === "string" ? JSON.parse(value) : value
-}
-
-function strings(value: unknown) {
-  const list = parsed(value)
-  return Array.isArray(list) ? list.filter((item): item is string => typeof item === "string") : []
-}
 
 export const node = makeLocationNode({
   service: Service,

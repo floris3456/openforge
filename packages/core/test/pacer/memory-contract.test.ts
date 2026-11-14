@@ -20,8 +20,9 @@ afterAll(async () => {
   await fake.stop()
 })
 
-// The groups "tasks", "recall log" and "prompt" run only against a server whose capabilities say `tasks`, `recalls` and
-// `prompt`, as openforge offers the task tool, sends what followed a search and asks for each prompt's entries only then. The group "projects" runs only against
+// The groups "tasks", "recall log", "prompt" and "summary" run only against a server whose capabilities say `tasks`,
+// `recalls`, `prompt` and `summary`, as openforge offers the task tool, sends what followed a search, asks for each
+// prompt's entries and sends a compaction's summary only then. The group "projects" runs only against
 // the small server, which switches a project's memory in process, and against CLIProxyPacer when
 // MEMORY_CONTRACT_MANAGEMENT_KEY names its management key: its switch is its Projects page, and every project a case
 // uses is turned on there first, as a new project starts with memory off.
@@ -31,13 +32,16 @@ const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
 }).then(
   (response) =>
     response.json() as Promise<{
-      pacer?: { memory?: { tasks?: unknown; recalls?: unknown; projects?: unknown; prompt?: unknown } }
+      pacer?: {
+        memory?: { tasks?: unknown; recalls?: unknown; projects?: unknown; prompt?: unknown; summary?: unknown }
+      }
     }>,
 )
 const tasks = capabilities.pacer?.memory?.tasks === true
 const recalls = capabilities.pacer?.memory?.recalls === true
 const projects = capabilities.pacer?.memory?.projects === true
 const prompt = capabilities.pacer?.memory?.prompt === true
+const summary = capabilities.pacer?.memory?.summary === true
 // The group "a moved chat" runs against the small server, and against CLIProxyPacer with its management key once its
 // closed answers say `moved` (a project never turned on answers project_memory_off). The subagent's case there needs
 // MEMORY_CONTRACT_MODEL, a model it serves: only a model request names a chat's parent to it.
@@ -57,6 +61,7 @@ memoryContract(
         recalls,
         projects,
         prompt,
+        summary,
         setProject: async (identity, setting) => server.project(identity, setting),
         moves: {
           known: async (chat, key) => server.chat(key, chat),
@@ -95,5 +100,6 @@ memoryContract(
         recalls,
         projects,
         prompt,
+        summary,
       },
 )

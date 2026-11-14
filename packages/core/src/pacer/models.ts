@@ -50,6 +50,11 @@ export interface Memory {
    * start then asks for no entries.
    */
   readonly prompt: boolean
+  /**
+   * Whether a start takes the parts of the chat's compaction summary and answers the entries close to them (the
+   * memory API's section "Start", `summary`).
+   */
+  readonly summary: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -209,6 +214,7 @@ const MemoryBlock = Schema.Struct({
   recalls: Schema.optional(Schema.Unknown),
   projects: Schema.optional(Schema.Unknown),
   prompt: Schema.optional(Schema.Unknown),
+  summary: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -372,6 +378,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           recalls: memory.recalls === true,
           projects: memory.projects === true,
           prompt: memory.prompt === true,
+          summary: memory.summary === true,
         },
       }),
     }),

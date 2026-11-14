@@ -79,7 +79,7 @@ export interface TaskList extends Schema.Schema.Type<typeof TaskList> {}
 /** A row of the recall log: one search or start, what followed it in the chat, and its labels. */
 export const Recall = Schema.Struct({
   id: Schema.String,
-  kind: Schema.NullOr(Schema.Literals(["search", "start", "prompt"])),
+  kind: Schema.NullOr(Schema.Literals(["search", "start", "prompt", "summary"])),
   query: Schema.String,
   entries: Schema.Array(Schema.String),
   meaning: Schema.NullOr(Schema.Boolean),
@@ -194,6 +194,13 @@ export interface StartInput {
   readonly scopes: Scopes
   /** 0 on a server with `prompt`: no search runs, and the answer has no entries and no recall. */
   readonly limit: number
+  /**
+   * After a compaction, on a server with `summary`: the parts of its summary (1 to 16, each 1 to 2,000 characters),
+   * whose close entries the answer then holds; `limit` is 0.
+   */
+  readonly summary?: ReadonlyArray<string>
+  /** With `summary`: the entries the chat still has in view, which are not answered again; at most 100. */
+  readonly exclude?: ReadonlyArray<string>
   /** The chat's task (one without a parent) and its subtask, whose parts the answer then holds. */
   readonly task?: string
   readonly subtask?: string

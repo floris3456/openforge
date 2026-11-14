@@ -947,10 +947,12 @@ function CompactionDivider(props: { label: string }) {
 export function SessionCompactionMessage(props: { message: SessionMessageCompaction; error: string }) {
   const i18n = useI18n()
   const data = useData()
+
   // CLIProxyPacer's list of the person's earlier messages shows as a list below the summary (spec checkpoint, section 5).
   const earlier = createMemo(() =>
     props.message.status === "completed" ? EarlierMessages.split(props.message.summary) : undefined,
   )
+
   const summary = () => (props.message.status === "failed" ? "" : (earlier()?.summary ?? props.message.summary))
 
   const error = () => {
@@ -1140,6 +1142,7 @@ function QuietCompaction(props: {
 /** "Your earlier messages": one line per message, `n. text`, and per gap, `n–m: see the summary`. */
 function EarlierMessageList(props: { entries: ReadonlyArray<EarlierMessages.Entry> }) {
   const i18n = useI18n()
+
   return (
     <Show when={props.entries.length > 0}>
       <div data-slot="session-compaction-earlier" class="mt-3 text-[13px] leading-text-compact">

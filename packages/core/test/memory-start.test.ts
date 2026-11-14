@@ -1365,7 +1365,7 @@ describe("MemoryPrompt through the runner", () => {
       const requests = h.requests()
       expect(requests).toHaveLength(2)
       // The step that answers no new prompt sends the same, and asks nothing.
-      for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", block, message])
+      for (const request of requests) expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
       expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
       expect(h.prompts().map((call) => call.body)).toEqual([
         {
@@ -1412,9 +1412,9 @@ describe("MemoryPrompt through the runner", () => {
         [first.id],
       ])
       const last = userTexts(h.requests().at(-1))
-      expect(last.filter((text) => text.startsWith(line))).toEqual([
-        [line, MemoryText.entry(first)].join("\n"),
-        [line, MemoryText.entry(second)].join("\n"),
+      expect(last.filter((text) => text.startsWith(`<system-reminder>\n${line}`))).toEqual([
+        sent([line, MemoryText.entry(first)].join("\n")),
+        sent([line, MemoryText.entry(second)].join("\n")),
       ])
       // Nothing after the prompt no entry was close to: the next text is the prompt after it.
       expect(last[last.indexOf("zebra lint") + 1]).toBe("and the release tag?")
@@ -1442,7 +1442,7 @@ describe("MemoryPrompt through the runner", () => {
         yield* h.prompt("how do we release")
         prompted.control.answer = undefined
         const request = h.requests().at(-1)
-        expect(userTexts(request).some((text) => text.startsWith(line))).toBe(answer)
+        expect(userTexts(request).some((text) => text.startsWith(`<system-reminder>\n${line}`))).toBe(answer)
         twins.push(upTo(request, "how do we release"))
         // Nothing earlier changes: the step before sent what this one sends before its new messages.
         const before = h.requests().at(-2)
@@ -1500,7 +1500,8 @@ describe("MemoryPrompt through the runner", () => {
       prompted.control.answer = undefined
       expect(h.prompts()).toHaveLength(4)
       expect(h.requests()).toHaveLength(4)
-      for (const request of h.requests()) expect(userTexts(request).some((text) => text.startsWith(line))).toBe(false)
+      for (const request of h.requests())
+        expect(userTexts(request).some((text) => text.startsWith(`<system-reminder>\n${line}`))).toBe(false)
       expect((yield* h.asked()).map((row) => row.recall)).toEqual([expect.any(String), null, null, null])
     }),
   )
@@ -1611,10 +1612,10 @@ describe("MemoryStart after a compaction: the summary", () => {
       expect(blocks[0]).not.toContain(line)
       expect(blocks[1]).toBe([opening, line, MemoryText.entry(close), counts(1), keep].join("\n"))
       // Every step after the compaction sends the block as it was built.
-      const after = h.requests().filter((request) => userTexts(request).includes(blocks[1]!))
+      const after = h.requests().filter((request) => userTexts(request).includes(sent(blocks[1]!)))
       expect(after.length).toBeGreaterThanOrEqual(2)
       for (const request of after)
-        expect(userTexts(request).filter((text) => text.startsWith("Memory:"))).toEqual([blocks[1]])
+        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([sent(blocks[1]!)])
       // Its entries are in view: a later prompt leaves them out.
       expect(
         h

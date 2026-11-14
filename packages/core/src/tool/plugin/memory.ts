@@ -2,7 +2,7 @@ export * as MemoryTools from "./memory.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
-import { Effect, Schema, Stream } from "effect"
+import { Clock, Effect, Schema, Stream } from "effect"
 import { KV } from "../../kv.js"
 import { MemoryClient } from "../../memory/client.js"
 import { MemoryKnown } from "../../memory/known.js"
@@ -67,19 +67,42 @@ export const RecallInput = Schema.Struct({
       description: "How many entries at most, 1 to 20; 5 by default",
     }),
   ),
+  task: Schema.optional(
+    Schema.String.annotate({ description: "Another task's id: search only what was noted in that task" }),
+  ),
 })
+
+const Step = Schema.Struct({
+  title: Schema.String.annotate({ description: "One line" }),
+  description: Schema.optional(Schema.String.annotate({ description: "Optional: what one line cannot say" })),
+})
+const steps = (description: string) =>
+  Schema.Array(Step).check(Schema.isMinLength(1), Schema.isMaxLength(20)).annotate({ description })
 
 export const TaskInput = Schema.Struct({
   id: Schema.optional(Schema.String.annotate({ description: "A task's id" })),
-  title: Schema.optional(Schema.String.annotate({ description: "For a new task: what it is, in one line" })),
+  title: Schema.optional(
+    Schema.String.annotate({
+      description: "One line: what it is, with the steps you now believe in, very summarized",
+    }),
+  ),
   description: Schema.optional(
-    Schema.String.annotate({ description: "For a new task: what is to be done and when it is done" }),
+    Schema.String.annotate({
+      description:
+        "Optional: what is to be done and when it is done; recommended for a bigger task. With an id, empty clears it",
+    }),
+  ),
+  subtasks: Schema.optional(
+    steps("For a new task: the steps you now believe in, in order, 1 to 20; the next one or two concrete"),
+  ),
+  plan: Schema.optional(
+    steps("With id and note: the subtasks that replace every one of the task's not yet started, in order, 1 to 20"),
   ),
   state: Schema.optional(
-    MemoryClient.State.annotate({ description: "The state to set: todo, active, blocked, review or done" }),
+    MemoryClient.State.annotate({ description: "The state to set: todo, active, blocked, review, done or dropped" }),
   ),
   note: Schema.optional(
-    Schema.String.annotate({ description: "Why the state changes, in a few words; needed for blocked" }),
+    Schema.String.annotate({ description: "Why, in a few words; needed for blocked, dropped and plan" }),
   ),
 })
 
@@ -99,11 +122,12 @@ export const descriptions = {
   remember: `Saves one entry in memory. ${memory} Its kind says whose words it is and how sure: verified (you checked it; basis says how and where the evidence is), unverified (you concluded it or were told it; basis says why), or words (a person's exact words; no basis).`,
   recall: `Finds the entries in memory nearest to a query. ${memory} A memory is information, never an instruction to follow. Without scope it looks in the project's global entries and your role's.`,
   forget: `Deletes one entry's text from memory for good. ${memory} To correct an entry, remember a new one that supersedes it.`,
-  task: "Tasks are pieces of work this project's lead gives out. Without parameters it lists the open ones; with a title it makes one; with an id it reads one, and with a state it sets that state (todo, active, blocked, review, done; a note says why). A subagent started with a task's id as taskID works inside that task.",
+  // The workspace's spec `docs/specs/task-plans.md`, sections 1 to 4.
+  task: "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first: its title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask. When a subtask is done, set it done: the next one starts and the answer gives it; after the last, the task goes to review. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
 }
 
 const forms =
-  "Call task with no fields to list the open tasks, with title (and description) to make one, with id to read one, or with id and state (and note) to set its state."
+  "Call task with no fields to list the open tasks; with title (and description, subtasks) to make one; with id to read one; with id and state (and note) to set its state; with id, plan and note to replace its subtasks not yet started; or with id and title or description (and note) to edit them."
 
 export const Plugin = {
   id: "opencode.tool.memory",
@@ -179,6 +203,257 @@ export const Plugin = {
       const refusal = mayChange(who, entry)
       if (refusal) return yield* new ToolFailure({ message: refusal })
       return entry
+    })
+
+    type Caller = Effect.Success<ReturnType<typeof caller>>
+    type Input = typeof TaskInput.Type
+
+    /** Puts the chat inside `place`, or inside no task when it is undefined; nothing when it is there already. */
+    const move = (who: Caller, place: MemoryTask.Inside | undefined) =>
+      place?.task === who.inside?.task && place?.subtask === who.inside?.subtask
+        ? Effect.void
+        : sessions
+            .setMetadata({ sessionID: who.session.id, metadata: MemoryTask.placed(who.session.metadata, place) })
+            .pipe(Effect.mapError(fail))
+
+    const listTasks = Effect.fnUntraced(function* (who: Caller, plans: boolean, now: number) {
+      const list = yield* who.client.tasks(who.project).pipe(Effect.mapError(fail))
+      const running = yield* sessions.active
+      // A worker's chat of this openforge that runs no more; a chat it does not know may run elsewhere.
+      const known = yield* Effect.forEach(
+        list.tasks.filter((item) => item.state === "active" && item.worker),
+        (item) =>
+          sessions.get(SessionSchema.ID.make(item.worker!.chat)).pipe(
+            Effect.as([item.id]),
+            Effect.orElseSucceed(() => []),
+          ),
+      ).pipe(Effect.map((ids) => new Set(ids.flat())))
+      const stopped = (item: MemoryClient.Task) =>
+        known.has(item.id) && !running.has(SessionSchema.ID.make(item.worker!.chat))
+      return {
+        content: plans ? MemoryText.board(list, stopped, now) : MemoryText.tasks(list, stopped),
+        metadata: { tasks: list.tasks.length, more: list.more },
+      }
+    })
+
+    /**
+     * A task, or inside one a subtask of it. Any chat outside a task may make one (the workspace's spec
+     * `docs/specs/task-plans.md`, section 1), and with plans it is then inside it.
+     */
+    const makeTask = Effect.fnUntraced(function* (who: Caller, input: Input, plans: boolean) {
+      if (who.inside && input.subtasks)
+        return yield* new ToolFailure({
+          message: `This chat is inside task ${who.inside.task}, and a subtask has no subtasks: make each new step with its title alone, or replace the steps still to do with plan.`,
+        })
+      const made = yield* who.client
+        .make(who.project, {
+          title: input.title!,
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(who.inside ? { parent: who.inside.task } : {}),
+          ...(input.subtasks ? { subtasks: input.subtasks } : {}),
+          by: who.by,
+        })
+        .pipe(Effect.mapError(fail))
+      const task = made.task
+      const metadata = {
+        id: task.id,
+        existing: made.existing,
+        ...(made.subtasks.length ? { subtasks: made.subtasks.map((sub) => sub.id) } : {}),
+      }
+      if (made.existing)
+        return {
+          content: `That task exists already as ${task.id} (${task.state}).${plans && !who.inside ? " Set it active to work inside it." : ""}`,
+          metadata,
+        }
+      if (who.inside || !plans)
+        return {
+          content: task.parent
+            ? `Made subtask ${task.id} of ${task.parent}: ${task.title}. ${MemoryText.started(task.id)}`
+            : `Made task ${task.id}: ${task.title}. ${MemoryText.started(task.id)}`,
+          metadata,
+        }
+      // The server set the task and its first subtask active with this chat as their worker; a task without subtasks
+      // is set active here.
+      const first = made.subtasks[0]
+      if (!first)
+        yield* who.client.change(who.project, task.id, { state: "active", by: who.by }).pipe(Effect.mapError(fail))
+      yield* move(who, first ? { task: task.id, subtask: first.id } : { task: task.id })
+      return {
+        content: [
+          first
+            ? `Made task ${task.id}: ${task.title}. You are inside it, on its first subtask ${first.id}.`
+            : `Made task ${task.id}: ${task.title}. You are inside it.`,
+          ...(first ? ["Subtasks in order:", ...MemoryText.plan(made.subtasks)] : []),
+          MemoryText.planStates,
+        ].join("\n"),
+        metadata,
+      }
+    })
+
+    const changeTask = Effect.fnUntraced(function* (who: Caller, input: Input, plans: boolean) {
+      const next = input.state!
+      if (next === "blocked" && !input.note?.trim())
+        return yield* new ToolFailure({
+          message: "blocked needs a note that says what is wrong with the task as given.",
+        })
+      if (next === "dropped" && !input.note?.trim())
+        return yield* new ToolFailure({ message: "dropped needs a note that says why it is given up." })
+      const current = (yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
+      const own = who.inside !== undefined && (current.id === who.inside.task || current.id === who.inside.subtask)
+      const allowed =
+        who.lead ||
+        (own && (next === "active" || next === "blocked" || next === "review")) ||
+        (current.parent !== null && current.parent !== undefined && current.by.chat === who.by.chat)
+      if (!allowed)
+        return yield* new ToolFailure({
+          message: `Only a lead chat or the chat that made it sets ${next} on ${current.id}.`,
+        })
+      // Done on the subtask this chat is on starts the next one (the workspace's spec `docs/specs/task-plans.md`,
+      // section 4).
+      if (plans && next === "done" && current.parent && who.inside?.subtask === current.id)
+        return yield* finishSubtask(who, current, input.note)
+      const changed = yield* who.client
+        .change(who.project, current.id, {
+          state: next,
+          ...(input.note === undefined ? {} : { note: input.note }),
+          by: who.by,
+        })
+        .pipe(Effect.mapError(fail))
+      // Active puts this chat inside the task; done, dropped or todo on the one it is inside takes it out.
+      yield* move(
+        who,
+        next === "active"
+          ? MemoryTask.placeOf(changed)
+          : (next === "done" || next === "dropped" || next === "todo") && own
+            ? changed.parent && who.inside?.subtask === changed.id
+              ? { task: changed.parent }
+              : undefined
+            : who.inside,
+      )
+      const metadata = { id: changed.id, state: changed.state }
+      if (next === "blocked")
+        return {
+          content: `Task ${changed.id} is blocked. Stop here and say in your answer what is wrong with it.`,
+          metadata,
+        }
+      if (next !== "active") return { content: `Task ${changed.id} is now ${changed.state}.`, metadata }
+      const read = yield* who.client.task(who.project, changed.id).pipe(Effect.mapError(fail))
+      const top = changed.parent
+        ? yield* who.client.task(who.project, changed.parent).pipe(Effect.mapError(fail))
+        : read
+      return {
+        content: [
+          `Task ${changed.id} is now active; you are inside it.`,
+          MemoryText.task(top, changed.parent ? read : undefined, plans),
+        ].join("\n"),
+        metadata,
+      }
+    })
+
+    /**
+     * Done on the chat's current subtask: the server starts the next one, which the answer names with its description
+     * and the rest still to do, as the plan's only reminder (spec section 4); after the last the task is review.
+     */
+    const finishSubtask = Effect.fnUntraced(function* (
+      who: Caller,
+      current: MemoryClient.Task,
+      note: string | undefined,
+    ) {
+      const finished = yield* who.client
+        .finish(who.project, current.id, { ...(note === undefined ? {} : { note }), by: who.by })
+        .pipe(Effect.mapError(fail))
+      const parent = finished.parent
+      const next = finished.next
+      yield* move(who, next ? { task: parent.id, subtask: next.id } : { task: parent.id })
+      const metadata = { id: current.id, state: finished.task.state, next: next?.id ?? null, parent: parent.state }
+      if (!next && parent.state === "review")
+        return {
+          content: `Subtask ${current.id} is done. Every subtask of ${parent.id} is done or dropped, so the task is now review.`,
+          metadata,
+        }
+      const open = (yield* who.client.task(who.project, parent.id).pipe(Effect.mapError(fail))).subtasks.filter(
+        (sub) => !MemoryClient.isClosed(sub),
+      )
+      if (!next)
+        return {
+          content: [
+            `Subtask ${current.id} is done. None of the subtasks of ${parent.id} is left to start; those still open:`,
+            ...MemoryText.plan(open),
+          ].join("\n"),
+          metadata,
+        }
+      const rest = open.filter((sub) => sub.id !== next.id)
+      return {
+        content: [
+          `Subtask ${current.id} is done. You are now on subtask ${next.id} of ${parent.id}: ${next.title}.`,
+          ...(next.description ? [next.description] : []),
+          ...(rest.length
+            ? [
+                "The rest still to do:",
+                ...rest.map((sub) => `- [${sub.id}] ${sub.title}${sub.state === "todo" ? "" : ` (${sub.state})`}`),
+              ]
+            : ["It is the last one."]),
+          "Before you work on it, check it against what you now know: when it no longer fits, replace it and the ones after it that fall with it (plan, with a note).",
+        ].join("\n"),
+        metadata,
+      }
+    })
+
+    /** Replaces the subtasks of a task not yet started; the chat follows the subtask it works on afterwards. */
+    const planTask = Effect.fnUntraced(function* (who: Caller, input: Input) {
+      if (!input.note?.trim())
+        return yield* new ToolFailure({ message: "plan needs a note that says why the plan changes." })
+      const current = (yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
+      // A child must not drop the subtasks its lead planned: a lead plans any task, another chat only the one it works
+      // on. A subtask the server refuses, with what to plan instead.
+      if (!current.parent && !who.lead && current.worker?.chat !== who.by.chat)
+        return yield* new ToolFailure({
+          message: `Only a lead chat or the chat that works on ${current.id} replaces its plan.`,
+        })
+      const planned = yield* who.client
+        .plan(who.project, current.id, { plan: input.plan!, note: input.note, by: who.by })
+        .pipe(Effect.mapError(fail))
+      const mine = planned.subtasks.find((sub) => sub.state === "active" && sub.worker?.chat === who.by.chat)
+      const left =
+        who.inside?.task === current.id &&
+        who.inside.subtask !== undefined &&
+        planned.dropped.includes(who.inside.subtask)
+      yield* move(who, mine ? { task: current.id, subtask: mine.id } : left ? { task: current.id } : who.inside)
+      return {
+        content: [
+          planned.dropped.length
+            ? `The plan of ${current.id} is replaced: ${planned.dropped.join(", ")} dropped with your note.`
+            : `The plan of ${current.id} has new subtasks after its others; none was dropped.`,
+          "Subtasks in order:",
+          ...MemoryText.plan(planned.subtasks),
+          ...(mine ? [`You are on subtask ${mine.id}: ${mine.title}.`] : []),
+        ].join("\n"),
+        metadata: { id: current.id, dropped: planned.dropped, subtasks: planned.subtasks.map((sub) => sub.id) },
+      }
+    })
+
+    /** Edits a task's or subtask's title or description: a lead's, its maker's or its worker's to edit. */
+    const editTask = Effect.fnUntraced(function* (who: Caller, input: Input) {
+      const current = (yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
+      if (!who.lead && current.by.chat !== who.by.chat && current.worker?.chat !== who.by.chat)
+        return yield* new ToolFailure({
+          message: `Only a lead chat, the chat that made ${current.id} or the one that works on it edits it.`,
+        })
+      const edited = yield* who.client
+        .edit(who.project, current.id, {
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(input.note === undefined ? {} : { note: input.note }),
+          by: who.by,
+        })
+        .pipe(Effect.mapError(fail))
+      const same = edited.title === current.title && edited.description === current.description
+      return {
+        content: same
+          ? `Task ${edited.id} has that already, so nothing changed. Its title: ${edited.title}`
+          : `Edited task ${edited.id}${current.description && !edited.description ? "; it has no description now" : ""}. Its title now: ${edited.title}`,
+        metadata: { id: edited.id, edited: !same },
+      }
     })
 
     yield* ctx.tool
@@ -301,10 +576,15 @@ export const Plugin = {
           execute: (input, context) =>
             Effect.gen(function* () {
               const who = yield* caller(context, "recall", input)
-              const scope = input.scope ?? "default"
-              if (scope === "task" && !who.inside)
+              if (input.task !== undefined && input.scope !== undefined && input.scope !== "task")
+                return yield* new ToolFailure({
+                  message: `With task, recall searches only that task's entries: leave scope out, or set it to task.`,
+                })
+              const scope = input.task === undefined ? (input.scope ?? "default") : "task"
+              if (scope === "task" && !who.inside && input.task === undefined)
                 return yield* new ToolFailure({ message: "This chat is in no task." })
-              const tasks = who.inside ? { tasks: [who.inside.task] } : {}
+              const own = who.inside ? { tasks: [who.inside.task] } : {}
+              const tasks = input.task === undefined ? own : { tasks: [input.task] }
               const found = yield* who.client
                 .search(who.project, {
                   query: input.query,
@@ -316,7 +596,7 @@ export const Plugin = {
                         : {
                             global: scope !== "role",
                             roles: scope === "global" ? [] : [who.by.role],
-                            ...(scope === "default" ? tasks : {}),
+                            ...(scope === "default" ? own : {}),
                           },
                   ...(input.kinds ? { kinds: [...new Set(input.kinds)] } : {}),
                   limit: input.limit ?? 5,
@@ -364,110 +644,25 @@ export const Plugin = {
                 return yield* new ToolFailure({ message: new MemoryClient.Unavailable({ reason: "no tasks" }).message })
               const form = formOf(input)
               if (form === undefined) return yield* new ToolFailure({ message: forms })
-              if (form === "list") {
-                const list = yield* who.client.tasks(who.project).pipe(Effect.mapError(fail))
-                const running = yield* sessions.active
-                // A worker's chat of this openforge that runs no more; a chat it does not know may run elsewhere.
-                const known = yield* Effect.forEach(
-                  list.tasks.filter((item) => item.state === "active" && item.worker),
-                  (item) =>
-                    sessions.get(SessionSchema.ID.make(item.worker!.chat)).pipe(
-                      Effect.as([item.id]),
-                      Effect.orElseSucceed(() => []),
-                    ),
-                ).pipe(Effect.map((ids) => new Set(ids.flat())))
-                return {
-                  content: MemoryText.tasks(
-                    list,
-                    (item) => known.has(item.id) && !running.has(SessionSchema.ID.make(item.worker!.chat)),
-                  ),
-                  metadata: { tasks: list.tasks.length, more: list.more },
-                }
-              }
-              if (form === "make") {
-                if (!who.lead && !who.inside)
-                  return yield* new ToolFailure({
-                    message: "Only a lead chat makes a task; a chat inside a task makes its subtasks.",
-                  })
-                const made = yield* who.client
-                  .make(who.project, {
-                    title: input.title!,
-                    ...(input.description === undefined ? {} : { description: input.description }),
-                    ...(who.inside ? { parent: who.inside.task } : {}),
-                    by: who.by,
-                  })
-                  .pipe(Effect.mapError(fail))
-                const task = made.task
-                return {
-                  content: made.existing
-                    ? `That task exists already as ${task.id} (${task.state}).`
-                    : task.parent
-                      ? `Made subtask ${task.id} of ${task.parent}: ${task.title}. ${MemoryText.started(task.id)}`
-                      : `Made task ${task.id}: ${task.title}. ${MemoryText.started(task.id)}`,
-                  metadata: { id: task.id, existing: made.existing },
-                }
-              }
+              const plans = catalog?.pacer?.memory?.plans === true
+              const planned = plannedOf(form, input)
+              if (planned && !plans)
+                return yield* new ToolFailure({
+                  message: `${planned} is unavailable: memory on this server has no task plans yet. The other forms of task work as before.`,
+                })
+              const now = yield* Clock.currentTimeMillis
+              if (form === "list") return yield* listTasks(who, plans, now)
+              if (form === "make") return yield* makeTask(who, input, plans)
               if (form === "read") {
                 const read = yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))
-                return { content: MemoryText.read(read), metadata: { id: read.task.id } }
-              }
-              const next = input.state!
-              if (next === "blocked" && !input.note?.trim())
-                return yield* new ToolFailure({
-                  message: "blocked needs a note that says what is wrong with the task as given.",
-                })
-              const current = (yield* who.client.task(who.project, input.id!).pipe(Effect.mapError(fail))).task
-              const own =
-                who.inside !== undefined && (current.id === who.inside.task || current.id === who.inside.subtask)
-              const allowed =
-                who.lead ||
-                (own && (next === "active" || next === "blocked" || next === "review")) ||
-                (current.parent !== null && current.parent !== undefined && current.by.chat === who.by.chat)
-              if (!allowed)
-                return yield* new ToolFailure({
-                  message: `Only a lead chat or the chat that made it sets ${next} on ${current.id}.`,
-                })
-              const changed = yield* who.client
-                .change(who.project, current.id, {
-                  state: next,
-                  ...(input.note === undefined ? {} : { note: input.note }),
-                  by: who.by,
-                })
-                .pipe(Effect.mapError(fail))
-              // Active puts this chat inside the task; done or todo on the one it is inside takes it out.
-              const place =
-                next === "active"
-                  ? MemoryTask.placeOf(changed)
-                  : (next === "done" || next === "todo") && own
-                    ? changed.parent && who.inside?.subtask === changed.id
-                      ? { task: changed.parent }
-                      : undefined
-                    : who.inside
-              if (place !== who.inside)
-                yield* sessions
-                  .setMetadata({
-                    sessionID: who.session.id,
-                    metadata: MemoryTask.placed(who.session.metadata, place),
-                  })
-                  .pipe(Effect.mapError(fail))
-              const metadata = { id: changed.id, state: changed.state }
-              if (next === "blocked")
                 return {
-                  content: `Task ${changed.id} is blocked. Stop here and say in your answer what is wrong with it.`,
-                  metadata,
+                  content: MemoryText.read(read, plans ? { now } : undefined),
+                  metadata: { id: read.task.id },
                 }
-              if (next !== "active") return { content: `Task ${changed.id} is now ${changed.state}.`, metadata }
-              const read = yield* who.client.task(who.project, changed.id).pipe(Effect.mapError(fail))
-              const top = changed.parent
-                ? yield* who.client.task(who.project, changed.parent).pipe(Effect.mapError(fail))
-                : read
-              return {
-                content: [
-                  `Task ${changed.id} is now active; you are inside it.`,
-                  MemoryText.task(top, changed.parent ? read : undefined),
-                ].join("\n"),
-                metadata,
               }
+              if (form === "plan") return yield* planTask(who, input)
+              if (form === "edit") return yield* editTask(who, input)
+              return yield* changeTask(who, input, plans)
             }),
         })
       })
@@ -491,17 +686,29 @@ function mayChange(who: { readonly lead: boolean; readonly by: MemoryClient.By }
   return undefined
 }
 
-/** Which of the task tool's four forms a call is, or undefined for any other combination of fields. */
+const fields = ["id", "title", "description", "subtasks", "plan", "state", "note"] as const
+
+/** Which of the task tool's six forms a call is, or undefined for any other combination of fields. */
 function formOf(input: typeof TaskInput.Type) {
-  const given = (["id", "title", "description", "state", "note"] as const).filter((key) => input[key] !== undefined)
+  const given = fields.filter((key) => input[key] !== undefined)
+  const only = (...keys: ReadonlyArray<(typeof fields)[number]>) => given.every((key) => keys.includes(key))
   if (given.length === 0) return "list"
   if (input.id === undefined)
-    return input.title !== undefined && given.every((key) => key === "title" || key === "description")
-      ? "make"
-      : undefined
+    return input.title !== undefined && only("title", "description", "subtasks") ? "make" : undefined
   if (given.length === 1) return "read"
-  if (input.state !== undefined && given.every((key) => key === "id" || key === "state" || key === "note"))
-    return "change"
+  if (input.state !== undefined) return only("id", "state", "note") ? "change" : undefined
+  if (input.plan !== undefined) return only("id", "plan", "note") ? "plan" : undefined
+  if (input.title !== undefined || input.description !== undefined)
+    return only("id", "title", "description", "note") ? "edit" : undefined
+  return undefined
+}
+
+/** What a call needs task plans for (workspace spec `docs/specs/task-plans.md`), as its refusal names it. */
+function plannedOf(form: ReturnType<typeof formOf>, input: typeof TaskInput.Type) {
+  if (form === "plan") return "Replacing the subtasks with plan"
+  if (form === "edit") return "Editing a task"
+  if (form === "make" && input.subtasks) return "Making a task with subtasks"
+  if (form === "change" && input.state === "dropped") return "The state dropped"
   return undefined
 }
 

@@ -20,9 +20,9 @@ afterAll(async () => {
   await fake.stop()
 })
 
-// The groups "tasks", "recall log", "prompt" and "summary" run only against a server whose capabilities say `tasks`,
-// `recalls`, `prompt` and `summary`, as openforge offers the task tool, sends what followed a search, asks for each
-// prompt's entries and sends a compaction's summary only then. The group "projects" runs only against
+// The groups "tasks", "tasks > plans", "recall log", "prompt" and "summary" run only against a server whose
+// capabilities say `tasks`, `plans`, `recalls`, `prompt` and `summary`, as openforge offers the task tool and its plans,
+// sends what followed a search, asks for each prompt's entries and sends a compaction's summary only then. The group "projects" runs only against
 // the small server, which switches a project's memory in process, and against CLIProxyPacer when
 // MEMORY_CONTRACT_MANAGEMENT_KEY names its management key: its switch is its Projects page, and every project a case
 // uses is turned on there first, as a new project starts with memory off.
@@ -33,11 +33,19 @@ const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
   (response) =>
     response.json() as Promise<{
       pacer?: {
-        memory?: { tasks?: unknown; recalls?: unknown; projects?: unknown; prompt?: unknown; summary?: unknown }
+        memory?: {
+          tasks?: unknown
+          plans?: unknown
+          recalls?: unknown
+          projects?: unknown
+          prompt?: unknown
+          summary?: unknown
+        }
       }
     }>,
 )
 const tasks = capabilities.pacer?.memory?.tasks === true
+const plans = tasks && capabilities.pacer?.memory?.plans === true
 const recalls = capabilities.pacer?.memory?.recalls === true
 const projects = capabilities.pacer?.memory?.projects === true
 const prompt = capabilities.pacer?.memory?.prompt === true
@@ -58,6 +66,8 @@ memoryContract(
   server
     ? {
         tasks,
+        plans,
+        seen: async (chat, at) => server.seen(chat, at),
         recalls,
         projects,
         prompt,
@@ -97,6 +107,7 @@ memoryContract(
           : undefined,
         embedding: { fake, key: process.env.MEMORY_CONTRACT_EMBEDDING_KEY },
         tasks,
+        plans,
         recalls,
         projects,
         prompt,

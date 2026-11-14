@@ -18,6 +18,13 @@ export type Target = {
   readonly bare?: string
   /** Whether the server's capabilities say `tasks`: the group "tasks" runs only then. */
   readonly tasks: boolean
+  /** Whether they say `plans` (workspace spec `docs/specs/task-plans.md`): the group "tasks > plans" runs only then. */
+  readonly plans?: boolean
+  /**
+   * Says when the chat a worker names last sent a model request, as a model request through CLIProxyPacer does; the
+   * case on `worker_seen` and idle runs only with it.
+   */
+  readonly seen?: (chat: string, at: number) => Promise<void>
   /** Whether they say `recalls`: the group "recall log" runs only then. */
   readonly recalls: boolean
   /** Whether they say `projects`. */
@@ -166,9 +173,20 @@ type Task = {
   worker: { person: string; role: string; chat: string } | null
   at: number
   changed: number
+  /** With plans: when the worker's chat last sent a model request, null when unknown; and whether it is idle. */
+  worker_seen?: number | null
+  idle?: boolean
 }
 
-type Change = { state: string; note: string | null; by: { person: string; role: string; chat: string }; at: number }
+type Change = {
+  state: string
+  note: string | null
+  by: { person: string; role: string; chat: string }
+  at: number
+  /** With plans, on an edit only: what it edited. */
+  title?: string
+  description?: string
+}
 
 /** What the task routes answer. */
 type TaskBody = {
@@ -179,6 +197,11 @@ type TaskBody = {
   changes: Change[]
   subtasks: Task[]
   entries: Entry[]
+  /** `done` with `next`: the subtask that started, or null, and the task it is part of. */
+  next: Task | null
+  parent: Task
+  /** A plan: the ids of the subtasks it dropped. */
+  dropped: string[]
   error: { type: string; message: string }
 }
 /** The task parts of what `start` answers. */
@@ -2295,7 +2318,7 @@ export function memoryContract(target: Target) {
   })
 
   describe.if(target.tasks)("tasks", () => {
-    const STATES = ["todo", "active", "blocked", "review", "done"]
+    const STATES = ["todo", "active", "blocked", "review", "done", ...(target.plans ? ["dropped"] : [])]
     const tasked = async (answer: Promise<Awaited<ReturnType<typeof send>>>) => {
       const result = await answer
       return { ...result, body: result.body as unknown as TaskBody }
@@ -2354,6 +2377,7 @@ export function memoryContract(target: Target) {
           worker: null,
           at: expect.any(Number),
           changed: task.at,
+          ...(target.plans ? { worker_seen: null, idle: false } : {}),
         })
         expect(task.at).toBeGreaterThanOrEqual(before - 1000)
         expect((await tasks.get(task.id)).body as unknown).toEqual({ task, changes: [], subtasks: [], entries: [] })
@@ -2948,6 +2972,349 @@ export function memoryContract(target: Target) {
         { type: "entry", ...entry },
       ])
     })
+
+    describe.if(target.plans === true)("plans", () => {
+      const worker = { role: "general", chat: "ses_plan_worker" }
+      /** The board's routes with those of plans. */
+      const planned = (name: string) => {
+        const tasks = board(name)
+        const base = `/pacer/v1/memory/${tasks.id}`
+        return {
+          ...tasks,
+          /** `done` with `next` on a subtask. */
+          finish: (id: string, body: Record<string, unknown> = {}) =>
+            tasks.set(id, { state: "done", next: true, ...body }),
+          plan: (id: string, body: Record<string, unknown>) =>
+            tasked(send("POST", `${base}/tasks/${id}/plan`, { by, ...body })),
+          edit: (id: string, body: Record<string, unknown>) =>
+            tasked(send("POST", `${base}/tasks/${id}/edit`, { by, ...body })),
+          /** Makes a task with subtasks of these titles and answers the whole answer. */
+          steps: async (title: string, titles: string[]) =>
+            created(tasks.make({ title, subtasks: titles.map((item) => ({ title: item })) })),
+        }
+      }
+      const caller = { person: target.person, role: by.role, chat: by.chat }
+      const states = (subtasks: Task[]) => subtasks.map((sub) => [sub.title, sub.state, sub.worker?.chat ?? null])
+
+      describe("make with subtasks", () => {
+        test("the task and its first subtask are active with the caller as worker, the others todo, in order", async () => {
+          const tasks = planned("plans-make")
+          const answer = await tasks.make({
+            title: "Move the checks: script, test, doc",
+            description: "One script.",
+            subtasks: [
+              { title: "Write the script", description: "scripts/check.ts.\nOne file." },
+              { title: "Its test" },
+              { title: "The doc" },
+            ],
+          })
+          expect(answer.status).toBe(201)
+          expect(answer.body.existing).toBeUndefined()
+          expect(answer.body.task).toMatchObject({
+            state: "active",
+            worker: caller,
+            parent: null,
+            description: "One script.",
+          })
+          expect(states(answer.body.subtasks)).toEqual([
+            ["Write the script", "active", by.chat],
+            ["Its test", "todo", null],
+            ["The doc", "todo", null],
+          ])
+          expect(answer.body.subtasks.map((sub) => [sub.parent, sub.description, sub.by])).toEqual([
+            [answer.body.task.id, "scripts/check.ts.\nOne file.", caller],
+            [answer.body.task.id, "", caller],
+            [answer.body.task.id, "", caller],
+          ])
+          const read = (await tasks.get(answer.body.task.id)).body
+          expect(read.task).toEqual(answer.body.task)
+          expect(read.subtasks).toEqual(answer.body.subtasks)
+        })
+
+        test("with a parent, none, more than 20 or a bad one is 400, and nothing is made", async () => {
+          const tasks = planned("plans-make-checks")
+          const parent = await tasks.task("The parent")
+          expectTaskInvalid(
+            await tasks.make({ title: "Under", parent: parent.id, subtasks: [{ title: "A" }] }),
+            "subtasks",
+          )
+          for (const subtasks of [
+            [],
+            Array.from({ length: 21 }, (_, index) => ({ title: `Step ${index}` })),
+            "A",
+            [{}],
+            [{ title: "" }],
+            [{ title: "two\nlines" }],
+            [{ title: "A", description: "d".repeat(2001) }],
+          ])
+            expectTaskInvalid(await tasks.make({ title: "Planned", subtasks }), "subtasks")
+          expect(
+            (
+              await tasks.make({
+                title: "Twenty",
+                subtasks: Array.from({ length: 20 }, (_, index) => ({ title: `Step ${index}` })),
+              })
+            ).status,
+          ).toBe(201)
+          expect((await tasks.list(true)).body.tasks.length).toBe(22)
+        })
+
+        test("a copy answers the open task and its subtasks in order, and makes nothing", async () => {
+          const tasks = planned("plans-make-copy")
+          const first = await tasks.steps("Once", ["A", "B"])
+          const again = await tasks.make({ title: "Once", subtasks: [{ title: "C" }] })
+          expect(again.status).toBe(200)
+          expect(again.body.existing).toBe(true)
+          expect(again.body.task.id).toBe(first.task.id)
+          expect(again.body.subtasks).toEqual((await tasks.get(first.task.id)).body.subtasks)
+          expect((await tasks.list(true)).body.tasks.length).toBe(3)
+        })
+      })
+
+      describe("dropped", () => {
+        test("needs a note, and a dropped task counts as done: listed no more, its title free again", async () => {
+          const tasks = planned("plans-dropped")
+          const task = await tasks.task("Given up")
+          for (const note of [undefined, null, "", "  "])
+            expectTaskInvalid(
+              await tasks.set(task.id, { state: "dropped", ...(note === undefined ? {} : { note }) }),
+              "note",
+            )
+          expect((await answered(tasks.set(task.id, { state: "dropped", note: "not needed" }))).task).toMatchObject({
+            state: "dropped",
+            note: "not needed",
+          })
+          expect((await tasks.list()).body.tasks).toEqual([])
+          const again = await tasks.make({ title: "Given up" })
+          expect(again.status).toBe(201)
+          expect(again.body.task.id).not.toBe(task.id)
+        })
+
+        test("a task's dropped subtasks are listed while it is open", async () => {
+          const tasks = planned("plans-dropped-list")
+          const made = await tasks.steps("Open", ["A", "B"])
+          await answered(tasks.set(made.subtasks[1]!.id, { state: "dropped", note: "not needed" }))
+          expect((await tasks.list()).body.tasks.map((item) => item.id)).toEqual([
+            made.subtasks[1]!.id,
+            made.subtasks[0]!.id,
+            made.task.id,
+          ])
+        })
+      })
+
+      describe("done with next", () => {
+        test("starts the first todo subtask with the caller as worker; after the last the task is review, its worker kept", async () => {
+          const tasks = planned("plans-next")
+          const made = await tasks.steps("Three steps", ["A", "B", "C"])
+          const [a, b, c] = made.subtasks
+          const first = await answered(tasks.finish(a!.id, { note: "A works", by: worker }))
+          expect(first.task).toMatchObject({ id: a!.id, state: "done", note: "A works" })
+          expect(first.next).toMatchObject({ id: b!.id, state: "active", worker: { person: target.person, ...worker } })
+          expect(first.parent).toEqual((await tasks.get(made.task.id)).body.task)
+          expect(first.parent).toMatchObject({ state: "active", worker: caller })
+          expect((await answered(tasks.finish(b!.id))).next).toMatchObject({
+            id: c!.id,
+            state: "active",
+            worker: caller,
+          })
+          const last = await answered(tasks.finish(c!.id))
+          expect(last.next).toBeNull()
+          expect(last.parent).toMatchObject({
+            state: "review",
+            note: "every subtask is done or dropped",
+            worker: caller,
+          })
+          expect((await tasks.get(made.task.id)).body.changes[0]).toMatchObject({
+            state: "review",
+            note: "every subtask is done or dropped",
+          })
+        })
+
+        test("with none todo but one still open, next is null and the task keeps its state", async () => {
+          const tasks = planned("plans-next-open")
+          const made = await tasks.steps("Two steps", ["A", "B"])
+          await answered(tasks.set(made.subtasks[1]!.id, { state: "blocked", note: "no schema" }))
+          const done = await answered(tasks.finish(made.subtasks[0]!.id))
+          expect(done.next).toBeNull()
+          expect(done.parent).toMatchObject({ state: "active" })
+        })
+
+        test("dropped subtasks count as closed, and the order is the order made", async () => {
+          const tasks = planned("plans-next-dropped")
+          const made = await tasks.steps("Steps", ["A", "B", "C"])
+          await answered(tasks.set(made.subtasks[1]!.id, { state: "dropped", note: "not needed" }))
+          expect((await answered(tasks.finish(made.subtasks[0]!.id))).next?.id).toBe(made.subtasks[2]!.id)
+          expect((await answered(tasks.finish(made.subtasks[2]!.id))).parent.state).toBe("review")
+        })
+
+        test("only with done, only on a subtask, and true, false or null; the body is checked before the id", async () => {
+          const tasks = planned("plans-next-checks")
+          const made = await tasks.steps("Checked", ["A"])
+          expectTaskInvalid(await tasks.set(made.subtasks[0]!.id, { state: "review", next: true }), "next")
+          expectTaskInvalid(await tasks.finish(made.task.id), "next")
+          expectTaskInvalid(await tasks.set(made.subtasks[0]!.id, { state: "done", next: "yes" }), "next")
+          expectTaskInvalid(await tasks.set("000000000000", { state: "review", next: true }), "next")
+          expectTaskMissing(await tasks.finish("000000000000"))
+          expect((await tasks.get(made.task.id)).body.task.state).toBe("active")
+          expect((await answered(tasks.set(made.subtasks[0]!.id, { state: "done", next: false }))).task.state).toBe(
+            "done",
+          )
+        })
+      })
+
+      describe("plan", () => {
+        test("drops the todo subtasks and the caller's active one with its note, keeps the done ones and others' active ones, and adds its own after all", async () => {
+          const tasks = planned("plans-plan")
+          const made = await tasks.steps("Four steps", ["A", "B", "C", "D"])
+          const [a, b, c, d] = made.subtasks
+          await answered(tasks.finish(a!.id))
+          await answered(tasks.set(c!.id, { state: "active", by: worker }))
+          const answer = await tasks.plan(made.task.id, {
+            plan: [{ title: "B2", description: "With the schema." }, { title: "D2" }],
+            note: "B needs a schema first",
+          })
+          expect(answer.status).toBe(200)
+          expect(answer.body.dropped).toEqual([b!.id, d!.id])
+          expect(states(answer.body.subtasks)).toEqual([
+            ["A", "done", by.chat],
+            ["B", "dropped", by.chat],
+            ["C", "active", worker.chat],
+            ["D", "dropped", null],
+            ["B2", "active", by.chat],
+            ["D2", "todo", null],
+          ])
+          expect(answer.body.subtasks[1]).toMatchObject({ note: "B needs a schema first" })
+          expect(answer.body.subtasks[4]).toMatchObject({ description: "With the schema.", by: caller })
+          expect(answer.body.task).toEqual((await tasks.get(made.task.id)).body.task)
+          expect((await tasks.get(made.task.id)).body.subtasks).toEqual(answer.body.subtasks)
+          expect((await tasks.get(d!.id)).body.changes[0]).toMatchObject({
+            state: "dropped",
+            note: "B needs a schema first",
+          })
+        })
+
+        test("while another's subtask is active and none of the caller's was, the new ones are todo", async () => {
+          const tasks = planned("plans-plan-others")
+          const made = await tasks.steps("Shared", ["A", "B"])
+          await answered(tasks.set(made.subtasks[0]!.id, { state: "active", by: worker }))
+          const answer = await answered(tasks.plan(made.task.id, { plan: [{ title: "X" }], note: "B was wrong" }))
+          expect(answer.dropped).toEqual([made.subtasks[1]!.id])
+          expect(states(answer.subtasks)).toEqual([
+            ["A", "active", worker.chat],
+            ["B", "dropped", null],
+            ["X", "todo", null],
+          ])
+        })
+
+        test("with none active afterwards the first new one is active, and so is a task in review", async () => {
+          const tasks = planned("plans-plan-review")
+          const made = await tasks.steps("Reviewed", ["A"])
+          expect((await answered(tasks.finish(made.subtasks[0]!.id))).parent.state).toBe("review")
+          const answer = await answered(
+            tasks.plan(made.task.id, { plan: [{ title: "X" }, { title: "Y" }], note: "one more step", by: worker }),
+          )
+          expect(answer.dropped).toEqual([])
+          expect(states(answer.subtasks)).toEqual([
+            ["A", "done", by.chat],
+            ["X", "active", worker.chat],
+            ["Y", "todo", null],
+          ])
+          expect(answer.task).toMatchObject({ state: "active", worker: { person: target.person, ...worker } })
+        })
+
+        test("of a subtask, of a closed task, or with the title of a subtask kept open is 400; of an unknown task 404", async () => {
+          const tasks = planned("plans-plan-checks")
+          const made = await tasks.steps("Checked", ["A", "B"])
+          await answered(tasks.set(made.subtasks[0]!.id, { state: "active", by: worker }))
+          const plan = { plan: [{ title: "X" }], note: "why" }
+          expectTaskInvalid(await tasks.plan(made.subtasks[1]!.id, plan), "subtask")
+          expectTaskInvalid(await tasks.plan(made.task.id, { plan: [{ title: "A" }], note: "why" }), "A")
+          // The title of one it drops is free.
+          expect((await tasks.plan(made.task.id, { plan: [{ title: "B" }], note: "again" })).status).toBe(200)
+          for (const state of ["done", "dropped"]) {
+            const closed = await tasks.task(`Closed ${state}`)
+            await answered(tasks.set(closed.id, { state, note: "closed" }))
+            expectTaskInvalid(await tasks.plan(closed.id, plan), state)
+          }
+          expectTaskMissing(await tasks.plan("000000000000", plan))
+        })
+
+        test("needs a note and 1 to 20 subtasks, checked before the task is looked up", async () => {
+          const tasks = planned("plans-plan-body")
+          for (const body of [
+            { plan: [{ title: "X" }] },
+            { plan: [{ title: "X" }], note: "  " },
+            { plan: [], note: "why" },
+            { note: "why" },
+            { plan: Array.from({ length: 21 }, (_, index) => ({ title: `X${index}` })), note: "why" },
+            { plan: [{ title: "" }], note: "why" },
+          ])
+            expectTaskInvalid(await tasks.plan("000000000000", body))
+        })
+      })
+
+      describe("edit", () => {
+        test("changes the title and description, keeps the state, and keeps the change with its note and what it edited", async () => {
+          const tasks = planned("plans-edit")
+          const made = await tasks.steps("Old title", ["A"])
+          await answered(tasks.edit(made.task.id, { description: "First." }))
+          const titled = await answered(tasks.edit(made.task.id, { title: "  New title  ", note: "named the file" }))
+          expect(titled.task).toMatchObject({ title: "New title", description: "First.", state: "active" })
+          const cleared = await answered(tasks.edit(made.task.id, { description: "" }))
+          expect(cleared.task.description).toBe("")
+          // The same again changes nothing.
+          expect((await answered(tasks.edit(made.task.id, { title: "New title", description: "" }))).task).toEqual(
+            cleared.task,
+          )
+          const read = (await tasks.get(made.task.id)).body
+          expect(read.task).toEqual(cleared.task)
+          expect(read.changes.slice(0, 3)).toEqual([
+            { state: "active", note: null, by: caller, at: expect.any(Number), description: "" },
+            { state: "active", note: "named the file", by: caller, at: expect.any(Number), title: "New title" },
+            { state: "active", note: null, by: caller, at: expect.any(Number), description: "First." },
+          ])
+          const sub = await answered(tasks.edit(made.subtasks[0]!.id, { title: "A, renamed" }))
+          expect(sub.task).toMatchObject({ title: "A, renamed", parent: made.task.id, state: "active" })
+        })
+
+        test("needs a title or a description, each checked as a make's, before the task is looked up; an unknown task is 404", async () => {
+          const tasks = planned("plans-edit-checks")
+          for (const body of [
+            {},
+            { note: "why" },
+            { title: "" },
+            { title: "two\nlines" },
+            { description: "d".repeat(2001) },
+          ])
+            expectTaskInvalid(await tasks.edit("000000000000", body))
+          expectTaskMissing(await tasks.edit("000000000000", { title: "T" }))
+        })
+      })
+
+      test.if(target.seen !== undefined)(
+        "worker_seen is when the worker's chat last sent a model request; active with none for 24 hours is idle",
+        async () => {
+          const tasks = planned("plans-seen")
+          const chat = `ses_seen_${random()}`
+          const task = await tasks.task("Watched")
+          const todo = await tasks.task("Never started")
+          await answered(tasks.set(task.id, { state: "active", by: { role: "general", chat } }))
+          const read = async (id: string) => (await tasks.get(id)).body.task
+          expect(await read(task.id)).toMatchObject({ worker_seen: null, idle: false })
+          const recent = Date.now() - 5 * 60_000
+          await target.seen!(chat, recent)
+          expect(await read(task.id)).toMatchObject({ worker_seen: recent, idle: false })
+          const old = Date.now() - 25 * 60 * 60_000
+          await target.seen!(chat, old)
+          expect(await read(task.id)).toMatchObject({ worker_seen: old, idle: true })
+          expect((await tasks.list()).body.tasks.find((item) => item.id === task.id)).toMatchObject({ idle: true })
+          // Idle is only of an active task.
+          await answered(tasks.set(task.id, { state: "review", by: { role: "general", chat } }))
+          expect(await read(task.id)).toMatchObject({ worker_seen: old, idle: false })
+          expect(await read(todo.id)).toMatchObject({ worker_seen: null, idle: false })
+        },
+      )
+    })
   })
 
   describe.if(target.recalls)("recall log", () => {
@@ -3447,6 +3814,7 @@ export function memoryContract(target: Target) {
       search_limit: 20,
       embedding: "test-embedding",
       ...(target.tasks ? { tasks: true } : {}),
+      ...(target.plans ? { plans: true } : {}),
       ...(target.recalls ? { recalls: true } : {}),
       ...(target.projects ? { projects: true } : {}),
       ...(target.prompt ? { prompt: true } : {}),

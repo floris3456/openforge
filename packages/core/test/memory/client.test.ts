@@ -145,6 +145,84 @@ describe("MemoryClient", () => {
     }),
   )
 
+  it.live("makes a task with subtasks in order, starts the next one, replaces the plan, edits and drops", () =>
+    Effect.gen(function* () {
+      const h = yield* setup
+      const worker = { role: "general", chat: "ses_w" }
+      const made = yield* h.client.make(project, {
+        title: "Move the checks: script, test, doc",
+        subtasks: [{ title: "The script", description: "One file." }, { title: "Its test" }, { title: "The doc" }],
+        by,
+      })
+      expect(made.existing).toBe(false)
+      expect(made.task).toMatchObject({ state: "active", worker: { ...by, person: "floris" }, worker_seen: null })
+      expect(made.subtasks.map((sub) => [sub.title, sub.state, sub.parent])).toEqual([
+        ["The script", "active", made.task.id],
+        ["Its test", "todo", made.task.id],
+        ["The doc", "todo", made.task.id],
+      ])
+      const [script, test, doc] = made.subtasks
+      const copy = yield* h.client.make(project, { title: made.task.title, subtasks: [{ title: "Other" }], by })
+      expect(copy).toEqual({ task: made.task, existing: true, subtasks: made.subtasks })
+      // Without subtasks, as before: none in the answer.
+      expect((yield* h.client.make(project, { title: "Plain", by })).subtasks).toEqual([])
+
+      const finished = yield* h.client.finish(project, script!.id, { note: "written", by: worker })
+      expect(finished.task).toMatchObject({ id: script!.id, state: "done", note: "written" })
+      expect(finished.next).toMatchObject({ id: test!.id, state: "active", worker: { ...worker, person: "floris" } })
+      expect(finished.parent.id).toBe(made.task.id)
+      const refused = yield* h.client.finish(project, made.task.id, { by }).pipe(Effect.flip)
+      expect(refused).toBeInstanceOf(MemoryClient.Refused)
+      expect(refused.message).toBe(`next: only on a subtask, and task ${made.task.id} has no parent`)
+
+      const planned = yield* h.client.plan(project, made.task.id, {
+        plan: [{ title: "The doc, short" }],
+        note: "one doc is enough",
+        by,
+      })
+      // The worker's active one stays; the todo one goes; the caller had none active, and one is: the new one waits.
+      expect(planned.dropped).toEqual([doc!.id])
+      expect(planned.subtasks.map((sub) => [sub.title, sub.state])).toEqual([
+        ["The script", "done"],
+        ["Its test", "active"],
+        ["The doc", "dropped"],
+        ["The doc, short", "todo"],
+      ])
+      expect((yield* h.client.task(project, doc!.id)).task).toMatchObject({
+        state: "dropped",
+        note: "one doc is enough",
+      })
+      expect(
+        (yield* h.client.plan(project, "000000000000", { plan: [{ title: "p" }], note: "n", by }).pipe(Effect.flip))
+          ._tag,
+      ).toBe("MemoryClient.MissingTask")
+
+      const edited = yield* h.client.edit(project, made.task.id, {
+        title: "Move the checks: script, test",
+        note: "doc short",
+        by,
+      })
+      expect(edited).toMatchObject({ title: "Move the checks: script, test", state: "active" })
+      expect((yield* h.client.task(project, made.task.id)).changes[0]).toEqual({
+        state: "active",
+        note: "doc short",
+        by: { ...by, person: "floris" },
+        at: expect.any(Number),
+        title: "Move the checks: script, test",
+      })
+      expect((yield* h.client.change(project, made.task.id, { state: "dropped", note: "superseded", by })).state).toBe(
+        "dropped",
+      )
+      expect(MemoryClient.isClosed((yield* h.client.task(project, made.task.id)).task)).toBe(true)
+      // Closing a task closes none of its subtasks: the open ones are listed, the closed ones not.
+      expect((yield* h.client.tasks(project)).tasks.map((task) => task.title)).toEqual([
+        "The doc, short",
+        "Plain",
+        "Its test",
+      ])
+    }),
+  )
+
   it.live(
     "answers a write's near entries with their scores, none for a copy, and none from a server without near",
     () =>
@@ -266,6 +344,9 @@ describe("MemoryClient", () => {
             h.client.tasks(where),
             h.client.task(where, "k3f9x2m7q4tz"),
             h.client.change(where, "k3f9x2m7q4tz", { state: "done", by }),
+            h.client.finish(where, "k3f9x2m7q4tz", { by }),
+            h.client.plan(where, "k3f9x2m7q4tz", { plan: [{ title: "p" }], note: "n", by }),
+            h.client.edit(where, "k3f9x2m7q4tz", { title: "t", by }),
             h.client.after(where, "k3f9x2m7q4tz", { person: "p", by }),
             h.client.recall(where, "k3f9x2m7q4tz"),
           ] as ReadonlyArray<Effect.Effect<unknown, MemoryClient.Error>>
@@ -377,12 +458,15 @@ describe("MemoryClient", () => {
           named.tasks(project),
           named.task(project, "k3f9x2m7q4tz"),
           named.change(project, "k3f9x2m7q4tz", { state: "done", by }),
+          named.finish(project, "k3f9x2m7q4tz", { by }),
+          named.plan(project, "k3f9x2m7q4tz", { plan: [{ title: "p" }], note: "n", by }),
+          named.edit(project, "k3f9x2m7q4tz", { title: "t", by }),
           named.after(project, "k3f9x2m7q4tz", { person: "p", by }),
           named.recall(project, "k3f9x2m7q4tz"),
         ].map((call) => Effect.ignore(call)),
       )
       const calls = h.server.calls()
-      expect(calls).toHaveLength(11)
+      expect(calls).toHaveLength(14)
       for (const call of calls)
         expect(call.pacer).toEqual({ "x-pacer-project": project, "x-pacer-project-name": "openforge" })
       yield* Effect.ignore(h.client.tasks(project))

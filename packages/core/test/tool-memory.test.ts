@@ -33,7 +33,7 @@ import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
 import { until } from "./pacer/fake-tools"
-import { catalogOf, endpointAt, memoryServer, nearServer, startClient, type MemoryServer } from "./memory/fixture"
+import { catalogOf, endpointAt, key, memoryServer, nearServer, startClient, type MemoryServer } from "./memory/fixture"
 
 // The memory tools against the small memory server (the contract in code), through a proxy that keeps what it was
 // sent. Sessions are the store's answers: a lead, a child of it, and a lead of another project.
@@ -676,6 +676,36 @@ describe("MemoryTools answers", () => {
 
       yield* Effect.promise(() => h.server.proxy.stop(true))
       expect(yield* h.read("forget", { id: "k3f9x2m7q4tz", reason: "r" })).toBe(unavailable)
+    }),
+  )
+
+  it.live("says on every tool that memory is off for the chat's project, by name, or for the one it was moved to", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const then = "the memory tools stop working now and leave this chat at its next cold moment. Go on without them."
+      const calls = [
+        ["remember", { text: "t", kind: "words" }],
+        ["recall", { query: "q" }],
+        ["forget", { id: "k3f9x2m7q4tz", reason: "r" }],
+        ["task", {}],
+      ] as const
+      h.say("t")
+      h.server.store.project(projectID, { memory: false, name: "openforge" })
+      for (const [name, input] of calls)
+        expect(yield* h.read(name, input)).toBe(
+          `error: Memory is off for "openforge", this chat's project on CLIProxyPacer: ${then}`,
+        )
+
+      h.server.store.project(projectID, { memory: true })
+      const moved = `tool-moved-${crypto.randomUUID().slice(0, 8)}`
+      h.server.store.project(moved, { memory: true, keys: ["a-key-of-someone-else"], name: "acme-web" })
+      h.server.store.chat(key, PacerSessionID.make(lead))
+      h.server.store.chat(key, PacerSessionID.make(child), PacerSessionID.make(lead))
+      h.server.store.move(key, PacerSessionID.make(lead), moved)
+      const forbidden = `error: This key may not use the memory of "acme-web", the project this chat was moved to on CLIProxyPacer's Projects page: ${then}`
+      for (const [name, input] of calls) expect(yield* h.read(name, input)).toBe(forbidden)
+      // Its subagent follows the move.
+      expect(yield* h.read("recall", { query: "q" }, child, "general")).toBe(forbidden)
     }),
   )
 

@@ -12,7 +12,10 @@ import { nearest, search, tokenizer, waiting, type Scopes } from "./memory-searc
  *
  * Every project has memory, for every key, until `project()` switches it off or names the keys that may use it; its
  * routes then answer as CLIProxyPacer's projects do (the workspace's spec `docs/specs/cpp-projects.md`, "Memory routes"):
- * `404 project_memory_off`, or `403 project_forbidden`, before anything else is checked.
+ * `404 project_memory_off`, or `403 project_forbidden`, before anything else is checked, the answer naming the project
+ * and whether the chat was moved into it. A chat `chat()` made known (as a model request does on CLIProxyPacer) can be
+ * moved into another project with `move()`: its memory calls, found by `X-Pacer-Session` and the key, and those of its
+ * subagents not moved themselves, then use that project ("Memory follows the project").
  *
  * As a script: `bun memory-server.ts --port <n> --key <key>[=<label>] [--key …] [--file <path>]
  * [--embedding-url <url> --embedding-model <name> [--embedding-key <key>]]`.
@@ -233,30 +236,49 @@ export function startMemoryServer(input: {
   SCHEMA.forEach((statement) => db.run(statement))
   const store = storeOf(db, input.embedding)
   /** The projects switched by `project()`; `keys` null for every key. */
-  const projects = new Map<string, { readonly memory: boolean; readonly keys: ReadonlySet<string> | null }>()
+  const projects = new Map<
+    string,
+    { readonly memory: boolean; readonly keys: ReadonlySet<string> | null; readonly name?: string }
+  >()
+  /** The chats `chat()` made known, by key and chat: the parent each names, and the project it was moved into. */
+  const chats = new Map<string, { readonly parent?: string; readonly moved: string | null }>()
+  const chatOf = (key: string, chat: string) => `${key} ${chat}`
+  /** The chat's own move, else the nearest up its chat tree, which is followed 16 steps at most. */
+  const moveOf = (key: string, chat: string | undefined, steps = 16): string | undefined => {
+    if (chat === undefined || steps === 0) return undefined
+    const known = chats.get(chatOf(key, chat))
+    return known?.moved ?? moveOf(key, known?.parent, steps - 1)
+  }
 
   const guarded =
-    <R extends Request>(handle: (request: R, person: string) => Response | Promise<Response>) =>
+    <R extends Request>(handle: (request: R, person: string, project: string) => Response | Promise<Response>) =>
     (request: R) => {
       const key = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1]
       if (!key) return Response.json({ error: "Missing API key" }, { status: 401 })
       const person = people.get(key)
       if (!person) return Response.json({ error: "Invalid API key" }, { status: 401 })
-      const project = (request as Request & { params?: Record<string, string> }).params?.project
-      const setting = project === undefined ? undefined : projects.get(project)
+      const identity = (request as Request & { params?: Record<string, string> }).params?.project
+      if (identity === undefined) return handle(request, person, "")
+      const moved = moveOf(key, request.headers.get("x-pacer-session") ?? undefined)
+      const project = moved ?? identity
+      const setting = projects.get(project)
+      const named = { project: { id: project, name: setting?.name ?? project }, moved: moved !== undefined }
+      const where = moved === undefined ? "this project" : "the project this chat was moved to"
       if (setting && !setting.memory)
         return failure(
           404,
           "project_memory_off",
-          "memory is off for this project: turn memory on for this project on CLIProxyPacer's Projects page",
+          `memory is off for ${where}: turn memory on for this project on CLIProxyPacer's Projects page`,
+          named,
         )
       if (setting?.keys && !setting.keys.has(key))
         return failure(
           403,
           "project_forbidden",
-          "this key may not use this project's memory: allow it for this project on CLIProxyPacer's Projects page",
+          `this key may not use the memory of ${where}: allow it for this project on CLIProxyPacer's Projects page`,
+          named,
         )
-      return handle(request, person)
+      return handle(request, person, project)
     }
 
   const server = Bun.serve({
@@ -273,62 +295,64 @@ export function startMemoryServer(input: {
         ),
       },
       "/pacer/v1/memory/:project/entries": {
-        POST: guarded(async (request, person) =>
-          store.write(projectOf(request.params.project), await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.write(projectOf(project), await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/entries/:id": {
-        GET: guarded((request) => store.read(projectOf(request.params.project), request.params.id)),
+        GET: guarded((request, _person, project) => store.read(projectOf(project), request.params.id)),
       },
       "/pacer/v1/memory/:project/entries/:id/forget": {
-        POST: guarded(async (request, person) =>
-          store.forget(projectOf(request.params.project), request.params.id, await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.forget(projectOf(project), request.params.id, await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/search": {
-        POST: guarded(async (request, person) =>
-          store.search(projectOf(request.params.project), await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.search(projectOf(project), await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/start": {
-        POST: guarded(async (request, person) =>
-          store.start(projectOf(request.params.project), await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.start(projectOf(project), await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/tasks": {
-        POST: guarded(async (request, person) =>
-          store.make(projectOf(request.params.project), await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.make(projectOf(project), await bodyOf(request), person),
         ),
-        GET: guarded((request) =>
-          store.tasks(projectOf(request.params.project), new URL(request.url).searchParams.get("all") === "1"),
+        GET: guarded((request, _person, project) =>
+          store.tasks(projectOf(project), new URL(request.url).searchParams.get("all") === "1"),
         ),
       },
       "/pacer/v1/memory/:project/tasks/:id": {
-        GET: guarded((request) => store.task(projectOf(request.params.project), request.params.id)),
+        GET: guarded((request, _person, project) => store.task(projectOf(project), request.params.id)),
       },
       "/pacer/v1/memory/:project/tasks/:id/state": {
-        POST: guarded(async (request, person) =>
-          store.change(projectOf(request.params.project), request.params.id, await bodyOf(request), person),
+        POST: guarded(async (request, person, project) =>
+          store.change(projectOf(project), request.params.id, await bodyOf(request), person),
         ),
       },
       "/pacer/v1/memory/:project/recalls": {
-        GET: guarded((request) => store.recalls(projectOf(request.params.project), new URL(request.url).searchParams)),
+        GET: guarded((request, _person, project) =>
+          store.recalls(projectOf(project), new URL(request.url).searchParams),
+        ),
       },
       "/pacer/v1/memory/:project/recalls/:id": {
-        GET: guarded((request) => store.recall(projectOf(request.params.project), request.params.id)),
+        GET: guarded((request, _person, project) => store.recall(projectOf(project), request.params.id)),
       },
       "/pacer/v1/memory/:project/recalls/:id/after": {
-        POST: guarded(async (request) =>
-          store.after(projectOf(request.params.project), request.params.id, await bodyOf(request)),
+        POST: guarded(async (request, _person, project) =>
+          store.after(projectOf(project), request.params.id, await bodyOf(request)),
         ),
       },
       "/pacer/v1/memory/:project/recalls/:id/labels": {
-        POST: guarded(async (request) =>
-          store.label(projectOf(request.params.project), request.params.id, await bodyOf(request)),
+        POST: guarded(async (request, _person, project) =>
+          store.label(projectOf(project), request.params.id, await bodyOf(request)),
         ),
       },
       "/pacer/v1/memory/:project/export": {
-        GET: guarded((request) => store.export(projectOf(request.params.project))),
+        GET: guarded((request, _person, project) => store.export(projectOf(project))),
       },
     },
     fetch: (request) =>
@@ -343,9 +367,35 @@ export function startMemoryServer(input: {
 
   return {
     url: `http://127.0.0.1:${server.port}`,
-    /** Switches a project's memory, and names the keys that may use it (all when left out or null). */
-    project: (identity: string, setting: { readonly memory: boolean; readonly keys?: ReadonlyArray<string> | null }) =>
-      void projects.set(identity, { memory: setting.memory, keys: setting.keys ? new Set(setting.keys) : null }),
+    /**
+     * Switches a project's memory, names the keys that may use it (all when left out or null), and its name as its
+     * closed answers give it (the identity when left out).
+     */
+    project: (
+      identity: string,
+      setting: {
+        readonly memory: boolean
+        readonly keys?: ReadonlyArray<string> | null
+        readonly name?: string
+      },
+    ) =>
+      void projects.set(identity, {
+        memory: setting.memory,
+        keys: setting.keys ? new Set(setting.keys) : null,
+        ...(setting.name === undefined ? {} : { name: setting.name }),
+      }),
+    /** Makes a chat of `key` known, a subagent of `parent` when it names one. */
+    chat: (key: string, chat: string, parent?: string) =>
+      void chats.set(chatOf(key, chat), {
+        ...(parent === undefined ? {} : { parent }),
+        moved: chats.get(chatOf(key, chat))?.moved ?? null,
+      }),
+    /** The owner's move of a known chat into the project `identity` names, or back with null. */
+    move: (key: string, chat: string, identity: string | null) => {
+      const known = chats.get(chatOf(key, chat))
+      if (!known) throw new Error(`no chat ${chat} of this key is known`)
+      chats.set(chatOf(key, chat), { ...known, moved: identity })
+    },
     stop: async () => {
       store.stop()
       await server.stop(true)
@@ -1118,8 +1168,8 @@ function refuse(message: string, status = 400, type = "invalid_request"): never 
   throw new Refusal(status, type, message)
 }
 
-function failure(status: number, type: string, message: string) {
-  return Response.json({ error: { type, message } }, { status })
+function failure(status: number, type: string, message: string, extra: Fields = {}) {
+  return Response.json({ error: { type, message, ...extra } }, { status })
 }
 
 if (import.meta.main) {

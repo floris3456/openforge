@@ -12,6 +12,9 @@ import { endpointAt, key, memoryServer, nearServer, startClient } from "./fixtur
 const it = testEffect(Layer.empty)
 const project = "client-project"
 const by = { role: "build", chat: "ses_client" }
+/** A closed answer by its fields, as `toEqual` compares errors by their message alone. */
+const closedOf = (error: MemoryClient.Error) =>
+  error._tag === "MemoryClient.Closed" ? { type: error.type, project: error.project, moved: error.moved } : error
 
 const setup = Effect.gen(function* () {
   const server = yield* memoryServer
@@ -271,10 +274,8 @@ describe("MemoryClient", () => {
         [off, "project_memory_off"],
         [forbidden, "project_forbidden"],
       ] as const)
-        for (const error of yield* Effect.all(every(where))) expect(error).toEqual(new MemoryClient.Closed({ type }))
-      expect(new MemoryClient.Closed({ type: "project_memory_off" }).message).toBe(
-        "Memory is off for this project on CLIProxyPacer, so the work goes on without it.",
-      )
+        for (const error of yield* Effect.all(every(where)))
+          expect(closedOf(error)).toEqual({ type, project: where, moved: false })
 
       // Memory off for the whole server (CPP's `not_found` on a route naming no entry) stays unavailable.
       h.server.control.answer = () =>
@@ -287,6 +288,77 @@ describe("MemoryClient", () => {
       expect(
         yield* h.client.start(project, { prompt: "q", scopes: "all", limit: 5, by }).pipe(Effect.flip),
       ).toBeInstanceOf(MemoryClient.Unavailable)
+    }),
+  )
+
+  it.live("is closed with the project's name and the move when CPP answers them for a chat moved into it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup
+      const id = crypto.randomUUID().slice(0, 8)
+      const own = `client-own-${id}`
+      const off = `client-moved-off-${id}`
+      const forbidden = `client-moved-forbidden-${id}`
+      h.server.store.project(off, { memory: false, name: "acme-web" })
+      h.server.store.project(forbidden, { memory: true, keys: ["another-key"], name: "acme-api" })
+      const chat = h.client.withHeaders({ "X-Pacer-Session": `chat-${id}` })
+      h.server.store.chat(key, `chat-${id}`)
+      const search = () => chat.search(own, { query: "q", scopes: "all", limit: 5, by }).pipe(Effect.flip)
+
+      h.server.store.move(key, `chat-${id}`, off)
+      expect(closedOf(yield* search())).toEqual({ type: "project_memory_off", project: "acme-web", moved: true })
+      h.server.store.move(key, `chat-${id}`, forbidden)
+      expect(closedOf(yield* search())).toEqual({ type: "project_forbidden", project: "acme-api", moved: true })
+      // Moved back, the chat's own project's memory again.
+      h.server.store.move(key, `chat-${id}`, null)
+      expect((yield* chat.search(own, { query: "q", scopes: "all", limit: 5, by })).entries).toEqual([])
+
+      // A server before moves names neither; a project of another shape is left out, and the answer's type kept.
+      for (const [extra, closed] of [
+        [{}, {}],
+        [{ project: { id: off }, moved: "yes" }, {}],
+        [{ project: { id: off, name: "acme-web" } }, { project: "acme-web" }],
+      ] as const) {
+        h.server.control.answer = () =>
+          Response.json({ error: { type: "project_memory_off", message: "off", ...extra } }, { status: 404 })
+        expect(closedOf(yield* search())).toEqual({
+          type: "project_memory_off",
+          project: undefined,
+          moved: undefined,
+          ...closed,
+        })
+      }
+    }),
+  )
+
+  it.effect("says the project's memory is off or kept from the key, by name, where it was moved, and what now", () =>
+    Effect.sync(() => {
+      const then = "the memory tools stop working now and leave this chat at its next cold moment. Go on without them."
+      const message = (input: ConstructorParameters<typeof MemoryClient.Closed>[0]) =>
+        new MemoryClient.Closed(input).message
+      expect(message({ type: "project_memory_off", project: "acme-web", moved: true })).toBe(
+        `Memory is off for "acme-web", the project this chat was moved to on CLIProxyPacer's Projects page: ${then}`,
+      )
+      expect(message({ type: "project_memory_off", project: "acme-web", moved: false })).toBe(
+        `Memory is off for "acme-web", this chat's project on CLIProxyPacer: ${then}`,
+      )
+      expect(message({ type: "project_memory_off", moved: true })).toBe(
+        `Memory is off for the project this chat was moved to on CLIProxyPacer's Projects page: ${then}`,
+      )
+      expect(message({ type: "project_memory_off" })).toBe(
+        `Memory is off for this chat's project on CLIProxyPacer: ${then}`,
+      )
+      expect(message({ type: "project_forbidden", project: "acme-web", moved: true })).toBe(
+        `This key may not use the memory of "acme-web", the project this chat was moved to on CLIProxyPacer's Projects page: ${then}`,
+      )
+      expect(message({ type: "project_forbidden", project: "acme-web", moved: false })).toBe(
+        `This key may not use the memory of "acme-web", this chat's project on CLIProxyPacer: ${then}`,
+      )
+      expect(message({ type: "project_forbidden", moved: true })).toBe(
+        `This key may not use the memory of the project this chat was moved to on CLIProxyPacer's Projects page: ${then}`,
+      )
+      expect(message({ type: "project_forbidden" })).toBe(
+        `This key may not use the memory of this chat's project on CLIProxyPacer: ${then}`,
+      )
     }),
   )
 

@@ -1,5 +1,5 @@
 import { afterAll } from "bun:test"
-import { memoryContract } from "./memory-contract"
+import { cppProjects, memoryContract } from "./memory-contract"
 import { startFakeEmbedding } from "./memory-embedding"
 import { startMemoryServer } from "./memory-server"
 
@@ -22,7 +22,9 @@ afterAll(async () => {
 
 // The groups "tasks" and "recall log" run only against a server whose capabilities say `tasks` and `recalls`, as
 // openforge offers the task tool and sends what followed a search only then. The group "projects" runs only against
-// the small server, which switches a project's memory in process; CLIProxyPacer's switch is its Projects page.
+// the small server, which switches a project's memory in process, and against CLIProxyPacer when
+// MEMORY_CONTRACT_MANAGEMENT_KEY names its management key: its switch is its Projects page, and every project a case
+// uses is turned on there first, as a new project starts with memory off.
 const url = server?.url ?? process.env.MEMORY_CONTRACT_URL!
 const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
   headers: { authorization: `Bearer ${server ? "contract-key-one" : process.env.MEMORY_CONTRACT_KEY}` },
@@ -49,6 +51,13 @@ memoryContract(
         bare: bare?.url,
       }
     : {
+        ...(process.env.MEMORY_CONTRACT_MANAGEMENT_KEY
+          ? cppProjects({
+              url: process.env.MEMORY_CONTRACT_URL!,
+              key: process.env.MEMORY_CONTRACT_KEY!,
+              management: process.env.MEMORY_CONTRACT_MANAGEMENT_KEY,
+            })
+          : {}),
         url: process.env.MEMORY_CONTRACT_URL!,
         key: process.env.MEMORY_CONTRACT_KEY!,
         person: process.env.MEMORY_CONTRACT_PERSON ?? `key-${process.env.MEMORY_CONTRACT_KEY!.slice(-4)}`,

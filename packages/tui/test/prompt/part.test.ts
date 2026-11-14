@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { measureEditText } from "@opentui/core"
-import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../src/prompt/part"
+import { expandPastedTextPlaceholders, expandTrackedPastedText, expandTrackedPastes } from "../../src/prompt/part"
 
 const widthMethod = "wcwidth"
 const measure = (text: string) => measureEditText(text, { widthMethod })
@@ -20,6 +20,13 @@ test.each([
     return { start: measure(before), end: measure(before + marker), text: pasted }
   })
   expect(expandTrackedPastedText(pieces.join(marker), ranges, widthMethod)).toBe(pieces.join(pasted))
+  // Each span is where its paste now stands in the expanded text, so the model gets exactly it inside `<paste>`.
+  const expanded = expandTrackedPastes(pieces.join(marker), ranges, widthMethod)
+  expect(expanded.text).toBe(pieces.join(pasted))
+  expect(expanded.pastes.map((paste) => expanded.text.slice(paste.start, paste.end))).toEqual(ranges.map(() => pasted))
+  expect(expanded.pastes.map((paste) => paste.start)).toEqual(
+    pieces.slice(1).map((_, index) => pieces.slice(0, index + 1).join(pasted).length),
+  )
 })
 
 test("expands clipboard placeholders literally in document order without re-matching expanded text", () => {

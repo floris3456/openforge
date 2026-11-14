@@ -1,7 +1,7 @@
 export * as PromptInput from "./prompt-input.js"
 
 import { Schema } from "effect"
-import { AgentAttachment, FileSource, PromptMention } from "./prompt.js"
+import { AgentAttachment, FileSource, PromptMention, PromptPaste } from "./prompt.js"
 import { optional } from "./schema.js"
 import { Skill } from "./skill.js"
 
@@ -27,4 +27,6 @@ export const Prompt = Schema.Struct({
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
   skills: Schema.Array(SkillAttachment).pipe(optional),
+  /** What of `text` was pasted, in order and apart; it reaches the model inside `<paste>` tags. */
+  pastes: Schema.Array(PromptPaste).pipe(optional),
 }).annotate({ identifier: "PromptInput" })

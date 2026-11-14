@@ -30,6 +30,7 @@ export const SyntheticPayload = Schema.Struct({
   text: Schema.String,
   description: Schema.String.pipe(optional),
   metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
+  reminder: SessionMessage.Synthetic.fields.reminder,
 }).annotate({ identifier: "Session.Inbox.SyntheticPayload" })
 
 export interface CompactionPayload extends Schema.Schema.Type<typeof CompactionPayload> {}

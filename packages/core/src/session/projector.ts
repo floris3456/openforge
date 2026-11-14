@@ -752,6 +752,7 @@ const layer = Layer.effectDiscard(
             files: input.payload.files,
             agents: input.payload.agents,
             skills: input.payload.skills,
+            pastes: input.payload.pastes,
             time,
           })
         if (input.type === "synthetic")
@@ -761,6 +762,7 @@ const layer = Layer.effectDiscard(
             text: input.payload.text,
             description: input.payload.description,
             metadata: input.payload.metadata,
+            ...(input.payload.reminder ? { reminder: true } : {}),
             time,
           })
       }),

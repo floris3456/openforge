@@ -289,7 +289,10 @@ export const Synthetic = Event.durable({
     text: Schema.String,
     description: Schema.String.pipe(optional),
     metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(optional),
+    reminder: SessionMessage.Synthetic.fields.reminder,
   },
+  // Every synthetic message created from now on is marked; one recorded before keeps reaching the model as it did.
+  stamp: (data) => ({ ...data, reminder: true }),
 })
 export type Synthetic = typeof Synthetic.Type
 

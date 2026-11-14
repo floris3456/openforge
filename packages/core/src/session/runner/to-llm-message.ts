@@ -264,7 +264,7 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
     case "user":
       const content = [
         ...(message.skills ?? []).flatMap((skill) => (skill.text === undefined ? [] : [Message.text(skill.text)])),
-        ...(message.text === "" ? [] : [Message.text(message.text)]),
+        ...(message.text === "" ? [] : [Message.text(withPastes(message))]),
         ...userAttachmentContent(message.files ?? [], ImageBudget.userLines(message)),
       ]
       if (content.length === 0) return []
@@ -280,7 +280,13 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
         }),
       ]
     case "synthetic":
-      return [Message.make({ id: message.id, role: "user", content: message.text })]
+      return [
+        Message.make({
+          id: message.id,
+          role: "user",
+          content: message.reminder ? systemReminder(message.text) : message.text,
+        }),
+      ]
     case "skill":
       return [Message.make({ id: message.id, role: "user", content: message.text, metadata: message.metadata })]
     case "system":
@@ -321,6 +327,26 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
     }
   }
 }
+
+/**
+ * A marked synthetic message's text inside `<system-reminder>` tags (spec checkpoint, section 1); one its publisher
+ * already wrapped (plan mode, a goal's reminder, the TUI's editor context) is sent as it is.
+ */
+export const systemReminder = (text: string) => {
+  const trimmed = text.trim()
+  if (trimmed.startsWith("<system-reminder>") && trimmed.endsWith("</system-reminder>")) return text
+  return `<system-reminder>\n${text}\n</system-reminder>`
+}
+
+/** The person's text with each span they pasted inside `<paste>` tags (spec checkpoint, section 2). */
+const withPastes = (message: SessionMessage.User) =>
+  message.pastes?.length
+    ? message.pastes.reduceRight(
+        (text, paste) =>
+          `${text.slice(0, paste.start)}<paste>${text.slice(paste.start, paste.end)}</paste>${text.slice(paste.end)}`,
+        message.text,
+      )
+    : message.text
 
 /** Translate projected Session history into canonical @opencode/ai context. */
 export const toLLMMessages = (

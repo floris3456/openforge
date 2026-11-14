@@ -91,9 +91,16 @@ export type SkillID = string
 
 export type SkillName = string
 
+export type PromptPaste = { start: number; end: number }
+
 export type SessionInboxDelivery = "steer" | "queue"
 
-export type SessionInboxSyntheticPayload = { text: string; description?: string; metadata?: { [x: string]: JsonValue } }
+export type SessionInboxSyntheticPayload = {
+  text: string
+  description?: string
+  metadata?: { [x: string]: JsonValue }
+  reminder?: boolean
+}
 
 export type ShellID = string
 
@@ -171,7 +178,12 @@ export type InstructionKey = string
 
 export type InstructionHash = string
 
-export type SessionInboxSyntheticPayload1 = { text: string; description?: string; metadata?: { [x: string]: any } }
+export type SessionInboxSyntheticPayload1 = {
+  text: string
+  description?: string
+  metadata?: { [x: string]: any }
+  reminder?: boolean
+}
 
 export type SessionMessageNative1 = { [x: string]: any }
 
@@ -539,6 +551,7 @@ export type SessionMessageSynthetic = {
   time: { created: number }
   text: string
   description?: string
+  reminder?: boolean
   type: "synthetic"
 }
 
@@ -1278,6 +1291,7 @@ export type SessionInboxUserPayload = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  pastes?: Array<PromptPaste>
   metadata?: { [x: string]: JsonValue }
 }
 
@@ -1289,6 +1303,7 @@ export type SessionMessageUser = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  pastes?: Array<PromptPaste>
   type: "user"
 }
 
@@ -1297,6 +1312,7 @@ export type SessionInboxUserPayload1 = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   skills?: Array<PromptSkillAttachment>
+  pastes?: Array<PromptPaste>
   metadata?: { [x: string]: any }
 }
 
@@ -1527,7 +1543,13 @@ export type SessionSynthetic = {
   type: "session.synthetic"
   durable: { aggregateID: string; seq: EventSeq; version: 1 }
   location?: LocationRef
-  data: { sessionID: SessionID; text: string; description?: string; metadata?: { [x: string]: any } }
+  data: {
+    sessionID: SessionID
+    text: string
+    description?: string
+    metadata?: { [x: string]: any }
+    reminder?: boolean
+  }
 }
 
 export type SessionSkillActivated = {
@@ -3749,6 +3771,7 @@ export type SessionPromptInput = {
         readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
       }>
     | undefined
+  readonly pastes?: ReadonlyArray<{ readonly start: number; readonly end: number }> | undefined
   readonly metadata?: { readonly [x: string]: JsonValue } | undefined
   readonly delivery?: ("steer" | "queue") | null | undefined
   readonly resume?: boolean | null | undefined
@@ -3782,6 +3805,7 @@ export type SessionCommandInput = {
         readonly mention?: { readonly start: number; readonly end: number; readonly text: string }
       }>
     | undefined
+  readonly pastes?: ReadonlyArray<{ readonly start: number; readonly end: number }> | undefined
   readonly delivery?: ("steer" | "queue") | null | undefined
 }
 

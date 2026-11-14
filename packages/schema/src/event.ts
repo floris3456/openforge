@@ -45,6 +45,8 @@ export type DurableDefinition<
     readonly aggregate: string
   }
   readonly data: DataSchema
+  /** What a new event records at its creation beyond what its publisher passes. A replayed event keeps what it recorded. */
+  stamp?(data: Schema.Schema.Type<DataSchema>): Schema.Schema.Type<DataSchema>
 }
 
 export type EphemeralDefinition<
@@ -85,6 +87,7 @@ type Input<Type extends string, Fields extends Readonly<Record<PropertyKey, Sche
     readonly aggregate: string
   }
   readonly schema: Fields
+  readonly stamp?: (data: Schema.Struct.Type<Fields>) => Schema.Struct.Type<Fields>
 }
 
 export function durable<
@@ -121,6 +124,7 @@ export function durable<
         durability: "durable" as const,
         durable: input.durable,
         data,
+        ...(input.stamp ? { stamp: input.stamp } : {}),
       })),
     ) satisfies DurableDefinition<Type, typeof data>
 }
@@ -128,7 +132,7 @@ export function durable<
 export function ephemeral<
   const Type extends string,
   const Fields extends Readonly<Record<PropertyKey, Schema.Codec<unknown, unknown>>>,
->(input: Omit<Input<Type, Fields>, "durable">) {
+>(input: Omit<Input<Type, Fields>, "durable" | "stamp">) {
   const data = Schema.Struct(input.schema)
   return Schema.Struct({
     id: ID,

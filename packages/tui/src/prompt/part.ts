@@ -21,15 +21,32 @@ export function expandTrackedPastedText(
   ranges: { start: number; end: number; text: string }[],
   widthMethod: WidthMethod,
 ) {
-  // Ranges expand from right to left, so indices found in the unexpanded text stay valid.
-  return ranges
+  return expandTrackedPastes(text, ranges, widthMethod).text
+}
+
+/**
+ * The prompt with each tracked paste put back, and where each paste now stands in it (string offsets, in order), so
+ * the model can get it inside `<paste>` tags.
+ */
+export function expandTrackedPastes(
+  text: string,
+  ranges: { start: number; end: number; text: string }[],
+  widthMethod: WidthMethod,
+) {
+  const expanded = ranges
     .slice()
-    .sort((a, b) => b.start - a.start)
+    .sort((a, b) => a.start - b.start)
     .reduce(
-      (result, part) =>
-        result.slice(0, promptOffsetIndex(text, part.start, widthMethod)) +
-        part.text +
-        result.slice(promptOffsetIndex(text, part.end, widthMethod)),
-      text,
+      (result, part) => {
+        const start = promptOffsetIndex(text, part.start, widthMethod)
+        const at = result.text.length + start - result.consumed
+        return {
+          text: result.text + text.slice(result.consumed, start) + part.text,
+          consumed: promptOffsetIndex(text, part.end, widthMethod),
+          pastes: part.text ? [...result.pastes, { start: at, end: at + part.text.length }] : result.pastes,
+        }
+      },
+      { text: "", consumed: 0, pastes: [] as { start: number; end: number }[] },
     )
+  return { text: expanded.text + text.slice(expanded.consumed), pastes: expanded.pastes }
 }

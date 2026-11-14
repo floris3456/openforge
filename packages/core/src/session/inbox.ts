@@ -158,6 +158,7 @@ const promotedFromMessage = Effect.fn("SessionInbox.promotedFromMessage")(functi
         files: message.files,
         agents: message.agents,
         skills: message.skills,
+        pastes: message.pastes,
         metadata: message.metadata,
       }),
     })
@@ -169,6 +170,7 @@ const promotedFromMessage = Effect.fn("SessionInbox.promotedFromMessage")(functi
         text: message.text,
         description: message.description,
         metadata: message.metadata,
+        reminder: message.reminder,
       }),
     })
 })

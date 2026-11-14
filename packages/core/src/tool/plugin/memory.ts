@@ -11,6 +11,7 @@ import { MemoryTask } from "../../memory/task.js"
 import { MemoryText } from "../../memory/text.js"
 import { MemoryWords } from "../../memory/words.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
+import { PacerHeaders } from "../../pacer/headers.js"
 import { PacerModels } from "../../pacer/models.js"
 import { PacerProject } from "../../pacer/project.js"
 import { Permission } from "../../permission.js"
@@ -163,7 +164,9 @@ export const Plugin = {
       return {
         lead: session.parentID === undefined,
         project,
-        client: client.withHeaders(chat.headers),
+        client: client.withHeaders(
+          PacerHeaders.chat({ sessionID: session.id, parentID: session.parentID, project: chat.headers }),
+        ),
         session,
         inside,
         by: { role: String(context.agent), chat: String(context.sessionID), ...inside },

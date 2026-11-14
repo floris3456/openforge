@@ -41,8 +41,8 @@ export function make(input: Input): Readonly<Record<string, string>> {
 }
 
 /**
- * The chat a request belongs to, its parent for a subagent, and its project: on model requests, tool list reads and
- * tool calls.
+ * The chat a request belongs to, its parent for a subagent, and its project: on model requests, tool list reads, tool
+ * calls and memory calls.
  */
 export function chat(input: {
   readonly sessionID: SessionID

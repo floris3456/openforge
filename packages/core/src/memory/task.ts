@@ -3,6 +3,7 @@ export * as MemoryTask from "./task.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import { Context, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
 import { PacerProject } from "../pacer/project.js"
 import type { SessionSchema } from "../session/schema.js"
@@ -45,6 +46,8 @@ export function placeOf(task: MemoryClient.Task): Inside {
 
 /** A new child's task, read before the child is made. */
 export interface Assigned {
+  /** The chat the child is made under. */
+  readonly parent: SessionSchema.ID
   readonly project: string
   readonly task: MemoryClient.Task
   readonly inside: Inside
@@ -59,7 +62,7 @@ export interface Interface {
   /** Sets the task active in the child's name, before its first step. */
   readonly activate: (
     assigned: Assigned,
-    child: { readonly id: string; readonly role: string },
+    child: { readonly id: SessionSchema.ID; readonly role: string },
   ) => Effect.Effect<void, ToolFailure>
   /** The child's answer with the task's state and note after it, when the task is no longer active. */
   readonly ended: (parent: SessionSchema.Info, taskID: string, output: string) => Effect.Effect<string>
@@ -82,7 +85,11 @@ const layer = Layer.effect(
         })
       return project
     })
-    const named = (project: string) => client.withHeaders(projects.headers(project))
+    /** The client of `project`, its calls in the name of `chat` and, for a subagent, of its parent. */
+    const named = (project: string, chat: { readonly id: SessionSchema.ID; readonly parentID?: SessionSchema.ID }) =>
+      client.withHeaders(
+        PacerHeaders.chat({ sessionID: chat.id, parentID: chat.parentID, project: projects.headers(project) }),
+      )
 
     return Service.of({
       assign: Effect.fn("MemoryTask.assign")(function* (parent, taskID) {
@@ -92,12 +99,12 @@ const layer = Layer.effect(
             message: `There is no task ${taskID}: memory on this server has no tasks, so no subagent was started.`,
           })
         const project = yield* projectOf(parent)
-        const task = (yield* named(project).task(project, taskID).pipe(Effect.mapError(fail))).task
+        const task = (yield* named(project, parent).task(project, taskID).pipe(Effect.mapError(fail))).task
         const place = placeOf(task)
-        return { project, task, inside: place, metadata: placed(parent.metadata, place) }
+        return { parent: parent.id, project, task, inside: place, metadata: placed(parent.metadata, place) }
       }),
       activate: Effect.fn("MemoryTask.activate")(function* (assigned, child) {
-        yield* named(assigned.project)
+        yield* named(assigned.project, { id: child.id, parentID: assigned.parent })
           .change(assigned.project, assigned.task.id, {
             state: "active",
             by: { role: child.role, chat: child.id, ...assigned.inside },
@@ -107,7 +114,7 @@ const layer = Layer.effect(
       ended: Effect.fn("MemoryTask.ended")(function* (parent, taskID, output) {
         const project = (yield* projects.chat(parent.projectID)).project
         if (project === undefined) return output
-        const read = yield* named(project).task(project, taskID).pipe(Effect.option)
+        const read = yield* named(project, parent).task(project, taskID).pipe(Effect.option)
         if (read._tag === "None" || read.value.task.state === "active") return output
         return `${output}\n${MemoryText.ended(read.value.task)}`
       }),

@@ -7,6 +7,7 @@ import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { KV } from "../kv.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
 import { PacerProject } from "../pacer/project.js"
 import { SessionEvent } from "../session/event.js"
@@ -88,7 +89,7 @@ const layer = Layer.effect(
       const by = { role: input.agent, chat: sessionID, ...inside }
       const offered = { ...input, task: input.task && tasks }
       const block = yield* client
-        .withHeaders(chat.headers)
+        .withHeaders(PacerHeaders.chat({ sessionID, parentID: input.session.parentID, project: chat.headers }))
         .start(
           project,
           // Cut as the server counts, in code points.

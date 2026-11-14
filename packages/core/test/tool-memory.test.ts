@@ -17,6 +17,7 @@ import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryText } from "@opencode/core/memory/text"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { Permission } from "@opencode/core/permission"
 import { Project } from "@opencode/core/project"
@@ -1476,21 +1477,41 @@ describe("MemoryTools project", () => {
     }),
   )
 
-  it.live("names the project it calls to CPP on each call, a child's and a task's too", () =>
+  it.live("names the project and the chat it calls for to CPP on each call, a child's with its parent's", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const id = yield* h.save({ text: "The pump runs at night.", kind: "unverified", basis: "b" })
-      yield* h.read("recall", { query: "pump" }, child)
-      yield* h.read("forget", { id, reason: "gone" })
-      yield* h.read("task", {})
       const naming = { "x-pacer-project": projectID, "x-pacer-project-name": "project" }
-      expect(h.server.calls().map((call) => call.pacer)).toEqual(h.server.calls().map(() => naming))
-      expect(h.server.calls().length).toBeGreaterThanOrEqual(4)
+      const as = (sessionID: SessionInfo.ID, parentID?: SessionInfo.ID) => ({
+        ...naming,
+        "x-pacer-session": PacerSessionID.make(sessionID),
+        ...(parentID ? { "x-pacer-parent-session": PacerSessionID.make(parentID) } : {}),
+      })
+      /** What `call` answered, and that each call it made to CPP carried `expected` (and it made some). */
+      const sent = <A, E>(call: Effect.Effect<A, E>, expected: Record<string, string>) =>
+        Effect.gen(function* () {
+          const from = h.server.calls().length
+          const answer = yield* call
+          const made = h.server.calls().slice(from)
+          expect(made.length).toBeGreaterThan(0)
+          expect(made.map((item) => item.pacer)).toEqual(made.map(() => expected))
+          return answer
+        })
+      const id = yield* sent(h.save({ text: "The pump runs at night.", kind: "unverified", basis: "b" }), as(lead))
+      yield* sent(h.read("recall", { query: "pump" }, child), as(child, lead))
+      yield* sent(h.read("forget", { id, reason: "gone" }), as(lead))
+      yield* sent(h.read("task", {}, child), as(child, lead))
+      // `by.chat` stays the session's own ID.
+      const write = h.server.calls().find((call) => call.path.endsWith("/entries"))
+      expect((write?.body as { by: { chat: string } }).by.chat).toBe(lead)
 
       const configured = yield* setup({ config: named("openforge-workspace") })
       yield* configured.read("recall", { query: "q" }, outside)
       expect(configured.server.calls().map((call) => call.pacer)).toEqual([
-        { "x-pacer-project": "openforge-workspace", "x-pacer-project-name": "project" },
+        {
+          "x-pacer-project": "openforge-workspace",
+          "x-pacer-project-name": "project",
+          "x-pacer-session": PacerSessionID.make(outside),
+        },
       ])
     }),
   )

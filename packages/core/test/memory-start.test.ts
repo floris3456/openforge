@@ -24,6 +24,7 @@ import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
@@ -349,6 +350,7 @@ const setup = Effect.fnUntraced(function* (
   const started = requests.length
   return {
     project,
+    lead,
     sessionID,
     session,
     llm,
@@ -896,12 +898,16 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
     ["the key not allowed", { memory: true, keys: ["a-key-of-someone-else"] }],
   ] as const
 
-  it.live("names the chat's project on the start call", () =>
+  it.live("names the chat's project and the chat on the start call", () =>
     Effect.gen(function* () {
       const h = yield* setup()
       yield* h.prompt("zebra?")
       expect(h.starts().map((call) => call.pacer)).toEqual([
-        { "x-pacer-project": h.project, "x-pacer-project-name": "project" },
+        {
+          "x-pacer-project": h.project,
+          "x-pacer-project-name": "project",
+          "x-pacer-session": PacerSessionID.make(h.sessionID),
+        },
       ])
     }),
   )
@@ -1301,6 +1307,47 @@ const json = (value: unknown) => JSON.stringify(value)
 const fill = (length: number) => "Q7x".repeat(length).slice(0, length)
 
 describe("MemoryFollowed through the runner", () => {
+  it.live("names the chat to CPP on the start call and what followed, a subagent's with its lead's", () =>
+    Effect.gen(function* () {
+      const lead = yield* setup()
+      let project = lead.project
+      const as = (sessionID: Session.ID, parentID?: Session.ID) => ({
+        "x-pacer-project": project,
+        "x-pacer-project-name": "project",
+        "x-pacer-session": PacerSessionID.make(sessionID),
+        ...(parentID ? { "x-pacer-parent-session": PacerSessionID.make(parentID) } : {}),
+      })
+      yield* lead.llm.push(TestLLM.text("Looking.", "looking"))
+      yield* lead.prompt("zebra?")
+      const block = yield* lead.blockRecall()
+      yield* eventually("the step's row was added to", () => lead.afters(block).length === 1)
+      yield* lead.llm.push(TestLLM.text("Ok.", "ok"))
+      yield* lead.prompt("The other one.")
+      yield* eventually("the person's message was added", () => lead.afters(block).length === 2)
+      expect([...lead.starts(), ...lead.afters()].map((call) => call.pacer)).toEqual([
+        as(lead.sessionID),
+        as(lead.sessionID),
+        as(lead.sessionID),
+      ])
+      // `by.chat` stays the session's own ID.
+      expect(lead.afters().map((call) => (call.body as { by: { chat: string } }).by.chat)).toEqual([
+        lead.sessionID,
+        lead.sessionID,
+      ])
+
+      const child = yield* setup({ child: true, agent: "explore" })
+      project = child.project
+      yield* child.llm.push(TestLLM.text("In src.", "src"))
+      yield* child.prompt("where are the zebra files?")
+      const its = yield* child.blockRecall()
+      yield* eventually("the subagent's step was added", () => child.afters(its).length === 1)
+      expect([...child.starts(), ...child.afters()].map((call) => call.pacer)).toEqual([
+        as(child.sessionID, child.lead),
+        as(child.sessionID, child.lead),
+      ])
+    }),
+  )
+
   it.live(
     "after the step that reads a recall's result, its text and calls go to the search's row, with the entries it replaced or deleted",
     () =>

@@ -315,7 +315,7 @@ export interface Interface {
   ) => Effect.Effect<Recall, Error>
   /** Reads one row of the recall log. */
   readonly recall: (project: string, id: string) => Effect.Effect<Recall, Error>
-  /** The same client, its requests carrying `headers`: the chat's project as CPP knows it (`PacerProject`). */
+  /** The same client, its requests carrying `headers`: the chat and its project as CPP knows them (`PacerHeaders.chat`). */
   readonly withHeaders: (headers: Readonly<Record<string, string>>) => Interface
 }
 

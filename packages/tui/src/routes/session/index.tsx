@@ -133,6 +133,7 @@ import { parseTodos } from "../../util/todo"
 import { createHistoryPrepend } from "./history"
 import { context, use, type PendingAction } from "./render-context"
 import { INLINE_TOOL_ICON_WIDTH, InlineToolRow, ReasoningPart, TextPart, toolDisplay } from "./message-parts"
+import { NoticeLine } from "./notice-view"
 import { defaultVerbosity, type GroupKind, type SessionEntry } from "./grouping/session"
 import { SessionGroupView } from "./group-view"
 import { useEntryAnchor } from "./anchor-view"
@@ -2156,9 +2157,7 @@ function SessionNoticeMessageV2(props: { message: SessionMessageInfo }) {
     <Show
       when={completion()}
       fallback={
-        <InlineToolRow icon={source() === "goal" ? "◎" : "◈"} color={theme.text.muted} pending="Notice" complete={true}>
-          {text()}
-        </InlineToolRow>
+        <NoticeLine message={props.message} icon={source() === "goal" ? "◎" : "◈"} description={text()} />
       }
     >
       <box

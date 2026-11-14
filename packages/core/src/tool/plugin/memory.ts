@@ -241,18 +241,21 @@ export const Plugin = {
 
     /**
      * A task, or inside one a subtask of it. Any chat outside a task may make one (the workspace's spec
-     * `docs/specs/task-plans.md`, section 1), and with plans it is then inside it.
+     * `docs/specs/task-plans.md`, section 1), and with plans it is then inside it. A subtask has no subtasks, so a lead
+     * inside a task that gives `subtasks` makes a new task with that plan and moves into it: other work the person asks
+     * for while one task is open.
      */
     const makeTask = Effect.fnUntraced(function* (who: Caller, input: Input, plans: boolean) {
-      if (who.inside && input.subtasks)
+      if (who.inside && input.subtasks && !who.lead)
         return yield* new ToolFailure({
-          message: `This chat is inside task ${who.inside.task}, and a subtask has no subtasks: make each new step with its title alone, or replace the steps still to do with plan.`,
+          message: `This chat is inside task ${who.inside.task}, and a subagent stays on the task it was given: make each new step with its title alone, or replace the steps still to do with plan.`,
         })
+      const parent = who.inside && !input.subtasks ? who.inside.task : undefined
       const made = yield* who.client
         .make(who.project, {
           title: input.title!,
           ...(input.description === undefined ? {} : { description: input.description }),
-          ...(who.inside ? { parent: who.inside.task } : {}),
+          ...(parent ? { parent } : {}),
           ...(input.subtasks ? { subtasks: input.subtasks } : {}),
           by: who.by,
         })
@@ -265,10 +268,10 @@ export const Plugin = {
       }
       if (made.existing)
         return {
-          content: `That task exists already as ${task.id} (${task.state}).${plans && !who.inside ? " Set it active to work inside it." : ""}`,
+          content: `That task exists already as ${task.id} (${task.state}).${plans && !parent ? " Set it active to work inside it." : ""}`,
           metadata,
         }
-      if (who.inside || !plans)
+      if (parent || !plans)
         return {
           content: task.parent
             ? `Made subtask ${task.id} of ${task.parent}: ${task.title}. ${MemoryText.started(task.id)}`

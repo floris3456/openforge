@@ -1267,11 +1267,19 @@ describe("MemoryTools task", () => {
       expect(h.metadata(lead)).toEqual({ memory: { task, subtask: first } })
       expect(sent(h.server).slice(0, 1)).toEqual([["POST", `/pacer/v1/memory/${projectID}/tasks`]])
       expect(h.server.calls().length).toBe(2)
-      // Inside a task new steps are subtasks of it, which have none.
-      expect(yield* h.read("task", { title: "More", subtasks: steps("A step") })).toBe(
-        `error: This chat is inside task ${task}, and a subtask has no subtasks: make each new step with its title alone, or replace the steps still to do with plan.`,
+      // A subagent inside a task stays on the task it was given: a make with subtasks there is refused, nothing sent.
+      h.place(child, { task, subtask: second })
+      expect(yield* h.read("task", { title: "More", subtasks: steps("A step") }, child, "general")).toBe(
+        `error: This chat is inside task ${task}, and a subagent stays on the task it was given: make each new step with its title alone, or replace the steps still to do with plan.`,
       )
       expect(h.server.calls().length).toBe(2)
+      // A lead inside a task that gives subtasks starts other work: a new task with that plan, and the chat moves
+      // into it; the first task stays as it was.
+      const other = made(yield* h.read("task", { title: "Fix the typo in the README", subtasks: steps("Fix it") }))
+      const otherRead = yield* h.started.client.task(projectID, other)
+      expect(otherRead.task).toMatchObject({ parent: null, state: "active", worker: { chat: lead } })
+      expect(h.metadata(lead)).toEqual({ memory: { task: other, subtask: otherRead.subtasks[0]!.id } })
+      expect((yield* h.started.client.task(projectID, task)).task).toMatchObject({ state: "active", parent: null })
     }),
   )
 

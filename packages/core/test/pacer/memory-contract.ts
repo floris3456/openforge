@@ -35,6 +35,24 @@ export type Target = {
    * (CLIProxyPacer); the small server's projects start on.
    */
   readonly open?: (identity: string) => Promise<void>
+  /**
+   * The owner's move of a chat on CLIProxyPacer's Projects page, for the group "a moved chat" (workspace spec
+   * `docs/specs/cpp-projects.md`, "Memory follows the project"); only on a server whose closed answers say `moved`. A
+   * chat is a UUID, as `X-Pacer-Session` names one.
+   */
+  readonly moves?: {
+    /** Makes a chat of `key` known to the server, as its first request does. */
+    readonly known: (chat: string, key: string) => Promise<void>
+    /**
+     * Makes a subagent's chat of `key` known with its parent, as its first model request does; the subagent's case
+     * runs only with it.
+     */
+    readonly subagent?: (chat: string, parent: string, key: string) => Promise<void>
+    /** Moves the chat into the project `identity` names, or back with null. */
+    readonly move: (chat: string, key: string, identity: string | null) => Promise<void>
+    /** The id of the project `identity` names. */
+    readonly id: (identity: string) => Promise<string>
+  }
 }
 
 /**
@@ -42,7 +60,15 @@ export type Target = {
  * made by the client key's `GET /pacer/v1/projects/{identity}`, which answers its id, and switched by the page's
  * `PATCH`; the keys it allows are named by their ids, found by their last four characters.
  */
-export function cppProjects(input: { readonly url: string; readonly key: string; readonly management: string }) {
+export function cppProjects(input: {
+  readonly url: string
+  readonly key: string
+  readonly management: string
+  /** Whether the server's closed answers say `moved`: only then are its moves offered. */
+  readonly moves: boolean
+  /** A model the server serves, for the one request that makes a subagent's chat known with its parent. */
+  readonly model?: string
+}) {
   const json = async (path: string, init: { method?: string; key: string; body?: unknown }) => {
     const response = await fetch(`${input.url}${path}`, {
       method: init.method ?? "GET",
@@ -86,7 +112,43 @@ export function cppProjects(input: { readonly url: string; readonly key: string;
       body: { memory: setting.memory, allowed_keys: setting.keys ? await keyIDs(setting.keys) : null },
     })
   }
-  return { setProject, open: (identity: string) => setProject(identity, { memory: true }) }
+  const moves: Target["moves"] = {
+    known: async (chat, key) => void (await json(`/pacer/v1/sessions/${chat}`, { method: "PUT", key, body: {} })),
+    // Only a model request names a chat's parent to the server; its answer does not matter, only that it was recorded.
+    ...(input.model
+      ? {
+          subagent: async (chat: string, parent: string, key: string) =>
+            void (await fetch(`${input.url}/v1/chat/completions`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${key}`,
+                "content-type": "application/json",
+                "x-pacer-session": chat,
+                "x-pacer-parent-session": parent,
+              },
+              body: JSON.stringify({
+                model: input.model,
+                max_tokens: 1,
+                messages: [{ role: "user", content: "Say ok." }],
+              }),
+            }).then((response) => response.text())),
+        }
+      : {}),
+    move: async (chat, key, identity) => {
+      const [keyID] = await keyIDs([key])
+      await json(`/v0/management/pacer/sessions/${chat}?key=${keyID}`, {
+        method: "PATCH",
+        key: input.management,
+        body: { project: identity === null ? null : await idOf(identity) },
+      })
+    },
+    id: idOf,
+  }
+  return {
+    setProject,
+    open: (identity: string) => setProject(identity, { memory: true }),
+    ...(input.moves ? { moves } : {}),
+  }
 }
 
 type Task = {
@@ -178,7 +240,7 @@ type Body = {
   waiting: number
   task: null
   counts: { global: number; role: number; task: number }
-  error: { type: string; message: string }
+  error: { type: string; message: string; project?: { id: string; name: string }; moved?: boolean }
   pacer: { memory: Record<string, unknown> }
 }
 
@@ -223,11 +285,13 @@ export function memoryContract(target: Target) {
     body?: unknown,
     key: string | null = target.key,
     url = target.url,
+    headers: Readonly<Record<string, string>> = {},
   ) => {
     await open(path, url)
     const response = await fetch(`${url}${path}`, {
       method,
       headers: {
+        ...headers,
         ...(key === null ? {} : { authorization: `Bearer ${key}` }),
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
@@ -275,10 +339,13 @@ export function memoryContract(target: Target) {
   const project = (name: string, url = target.url, left = false) => {
     const id = `contract-${name}-${random()}`
     if (left) opened.set(id, Promise.resolve())
+    return { id, ...routesOf(id, url), as: (headers: Readonly<Record<string, string>>) => routesOf(id, url, headers) }
+  }
+  /** A project's routes, each call carrying `headers` (a chat's `X-Pacer-Session`, say). */
+  const routesOf = (id: string, url: string, headers: Readonly<Record<string, string>> = {}) => {
     const base = `/pacer/v1/memory/${id}`
     return {
-      id,
-      write: (body: Record<string, unknown>, key?: string) => send("POST", `${base}/entries`, body, key, url),
+      write: (body: Record<string, unknown>, key?: string) => send("POST", `${base}/entries`, body, key, url, headers),
       verified: (text: string, extra: Record<string, unknown> = {}, key?: string) =>
         send(
           "POST",
@@ -286,16 +353,17 @@ export function memoryContract(target: Target) {
           { kind: "verified", text, basis: "checked by a test", scope: "global", by, ...extra },
           key,
           url,
+          headers,
         ),
-      read: (entry: string, key?: string) => send("GET", `${base}/entries/${entry}`, undefined, key, url),
+      read: (entry: string, key?: string) => send("GET", `${base}/entries/${entry}`, undefined, key, url, headers),
       forget: (entry: string, body: Record<string, unknown> = { reason: "a test forgets it", by }) =>
-        send("POST", `${base}/entries/${entry}/forget`, body, undefined, url),
+        send("POST", `${base}/entries/${entry}/forget`, body, undefined, url, headers),
       search: (body: Record<string, unknown>, key?: string) =>
-        send("POST", `${base}/search`, { by, ...body }, key, url),
+        send("POST", `${base}/search`, { by, ...body }, key, url, headers),
       start: (body: Record<string, unknown>) =>
-        send("POST", `${base}/start`, { by, task: null, ...body }, undefined, url),
+        send("POST", `${base}/start`, { by, task: null, ...body }, undefined, url, headers),
       export: async () => {
-        const answer = await send("GET", `${base}/export`, undefined, undefined, url)
+        const answer = await send("GET", `${base}/export`, undefined, undefined, url, headers)
         return {
           ...answer,
           lines: answer.text
@@ -500,6 +568,148 @@ export function memoryContract(target: Target) {
         expect([both.status, both.body.error.type]).toEqual([404, "project_memory_off"])
       },
     )
+
+    test.if(target.moves !== undefined)(
+      "a closed answer names the project, and that the chat was not moved into it",
+      async () => {
+        const memory = project("closed-named")
+        await switched(memory.id, { memory: false })
+        const answer = await memory.search({ query: "anything", scopes: "all" })
+        expect([answer.status, answer.body.error.type]).toEqual([404, "project_memory_off"])
+        expect(answer.body.error.project).toEqual({ id: await target.moves!.id(memory.id), name: expect.any(String) })
+        expect(answer.body.error.moved).toBe(false)
+      },
+    )
+
+    describe.if(target.moves !== undefined)("a moved chat", () => {
+      const moves = target.moves!
+      /** A chat of `key` the server knows; `on(memory)` is a project's routes as that chat calls them. */
+      const chat = async (key = target.key, parent?: string) => {
+        const id = crypto.randomUUID()
+        await (parent === undefined ? moves.known(id, key) : moves.subagent!(id, parent, key))
+        const headers = { "x-pacer-session": id, ...(parent === undefined ? {} : { "x-pacer-parent-session": parent }) }
+        return {
+          id,
+          on: (memory: ReturnType<typeof project>) => memory.as(headers),
+          move: (memory: ReturnType<typeof project> | null) => moves.move(id, key, memory?.id ?? null),
+        }
+      }
+      const closed = async (
+        answer: Promise<{ status: number; body: Body }>,
+        status: number,
+        type: string,
+        into: ReturnType<typeof project>,
+      ) => {
+        const settled = await answer
+        expect([settled.status, settled.body.error.type]).toEqual([status, type])
+        expect(settled.body.error.project).toEqual({ id: await moves.id(into.id), name: expect.any(String) })
+        expect(settled.body.error.moved).toBe(true)
+        expect(settled.body.error.message).toContain("Projects page")
+      }
+
+      test("moved into a project with memory on, it reads and writes that project's memory, not its own", async () => {
+        const own = project("moved-own")
+        const into = project("moved-into")
+        const term = word()
+        const before = (await created(own.verified(`The own project holds ${term}.`))).entry
+        const there = (await created(into.verified(`The project moved into holds ${term}.`))).entry
+        const moved = await chat()
+        await moved.move(into)
+        const found = await answered(moved.on(own).search({ query: term, scopes: "all" }))
+        expect(ids(found.entries)).toEqual([there.id])
+        const started = await answered(moved.on(own).start({ prompt: term, scopes: { global: true, roles: [] } }))
+        expect(ids(started.entries)).toEqual([there.id])
+        const written = (await created(moved.on(own).verified(`Written after the move, ${term}.`))).entry
+        expect(ids((await answered(into.search({ query: term, scopes: "all" }))).entries)).toEqual(
+          ids([there, written]),
+        )
+        expect(ids((await answered(own.search({ query: term, scopes: "all" }))).entries)).toEqual([before.id])
+        // Nothing crosses projects: an entry of the own project is not found from the new one.
+        expectNotFound(await moved.on(own).read(before.id))
+        // A chat that names no session, and one the server does not know, use the identity's project.
+        expect(
+          ids(
+            (await answered(own.as({ "x-pacer-session": crypto.randomUUID() }).search({ query: term, scopes: "all" })))
+              .entries,
+          ),
+        ).toEqual([before.id])
+      })
+
+      test("moved into a project with memory off, every route answers project_memory_off naming it, moved", async () => {
+        const own = project("moved-own")
+        const into = project("moved-off")
+        await switched(into.id, { memory: false })
+        const moved = await chat()
+        await moved.move(into)
+        const headers = { "x-pacer-session": moved.id }
+        for (const [method, path, body] of routes(own.id))
+          await closed(send(method, path, body, target.key, target.url, headers), 404, "project_memory_off", into)
+        // The chat's own project keeps its memory for every other chat.
+        expect((await own.verified("Still written from an unmoved chat.")).status).toBe(201)
+      })
+
+      test.if(target.second !== undefined)(
+        "moved into a project its key may not use, every route answers project_forbidden naming it, moved",
+        async () => {
+          const own = project("moved-own")
+          const into = project("moved-forbidden")
+          await switched(into.id, { memory: true, keys: [target.key] })
+          const moved = await chat(target.second!.key)
+          await moved.move(into)
+          const headers = { "x-pacer-session": moved.id }
+          for (const [method, path, body] of routes(own.id))
+            await closed(
+              send(method, path, body, target.second!.key, target.url, headers),
+              403,
+              "project_forbidden",
+              into,
+            )
+        },
+      )
+
+      test("a chat with memory off moved into a project with memory on gets memory", async () => {
+        const own = project("moved-was-off")
+        const into = project("moved-on")
+        await switched(own.id, { memory: false })
+        await switched(into.id, { memory: true })
+        const moved = await chat()
+        expect((await moved.on(own).search({ query: "anything", scopes: "all" })).status).toBe(404)
+        await moved.move(into)
+        expect((await moved.on(own).verified("Memory at last.")).status).toBe(201)
+      })
+
+      test("moved back, it uses its identity's project again", async () => {
+        const own = project("moved-back")
+        const into = project("moved-back-into")
+        await switched(into.id, { memory: true })
+        const term = word()
+        const before = (await created(own.verified(`The own project holds ${term}.`))).entry
+        const moved = await chat()
+        await moved.move(into)
+        expect((await answered(moved.on(own).search({ query: term, scopes: "all" }))).entries).toEqual([])
+        await moved.move(null)
+        expect(ids((await answered(moved.on(own).search({ query: term, scopes: "all" }))).entries)).toEqual([before.id])
+      })
+
+      test.if(target.moves?.subagent !== undefined)(
+        "a subagent follows its lead's move, unless it was moved itself",
+        async () => {
+          const own = project("moved-lead")
+          const into = project("moved-lead-into")
+          const elsewhere = project("moved-sub-into")
+          await switched(elsewhere.id, { memory: false })
+          const term = word()
+          const there = (await created(into.verified(`The lead's new project holds ${term}.`))).entry
+          const lead = await chat()
+          const sub = await chat(target.key, lead.id)
+          await lead.move(into)
+          expect(ids((await answered(sub.on(own).search({ query: term, scopes: "all" }))).entries)).toEqual([there.id])
+          await sub.move(elsewhere)
+          await closed(sub.on(own).search({ query: term, scopes: "all" }), 404, "project_memory_off", elsewhere)
+          expect(ids((await answered(lead.on(own).search({ query: term, scopes: "all" }))).entries)).toEqual([there.id])
+        },
+      )
+    })
   })
 
   describe("write and read back", () => {

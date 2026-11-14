@@ -256,16 +256,26 @@ export class MissingRecall extends Schema.TaggedError<MissingRecall>()("MemoryCl
 }
 
 /**
- * CPP keeps this project's memory from the asking key: memory is off for the project (`project_memory_off`), or the key
- * may not use it (`project_forbidden`) (workspace spec `docs/specs/cpp-projects.md`, "Memory follows the project").
+ * CPP keeps this chat's project's memory from the asking key: memory is off for the project (`project_memory_off`), or
+ * the key may not use it (`project_forbidden`) (workspace spec `docs/specs/cpp-projects.md`, "Memory follows the
+ * project"). `project` is the project's name and `moved` whether the chat was moved into it, both unknown from a server
+ * before moves. The message is what every memory tool answers while the chat still has the tools.
  */
 export class Closed extends Schema.TaggedError<Closed>()("MemoryClient.Closed", {
   type: Schema.Literals(["project_memory_off", "project_forbidden"]),
+  project: Schema.optional(Schema.String),
+  moved: Schema.optional(Schema.Boolean),
 }) {
   override get message() {
-    return this.type === "project_memory_off"
-      ? "Memory is off for this project on CLIProxyPacer, so the work goes on without it."
-      : "This key may not use this project's memory on CLIProxyPacer, so the work goes on without it."
+    const where = this.moved
+      ? "the project this chat was moved to on CLIProxyPacer's Projects page"
+      : "this chat's project on CLIProxyPacer"
+    const project = this.project === undefined ? where : `${JSON.stringify(this.project)}, ${where}`
+    const closed =
+      this.type === "project_memory_off"
+        ? `Memory is off for ${project}`
+        : `This key may not use the memory of ${project}`
+    return `${closed}: the memory tools stop working now and leave this chat at its next cold moment. Go on without them.`
   }
 }
 
@@ -464,10 +474,15 @@ export function project(entries: Parameters<typeof Config.latest>[0], projectID:
  */
 function failure(id?: string, thing: "entry" | "task" | "recall" = "entry") {
   return (error: PacerHttp.Error): Error => {
-    if (error._tag === "PacerHttp.NoPacer" && error.type === "project_memory_off")
-      return new Closed({ type: error.type })
-    if (error._tag === "PacerHttp.Refused" && error.type === "project_forbidden")
-      return new Closed({ type: error.type })
+    if (
+      (error._tag === "PacerHttp.NoPacer" && error.type === "project_memory_off") ||
+      (error._tag === "PacerHttp.Refused" && error.type === "project_forbidden")
+    )
+      return new Closed({
+        type: error.type,
+        ...(error.project === undefined ? {} : { project: error.project.name }),
+        ...(error.moved === undefined ? {} : { moved: error.moved }),
+      })
     if (error._tag === "PacerHttp.NotFound" && id !== undefined)
       return thing === "task"
         ? new MissingTask({ id })

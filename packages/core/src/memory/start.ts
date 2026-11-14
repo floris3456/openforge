@@ -110,9 +110,12 @@ const layer = Layer.effect(
           })),
           // CPP keeps the project's memory from this key: no block, so no memory tools, till the chat's next cold point.
           Effect.catchTag("MemoryClient.Closed", (closed) =>
-            Effect.logInfo("memory is closed to this chat's project", { project, type: closed.type }).pipe(
-              Effect.as(undefined),
-            ),
+            Effect.logInfo("memory is closed to this chat's project", {
+              project,
+              type: closed.type,
+              name: closed.project,
+              moved: closed.moved,
+            }).pipe(Effect.as(undefined)),
           ),
           Effect.catch((error) =>
             Effect.logWarning("memory's start block could not be read", { reason: error.message }).pipe(

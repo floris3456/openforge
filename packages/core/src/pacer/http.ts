@@ -25,11 +25,21 @@ export class Unreachable extends Schema.TaggedError<Unreachable>()("PacerHttp.Un
   }
 }
 
+/**
+ * The project a memory answer of `project_memory_off` or `project_forbidden` names, and whether the chat was moved into
+ * it on CPP's Projects page (workspace spec `docs/specs/cpp-projects.md`, "Memory follows the project"); both absent
+ * from a server before moves.
+ */
+export const Project = Schema.Struct({ id: Schema.String, name: Schema.String })
+export type Project = typeof Project.Type
+
 /** CPP refused the key (401 or 403). */
 export class Refused extends Schema.TaggedError<Refused>()("PacerHttp.Refused", {
   status: Schema.Number,
   /** The answer's `error.type`, such as memory's `project_forbidden`. */
   type: Schema.optional(Schema.String),
+  project: Schema.optional(Project),
+  moved: Schema.optional(Schema.Boolean),
   reason: Schema.String,
 }) {
   override get message() {
@@ -47,6 +57,8 @@ export class NoPacer extends Schema.TaggedError<NoPacer>()("PacerHttp.NoPacer", 
   status: Schema.optional(Schema.Number),
   /** The answer's `error.type`, such as memory's `project_memory_off`. */
   type: Schema.optional(Schema.String),
+  project: Schema.optional(Project),
+  moved: Schema.optional(Schema.Boolean),
   reason: Schema.String,
 }) {
   override get message() {
@@ -134,10 +146,14 @@ const ApiError = Schema.fromJsonString(
       type: Schema.optional(Schema.String),
       code: Schema.optional(Schema.String),
       message: Schema.optional(Schema.String),
+      // Read on their own, so that a project of another shape loses only itself, not the answer's type.
+      project: Schema.optional(Schema.Unknown),
+      moved: Schema.optional(Schema.Unknown),
     }),
   }),
 )
 const decodeApiError = Schema.decodeUnknownOption(ApiError)
+const decodeProject = Schema.decodeUnknownOption(Project)
 
 export const layer = Layer.effect(
   Service,
@@ -247,10 +263,15 @@ function refusal(response: HttpClientResponse.HttpClientResponse, text: string) 
   const error = Option.getOrUndefined(decodeApiError(text))?.error
   const reason = error?.message ?? error?.type ?? `HTTP ${status}`
   if (status >= 300 && status < 400) return new Unexpected({ status, reason: `redirect (${status}) refused` })
-  const type = error?.type === undefined ? {} : { type: error.type }
-  if (status === 401 || status === 403) return new Refused({ status, ...type, reason })
+  const project = Option.getOrUndefined(decodeProject(error?.project))
+  const named = {
+    ...(error?.type === undefined ? {} : { type: error.type }),
+    ...(project === undefined ? {} : { project }),
+    ...(typeof error?.moved === "boolean" ? { moved: error.moved } : {}),
+  }
+  if (status === 401 || status === 403) return new Refused({ status, ...named, reason })
   if (status === 404 && error?.type === "not_found") return new NotFound({ reason })
-  if (status === 404) return new NoPacer({ status, ...type, reason })
+  if (status === 404) return new NoPacer({ status, ...named, reason })
   if (status >= 500) return new Unreachable({ status, retryAfter: retryAfter(response.headers["retry-after"]), reason })
   return new Unexpected({ status, reason })
 }

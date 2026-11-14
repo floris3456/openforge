@@ -167,6 +167,7 @@ export function update(adapter: Adapter, event: SessionEvent.DurableEvent) {
             text: event.data.text,
             description: event.data.description,
             metadata: event.data.metadata,
+            ...(event.data.reminder ? { reminder: true } : {}),
             id: SessionMessage.ID.fromEvent(event.id),
             type: "synthetic",
             time: { created },

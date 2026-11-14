@@ -336,8 +336,10 @@ describe("SessionPromptStart: a warm chat's start between two steps", () => {
       expect(reminders[0]).toStartWith(`${header}\n\nThe agent's prompt changed; the new passages apply from now on.`)
       expect(reminders[0]).toContain("-Work carefully.\n+Work very carefully.")
       // After the history, in the step that follows the change and in every one after it.
-      expect(texts(second)).toEqual(["one", "two", reminders[0]])
-      expect(texts(third)).toEqual(["one", "two", reminders[0], "three"])
+      // A synthetic message, it reaches the model inside `<system-reminder>` (spec checkpoint, section 1).
+      const sent = `<system-reminder>\n${reminders[0]}\n</system-reminder>`
+      expect(texts(second)).toEqual(["one", "two", sent])
+      expect(texts(third)).toEqual(["one", "two", sent, "three"])
     }),
   )
 

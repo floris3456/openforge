@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { optional } from "./schema.js"
+import { NonNegativeInt, optional } from "./schema.js"
 import { statics } from "./schema.js"
 import { Skill } from "./skill.js"
 
@@ -91,23 +91,33 @@ export const SkillAttachment = Schema.Struct({
   mention: PromptMention.pipe(optional),
 }).annotate({ identifier: "Prompt.SkillAttachment" })
 
+/** A span of a prompt's `text` (UTF-16 offsets, `end` exclusive) the person pasted rather than typed. */
+export interface PromptPaste extends Schema.Schema.Type<typeof PromptPaste> {}
+export const PromptPaste = Schema.Struct({
+  start: NonNegativeInt,
+  end: NonNegativeInt,
+}).annotate({ identifier: "Prompt.Paste" })
+
 export interface Prompt extends Schema.Schema.Type<typeof Prompt> {}
 export const Prompt = Schema.Struct({
   text: Schema.String,
   files: Schema.Array(FileAttachment).pipe(optional),
   agents: Schema.Array(AgentAttachment).pipe(optional),
   skills: Schema.Array(SkillAttachment).pipe(optional),
+  /** What of `text` was pasted, in order and apart; it reaches the model inside `<paste>` tags. */
+  pastes: Schema.Array(PromptPaste).pipe(optional),
 })
   .annotate({ identifier: "Prompt" })
   .pipe(
     statics((schema) => ({
       equivalence: Schema.toEquivalence(schema),
-      fromUserMessage: (input: Pick<Prompt, "text" | "files" | "agents" | "skills">) =>
+      fromUserMessage: (input: Pick<Prompt, "text" | "files" | "agents" | "skills" | "pastes">) =>
         schema.make({
           text: input.text,
           ...(input.files === undefined ? {} : { files: input.files }),
           ...(input.agents === undefined ? {} : { agents: input.agents }),
           ...(input.skills === undefined ? {} : { skills: input.skills }),
+          ...(input.pastes === undefined ? {} : { pastes: input.pastes }),
         }),
     })),
   )

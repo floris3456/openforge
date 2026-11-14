@@ -35,7 +35,7 @@ import { registerComposer, saveDraft, takeDraft } from "./draft-stash"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
-import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
+import { expandPastedTextPlaceholders, expandTrackedPastes } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteOption, type AutocompleteRef, Autocomplete } from "./autocomplete"
@@ -1136,7 +1136,7 @@ export function Prompt(props: PromptProps) {
     if (!trimmed && (!props.sessionID || store.mode === "shell" || delivery === "queue"))
       return delivery === "steer" ? (await props.onEmptySubmit?.()) === true : false
     const exitWord = trimmed === "exit" || trimmed === "quit" || trimmed === ":q"
-    const inputText = expandTrackedPastedText(
+    const expanded = expandTrackedPastes(
       store.prompt.text,
       input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
         const ref = store.extmarkToPart.get(extmark.id)
@@ -1147,6 +1147,7 @@ export function Prompt(props: PromptProps) {
       }),
       renderer.widthMethod,
     )
+    const inputText = expanded.text
     const slash = argumentSlash(inputText, keymapCommands())
     if (delivery === "queue" && (store.mode === "shell" || exitWord || slash)) {
       toast.show({ message: "This prompt cannot be queued", variant: "warning" })
@@ -1399,6 +1400,7 @@ export function Prompt(props: PromptProps) {
           files: promptFilesForServer(entry.files, terminalEnvironment.localServer === true),
           agents: entry.agents,
           skills: entry.skills?.length ? entry.skills : undefined,
+          pastes: expanded.pastes.length ? expanded.pastes : undefined,
           delivery,
           gate: newSession?.gate,
           // Commit the captured selection after earlier admissions, including

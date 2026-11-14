@@ -525,7 +525,7 @@ export function configured(options?: Options) {
                 ...(options?.metadata ? { metadata: options.metadata } : {}),
                 type: definition.type,
                 ...(location ? { location } : {}),
-                data,
+                data: definition.durable && definition.stamp ? definition.stamp(data) : data,
               } as Event.Payload<D>,
               options?.commit,
             )
@@ -562,7 +562,7 @@ export function configured(options?: Options) {
                     ...(options?.metadata ? { metadata: options.metadata } : {}),
                     type: definition.type,
                     ...(location ? { location } : {}),
-                    data,
+                    data: definition.stamp ? definition.stamp(data) : data,
                   } as Event.Payload,
                 }
               }),

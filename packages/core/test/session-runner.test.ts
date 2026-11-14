@@ -65,6 +65,7 @@ import { ConfigCompaction } from "@opencode/schema/config/compaction"
 import { Tool } from "@opencode/core/tool"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
 import { InstructionStateTable, SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
+import { EventSequenceTable } from "@opencode/core/event/sql"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
 import { SessionStore } from "@opencode/core/session/store"
 import { Instructions } from "@opencode/core/instructions/index"
@@ -695,6 +696,8 @@ const incompleteStream = () =>
 
 const INCOMPLETE_STREAM_CONTINUATION =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
+// A synthetic message created from now on reaches the model inside `<system-reminder>` (spec checkpoint, section 1).
+const reminder = (text: string) => `<system-reminder>\n${text}\n</system-reminder>`
 
 const invalidRequest = () =>
   new AIError({
@@ -1246,7 +1249,7 @@ describe("SessionRunnerLLM", () => {
         expect(s.requests).toHaveLength(2)
         expect(s.requests[1]?.messages.at(-1)).toMatchObject({
           role: "user",
-          content: [{ type: "text", text: "Keep going" }],
+          content: [{ type: "text", text: reminder("Keep going") }],
         })
         expect(yield* s.context).toMatchObject([
           Expected.user("Start"),
@@ -1404,7 +1407,7 @@ describe("SessionRunnerLLM", () => {
 
     expect(idles).toEqual([sessionID, sessionID])
     expect(s.requests).toHaveLength(3)
-    expect(userTexts(s.requests[2])).toContain("Keep going")
+    expect(userTexts(s.requests[2])).toContain(reminder("Keep going"))
     expect((yield* s.context).filter((message) => message.type === "synthetic")).toHaveLength(1)
     expect(yield* s.inbox).toEqual([])
   })
@@ -1513,7 +1516,7 @@ describe("SessionRunnerLLM", () => {
     yield* Fiber.join(running)
 
     expect(s.requests).toHaveLength(3)
-    expect(userTexts(s.requests[2])).toContain("Background work completed")
+    expect(userTexts(s.requests[2])).toContain(reminder("Background work completed"))
   })
 
   scenario("streams one request with registry definitions from chronological user history", function* (s) {
@@ -2656,7 +2659,7 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests).toHaveLength(4)
     expect(userTexts(s.requests[1])).toContain("Steer after compaction")
-    expect(userTexts(s.requests[1])).toContain("Completion after compaction")
+    expect(userTexts(s.requests[1])).toContain(reminder("Completion after compaction"))
     expect(userTexts(s.requests[3])).toContain("Queue after compaction")
     expect(yield* SessionInbox.find(s.db, first.id)).toBeUndefined()
     expect((yield* s.messages).find((message) => message.id === first.id)).toMatchObject({
@@ -5079,14 +5082,14 @@ describe("SessionRunnerLLM", () => {
       "Queue first",
       "Steer before next queued input",
       "Also steer before next queued input",
-      "Background completion before next queued input",
+      reminder("Background completion before next queued input"),
     ])
     expect(userTexts(s.requests[3])).toEqual([
       "Start working",
       "Queue first",
       "Steer before next queued input",
       "Also steer before next queued input",
-      "Background completion before next queued input",
+      reminder("Background completion before next queued input"),
       "Queue second",
     ])
   })
@@ -6387,7 +6390,7 @@ describe("SessionRunnerLLM", () => {
       })
       expect(s.requests[1]?.messages.at(-1)).toMatchObject({
         role: "user",
-        content: [{ type: "text", text: nudge }],
+        content: [{ type: "text", text: reminder(nudge) }],
       })
       expect(yield* s.context).toMatchObject([
         { type: "user" },
@@ -6502,7 +6505,7 @@ describe("SessionRunnerLLM", () => {
       content: [
         {
           type: "text",
-          text: INCOMPLETE_STREAM_CONTINUATION,
+          text: reminder(INCOMPLETE_STREAM_CONTINUATION),
         },
       ],
     })
@@ -6545,7 +6548,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(s.requests[1]?.messages.at(-1)).toMatchObject({
       role: "user",
-      content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }],
+      content: [{ type: "text", text: reminder(INCOMPLETE_STREAM_CONTINUATION) }],
     })
     expect(yield* s.context).toMatchObject([
       { type: "user" },
@@ -6582,7 +6585,7 @@ describe("SessionRunnerLLM", () => {
     })
     expect(s.requests[1]?.messages.at(-1)).toMatchObject({
       role: "user",
-      content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }],
+      content: [{ type: "text", text: reminder(INCOMPLETE_STREAM_CONTINUATION) }],
     })
     expect(yield* recordedEventTypes(sessionID)).toContain("session.retry.scheduled.1")
     expect(yield* s.context).toMatchObject([
@@ -6615,7 +6618,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(s.requests[1]?.messages.at(-1)).toMatchObject({
       role: "user",
-      content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }],
+      content: [{ type: "text", text: reminder(INCOMPLETE_STREAM_CONTINUATION) }],
     })
     expect(yield* s.context).toMatchObject([
       Expected.user("Continue after unknown failure"),
@@ -6645,7 +6648,7 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests[1]?.messages.slice(-2)).toMatchObject([
       { role: "user", content: [{ type: "text", text: "Continue interrupted reasoning" }] },
-      { role: "user", content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }] },
+      { role: "user", content: [{ type: "text", text: reminder(INCOMPLETE_STREAM_CONTINUATION) }] },
     ])
     expect(yield* s.context).toMatchObject([
       { type: "user" },
@@ -6682,7 +6685,7 @@ describe("SessionRunnerLLM", () => {
       expect(yield* recordedEventTypes(sessionID)).toContain("session.retry.scheduled.1")
       expect(s.requests[1]?.messages.slice(-2)).toMatchObject([
         { role: "user", content: [{ type: "text", text: "Recover disconnected reasoning" }] },
-        { role: "user", content: [{ type: "text", text: INCOMPLETE_STREAM_CONTINUATION }] },
+        { role: "user", content: [{ type: "text", text: reminder(INCOMPLETE_STREAM_CONTINUATION) }] },
       ])
       expect(yield* s.context).toMatchObject([
         { type: "user" },
@@ -6728,7 +6731,7 @@ describe("SessionRunnerLLM", () => {
         content: [
           {
             type: "text",
-            text: INCOMPLETE_STREAM_CONTINUATION,
+            text: reminder(INCOMPLETE_STREAM_CONTINUATION),
           },
         ],
       },
@@ -7624,5 +7627,163 @@ describe("SessionRunnerLLM", () => {
     expect(defect).toBeInstanceOf(Error)
     if (!(defect instanceof Error)) return
     expect(defect.message).toBe("Tool input delta before start: call-1")
+  })
+})
+
+const nextSeq = (db: Effect.Success<typeof Database.Service>["db"]) =>
+  db
+    .select({ seq: EventSequenceTable.seq })
+    .from(EventSequenceTable)
+    .where(eq(EventSequenceTable.aggregate_id, sessionID))
+    .get()
+    .pipe(
+      Effect.orDie,
+      Effect.map((row) => (row?.seq ?? -1) + 1),
+    )
+
+// Spec checkpoint, "No warm cache breaks" (and spec frozen-prefix): a chat made before the marks and stepped after them
+// sends its earlier messages byte for byte as before; only messages created from then on are marked.
+describe("what a compaction leaves in the chat: marks only on what is new", () => {
+  scenario("a chat from before the marks keeps its bytes, and only its new messages are wrapped", function* (s) {
+    const long = "x".repeat(3_000)
+    const pasted = "line one\nline two\nline three"
+    yield* s.llm.push(
+      TestLLM.text("Started", "text-start"),
+      TestLLM.toolCall("call-long", "echo", { text: long }),
+      TestLLM.text("Wrote it", "text-wrote"),
+      TestLLM.text("## Objective\n- the summary", "summary"),
+      TestLLM.text("Old reply", "text-old"),
+      TestLLM.text("New reply", "text-new"),
+    )
+    yield* s.runPrompt("Start")
+    // The recent part keeps the newest exchange, a tool call with a whole file as its input among it.
+    yield* s.runPrompt("Write the file")
+    yield* s.session.compact({ sessionID })
+    yield* s.resume
+    // As written before the marks: no record that its recent part cuts tool inputs.
+    const compaction = (yield* s.messages).find((message) => message.type === "compaction")
+    expect(compaction?.metadata).toMatchObject({ recentInputs: "cut" })
+    const row = yield* s.db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, compaction!.id))
+      .get()
+      .pipe(Effect.orDie)
+    const { recentInputs: _, ...metadata } = row!.data.metadata as Record<string, unknown>
+    yield* s.db
+      .update(SessionMessageTable)
+      .set({ data: { ...row!.data, metadata } })
+      .where(eq(SessionMessageTable.id, compaction!.id))
+      .run()
+      .pipe(Effect.orDie)
+    // A synthetic message as stored before the marks, replayed from its event: it has no mark.
+    yield* s.bus.replay({
+      id: Event.ID.create(),
+      created: 1,
+      type: Bus.versionedType(SessionEvent.Synthetic.type, 1),
+      seq: yield* nextSeq(s.db),
+      aggregateID: sessionID,
+      data: { sessionID, text: "Old note" },
+    })
+    // A paste sent before the marks: the text alone, without its span.
+    yield* s.runPrompt(`Look at this:\n${pasted}`)
+
+    const before = s.requests.at(-1)!
+    const checkpoint = userTexts(before).find((text) => text.startsWith("<conversation-checkpoint>")) ?? ""
+    // The old checkpoint's recent part keeps the whole input, as it did.
+    expect(checkpoint).toContain(`[Assistant tool call]: echo(${JSON.stringify({ text: long })})`)
+    expect(userTexts(before).slice(-2)).toEqual(["Old note", `Look at this:\n${pasted}`])
+
+    yield* s.session.synthetic({ sessionID, text: "New note", resume: false })
+    yield* s.session.prompt({
+      sessionID,
+      text: `And this:\n${pasted}`,
+      pastes: [{ start: "And this:\n".length, end: `And this:\n${pasted}`.length }],
+      resume: false,
+    })
+    yield* s.resume
+    const after = s.requests.at(-1)!
+    // Everything the step before sent goes out again, byte for byte, before what is new.
+    expect(JSON.stringify(after.messages.slice(0, before.messages.length))).toBe(JSON.stringify(before.messages))
+    expect(userTexts(after).slice(-2)).toEqual([
+      "<system-reminder>\nNew note\n</system-reminder>",
+      `And this:\n<paste>${pasted}</paste>`,
+    ])
+    // What the person sees is what they sent, without tags.
+    const sent = (yield* s.messages).find((message) => message.type === "user" && message.text.startsWith("And this"))
+    expect(sent).toMatchObject({
+      text: `And this:\n${pasted}`,
+      pastes: [{ start: "And this:\n".length, end: `And this:\n${pasted}`.length }],
+    })
+  })
+
+  scenario("a compaction written from now on cuts a tool call's input in its recent part", function* (s) {
+    const long = "y".repeat(3_000)
+    yield* s.llm.push(
+      TestLLM.text("Started", "text-start"),
+      TestLLM.toolCall("call-long", "echo", { text: long }),
+      TestLLM.text("Wrote it", "text-wrote"),
+      TestLLM.text("## Objective\n- the summary", "summary"),
+      TestLLM.text("Next reply", "text-next"),
+    )
+    yield* s.runPrompt("Start")
+    yield* s.runPrompt("Write the file")
+    yield* s.session.compact({ sessionID })
+    yield* s.resume
+    yield* s.runPrompt("Next")
+    const checkpoint = userTexts(s.requests.at(-1)!).find((text) => text.startsWith("<conversation-checkpoint>")) ?? ""
+    const input = JSON.stringify({ text: long })
+    // Its first 1,250 characters, then `[truncated]`, as a tool's output is cut.
+    expect(checkpoint).toContain(`[Assistant tool call]: echo(${input.slice(0, 1_250)}\n[truncated])`)
+    expect(checkpoint).not.toContain(input)
+    // The tool's output is cut as before.
+    expect(checkpoint).toContain(`[Tool result]: ${long.slice(0, 1_250)}\n[truncated]`)
+  })
+
+  scenario("a replayed synthetic event keeps its mark, and one without the mark stays unmarked", function* (s) {
+    for (const [text, data] of [
+      ["Marked note", { reminder: true }],
+      ["Unmarked note", {}],
+    ] as const)
+      yield* s.bus.replay({
+        id: Event.ID.create(),
+        created: 1,
+        type: Bus.versionedType(SessionEvent.Synthetic.type, 1),
+        seq: yield* nextSeq(s.db),
+        aggregateID: sessionID,
+        data: { sessionID, text, ...data },
+      })
+    yield* s.llm.push(TestLLM.text("Seen", "text-seen"))
+    yield* s.runPrompt("Go on")
+    expect(userTexts(s.requests.at(-1)!)).toEqual([
+      "<system-reminder>\nMarked note\n</system-reminder>",
+      "Unmarked note",
+      "Go on",
+    ])
+    const synthetic = (yield* s.context).filter((message) => message.type === "synthetic")
+    expect(synthetic.map((message) => [message.text, message.reminder])).toEqual([
+      ["Marked note", true],
+      ["Unmarked note", undefined],
+    ])
+  })
+
+  scenario("paste spans that do not fit the prompt's text are not recorded", function* (s) {
+    yield* s.llm.push(TestLLM.text("One", "text-one"), TestLLM.text("Two", "text-two"))
+    for (const pastes of [
+      [{ start: 0, end: 40 }],
+      [
+        { start: 0, end: 5 },
+        { start: 3, end: 8 },
+      ],
+      [{ start: 4, end: 4 }],
+    ])
+      yield* s.session.prompt({ sessionID, text: "short text", pastes, resume: false })
+    yield* s.resume
+    expect(userTexts(s.requests.at(-1)!)).toEqual(["short text", "short text", "short text"])
+    expect((yield* s.context).flatMap((message) => (message.type === "user" ? [message.pastes] : []))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ])
   })
 })

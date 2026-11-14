@@ -2308,6 +2308,12 @@
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
                     }
                   },
+                  "pastes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Prompt.Paste"
+                    }
+                  },
                   "metadata": {
                     "type": "object"
                   },
@@ -2452,6 +2458,12 @@
                     "type": "array",
                     "items": {
                       "$ref": "#/components/schemas/PromptInput.SkillAttachment"
+                    }
+                  },
+                  "pastes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Prompt.Paste"
                     }
                   },
                   "delivery": {
@@ -24254,6 +24266,23 @@
         "required": ["start", "end", "text"],
         "additionalProperties": false
       },
+      "Prompt.Paste": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["start", "end"],
+        "additionalProperties": false
+      },
       "Prompt.SkillAttachment": {
         "type": "object",
         "properties": {
@@ -25522,6 +25551,9 @@
           },
           "metadata": {
             "type": "object"
+          },
+          "reminder": {
+            "type": "boolean"
           }
         },
         "required": ["text"],
@@ -25582,6 +25614,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Prompt.SkillAttachment"
+            }
+          },
+          "pastes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt.Paste"
             }
           },
           "metadata": {
@@ -26405,6 +26443,9 @@
           "description": {
             "type": "string"
           },
+          "reminder": {
+            "type": "boolean"
+          },
           "type": {
             "type": "string",
             "enum": ["synthetic"]
@@ -26576,6 +26617,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Prompt.SkillAttachment"
+            }
+          },
+          "pastes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt.Paste"
             }
           },
           "type": {

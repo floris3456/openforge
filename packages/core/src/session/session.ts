@@ -358,6 +358,8 @@ export const make = Effect.fn("Session.make")(function* () {
               text: input.text,
               description: input.description,
               metadata: input.metadata,
+              // Marked when it is admitted, so the model gets it inside `<system-reminder>` (spec checkpoint).
+              reminder: true,
             }),
             delivery: input.delivery ?? "steer",
           } satisfies SessionInbox.Item

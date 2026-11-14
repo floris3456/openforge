@@ -726,7 +726,8 @@ export const layer = Layer.effect(
       keep: number,
     ): Effect.fn.Return<Result, Failure> {
       const context = trigger.context
-      if (!context.messages.some(SessionRecentText.messageToText)) return yield* Effect.fail(NOTHING_TO_COMPACT)
+      if (!context.messages.some((message) => SessionRecentText.messageToText(message, true)))
+        return yield* Effect.fail(NOTHING_TO_COMPACT)
       const unsupported = (message: string) =>
         Effect.fail<Failure>({ error: { type: "provider.unsupported-operation", message } })
       const prepared = yield* prepare(context, context.messages, budget, "session")
@@ -1102,7 +1103,13 @@ export const layer = Layer.effect(
           ...(outcome.writer ? { writer: outcome.writer } : {}),
           ...usage,
         },
-        { metadata: outcome.metadata },
+        {
+          // History rebuilds a summary's recent part from `keepID` at every load, so whether it cuts tool inputs is
+          // recorded here, once, when the compaction is written.
+          metadata: outcome.metadata?.keepID
+            ? { ...outcome.metadata, [SessionRecentText.CUT_INPUTS]: "cut" }
+            : outcome.metadata,
+        },
       )
       return { status: "completed" }
     })
@@ -1154,7 +1161,13 @@ const heldIndex = (held: Precomputed, context: SessionContext.Loaded) => {
 
 /** Estimated text a swapped-in summary keeps verbatim: every message from `index` on. */
 const tailTokens = (context: SessionContext.Loaded, index: number) =>
-  Token.estimate(context.messages.slice(index).map(SessionRecentText.messageToText).filter(Boolean).join("\n\n"))
+  Token.estimate(
+    context.messages
+      .slice(index)
+      .map((message) => SessionRecentText.messageToText(message, true))
+      .filter(Boolean)
+      .join("\n\n"),
+  )
 
 const tailLimit = (keep: number, budget: number) =>
   Math.min(Math.max(keep * 2, PRECOMPUTED_TAIL_MIN), Math.floor(budget * PRECOMPUTED_TAIL_SHARE))
@@ -1180,7 +1193,7 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
  */
 const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
   const entries = messages.flatMap((message) => {
-    const text = SessionRecentText.messageToText(message)
+    const text = SessionRecentText.messageToText(message, true)
     return text ? [{ message, text }] : []
   })
   if (entries.length === 0) return undefined
@@ -1328,7 +1341,10 @@ export const estimatePrompt = (context: SessionContext.Loaded): Estimate => {
   if (anchor?.type !== "assistant" || !anchor.tokens)
     return {
       measured: 0,
-      estimated: estimateRequest({ system: base.system, tools: context.tools.definitions, messages: unmeasured }, exact),
+      estimated: estimateRequest(
+        { system: base.system, tools: context.tools.definitions, messages: unmeasured },
+        exact,
+      ),
     }
 
   const tokens = anchor.tokens
@@ -1464,7 +1480,8 @@ const estimatePart = (part: ContentPart, exact: ImageFit.Model | undefined): num
 
 const estimateMedia = (mime: string, exact?: { readonly model: ImageFit.Model; readonly data: string }) => {
   const type = mime.toLowerCase()
-  if (type.startsWith("image/")) return (exact === undefined ? undefined : ImageFit.visualTokens(exact.data, exact.model)) ?? IMAGE_TOKEN_ESTIMATE
+  if (type.startsWith("image/"))
+    return (exact === undefined ? undefined : ImageFit.visualTokens(exact.data, exact.model)) ?? IMAGE_TOKEN_ESTIMATE
   if (type === "application/pdf") return PDF_TOKEN_ESTIMATE
   return 0
 }

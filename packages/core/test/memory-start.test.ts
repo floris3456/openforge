@@ -430,13 +430,21 @@ const setup = Effect.fnUntraced(function* (
 
 const names = (request: LLMRequest | undefined) =>
   (request?.tools ?? []).map((tool) => tool.name).filter((name) => name !== "execute")
-const blocksIn = (request: LLMRequest | undefined) => userTexts(request).filter((text) => text.startsWith("Memory"))
+const blocksIn = (request: LLMRequest | undefined) =>
+  userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory"))
 
 /** The texts of a request's user-role messages, in order: prompts and synthetic messages alike. */
 const userTexts = (request: LLMRequest | undefined) =>
   (request?.messages ?? []).flatMap((message) =>
     message.role === "user" ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])) : [],
   )
+// Memory's blocks are synthetic messages, which the model gets inside `<system-reminder>` (spec checkpoint, section 1).
+const sent = (text: string) => `<system-reminder>\n${text}\n</system-reminder>`
+const unsent = (text: string | undefined) => {
+  expect(text).toStartWith("<system-reminder>\n")
+  expect(text).toEndWith("\n</system-reminder>")
+  return (text ?? "").slice("<system-reminder>\n".length, -"\n</system-reminder>".length)
+}
 const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
 const opening =
   "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
@@ -476,7 +484,7 @@ describe("MemoryStart through the runner", () => {
         `Memory holds 1 global entry and 1 of role build; recall finds them.`,
         keep,
       ].join("\n")
-      expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", block])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", sent(block)])
       expect(yield* h.blocks()).toEqual([block])
       for (const id of [otherRole.id, otherProject.id]) expect(block).not.toContain(id)
       expect(h.starts().map((call) => call.body)).toEqual([
@@ -498,14 +506,14 @@ describe("MemoryStart through the runner", () => {
       for (const n of [1, 2, 3, 4, 5, 6, 7])
         yield* h.write({ kind: "unverified", text: `Quokka note ${n}.`, basis: "b", scope: "role" })
       yield* h.prompt("quokka ".repeat(400))
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       expect(block.split("\n").filter((line) => line.startsWith("- ["))).toHaveLength(5)
       expect((h.starts()[0]?.body as { prompt: string }).prompt).toBe("quokka ".repeat(400).slice(0, 2_000))
 
       const empty = yield* setup()
       yield* empty.prompt("nothing is stored here")
       expect(userTexts(empty.requests()[0])[1]).toBe(
-        [opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n"),
+        sent([opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n")),
       )
     }),
   )
@@ -522,11 +530,13 @@ describe("MemoryStart through the runner", () => {
       yield* h.prompt("echo twice")
       const requests = h.requests()
       expect(requests).toHaveLength(3)
-      const blocks = requests.map((request) => userTexts(request).filter((text) => text.startsWith("Memory:")))
+      const blocks = requests.map((request) =>
+        userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:")),
+      )
       expect(blocks[0]).toHaveLength(1)
       expect(blocks[1]).toEqual(blocks[0])
       expect(blocks[2]).toEqual(blocks[0])
-      expect(yield* h.blocks()).toEqual(blocks[0])
+      expect((yield* h.blocks()).map(sent)).toEqual(blocks[0]!)
       expect(h.starts()).toHaveLength(1)
     }),
   )
@@ -556,7 +566,7 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(zebra.id)
       expect(blocks[1]).toContain(quokka.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last.filter((text) => text.startsWith("Memory:"))).toEqual([blocks[1]])
+      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual(blocks.slice(1, 2).map(sent))
     }),
   )
 
@@ -588,7 +598,7 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(walrus.id)
       expect(blocks[0]).not.toContain(zebra.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last).toEqual(["zebra deploys?", "walrus lint?", blocks[0]])
+      expect(last).toEqual(["zebra deploys?", "walrus lint?", ...blocks.slice(0, 1).map(sent)])
     }),
   )
 
@@ -602,7 +612,7 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* h.prompt("walrus lint?")
       expect(yield* h.blocks()).toEqual([MemoryText.unavailable])
-      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(MemoryText.unavailable)
+      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(sent(MemoryText.unavailable))
     }),
   )
 
@@ -612,7 +622,7 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () =>
         Response.json({ error: { type: "unavailable", message: "store not open" } }, { status: 503 })
       yield* h.prompt("zebra?")
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
       expect(MemoryText.unavailable).toBe("Memory is unavailable right now, so this chat starts without it.")
 
       const k = yield* setup()
@@ -625,7 +635,9 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* k.prompt("quokka?")
       expect(yield* k.blocks()).toEqual([first, first])
-      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("Memory:"))).toEqual([first])
+      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([
+        sent(first ?? ""),
+      ])
     }),
   )
 
@@ -639,7 +651,7 @@ describe("MemoryStart through the runner", () => {
       expect(h.requests()).toHaveLength(0)
       yield* TestClock.adjust("2 seconds")
       yield* Fiber.join(run)
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
     }),
   )
 
@@ -693,7 +705,7 @@ describe("MemoryStart through the runner", () => {
       )
       const lead = yield* h.write({ kind: "unverified", text: "Zebra builds are slow.", basis: "felt", scope: "role" })
       yield* h.prompt("where are the zebra files?")
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       expect(block).toContain(own.id)
       expect(block).not.toContain(lead.id)
       expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore; recall finds them.\n${keep}`)
@@ -715,13 +727,15 @@ describe("MemoryStart through the runner", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("recall")
       expect(userTexts(request)[1]).toBe(
-        [
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
-          "Memory holds 0 global entries and 1 of role reader.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
+            "Memory holds 0 global entries and 1 of role reader.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -738,12 +752,14 @@ describe("MemoryStart through the runner", () => {
       expect(request?.tools.map((tool) => tool.name)).toContain("recall")
       expect(request?.tools.map((tool) => tool.name)).not.toContain("remember")
       expect(userTexts(request)[1]).toBe(
-        [
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
-          `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
-        ].join("\n"),
+        sent(
+          [
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
+            `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -984,7 +1000,7 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
         const h = yield* setup()
         server.control.answer = answer
         yield* h.prompt("zebra?")
-        expect(userTexts(h.requests()[0])).toEqual(["zebra?", MemoryText.unavailable])
+        expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
         expect(names(h.requests()[0])).toEqual(["echo", "forget", "recall", "remember", "task"])
       }
     }),
@@ -1061,21 +1077,23 @@ describe("MemoryStart inside a task", () => {
         })
         yield* h.prompt("zebra deploys")
         expect(userTexts(h.requests()[0])[1]).toBe(
-          [
-            `Your task [${ids.task}]: Move the checks (active)`,
-            "One script.",
-            "Done when it passes.",
-            states,
-            opening,
-            "Said with the task's changes of state, newest first:",
-            `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
-            "What was noted in the task, newest first:",
-            MemoryText.entry(noted),
-            "What memory holds nearest to this prompt; it may not be about it:",
-            MemoryText.entry(global),
-            `Memory holds 1 global entry and 0 of role build, 1 of this task; recall finds them.`,
-            keep,
-          ].join("\n"),
+          sent(
+            [
+              `Your task [${ids.task}]: Move the checks (active)`,
+              "One script.",
+              "Done when it passes.",
+              states,
+              opening,
+              "Said with the task's changes of state, newest first:",
+              `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
+              "What was noted in the task, newest first:",
+              MemoryText.entry(noted),
+              "What memory holds nearest to this prompt; it may not be about it:",
+              MemoryText.entry(global),
+              `Memory holds 1 global entry and 0 of role build, 1 of this task; recall finds them.`,
+              keep,
+            ].join("\n"),
+          ),
         )
         expect(h.starts()[0]?.body).toMatchObject({
           scopes: { global: true, roles: ["build"], tasks: [ids.task] },
@@ -1105,16 +1123,18 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("zebra deploys")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.task}]: Move the checks (todo)`,
-          "One script.",
-          states,
-          opening,
-          "What memory holds nearest to this prompt; it may not be about it:",
-          MemoryText.entry(global),
-          `Memory holds 1 global entry and 0 of role build, 0 of this task; recall finds them.`,
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.task}]: Move the checks (todo)`,
+            "One script.",
+            states,
+            opening,
+            "What memory holds nearest to this prompt; it may not be about it:",
+            MemoryText.entry(global),
+            `Memory holds 1 global entry and 0 of role build, 0 of this task; recall finds them.`,
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1136,15 +1156,17 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (todo)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          "Only the lint part.",
-          states,
-          opening,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (todo)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            "Only the lint part.",
+            states,
+            opening,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
       expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
     }),
@@ -1175,18 +1197,20 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (review)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          "Only the lint part.",
-          states,
-          opening,
-          "Said with the task's changes of state, newest first:",
-          `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
-          `${said[0]} by floris as general: The old script is gone.`,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (review)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            "Only the lint part.",
+            states,
+            opening,
+            "Said with the task's changes of state, newest first:",
+            `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
+            `${said[0]} by floris as general: The old script is gone.`,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1208,14 +1232,16 @@ describe("MemoryStart inside a task", () => {
       })
       yield* h.prompt("go on")
       expect(userTexts(h.requests()[0])[1]).toBe(
-        [
-          `Your task [${ids.subtask}]: The first half (todo)`,
-          `Part of task [${ids.task}]: Move the checks.`,
-          states,
-          opening,
-          "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.subtask}]: The first half (todo)`,
+            `Part of task [${ids.task}]: Move the checks.`,
+            states,
+            opening,
+            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1237,13 +1263,15 @@ describe("MemoryStart inside a task", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("task")
       expect(userTexts(request)[1]).toBe(
-        [
-          `Your task [${ids.task}]: Move the checks (todo)`,
-          "One script.",
-          opening,
-          "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
-          keep,
-        ].join("\n"),
+        sent(
+          [
+            `Your task [${ids.task}]: Move the checks (todo)`,
+            "One script.",
+            opening,
+            "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
+            keep,
+          ].join("\n"),
+        ),
       )
     }),
   )
@@ -1264,7 +1292,7 @@ describe("MemoryStart inside a task", () => {
       for (const n of Array.from({ length: 12 }, (_, index) => index))
         written.push(yield* note(h.project, `Entry ${n} ${"e".repeat(300)}.`))
       yield* h.prompt("go on")
-      const block = userTexts(h.requests()[0])[1] ?? ""
+      const block = unsent(userTexts(h.requests()[0])[1])
       // The assignment above the opening and the notes under it are bounded together.
       const assignment = block.slice(0, block.indexOf(`\n${opening}\n`))
       const notes = block.slice(block.indexOf(`${opening}\n`) + opening.length + 1, block.indexOf("\nMemory holds "))

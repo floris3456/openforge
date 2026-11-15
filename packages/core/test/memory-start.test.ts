@@ -60,7 +60,16 @@ import { promptLocationNode } from "./fixture/prompt-location"
 import { permissionLayer } from "./lib/permission"
 import { settle, until } from "./pacer/fake-tools"
 import { texts } from "./pacer/memory-harness"
-import { catalogOf, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied, type Received } from "./memory/fixture"
+import {
+  catalogOf,
+  endpointAt,
+  key,
+  pacerToolsNode,
+  poll,
+  primeTools,
+  startProxied,
+  type Received,
+} from "./memory/fixture"
 import { startFakeEmbedding } from "./pacer/memory-embedding"
 
 // The start block through the real runner: what each model request holds, over the small memory server. One server
@@ -561,7 +570,9 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(zebra.id)
       expect(blocks[1]).toContain(quokka.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual(blocks.slice(1, 2).map(sent))
+      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual(
+        blocks.slice(1, 2).map(sent),
+      )
     }),
   )
 
@@ -631,9 +642,9 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* k.prompt("quokka?")
       expect(yield* k.blocks()).toEqual([first, first])
-      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual([
-        sent(first ?? ""),
-      ])
+      expect(
+        userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory (fake)")),
+      ).toEqual([sent(first ?? "")])
     }),
   )
 
@@ -724,7 +735,9 @@ describe("MemoryStart through the runner", () => {
       yield* h.prompt("where are the zebra files?")
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("recall")
-      expect(userTexts(request)[1]).toBe(sent(fakeBlock("reader", [own], { recall: false, remember: true, task: true })))
+      expect(userTexts(request)[1]).toBe(
+        sent(fakeBlock("reader", [own], { recall: false, remember: true, task: true })),
+      )
     }),
   )
 
@@ -739,7 +752,9 @@ describe("MemoryStart through the runner", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).toContain("recall")
       expect(request?.tools.map((tool) => tool.name)).not.toContain("remember")
-      expect(userTexts(request)[1]).toBe(sent(fakeBlock("viewer", [own], { recall: true, remember: false, task: true })))
+      expect(userTexts(request)[1]).toBe(
+        sent(fakeBlock("viewer", [own], { recall: true, remember: false, task: true })),
+      )
     }),
   )
 })
@@ -1096,8 +1111,7 @@ describe("MemoryPrompt through the runner", () => {
       const h = yield* near()
       yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
       yield* h.prompt("zebra lint")
-      const forward = (request: Received) =>
-        prompted.pass(request)
+      const forward = (request: Received) => prompted.pass(request)
       const hung = Promise.withResolvers<Response>()
       yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
       prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? hung.promise : forward(request))
@@ -1191,7 +1205,8 @@ describe("MemoryStart after a compaction: the summary", () => {
   const near = (input: Parameters<typeof setup>[0] = {}) =>
     setup({ served: summarized, catalog: catalogOf(true, { plans: false }), ...input })
   /** What the block holds after a compaction: CPP's text of the entries close to the summary. */
-  const closeTo = (entries: ReadonlyArray<{ readonly id: string; readonly text: string }>) => fakeBlock("build", entries)
+  const closeTo = (entries: ReadonlyArray<{ readonly id: string; readonly text: string }>) =>
+    fakeBlock("build", entries)
   const summary = "Before any heading.\n\n## Objective\nShip it soon.\n\n## Empty\n\n## Next\n- zebra lint"
   type Started = { prompt: string; limit: number; summary?: string[]; exclude?: string[] }
   const bodies = (h: Effect.Success<ReturnType<typeof setup>>) => h.starts().map((call) => call.body as Started)
@@ -1347,8 +1362,7 @@ describe("MemoryStart after a compaction: the summary", () => {
 
   it.effect("waits at most 5 seconds for the summary; a timeout or an error give the block without the line", () =>
     Effect.gen(function* () {
-      const forward = (request: Received) =>
-        summarized.pass(request)
+      const forward = (request: Received) => summarized.pass(request)
       const withSummary = (request: { path: string; body: unknown }) =>
         request.path.endsWith("/start") && (request.body as Started).summary !== undefined
       const { h } = yield* compacted()
@@ -1616,8 +1630,7 @@ describe("MemoryFollowed through the runner", () => {
   it.effect("a hanging or failing server never holds up a step: one try, dropped after 2 seconds", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const forward = (request: Received) =>
-        server.pass(request)
+      const forward = (request: Received) => server.pass(request)
       // Every row hangs; the rest goes through.
       const hung = Promise.withResolvers<Response>()
       yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))

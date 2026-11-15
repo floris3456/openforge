@@ -39,9 +39,7 @@ const make = (url: string, where: string, title: string, subtasks?: ReadonlyArra
       method: "POST",
       headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
       body: JSON.stringify({ title, ...(subtasks ? { subtasks } : {}), by: { role: "build", chat: "ses_maker" } }),
-    }).then(
-      (answer) => answer.json() as Promise<{ task: { id: string }; subtasks?: ReadonlyArray<{ id: string }> }>,
-    ),
+    }).then((answer) => answer.json() as Promise<{ task: { id: string }; subtasks?: ReadonlyArray<{ id: string }> }>),
   )
 
 const setup = Effect.gen(function* () {

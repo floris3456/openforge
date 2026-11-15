@@ -1,8 +1,8 @@
 export * as MemoryLines from "./memory-lines.js"
 
 /**
- * Memory's text as openforge writes it for a model (`MemoryText` in core), read back for showing (spec notice-view,
- * section 2). An entry is one line:
+ * Memory's text as CLIProxyPacer writes it for a model (workspace reference `docs/reference/cpp-tools-api.md`), read
+ * back for showing (spec notice-view, section 2). An entry is one line:
  *
  *   - [id] text (verified by P as R; scope; YYYY-MM-DD; basis: …)
  *

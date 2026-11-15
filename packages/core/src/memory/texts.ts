@@ -40,11 +40,15 @@ export const layer = Layer.effect(
         Effect.gen(function* () {
           const endpoint = yield* endpoints.get()
           if (!endpoint || catalog?.pacer?.memory?.tools !== true) return
-          const texts = yield* client.texts({ timeout: TIMEOUT }).pipe(
-            Effect.catch((error) =>
-              Effect.logInfo("memory's texts could not be read", { reason: error.message }).pipe(Effect.as(undefined)),
-            ),
-          )
+          const texts = yield* client
+            .texts({ timeout: TIMEOUT })
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logInfo("memory's texts could not be read", { reason: error.message }).pipe(
+                  Effect.as(undefined),
+                ),
+              ),
+            )
           // Kept only while the endpoint it was read from is still the current one.
           if (texts && PacerEndpoint.same(endpoint, yield* endpoints.get()))
             yield* kv.set(key(endpoint), { unavailable: texts.unavailable, refused: texts.refused })

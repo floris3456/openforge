@@ -177,7 +177,12 @@ export function makeHarness(store: Store) {
         store.change(
           who.project,
           id,
-          { state: input.state, ...(input.note ? { note: input.note } : {}), ...(next ? { next: true } : {}), by: by(who) },
+          {
+            state: input.state,
+            ...(input.note ? { note: input.note } : {}),
+            ...(next ? { next: true } : {}),
+            by: by(who),
+          },
           who.person,
         ),
       )
@@ -241,9 +246,7 @@ export function makeHarness(store: Store) {
     },
     /** `POST …/prompt` without `by`: the store's answer, with its message or null. */
     prompt: async (who: Caller, body: Fields) => {
-      const prompted = await json(
-        store.prompt(who.project, { ...body, scopes: scopes(who), by: by(who) }, who.person),
-      )
+      const prompted = await json(store.prompt(who.project, { ...body, scopes: scopes(who), by: by(who) }, who.person))
       const entries = prompted.entries as Fields[]
       return Response.json({
         ...prompted,

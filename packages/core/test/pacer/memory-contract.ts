@@ -3856,7 +3856,9 @@ export function memoryContract(target: Target) {
       const memory = project("harness-list")
       await memory.verified("Harness lists hold memory tools.")
       const headers = chat({ "x-pacer-project": memory.id })
-      const listed = await answered(send("GET", "/pacer/v1/tools?model=m&include=memory", undefined, undefined, undefined, headers))
+      const listed = await answered(
+        send("GET", "/pacer/v1/tools?model=m&include=memory", undefined, undefined, undefined, headers),
+      )
       const names = (listed.tools.claude as Array<{ name: string }>).map((tool) => tool.name)
       expect(names.filter((name) => ["remember", "recall", "forget", "task"].includes(name))).toEqual([
         "remember",
@@ -3902,7 +3904,14 @@ export function memoryContract(target: Target) {
       expect(started).toMatchObject({ text: expect.any(String), entries: expect.any(Array), place: null })
       expect(started.text).not.toBe("")
       const prompted = await answered(
-        send("POST", `/pacer/v1/memory/${memory.id}/prompt`, { prompt: "nothing near", exclude: [] }, undefined, undefined, chat()),
+        send(
+          "POST",
+          `/pacer/v1/memory/${memory.id}/prompt`,
+          { prompt: "nothing near", exclude: [] },
+          undefined,
+          undefined,
+          chat(),
+        ),
       )
       expect(prompted.entries).toEqual(expect.any(Array))
       expect(prompted.text === null || typeof prompted.text === "string").toBe(true)
@@ -3910,7 +3919,9 @@ export function memoryContract(target: Target) {
     test("the chat route answers its place and check; memory's texts are two strings", async () => {
       const memory = project("harness-chat")
       await memory.verified("Harness chats have a place.")
-      const read = await answered(send("GET", `/pacer/v1/memory/${memory.id}/chat`, undefined, undefined, undefined, chat()))
+      const read = await answered(
+        send("GET", `/pacer/v1/memory/${memory.id}/chat`, undefined, undefined, undefined, chat()),
+      )
       expect([read.place, read.check]).toEqual([null, null])
       const texts = await answered(send("GET", "/pacer/v1/memory/texts", undefined, undefined, undefined, chat()))
       expect([typeof texts.unavailable, typeof texts.refused]).toEqual(["string", "string"])

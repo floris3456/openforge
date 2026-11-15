@@ -2,7 +2,20 @@ export * as PacerTools from "./tools.js"
 
 import { ToolDefinition } from "@opencode/ai/effect"
 import type { SessionID } from "@opencode/schema/session-id"
-import { Clock, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schema, Scope, Stream, SubscriptionRef } from "effect"
+import {
+  Clock,
+  Context,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Schema,
+  Scope,
+  Stream,
+  SubscriptionRef,
+} from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { KV } from "../kv.js"
@@ -13,7 +26,8 @@ import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 
 // CPP's tools as a client of its API (CLIENT-GUIDE §4.3; the workspace's reference `docs/reference/cpp-tools-api.md`):
-// each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls. CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
+// each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
+// CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
 // anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
 // model changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
 // is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
@@ -153,7 +167,9 @@ const ListAnswer = Schema.Struct({
   meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 })
 const decodeMeta = Schema.decodeUnknownOption(Meta)
-const PlaceAnswer = Schema.NullOr(Schema.Struct({ task: Schema.String, subtask: Schema.optional(Schema.NullOr(Schema.String)) }))
+const PlaceAnswer = Schema.NullOr(
+  Schema.Struct({ task: Schema.String, subtask: Schema.optional(Schema.NullOr(Schema.String)) }),
+)
 const decodePlace = Schema.decodeUnknownOption(PlaceAnswer)
 const CallAnswer = Schema.Struct({
   text: Schema.optional(Schema.NullOr(Schema.String)),
@@ -198,9 +214,11 @@ export const layer = Layer.effect(
     const load = (endpoint: PacerEndpoint.Endpoint | undefined) =>
       endpoint === undefined
         ? Effect.succeed<Known>(new Map())
-        : kv.get(knownKey(endpoint)).pipe(
-            Effect.map((value): Known => new Map(Object.entries(Option.getOrElse(decodeKnown(value), () => ({}))))),
-          )
+        : kv
+            .get(knownKey(endpoint))
+            .pipe(
+              Effect.map((value): Known => new Map(Object.entries(Option.getOrElse(decodeKnown(value), () => ({}))))),
+            )
     const known = yield* SubscriptionRef.make<Known>(yield* load(yield* endpoints.get()))
     /** Adds what a list read from the current endpoint names; kept only when it changed something. */
     const learn = (endpoint: PacerEndpoint.Endpoint | undefined, list: List) =>
@@ -298,7 +316,9 @@ export const layer = Layer.effect(
                 if (chat.generation === generation) chat.stale = false
                 return { list, answered: true }
               }).pipe(
-                Effect.tap((read) => (read.list && epoch === state.epoch ? learn(state.endpoint, read.list) : Effect.void)),
+                Effect.tap((read) =>
+                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list) : Effect.void,
+                ),
               ),
             ),
             Effect.catch((error) =>
@@ -320,8 +340,7 @@ export const layer = Layer.effect(
                 }
                 if (error._tag !== "PacerHttp.NotSetUp")
                   state.pausedUntil = (yield* Clock.currentTimeMillis) + Duration.toMillis(PAUSE)
-                if (!quiet)
-                  yield* Effect.logWarning("could not read CLIProxyPacer's tools", { reason: error.message })
+                if (!quiet) yield* Effect.logWarning("could not read CLIProxyPacer's tools", { reason: error.message })
                 // A refused key or no CPP set up is an answer; nothing else from it is.
                 const answered = error._tag === "PacerHttp.Refused" || error._tag === "PacerHttp.NotSetUp"
                 return { list: chat.list, answered, reason: error.message }

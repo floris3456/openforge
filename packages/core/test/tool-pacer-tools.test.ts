@@ -102,7 +102,9 @@ const setup = Effect.fnUntraced(function* (options: { readonly read?: boolean } 
   /** The failure itself, with its metadata, which the test helper leaves out. */
   const failure = (name: string, input: unknown) =>
     registry.snapshot().pipe(
-      Effect.flatMap((tools) => tools.execute({ ...call, call: { type: "tool-call", id: `call-${name}`, name, input } })),
+      Effect.flatMap((tools) =>
+        tools.execute({ ...call, call: { type: "tool-call", id: `call-${name}`, name, input } }),
+      ),
       Effect.flip,
     )
   return { cpp, registry, started, asked, run, failure, chat }

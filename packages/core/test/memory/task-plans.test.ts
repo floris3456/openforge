@@ -562,7 +562,8 @@ describe("an edit outside a task", () => {
 
 describe("the check at the end of a turn", () => {
   /** CPP's check for what the chat is on, as the small server words it. */
-  const line = (item: { readonly id: string; readonly title: string }) => `Task check (fake): [${item.id}] ${item.title}.`
+  const line = (item: { readonly id: string; readonly title: string }) =>
+    `Task check (fake): [${item.id}] ${item.title}.`
 
   it.live("comes once after a turn that edited without a task call, as the last message, and the model goes on", () =>
     Effect.gen(function* () {
@@ -659,20 +660,22 @@ describe("the check at the end of a turn", () => {
     }),
   )
 
-  it.live("none while CPP names none, on a server that serves no memory tools, or for a chat without the task tool", () =>
-    Effect.gen(function* () {
-      for (const input of [
-        // Its subtask, the one it is on, is still todo: CPP answers no check.
-        { inside: "subtask" },
-        { inside: "task", catalog: catalogOf(true, { prompt: false, tools: false }) },
-        { inside: "task", child: true, agent: "untasked" },
-      ] as const) {
-        const h = yield* setup(input)
-        yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-        yield* h.prompt("go on")
-        expect({ input, checks: yield* h.checks() }).toEqual({ input, checks: [] })
-      }
-    }),
+  it.live(
+    "none while CPP names none, on a server that serves no memory tools, or for a chat without the task tool",
+    () =>
+      Effect.gen(function* () {
+        for (const input of [
+          // Its subtask, the one it is on, is still todo: CPP answers no check.
+          { inside: "subtask" },
+          { inside: "task", catalog: catalogOf(true, { prompt: false, tools: false }) },
+          { inside: "task", child: true, agent: "untasked" },
+        ] as const) {
+          const h = yield* setup(input)
+          yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+          yield* h.prompt("go on")
+          expect({ input, checks: yield* h.checks() }).toEqual({ input, checks: [] })
+        }
+      }),
   )
 
   it.live("a read that fails gives none, and the chat goes idle as before", () =>

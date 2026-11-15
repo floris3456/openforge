@@ -25,13 +25,13 @@ import { MemoryTexts } from "./texts.js"
 // The start block (the workspace's spec `docs/specs/memory.md`, section 3): one durable synthetic message per span of
 // a chat the model sees, put in at the step boundary before the step's request is built. CPP writes it (`POST …/start`
 // with the tools the agent may use, workspace reference `docs/reference/cpp-tools-api.md`); openforge decides when it
-// goes in, and its line in the person's view. As with file instructions
-// (`SessionInstructions`), the message's metadata is the only ledger: a block that a compaction or a revert took out
-// of view is built again, from the chat's newest prompt and, after a compaction on a server with `summary`, with the
-// entries close to its summary (`MemorySummary`). It is stored, so every step of the span sends the same bytes.
-// It goes in only where the chat's prompt cache is new anyway, before the span's first step: a chat that stepped
-// without one gets none until its next compaction; its memory tools are its tool list's (`PacerOffer`). So does a chat whose project
-// CPP keeps memory from (`MemoryClient.Closed`, workspace spec `docs/specs/cpp-projects.md`).
+// goes in, and its line in the person's view. As with file instructions (`SessionInstructions`), the message's
+// metadata is the only ledger: a block that a compaction or a revert took out of view is built again, from the chat's
+// newest prompt and, after a compaction on a server with `summary`, with the entries close to its summary
+// (`MemorySummary`). It is stored, so every step of the span sends the same bytes. It goes in only where the chat's
+// prompt cache is new anyway, before the span's first step: a chat that stepped without one gets none until its next
+// compaction, nor does a chat whose project CPP keeps memory from (`MemoryClient.Closed`, workspace spec
+// `docs/specs/cpp-projects.md`). Its memory tools are its tool list's (`PacerOffer`).
 
 /** How long the start call may take before the chat goes on without it. */
 const TIMEOUT = "2 seconds"

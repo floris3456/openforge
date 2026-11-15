@@ -3,6 +3,7 @@ export * as MemoryTask from "./task.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import { Context, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { Agent } from "../agent.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
 import { PacerProject } from "../pacer/project.js"
@@ -83,6 +84,10 @@ const layer = Layer.effect(
     const client = yield* MemoryClient.Service
     const projects = yield* PacerProject.Service
     const catalogs = yield* PacerModels.Service
+    const agents = yield* Agent.Service
+    /** The role a chat runs as: its agent, or the default one when it names none. */
+    const roleOf = (session: SessionSchema.Info) =>
+      agents.select(session.agent).pipe(Effect.map((selected) => String(selected.id)))
 
     const projectOf = Effect.fnUntraced(function* (parent: SessionSchema.Info) {
       const project = (yield* projects.chat(parent.projectID)).project
@@ -114,7 +119,7 @@ const layer = Layer.effect(
             message: `There is no task ${taskID}: this server serves no memory, so no subagent was started.`,
           })
         const project = yield* projectOf(parent)
-        const answer = yield* named(project, parent, String(parent.agent)).assign(project, taskID).pipe(Effect.mapError(fail))
+        const answer = yield* named(project, parent, yield* roleOf(parent)).assign(project, taskID).pipe(Effect.mapError(fail))
         if (answer.error) return yield* new ToolFailure({ message: answer.text || answer.error.message })
         const place = answer.place === undefined ? { task: taskID } : fromPlace(answer.place)
         return { parent: parent.id, project, task: taskID, metadata: placed(parent.metadata, place) }
@@ -131,7 +136,7 @@ const layer = Layer.effect(
       ended: Effect.fn("MemoryTask.ended")(function* (parent, taskID, output) {
         const project = (yield* projects.chat(parent.projectID)).project
         if (project === undefined) return output
-        const text = yield* named(project, parent, String(parent.agent)).ended(project, taskID).pipe(Effect.option)
+        const text = yield* named(project, parent, yield* roleOf(parent)).ended(project, taskID).pipe(Effect.option)
         if (text._tag === "None" || !text.value) return output
         return `${output}\n${text.value}`
       }),
@@ -142,7 +147,7 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [MemoryClient.node, PacerProject.node, PacerModels.node],
+  deps: [MemoryClient.node, PacerProject.node, PacerModels.node, Agent.node],
 })
 
 /** Not as the failure's cause, which would make it an unknown error rather than the tool's. */

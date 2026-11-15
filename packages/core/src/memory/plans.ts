@@ -76,13 +76,15 @@ const layer = Layer.effect(
     const chat = Effect.fnUntraced(function* (session: SessionSchema.Info, timeout?: Duration.Input) {
       const named = yield* projects.chat(session.projectID)
       if (named.project === undefined) return undefined
+      // A chat that names no agent runs as the default one.
+      const agent = String((yield* agents.select(session.agent)).id)
       const answer = yield* client
         .withHeaders(
           PacerHeaders.chat({
             sessionID: session.id,
             parentID: session.parentID,
             project: named.headers,
-            agent: String(session.agent),
+            agent,
           }),
         )
         .chat(named.project, timeout === undefined ? undefined : { timeout })

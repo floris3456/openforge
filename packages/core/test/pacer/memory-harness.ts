@@ -85,9 +85,16 @@ export function makeHarness(store: Store) {
     return { global: true, roles: [who.role], ...(place ? { tasks: [place.task] } : {}) }
   }
   const json = async (response: Response | Promise<Response>) => (await response).json() as Promise<Fields>
+  /** A task as reading it answers, or undefined for none: the store refuses a missing one by throwing. */
   const taskOf = async (who: Caller, id: string) => {
-    const response = store.task(who.project, id)
-    return response.ok ? ((await response.json()) as { task: Fields; subtasks: Fields[] }) : undefined
+    const response = (() => {
+      try {
+        return store.task(who.project, id)
+      } catch {
+        return undefined
+      }
+    })()
+    return response?.ok ? ((await response.json()) as { task: Fields; subtasks: Fields[] }) : undefined
   }
   const lineOf = (entry: Fields) => `- [${entry.id}] ${entry.text}`
 

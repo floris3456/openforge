@@ -351,6 +351,14 @@ const textUser = (text: string) =>
     time: { created: DateTime.makeUnsafe(0) },
   })
 
+// openforge: the person's own words are kept after the summary by CLIProxyPacer's list of earlier messages, which no
+// provider's compaction could keep; the summary is not asked to quote them (workspace spec
+// `docs/specs/earlier-messages-kept.md`).
+test("compaction prompt does not ask the summary to quote the user's requests word for word", () => {
+  for (const prompt of [SessionCompaction.buildPrompt(false), SessionCompaction.buildPrompt(true)])
+    expect(prompt).not.toContain("exact wording")
+})
+
 test("compaction prompt requires the checkpoint headings in order", () => {
   const prompt = SessionCompaction.buildPrompt(false)
   expect(prompt.match(/^#{2,3} .+$/gm)).toEqual([

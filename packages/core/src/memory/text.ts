@@ -325,7 +325,8 @@ function workerOf(item: MemoryClient.Task, now: number | undefined) {
   return `; worked on by ${who(item.worker)}, last request ${seen}`
 }
 
-function ago(ms: number) {
+/** How long ago `ms` milliseconds were, as the task texts say it. */
+export function ago(ms: number) {
   const minutes = Math.floor(ms / 60_000)
   if (minutes < 1) return "less than a minute ago"
   if (minutes < 60) return `${minutes} min ago`

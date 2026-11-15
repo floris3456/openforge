@@ -149,9 +149,9 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
   const history = new Map<SessionInfo.ID, SessionMessage.Info[]>()
   const chats = new Map(known)
   const running = new Set<SessionInfo.ID>()
-  /** Puts the chat inside a task, as the subagent tool or the task tool would. */
-  const place = (chat: SessionInfo.ID, inside: { task: string; subtask?: string }) =>
-    void chats.set(chat, { ...chats.get(chat)!, metadata: { memory: inside } })
+  /** Puts the chat inside a task, as the subagent tool or the task tool would, or inside none. */
+  const place = (chat: SessionInfo.ID, inside: { task: string; subtask?: string } | undefined) =>
+    void chats.set(chat, { ...chats.get(chat)!, metadata: inside ? { memory: inside } : {} })
   const metadata = (chat: SessionInfo.ID) => chats.get(chat)?.metadata
   const add = (chat: SessionInfo.ID, message: SessionMessage.Info) =>
     void history.set(chat, [...(history.get(chat) ?? []), message])
@@ -309,7 +309,7 @@ describe("MemoryTools offering", () => {
       })
       // The workspace's spec `docs/specs/task-plans.md`, sections 1 to 4.
       expect(description("task")).toBe(
-        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first: its title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done: the next one starts and the answer gives it; after the last, the task goes to review. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
+        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first, or set an existing one active to join it: a new task's title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done even if you stop there: the next one becomes current, which you need not start now, and the answer gives it; after the last, the task goes to review. Join or make the task in a step of its own before your first change; after that, send task calls in the same step as your other tool calls where you can: alone one costs a whole request. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
       )
       expect(fields("recall").task).toBe(
         "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
@@ -1376,11 +1376,14 @@ describe("MemoryTools task", () => {
         const h = yield* setup()
         const task = made(yield* h.read("task", { title: "Seeded: A, B", subtasks: steps("A", "B") }))
         const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
-        // The lead works on A; a child that joins stays on the task itself and takes nobody's step.
+        // The lead works on A and its chat runs: a child that joins stays on the task itself, takes nobody's step, and
+        // is told whose step it is and how to take it over.
+        h.running.add(lead)
         h.place(child, { task })
-        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
-          `Task ${task} is now active; you are inside it.\n`,
-        )
+        const joined = yield* h.read("task", { id: task, state: "active" }, child, "general")
+        expect(joined).toStartWith(`Task ${task} is now active; you are inside it.\n`)
+        expect(joined).toContain(`Its current subtask [${first}] A is worked on by floris as build`)
+        expect(joined).toEndWith("To take it over, as when the person asks you to, set it active.")
         expect(h.metadata(child)).toEqual({ memory: { task } })
         // The lead, back on the task itself, joins again and lands on its own step.
         h.place(lead, { task })
@@ -1400,6 +1403,54 @@ describe("MemoryTools task", () => {
           worker: { chat: child },
         })
       }),
+  )
+
+  it.live(
+    "joining a task takes over the step of a chat that runs no more; done on a task with steps open is refused",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const task = made(yield* h.read("task", { title: "Handed over: A, B", subtasks: steps("A", "B") }))
+        const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+        // The lead's chat is known here and not running: the child that joins carries on with its step.
+        h.place(child, { task })
+        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${first}.`,
+        )
+        expect((yield* h.started.client.task(projectID, first!)).task.worker).toMatchObject({ chat: child })
+        // Done meant for the step but sent for the task is refused, with the open steps named, and sends no change.
+        const changes = () => h.server.calls().filter((call) => call.method === "POST").length
+        const before = changes()
+        expect(yield* h.read("task", { id: task, state: "done" })).toBe(
+          `error: Task ${task} still has open subtasks: [${first}] A (active); [${second}] B (todo). Set the one you finished done, or replace the rest with plan; to close the task anyway, drop them first.`,
+        )
+        expect(changes()).toBe(before)
+      }),
+  )
+
+  // The behaviour set's third run: an edit and done on a step sent together before joining; a chat working from the task
+  // itself that closed every step left the task active.
+  it.live("done on a step in progress from no task is refused; from the task itself it goes on along the plan", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Steps: A, B", subtasks: steps("A", "B") }))
+      const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+      // The lead's chat leaves every task; its done on the step in progress is refused and changes nothing.
+      h.place(lead, undefined)
+      h.running.add(lead)
+      const changes = () => h.server.calls().filter((call) => call.method === "POST").length
+      const before = changes()
+      expect(yield* h.read("task", { id: first!, state: "done" })).toBe(
+        `error: This chat is in no task, and ${first} is a step of task ${task} in progress: set that task active to join it first, then set the step done.`,
+      )
+      expect(changes()).toBe(before)
+      // Inside the task on no step, done on its own step goes on: B starts in its name.
+      h.place(lead, { task })
+      expect(yield* h.read("task", { id: first!, state: "done" })).toStartWith(
+        `Subtask ${first} is done. You are now on subtask ${second} of ${task}: B.`,
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: second } })
+    }),
   )
 
   it.live("a plan keeps the done and others' active subtasks, drops the rest with its note and moves the chat", () =>
@@ -1707,7 +1758,10 @@ describe("MemoryTools task", () => {
         const own = made(yield* h.read("task", { title: "My part" }, child, "general"))
         expect(yield* set(own, "done")).toBe(`Task ${own} is now done.`)
         // A lead sets any state of any task.
-        expect(yield* set(elsewhere, "done", lead)).toBe(`Task ${elsewhere} is now done.`)
+        // The child's step closed by the lead: the lead takes no next step, and with every step closed the task is review.
+        expect(yield* set(elsewhere, "done", lead)).toBe(
+          `Task ${elsewhere} is now done. Every subtask of ${task} is done or dropped, so that task is now review.`,
+        )
         expect(yield* set(task, "todo", lead)).toBe(`Task ${task} is now todo.`)
       }),
   )

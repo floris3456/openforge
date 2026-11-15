@@ -3631,6 +3631,87 @@ describe("SessionRunnerLLM", () => {
       )
     })
 
+  // A step's unread results are kept whole beside the summary only up to a bound. Here one step read four files of
+  // 147,000 characters together. Kept whole, the request after the compaction went out at 63,203 tokens: at a point of
+  // 24,000 the next step compacted again, and past a window of 50,000 the provider rejected it and, with only the
+  // checkpoint left, there was nothing to compact, so the step failed.
+  for (const limit of [
+    { context: 200_000, output: 32_000, compact: 24_000 },
+    { context: 50_000, output: 8_000 },
+  ] as const)
+    scenario(
+      `keeps a step's unread results whole only up to a bound ${limit.compact ? "at a compaction point" : "near the window"}`,
+      function* (s) {
+        s.currentModel = testModel("unread-bound", limit)
+        // A provider counting 2.5 characters a token, which rejects a request larger than its window.
+        const counted = (request: LLMRequest | undefined) =>
+          Math.ceil(
+            JSON.stringify([request?.system, request?.tools, request?.messages.map((message) => message.content)])
+              .length / 2.5,
+          )
+        const answer = (...events: LLMEvent[]) =>
+          Stream.suspend(() => {
+            const tokens = counted(s.requests.at(-1))
+            return Stream.fromIterable(
+              tokens > limit.context
+                ? [
+                    LLMEvent.stepStart({ index: 0 }),
+                    LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" }),
+                  ]
+                : TestLLM.complete(
+                    {
+                      reason: { normalized: events.some(LLMEvent.is.toolCall) ? "tool-calls" : "stop" },
+                      usage: { inputTokens: tokens, nonCachedInputTokens: tokens },
+                    },
+                    ...events,
+                  ),
+            )
+          })
+        const file = (name: string, length: number) =>
+          Array.from({ length: 2_000 }, (_, index) => `${index}: export const ${name}${index} = scale(${index}, 2)`)
+            .join("\n")
+            .slice(0, length)
+        const small = file("small", 3_000)
+        const large = ["first", "second", "third"].map((name) => file(name, 48_000))
+        yield* s.llm.push(
+          answer(
+            ...[small, ...large].map((text, index) =>
+              LLMEvent.toolCall({ id: `call_read_${index}`, name: "echo", input: { text } }),
+            ),
+          ),
+          TestLLM.text("## Objective\n- Read the files", "bound-summary"),
+          answer(LLMEvent.toolCall({ id: "call_next", name: "echo", input: { text: "next" } })),
+          answer(
+            LLMEvent.textStart({ id: "bound-final" }),
+            LLMEvent.textDelta({ id: "bound-final", text: "Read them" }),
+            LLMEvent.textEnd({ id: "bound-final" }),
+          ),
+        )
+        yield* s.runPrompt("Read the four files")
+
+        expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false, false])
+        const after = s.requests[2]
+        expect(counted(after)).toBeLessThan(limit.compact ?? limit.context)
+        const checkpoint = userTexts(after)[0]
+        // The short result whole, the long ones cut to an equal share, each with the recent part's notice.
+        const results = checkpoint
+          .split("[Tool result]: ")
+          .slice(1)
+          .map((part) => part.split(/\n\[Assistant|\n\n|\n<\/recent-context>/)[0])
+        expect(results[0]).toBe(small)
+        const cut = results.slice(1).map((result) => result.split("\n[truncated]"))
+        expect(cut.map((parts) => parts.length)).toEqual([2, 2, 2])
+        expect(cut.map((parts) => parts[1])).toEqual(["", "", ""])
+        large.forEach((text, index) => {
+          expect(cut[index][0].length).toBeGreaterThan(1_250)
+          expect(cut[index][0].length).toBe(cut[0][0].length)
+          expect(text.startsWith(cut[index][0])).toBe(true)
+        })
+        // History rebuilds the recent part at each load as it was written, so the cached prefix holds.
+        expect(userTexts(s.requests[3])[0]).toBe(checkpoint)
+      },
+    )
+
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {
     s.currentModel = LanguageModel.make({ id: "native", provider: "openai", route: OpenAIResponses.route })
     modelLimits.set("native", { context: 11_000, output: 1_000 })

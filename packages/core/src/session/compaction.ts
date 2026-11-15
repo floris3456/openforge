@@ -215,7 +215,8 @@ const PRECOMPUTE_RATIO = 0.85
 const PRECOMPUTE_MIN_TOKENS = 64_000
 /**
  * The most text a swapped-in summary keeps verbatim beside it: twice `keep`, at least 30k, at most a quarter of the
- * budget. A longer tail would leave the context near the threshold, so compaction summarizes from scratch instead.
+ * budget. A longer tail would leave the context near the threshold, so compaction summarizes from scratch instead. A
+ * step's unread results keep as much whole beside a summary (`unreadChars`).
  */
 const PRECOMPUTED_TAIL_MIN = 30_000
 const PRECOMPUTED_TAIL_SHARE = 0.25
@@ -435,9 +436,25 @@ export const layer = Layer.effect(
           : pacer
             ? by({ by: "openforge", ...(pacer.fallback ? { fallback: pacer.fallback } : {}) })
             : compaction
+      // History rebuilds the recent part at every load, so the bound on an unread step's results is recorded once, here,
+      // for the chat's own model, which reads them next.
+      const bounded = (result: Result): Result =>
+        result.metadata?.[SessionRecentText.UNREAD] === undefined
+          ? result
+          : {
+              ...result,
+              metadata: {
+                ...result.metadata,
+                [SessionRecentText.UNREAD_CHARS]: unreadChars(
+                  context,
+                  Math.min(budget, calculateCeiling(context.model.limit, settings.buffer)),
+                  settings.keep,
+                ),
+              },
+            }
       return yield* written.pipe(
         Effect.matchEffect({
-          onSuccess: (result) => publish(selected, result),
+          onSuccess: (result) => publish(selected, bounded(result)),
           onFailure: (failure) => publish(selected, failure),
         }),
       )
@@ -1208,9 +1225,9 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
 
 /**
  * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary. A compaction
- * between a step's tool calls and the request that would read their results keeps that step too, its results whole
- * (`metadata`, `SessionRecentText.UNREAD`): a summary written from the requests the model saw has none of them.
- * Undefined when there is nothing to compact.
+ * between a step's tool calls and the request that would read their results keeps that step too, its results whole up
+ * to `unreadChars` (`metadata`, `SessionRecentText.UNREAD`): a summary written from the requests the model saw has
+ * none of them. Undefined when there is nothing to compact.
  */
 const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
   const entries = messages.flatMap((message) => {
@@ -1242,6 +1259,15 @@ const unreadStep = (messages: ReadonlyArray<SessionMessage.Info>) => {
 }
 
 const unreadMetadata = (step: SessionMessage.Info | undefined) => (step ? { [SessionRecentText.UNREAD]: step.id } : {})
+
+/**
+ * The characters an unread step's results keep whole beside a summary, together: as much as `tailLimit` lets a summary
+ * keep verbatim, at most a quarter of `ceiling`, at the chat's own characters a token; beyond it they are cut as the
+ * rest of the recent part is. Whole, they could take the request after the compaction past the point, and compact
+ * again at the next step, or past the window, where the provider's rejection leaves nothing to compact.
+ */
+const unreadChars = (context: SessionContext.Loaded, ceiling: number, keep: number) =>
+  Math.floor(tailLimit(keep, ceiling) * charsPerToken(context))
 
 /** The request without the retained tail, which starts at the message with ID `from`. */
 const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) => {
@@ -1391,10 +1417,9 @@ const promptSize = (context: SessionContext.Loaded, learned: boolean): Estimate 
     }
 
   const tokens = anchor.tokens
-  const prompt = tokens.input + tokens.cache.read + tokens.cache.write
-  const ratio = learned ? charsPerToken(context, anchorIndex, prompt) : Token.CHARS_PER_TOKEN
+  const ratio = learned ? charsPerToken(context) : Token.CHARS_PER_TOKEN
   return {
-    measured: prompt + tokens.output + tokens.reasoning,
+    measured: tokens.input + tokens.cache.read + tokens.cache.write + tokens.output + tokens.reasoning,
     estimated: unmeasured.reduce(
       (sum, message) => sum + estimateMessage(message, context.images, (text) => Token.estimate(text, ratio)),
       0,
@@ -1403,11 +1428,15 @@ const promptSize = (context: SessionContext.Loaded, learned: boolean): Estimate 
 }
 
 /**
- * The characters a token of text held in the request whose response is the anchor, the chat's own: its measured
- * `prompt`, less what its media is estimated at, over its text. `PROMPT_CHARS_PER_TOKEN` while that request holds
- * too little text to tell, or a native window, whose tokens have no text to count.
+ * The characters a token of text held in the request the latest measured response answered, the chat's own: its
+ * measured prompt, less what its media is estimated at, over its text. `PROMPT_CHARS_PER_TOKEN` with no such response,
+ * while that request holds too little text to tell, or a native window, whose tokens have no text to count.
  */
-const charsPerToken = (context: SessionContext.Loaded, anchorIndex: number, prompt: number) => {
+const charsPerToken = (context: SessionContext.Loaded) => {
+  const anchorIndex = context.messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
+  const anchor = context.messages[anchorIndex]
+  if (anchor?.type !== "assistant" || !anchor.tokens) return PROMPT_CHARS_PER_TOKEN
+  const prompt = anchor.tokens.input + anchor.tokens.cache.read + anchor.tokens.cache.write
   const before = context.messages.slice(0, anchorIndex)
   if (before.some(SessionHistory.isNativeCompaction)) return PROMPT_CHARS_PER_TOKEN
   const sent = sentFor(context, before)

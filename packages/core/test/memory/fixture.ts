@@ -24,10 +24,10 @@ export interface Received {
 export const catalogOf = (
   memory: boolean | "no pacer",
   /**
-   * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; as the small server
-   * says when left out.
+   * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; `plans`: whether its
+   * tasks are plans; as the small server says when left out.
    */
-  options: { readonly prompt?: boolean; readonly summary?: boolean } = {},
+  options: { readonly prompt?: boolean; readonly summary?: boolean; readonly plans?: boolean } = {},
 ): PacerModels.Catalog => ({
   at: 0,
   pacer:
@@ -45,6 +45,7 @@ export const catalogOf = (
                   searchLimit: capabilities.search_limit,
                   embedding: null,
                   tasks: capabilities.tasks,
+                  plans: options.plans ?? capabilities.plans,
                   recalls: capabilities.recalls,
                   projects: capabilities.projects,
                   prompt: options.prompt ?? capabilities.prompt,

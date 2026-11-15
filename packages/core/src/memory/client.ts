@@ -39,7 +39,8 @@ export interface Entry extends Schema.Schema.Type<typeof Entry> {}
 export const Near = Schema.Struct({ ...Entry.fields, score: Schema.Number })
 export interface Near extends Schema.Schema.Type<typeof Near> {}
 
-export const State = Schema.Literals(["todo", "active", "blocked", "review", "done"])
+/** `dropped`, given up for a new plan with a note, comes with `plans` (workspace spec `docs/specs/task-plans.md`). */
+export const State = Schema.Literals(["todo", "active", "blocked", "review", "done", "dropped"])
 export type State = typeof State.Type
 
 const Who = Schema.Struct({ person: Schema.String, role: Schema.String, chat: Schema.String })
@@ -58,10 +59,30 @@ export const Task = Schema.Struct({
   /** Unix milliseconds. */
   at: Schema.Number,
   changed: Schema.Number,
+  /**
+   * When the worker's chat last sent a model request through CLIProxyPacer, in Unix milliseconds; null when it is not
+   * known. A server without `plans` answers neither this nor `idle`.
+   */
+  worker_seen: maybe(Schema.Number),
+  /** Active, and no model request from its worker's chat (or no change, when that is not known) for 24 hours. */
+  idle: Schema.optional(Schema.Boolean),
 })
 export interface Task extends Schema.Schema.Type<typeof Task> {}
 
-export const Change = Schema.Struct({ state: State, note: maybe(Schema.String), by: Who, at: Schema.Number })
+/** Done or dropped: a closed task counts as a done one does everywhere. */
+export function isClosed(task: Task) {
+  return task.state === "done" || task.state === "dropped"
+}
+
+export const Change = Schema.Struct({
+  state: State,
+  note: maybe(Schema.String),
+  by: Who,
+  at: Schema.Number,
+  /** Only on a change that edited them: the new title and description. */
+  title: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.String),
+})
 export interface Change extends Schema.Schema.Type<typeof Change> {}
 
 /** One task as `GET …/tasks/{id}` answers it: its changes newest first, its subtasks oldest first, its entries. */
@@ -72,7 +93,18 @@ const TaskRead = Schema.Struct({
   entries: Schema.Array(Entry),
 })
 export interface TaskRead extends Schema.Schema.Type<typeof TaskRead> {}
-const TaskAnswer = Schema.Struct({ task: Task, existing: Schema.optional(Schema.Boolean) })
+const TaskAnswer = Schema.Struct({
+  task: Task,
+  existing: Schema.optional(Schema.Boolean),
+  /** A make with subtasks: those it made, or the copy's, in order. */
+  subtasks: Schema.optional(Schema.Array(Task)),
+})
+/** `done` with `next`: the subtask, the one that starts next (null when none), and its task. */
+const Finished = Schema.Struct({ task: Task, next: Schema.NullOr(Task), parent: Task })
+export interface Finished extends Schema.Schema.Type<typeof Finished> {}
+/** A plan: the task, every subtask of it in order, and the ids of those it dropped. */
+const Planned = Schema.Struct({ task: Task, subtasks: Schema.Array(Task), dropped: Schema.Array(Schema.String) })
+export interface Planned extends Schema.Schema.Type<typeof Planned> {}
 const TaskList = Schema.Struct({ tasks: Schema.Array(Task), more: Schema.Boolean })
 export interface TaskList extends Schema.Schema.Type<typeof TaskList> {}
 
@@ -227,16 +259,48 @@ export interface AfterInput {
   readonly by: By
 }
 
+/** A subtask as a make or a plan names it. */
+export interface Step {
+  readonly title: string
+  readonly description?: string
+}
+
 export interface MakeInput {
   readonly title: string
   readonly description?: string
   /** The task this is a subtask of. */
   readonly parent?: string
+  /**
+   * On a server with plans, without `parent`: its subtasks in order, 1 to 20. The task and the first are then active,
+   * the caller their worker, the others todo.
+   */
+  readonly subtasks?: ReadonlyArray<Step>
   readonly by: By
 }
 
 export interface ChangeInput {
   readonly state: State
+  readonly note?: string
+  readonly by: By
+}
+
+export interface FinishInput {
+  readonly note?: string
+  readonly by: By
+}
+
+export interface PlanInput {
+  /** The new subtasks, 1 to 20, in order. */
+  readonly plan: ReadonlyArray<Step>
+  /** Why the plan changes: the dropped subtasks keep it. */
+  readonly note: string
+  readonly by: By
+}
+
+export interface EditInput {
+  readonly title?: string
+  /** An empty one clears it. */
+  readonly description?: string
   readonly note?: string
   readonly by: By
 }
@@ -339,16 +403,31 @@ export interface Interface {
     input: PromptInput,
     options?: { readonly timeout?: Duration.Input },
   ) => Effect.Effect<Prompted, Error>
-  /** Makes a task, or a subtask of `parent`; `existing` when a task that is not done had that title and parent. */
+  /**
+   * Makes a task, or a subtask of `parent`; `existing` when an open task (not done nor dropped) had that title and
+   * parent. `subtasks`: with the input's, those made, or the copy's, in order; empty otherwise.
+   */
   readonly make: (
     project: string,
     input: MakeInput,
-  ) => Effect.Effect<{ readonly task: Task; readonly existing: boolean }, Error>
+  ) => Effect.Effect<{ readonly task: Task; readonly existing: boolean; readonly subtasks: ReadonlyArray<Task> }, Error>
   /** The open tasks and subtasks, newest first, at most 200; `more` when there are others. */
   readonly tasks: (project: string) => Effect.Effect<TaskList, Error>
   readonly task: (project: string, id: string) => Effect.Effect<TaskRead, Error>
   /** Sets a task's state and note; `active` makes the caller its worker. */
   readonly change: (project: string, id: string, input: ChangeInput) => Effect.Effect<Task, Error>
+  /**
+   * On a server with plans: sets a subtask done, then the first `todo` one of its task's subtasks active, the caller its
+   * worker; when none is `todo` and every one is done or dropped, the task goes to review.
+   */
+  readonly finish: (project: string, id: string, input: FinishInput) => Effect.Effect<Finished, Error>
+  /**
+   * On a server with plans: replaces the subtasks of a task (one without a parent) not yet started, those `todo` and
+   * the caller's chat's `active` one, which are dropped with the note; the plan's follow all the others.
+   */
+  readonly plan: (project: string, id: string, input: PlanInput) => Effect.Effect<Planned, Error>
+  /** On a server with plans: edits a task's title or description, keeping the change in its history. */
+  readonly edit: (project: string, id: string, input: EditInput) => Effect.Effect<Task, Error>
   /** Adds what followed to a search's row of the recall log; each part is kept once, the first that comes. */
   readonly after: (
     project: string,
@@ -451,13 +530,18 @@ export const layer = Layer.effect(
               title: input.title,
               ...(input.description === undefined ? {} : { description: input.description }),
               parent: input.parent ?? null,
+              ...(input.subtasks === undefined ? {} : { subtasks: input.subtasks }),
               by: input.by,
             },
             TaskAnswer,
             { headers },
           )
           .pipe(
-            Effect.map((answer) => ({ task: answer.body.task, existing: answer.body.existing === true })),
+            Effect.map((answer) => ({
+              task: answer.body.task,
+              existing: answer.body.existing === true,
+              subtasks: answer.body.subtasks ?? [],
+            })),
             Effect.mapError(failure(input.parent, "task")),
           ),
       tasks: (project) =>
@@ -472,6 +556,21 @@ export const layer = Layer.effect(
         ),
       change: (project, id, input) =>
         http.post(`${task(project, id)}/state`, input, TaskAnswer, { headers }).pipe(
+          Effect.map((answer) => answer.body.task),
+          Effect.mapError(failure(id, "task")),
+        ),
+      finish: (project, id, input) =>
+        http.post(`${task(project, id)}/state`, { ...input, state: "done", next: true }, Finished, { headers }).pipe(
+          Effect.map((answer) => answer.body),
+          Effect.mapError(failure(id, "task")),
+        ),
+      plan: (project, id, input) =>
+        http.post(`${task(project, id)}/plan`, input, Planned, { headers }).pipe(
+          Effect.map((answer) => answer.body),
+          Effect.mapError(failure(id, "task")),
+        ),
+      edit: (project, id, input) =>
+        http.post(`${task(project, id)}/edit`, input, TaskAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.task),
           Effect.mapError(failure(id, "task")),
         ),

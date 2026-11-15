@@ -17,6 +17,10 @@ import { close, nearest, search, tokenizer, waiting, words, type Scopes } from "
  * moved into another project with `move()`: its memory calls, found by `X-Pacer-Session` and the key, and those of its
  * subagents not moved themselves, then use that project ("Memory follows the project").
  *
+ * Tasks are plans (the workspace's spec `docs/specs/task-plans.md`): a make with subtasks, `done` that starts the next
+ * subtask, a plan that replaces the subtasks not yet started, edits, and `dropped`. When a task's worker last sent a
+ * model request is what `seen()` says of its chat, as CLIProxyPacer sees each request.
+ *
  * As a script: `bun memory-server.ts --port <n> --key <key>[=<label>] [--key …] [--file <path>]
  * [--embedding-url <url> --embedding-model <name> [--embedding-key <key>]]`.
  */
@@ -27,6 +31,7 @@ export const capabilities = {
   query_characters: 2000,
   search_limit: 20,
   tasks: true,
+  plans: true,
   recalls: true,
   projects: true,
   prompt: true,
@@ -44,10 +49,17 @@ const BATCH = 16
 /** How many of the nearest entries a write answers. */
 const NEAR = 3
 const SCOPES = ["global", "role", "task"]
-const STATES = ["todo", "active", "blocked", "review", "done"]
+const STATES = ["todo", "active", "blocked", "review", "done", "dropped"]
+/** The states of a closed task: it counts as done does everywhere. */
+const CLOSED = ["done", "dropped"]
+const OPEN = `state not in ('done', 'dropped')`
 /** How many tasks a list answers, and how many changes and entries a read. */
 const LIST = 200
 const READ = 20
+/** How many subtasks a make or a plan names at most. */
+const STEPS = 20
+/** How long an active task's worker may send no model request before the task is idle. */
+const IDLE_MS = 24 * 60 * 60 * 1000
 /** The recall log: how long a row is kept, how long what followed may be, how many judges label a row. */
 const KEPT_MS = 30 * 24 * 60 * 60 * 1000
 const STEP = 4000
@@ -154,7 +166,9 @@ const SCHEMA = [
     state text not null,
     note text,
     by text not null,
-    at integer not null
+    at integer not null,
+    title text,
+    description text
   )`,
 ]
 
@@ -223,6 +237,7 @@ type After = {
 
 type Labels = { judge: string; entries: { id: string; label: string }[]; corrected: string | null; at: number }
 
+/** A change of a task: of its state, or with `title` or `description` an edit, which keeps the state. */
 type ChangeRow = {
   seq: number
   project: string
@@ -231,7 +246,11 @@ type ChangeRow = {
   note: string | null
   by: string
   at: number
+  title: string | null
+  description: string | null
 }
+
+type Who = { person: string; role: string; chat: string }
 
 /** An OpenAI-style embedding endpoint: `url` is its base, such as `http://127.0.0.1:18433/v1`. */
 type Embedding = { readonly url: string; readonly model: string; readonly key?: string }
@@ -367,6 +386,16 @@ export function startMemoryServer(input: {
           store.change(projectOf(project), request.params.id, await bodyOf(request), person),
         ),
       },
+      "/pacer/v1/memory/:project/tasks/:id/plan": {
+        POST: guarded(async (request, person, project) =>
+          store.plan(projectOf(project), request.params.id, await bodyOf(request), person),
+        ),
+      },
+      "/pacer/v1/memory/:project/tasks/:id/edit": {
+        POST: guarded(async (request, person, project) =>
+          store.edit(projectOf(project), request.params.id, await bodyOf(request), person),
+        ),
+      },
       "/pacer/v1/memory/:project/recalls": {
         GET: guarded((request, _person, project) =>
           store.recalls(projectOf(project), new URL(request.url).searchParams),
@@ -430,6 +459,11 @@ export function startMemoryServer(input: {
       if (!known) throw new Error(`no chat ${chat} of this key is known`)
       chats.set(chatOf(key, chat), { ...known, moved: identity })
     },
+    /**
+     * When the chat a task's worker names (its `chat`) last sent a model request, in Unix milliseconds, as CPP sees each
+     * one; null as for a chat it never saw. Tasks answer it as `worker_seen`, and it decides whether one is idle.
+     */
+    seen: (chat: string, at: number | null) => store.seen(chat, at),
     stop: async () => {
       store.stop()
       await server.stop(true)
@@ -448,9 +482,12 @@ function storeOf(
   const live = "superseded_by is null and deleted is null"
   const getTask = (project: string, id: string) =>
     db.query<TaskRow, string[]>("select * from task where project = ? and id = ?").get(project, id)
+  /** When each worker's chat last sent a model request, by the chat its worker names. */
+  const requests = new Map<string, number>()
+  const json = (row: TaskRow) => taskOf(row, requests)
   /** What `GET …/tasks/{id}` answers for a task, and `start` for the chat's task and subtask. */
   const readOf = (row: TaskRow) => ({
-    task: taskOf(row),
+    task: json(row),
     changes: db
       .query<
         ChangeRow,
@@ -461,13 +498,47 @@ function storeOf(
     subtasks: subtasksOf(row),
     entries: taskEntries(row),
   })
-  const subtasksOf = (row: TaskRow) =>
+  /** A task's subtasks in their order, which is the order they were made in; none for a subtask. */
+  const subtaskRows = (row: TaskRow) =>
     row.parent !== null
       ? []
       : db
           .query<TaskRow, string[]>("select * from task where project = ? and parent = ? order by seq")
           .all(row.project, row.id)
-          .map(taskOf)
+  const subtasksOf = (row: TaskRow) => subtaskRows(row).map(json)
+  /** A new task, `todo`; within a transaction. */
+  const insertTask = (project: string, parent: string | null, step: Step, maker: Who) => {
+    const now = Date.now()
+    return db
+      .query<TaskRow, (string | number | null)[]>(
+        `insert into task (id, project, parent, title, description, state, note, by, worker, at, changed)
+         values (?, ?, ?, ?, ?, 'todo', null, ?, null, ?, ?) returning *`,
+      )
+      .get(newID(), project, parent, step.title, step.description, JSON.stringify(maker), now, now)!
+  }
+  /**
+   * Sets a task's state and note and keeps the change, within a transaction; `active` makes the caller its worker. The
+   * same state, note and worker again changes nothing.
+   */
+  const setState = (row: TaskRow, state: string, note: string | null, caller: Who) => {
+    const worker = state === "active" ? JSON.stringify(caller) : row.worker
+    if (row.state === state && row.note === note && row.worker === worker) return row
+    const now = Date.now()
+    db.run("insert into task_change (project, task, state, note, by, at) values (?, ?, ?, ?, ?, ?)", [
+      row.project,
+      row.id,
+      state,
+      note,
+      JSON.stringify(caller),
+      now,
+    ])
+    return db
+      .query<
+        TaskRow,
+        (string | number | null)[]
+      >("update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *")
+      .get(state, note, worker, now, row.seq)!
+  }
   /** The live task entries of a task, those written in its subtasks too; of a subtask only its own. */
   const taskEntries = (row: TaskRow) =>
     db
@@ -694,7 +765,7 @@ function storeOf(
       const tasks = db
         .query<TaskRow, string[]>("select * from task where project = ? order by seq")
         .all(project)
-        .map((row) => ({ type: "task", ...taskOf(row) }))
+        .map((row) => ({ type: "task", ...json(row) }))
       const changes = db
         .query<ChangeRow, string[]>("select * from task_change where project = ? order by seq")
         .all(project)
@@ -708,61 +779,57 @@ function storeOf(
     },
 
     make(project: string, body: Fields, person: string) {
-      const title = visible(body.title, "title").trim()
-      if (!title || [...title].length > 200) refuse("title: must be 1 to 200 characters")
-      const description =
-        body.description === undefined || body.description === null
-          ? ""
-          : visible(body.description, "description", true).trim()
-      if ([...description].length > 2000) refuse("description: must be at most 2000 characters")
+      const step = stepOf(body, "")
       if (body.parent !== undefined && body.parent !== null && typeof body.parent !== "string")
         refuse("parent: must be a task id or null")
       const parentID = typeof body.parent === "string" ? body.parent : null
+      const subtasks = body.subtasks === undefined || body.subtasks === null ? null : stepsOf(body.subtasks, "subtasks")
+      if (subtasks && parentID !== null)
+        refuse("subtasks: a subtask has no subtasks; a make with subtasks has no parent")
       const by = byOf(body.by)
+      const maker = { person, role: by.role, chat: by.chat }
       return db
         .transaction(() => {
           const parent = parentID === null ? null : getTask(project, parentID)
           if (parentID !== null && !parent) refuse(`parent: no task ${parentID} in this project`, 404, "not_found")
           if (parent?.parent) refuse(`parent: task ${parent.id} is a subtask, and a subtask has no subtasks`)
-          // A task that is not done with the same title and parent is the one a call sent twice made.
+          // An open task with the same title and parent is the one a call sent twice made.
           const copy = db
             .query<
               TaskRow,
               (string | null)[]
-            >("select * from task where project = ? and title = ? and parent is ? and state != 'done' order by seq limit 1")
-            .get(project, title, parentID)
-          if (copy) return Response.json({ task: taskOf(copy), existing: true })
-          const now = Date.now()
-          const row = db
-            .query<TaskRow, (string | number | null)[]>(
-              `insert into task (id, project, parent, title, description, state, note, by, worker, at, changed)
-               values (?, ?, ?, ?, ?, 'todo', null, ?, null, ?, ?) returning *`,
-            )
-            .get(
-              newID(),
-              project,
-              parentID,
-              title,
-              description,
-              JSON.stringify({ person, role: by.role, chat: by.chat }),
-              now,
-              now,
-            )!
-          return Response.json({ task: taskOf(row) }, { status: 201 })
+            >(`select * from task where project = ? and title = ? and parent is ? and ${OPEN} order by seq limit 1`)
+            .get(project, step.title, parentID)
+          if (copy)
+            return Response.json({
+              task: json(copy),
+              existing: true,
+              ...(subtasks ? { subtasks: subtasksOf(copy) } : {}),
+            })
+          const row = insertTask(project, parentID, step, maker)
+          if (!subtasks) return Response.json({ task: json(row) }, { status: 201 })
+          // The task and its first subtask are the maker's to work on.
+          const task = setState(row, "active", null, maker)
+          const made = subtasks.map((item, index) => {
+            const sub = insertTask(project, task.id, item, maker)
+            return index === 0 ? setState(sub, "active", null, maker) : sub
+          })
+          return Response.json({ task: json(task), subtasks: made.map(json) }, { status: 201 })
         })
         .immediate()
     },
 
     tasks(project: string, all: boolean) {
-      // Not done, and the done subtasks of a task that is not; with all, every task.
+      // Open, and the closed subtasks of a task that is open; with all, every task.
       const rows = db
         .query<TaskRow, [string, number]>(
-          `select * from task where project = ? and (? or state != 'done' or (parent is not null and
-           (select state from task as owner where owner.project = task.project and owner.id = task.parent) != 'done'))
+          `select * from task where project = ? and (? or ${OPEN} or (parent is not null and
+           (select state from task as owner where owner.project = task.project and owner.id = task.parent)
+           not in ('done', 'dropped')))
            order by seq desc limit ${LIST + 1}`,
         )
         .all(project, all ? 1 : 0)
-      return Response.json({ tasks: rows.slice(0, LIST).map(taskOf), more: rows.length > LIST })
+      return Response.json({ tasks: rows.slice(0, LIST).map(json), more: rows.length > LIST })
     },
 
     task(project: string, id: string) {
@@ -770,39 +837,130 @@ function storeOf(
       return Response.json(readOf(row))
     },
 
+    /**
+     * Sets a task's state. With `next`, on a subtask set done: the first `todo` one of its task's subtasks becomes
+     * active, the caller its worker; when none is `todo` and every one is closed, the task goes to review.
+     */
     change(project: string, id: string, body: Fields, person: string) {
       const state = oneOf(body.state, STATES, "state")
-      // A note that is empty once cut counts as none.
-      const note = body.note === undefined || body.note === null ? null : visible(body.note, "note").trim() || null
-      if (note !== null && [...note].length > 500) refuse("note: must be at most 500 characters")
-      if (state === "blocked" && !note) refuse("note: blocked needs a note of at least 1 character")
+      const note = noteOf(body.note)
+      if ((state === "blocked" || state === "dropped") && !note)
+        refuse(`note: ${state} needs a note of at least 1 character`)
+      if (body.next !== undefined && body.next !== null && typeof body.next !== "boolean")
+        refuse("next: must be true, false or null")
+      const next = body.next === true
+      if (next && state !== "done") refuse("next: only with state done")
       const by = byOf(body.by)
       const caller = { person, role: by.role, chat: by.chat }
       return db
         .transaction(() => {
           const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
-          const worker = state === "active" ? JSON.stringify(caller) : row.worker
-          // The same state and note again changes nothing, unless another caller sets it active.
-          if (row.state === state && row.note === note && row.worker === worker)
-            return Response.json({ task: taskOf(row) })
-          const now = Date.now()
-          db.run("insert into task_change (project, task, state, note, by, at) values (?, ?, ?, ?, ?, ?)", [
-            project,
-            row.id,
-            state,
-            note,
-            JSON.stringify(caller),
-            now,
-          ])
+          if (next && row.parent === null) refuse(`next: only on a subtask, and task ${row.id} has no parent`)
+          const changed = setState(row, state, note, caller)
+          if (!next) return Response.json({ task: json(changed) })
+          const parent = getTask(project, row.parent!)!
+          const siblings = subtaskRows(parent)
+          const todo = siblings.find((sub) => sub.state === "todo")
+          if (todo)
+            return Response.json({
+              task: json(changed),
+              next: json(setState(todo, "active", null, caller)),
+              parent: json(parent),
+            })
+          const closed = siblings.every((sub) => CLOSED.includes(sub.state))
+          return Response.json({
+            task: json(changed),
+            next: null,
+            parent: json(closed ? setState(parent, "review", "every subtask is done or dropped", caller) : parent),
+          })
+        })
+        .immediate()
+    },
+
+    /**
+     * Replaces the subtasks of a task not yet started: every `todo` one, and every `active` one the caller's chat works
+     * on, are dropped with the note; the plan's subtasks follow all the others, `todo`. When the caller's own was
+     * dropped, or none is active then, the first new one becomes active with the caller as its worker, and so does the
+     * task.
+     */
+    plan(project: string, id: string, body: Fields, person: string) {
+      const steps = stepsOf(body.plan, "plan")
+      const note = noteOf(body.note)
+      if (!note) refuse("note: a plan needs a note of at least 1 character")
+      const by = byOf(body.by)
+      const caller = { person, role: by.role, chat: by.chat }
+      return db
+        .transaction(() => {
+          const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
+          if (row.parent !== null)
+            refuse(`id: task ${row.id} is a subtask, and a subtask has no subtasks; plan its task ${row.parent}`)
+          if (CLOSED.includes(row.state)) refuse(`id: task ${row.id} is ${row.state}, and a closed task has no plan`)
+          const subtasks = subtaskRows(row)
+          const workerOf = (sub: TaskRow) => (sub.worker === null ? null : (JSON.parse(sub.worker) as Who).chat)
+          const dropped = subtasks.filter(
+            (sub) => sub.state === "todo" || (sub.state === "active" && workerOf(sub) === by.chat),
+          )
+          const kept = subtasks.filter((sub) => !CLOSED.includes(sub.state) && !dropped.includes(sub))
+          // As CLIProxyPacer words it: the item's field, and the subtask that keeps its title.
+          const index = steps.findIndex((step) => kept.some((sub) => sub.title === step.title))
+          const clash = kept.find((sub) => sub.title === steps[index]?.title)
+          if (clash) refuse(`plan[${index}].title: subtask ${clash.id} has that title and stays open`)
+          dropped.forEach((sub) => setState(sub, "dropped", note, caller))
+          const made = steps.map((step) => insertTask(project, row.id, step, caller))
+          const own = dropped.some((sub) => sub.state === "active")
+          if (own || !subtaskRows(row).some((sub) => sub.state === "active")) {
+            setState(made[0]!, "active", null, caller)
+            if (row.state !== "active") setState(row, "active", null, caller)
+          }
+          return Response.json({
+            task: json(getTask(project, row.id)!),
+            subtasks: subtasksOf(row),
+            dropped: dropped.map((sub) => sub.id),
+          })
+        })
+        .immediate()
+    },
+
+    /** Edits a task's title or description, keeping the change with its state; one that changes nothing keeps none. */
+    edit(project: string, id: string, body: Fields, person: string) {
+      const title = body.title === undefined || body.title === null ? undefined : titleOf(body.title, "title")
+      const description =
+        body.description === undefined || body.description === null
+          ? undefined
+          : descriptionOf(body.description, "description")
+      if (title === undefined && description === undefined)
+        refuse("title, description: an edit needs a title, a description or both")
+      const note = noteOf(body.note)
+      const by = byOf(body.by)
+      const caller = { person, role: by.role, chat: by.chat }
+      return db
+        .transaction(() => {
+          const row = getTask(project, id) ?? refuse(`no task ${id} in this project`, 404, "not_found")
+          const edited = {
+            title: title !== undefined && title !== row.title ? title : null,
+            description: description !== undefined && description !== row.description ? description : null,
+          }
+          if (edited.title === null && edited.description === null) return Response.json({ task: json(row) })
+          const at = Date.now()
+          db.run(
+            "insert into task_change (project, task, state, note, by, at, title, description) values (?, ?, ?, ?, ?, ?, ?, ?)",
+            [project, row.id, row.state, note, JSON.stringify(caller), at, edited.title, edited.description],
+          )
+          // As CLIProxyPacer: an edit is a change of the task, so `changed` moves; its `note` stays.
           const changed = db
             .query<
               TaskRow,
-              (string | number | null)[]
-            >("update task set state = ?, note = ?, worker = ?, changed = ? where seq = ? returning *")
-            .get(state, note, worker, now, row.seq)!
-          return Response.json({ task: taskOf(changed) })
+              (string | number)[]
+            >("update task set title = ?, description = ?, changed = ? where seq = ? returning *")
+            .get(edited.title ?? row.title, edited.description ?? row.description, at, row.seq)!
+          return Response.json({ task: json(changed) })
         })
         .immediate()
+    },
+
+    seen(chat: string, at: number | null) {
+      if (at === null) requests.delete(chat)
+      else requests.set(chat, at)
     },
 
     recall(project: string, id: string) {
@@ -1073,7 +1231,10 @@ function entryOf(row: Row) {
   }
 }
 
-function taskOf(row: TaskRow) {
+/** A task as the routes answer it; `requests` holds when each worker's chat last sent a model request. */
+function taskOf(row: TaskRow, requests: ReadonlyMap<string, number>) {
+  const worker: Who | null = row.worker === null ? null : JSON.parse(row.worker)
+  const seen = worker ? (requests.get(worker.chat) ?? null) : null
   return {
     id: row.id,
     parent: row.parent,
@@ -1082,9 +1243,11 @@ function taskOf(row: TaskRow) {
     state: row.state,
     note: row.note,
     by: JSON.parse(row.by),
-    worker: row.worker === null ? null : JSON.parse(row.worker),
+    worker,
     at: row.at,
     changed: row.changed,
+    worker_seen: seen,
+    idle: row.state === "active" && Date.now() - (seen ?? row.changed) > IDLE_MS,
   }
 }
 
@@ -1162,7 +1325,58 @@ function cursorOf(value: string) {
 }
 
 function changeOf(row: ChangeRow) {
-  return { state: row.state, note: row.note, by: JSON.parse(row.by), at: row.at }
+  return {
+    state: row.state,
+    note: row.note,
+    by: JSON.parse(row.by),
+    at: row.at,
+    ...(row.title === null ? {} : { title: row.title }),
+    ...(row.description === null ? {} : { description: row.description }),
+  }
+}
+
+/** A task's or subtask's title and description, as a make or a plan names them. */
+type Step = { title: string; description: string }
+
+/** The title and description of `fields`, each field named after `prefix`. */
+function stepOf(fields: Fields, prefix: string): Step {
+  return {
+    title: titleOf(fields.title, `${prefix}title`),
+    description:
+      fields.description === undefined || fields.description === null
+        ? ""
+        : descriptionOf(fields.description, `${prefix}description`),
+  }
+}
+
+/** A make's `subtasks` or a plan's `plan`: 1 to 20 of {title, description}, in order. */
+function stepsOf(value: unknown, field: string) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > STEPS)
+    refuse(`${field}: must be a list of 1 to ${STEPS} {title, description}`)
+  return value.map((item, index) => {
+    if (!isFields(item)) refuse(`${field}[${index}]: must be {title, description}`)
+    return stepOf(item, `${field}[${index}].`)
+  })
+}
+
+function titleOf(value: unknown, field: string) {
+  const title = visible(value, field).trim()
+  if (!title || [...title].length > 200) refuse(`${field}: must be 1 to 200 characters`)
+  return title
+}
+
+/** A description: 0 to 2,000 characters, line feeds allowed. */
+function descriptionOf(value: unknown, field: string) {
+  const description = visible(value, field, true).trim()
+  if ([...description].length > 2000) refuse(`${field}: must be at most 2000 characters`)
+  return description
+}
+
+/** A change's note: absent, or at most 500 characters; one that is empty once cut counts as none. */
+function noteOf(value: unknown) {
+  const note = value === undefined || value === null ? null : visible(value, "note").trim() || null
+  if (note !== null && [...note].length > 500) refuse("note: must be at most 500 characters")
+  return note
 }
 
 /** What a new entry belongs to, from its `scope` and who writes it. */

@@ -55,6 +55,7 @@ import { Location } from "../location.js"
 import { ModelsDev } from "../models-dev.js"
 import { Mcp } from "../mcp/index.js"
 import { MemoryClient } from "../memory/client.js"
+import { MemoryPlans } from "../memory/plans.js"
 import { MemoryTask } from "../memory/task.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
@@ -115,6 +116,7 @@ import { DynamicProviderPlugin } from "./provider/dynamic.js"
 import { OpencodePlugin } from "./provider/opencode.js"
 import { WebSearchPlugins } from "./websearch/index.js"
 import { SkillPlugin } from "./skill.js"
+import { TaskPlansPlugin } from "./task-plans.js"
 import { VcsHgPlugin } from "./vcs/hg.js"
 import { ToolInputRepairPlugin } from "./tool-input-repair.js"
 import { OptimizePlugin } from "./optimize.js"
@@ -153,6 +155,7 @@ const services = [
   ModelsDev.Service,
   Mcp.Service,
   MemoryClient.Service,
+  MemoryPlans.Service,
   MemoryTask.Service,
   Npm.Service,
   PacerEndpoint.Service,
@@ -216,6 +219,7 @@ export const requirements = LayerNode.group([
   ModelsDev.node,
   Mcp.node,
   MemoryClient.node,
+  MemoryPlans.node,
   MemoryTask.node,
   Npm.node,
   PacerEndpoint.node,
@@ -289,6 +293,7 @@ const pre = [
   WebSearchTool.Plugin,
   PacerWebTools.Plugin,
   MemoryTools.Plugin,
+  TaskPlansPlugin.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]

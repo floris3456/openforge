@@ -219,6 +219,93 @@ describe("MemoryText tasks", () => {
     )
   })
 
+  test("with plans, a subtask of a task not listed stands on its own too, its last request unknown", () => {
+    const sub = task({ id: "s1", parent: "gone", title: "Left over", state: "active", worker: who, worker_seen: null })
+    expect(MemoryText.board({ tasks: [sub], more: true }, () => false, at)).toBe(
+      [
+        "Open tasks of this project:",
+        "- [s1] Left over (active; made by floris as build; worked on by floris as build, last request unknown)",
+        "There are more: only the newest 200 are listed.",
+      ].join("\n"),
+    )
+  })
+
+  test("a plan's subtasks in order: an active one marked now, a run of done or dropped ones folded in one line", () => {
+    const sub = (id: string, state: MemoryClient.State, fields: Partial<MemoryClient.Task> = {}) =>
+      task({ id, parent: "t8n2k4m7q9xz", title: `Step ${id}`, state, ...fields })
+    const subtasks = [
+      sub("a", "done"),
+      sub("b", "done"),
+      sub("c", "dropped"),
+      sub("d", "active", { worker: who, worker_seen: at - 90 * 60_000 }),
+      sub("e", "dropped"),
+      sub("f", "blocked", { note: "no schema" }),
+      sub("g", "todo"),
+    ]
+    expect(MemoryText.plan(subtasks)).toEqual([
+      "- done: [a] Step a; [b] Step b",
+      "- dropped: [c] Step c",
+      "- now: [d] Step d (active; worked on by floris as build)",
+      "- dropped: [e] Step e",
+      "- [f] Step f (blocked)",
+      "- [g] Step g (todo)",
+    ])
+    // With the time, when the worker's chat last sent a model request; idle when it is.
+    expect(
+      MemoryText.plan([sub("d", "active", { worker: who, worker_seen: at - 90 * 60_000, idle: true })], at),
+    ).toEqual(["- now: [d] Step d (active, idle; worked on by floris as build, last request 1 h ago)"])
+  })
+
+  test("with plans the task part says what to do with a plan's subtasks, and an edit's note is said as an edit", () => {
+    const edit = { ...change("named the file", "active"), title: "Move the checks: one script" }
+    const cleared = { ...change("too long", "active"), description: "" }
+    // Inside a task without a subtask: its steps are the chat's own to plan.
+    const plans = { chat: "ses_child", lead: false }
+    expect(MemoryText.task({ task: task(), changes: [edit, cleared], entries: [] }, undefined, plans)).toBe(
+      [
+        "Your task [t8n2k4m7q9xz]: Move the checks (todo)",
+        MemoryText.planStates,
+        SAID,
+        '- 2026-11-13 title edited to "Move the checks: one script" by floris as general: named the file',
+        "- 2026-11-13 description cleared by floris as general: too long",
+      ].join("\n"),
+    )
+    // The line is as before unless the caller says plans.
+    expect(MemoryText.task({ task: task(), changes: [], entries: [] })).toContain(MemoryText.states)
+  })
+
+  test("with plans, a child on a subtask its lead made gets the review line, a chat on its own subtask the plan's", () => {
+    const child = { chat: "ses_child", lead: false }
+    const lead = { chat: "ses_lead", lead: true }
+    const subtask = (maker: string) => ({
+      task: task({ id: "s1", parent: "t8n2k4m7q9xz", title: "The first half", by: { ...who, chat: maker } }),
+      changes: [],
+    })
+    const line = (part: string) => part.split("\n")[2]
+    const read = { task: task(), changes: [], entries: [] }
+    // The answer when a task is set active.
+    expect(line(MemoryText.task(read, subtask("ses_lead"), child))).toBe(MemoryText.states)
+    expect(line(MemoryText.task(read, subtask("ses_child"), child))).toBe(MemoryText.planStates)
+    // A lead finishes any subtask it is on.
+    expect(line(MemoryText.task(read, subtask("ses_child"), lead))).toBe(MemoryText.planStates)
+    // The start block, the same; without plans, the review line.
+    const started = (maker: string): MemoryClient.Started => ({
+      recall: "r",
+      entries: [],
+      meaning: false,
+      counts: { global: 0, role: 0, task: 0 },
+      task: { ...read, subtasks: [] },
+      subtask: { ...subtask(maker), subtasks: [], entries: [] },
+    })
+    const tools = { recall: true, remember: false, task: true }
+    const block = (maker: string, plans?: { chat: string; lead: boolean }) =>
+      line(MemoryText.block(started(maker), "general", tools, true, false, plans))
+    expect(block("ses_lead", child)).toBe(MemoryText.states)
+    expect(block("ses_child", child)).toBe(MemoryText.planStates)
+    expect(block("ses_child", lead)).toBe(MemoryText.planStates)
+    expect(block("ses_child")).toBe(MemoryText.states)
+  })
+
   test("the maker's line, with the note when there is one", () => {
     expect(MemoryText.ended(task({ state: "blocked", note: "wrong file" }))).toBe(
       "Task t8n2k4m7q9xz is now blocked: wrong file.",

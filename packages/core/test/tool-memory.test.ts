@@ -149,9 +149,9 @@ const setup = Effect.fnUntraced(function* (options: Options = {}) {
   const history = new Map<SessionInfo.ID, SessionMessage.Info[]>()
   const chats = new Map(known)
   const running = new Set<SessionInfo.ID>()
-  /** Puts the chat inside a task, as the subagent tool or the task tool would. */
-  const place = (chat: SessionInfo.ID, inside: { task: string; subtask?: string }) =>
-    void chats.set(chat, { ...chats.get(chat)!, metadata: { memory: inside } })
+  /** Puts the chat inside a task, as the subagent tool or the task tool would, or inside none. */
+  const place = (chat: SessionInfo.ID, inside: { task: string; subtask?: string } | undefined) =>
+    void chats.set(chat, { ...chats.get(chat)!, metadata: inside ? { memory: inside } : {} })
   const metadata = (chat: SessionInfo.ID) => chats.get(chat)?.metadata
   const add = (chat: SessionInfo.ID, message: SessionMessage.Info) =>
     void history.set(chat, [...(history.get(chat) ?? []), message])
@@ -299,13 +299,20 @@ describe("MemoryTools offering", () => {
         )
       expect(fields("task")).toEqual({
         id: "A task's id",
-        title: "For a new task: what it is, in one line",
-        description: "For a new task: what is to be done and when it is done",
-        state: "The state to set: todo, active, blocked, review or done",
-        note: "Why the state changes, in a few words; needed for blocked",
+        title: "One line: what it is, with the steps you now believe in, very summarized",
+        description:
+          "Optional: what is to be done and when it is done; recommended for a bigger task. With an id, empty clears it",
+        subtasks: "For a new task: the steps you now believe in, in order, 1 to 20; the next one or two concrete",
+        plan: "With id and note: the subtasks that replace every one of the task's not yet started, in order, 1 to 20; a title or description given too is edited with them",
+        state: "The state to set: todo, active, blocked, review, done or dropped",
+        note: "Why, in a few words; needed for blocked, dropped and plan",
       })
+      // The workspace's spec `docs/specs/task-plans.md`, sections 1 to 4.
       expect(description("task")).toBe(
-        "Tasks are pieces of work this project's lead gives out. Without parameters it lists the open ones; with a title it makes one; with an id it reads one, and with a state it sets that state (todo, active, blocked, review, done; a note says why). A subagent started with a task's id as taskID works inside that task.",
+        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first, or set an existing one active to join it: a new task's title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done even if you stop there: the next one becomes current, which you need not start now, and the answer gives it; after the last, the task goes to review. Join or make the task in a step of its own before your first change; after that, send task calls in the same step as your other tool calls where you can: alone one costs a whole request. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
+      )
+      expect(fields("recall").task).toBe(
+        "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
       )
       expect(fields("remember").scope).toBe(
         "task: for the task you are in (the default there); role: for your role (the default elsewhere); global: for the whole project",
@@ -1040,11 +1047,22 @@ describe("MemoryTools words", () => {
 
 describe("MemoryTools task", () => {
   const forms =
-    "error: Call task with no fields to list the open tasks, with title (and description) to make one, with id to read one, or with id and state (and note) to set its state."
+    "error: Call task with no fields to list the open tasks; with title (and description, subtasks) to make one; with id to read one; with id and state (and note) to set its state; with id, plan and note (and title or description) to replace its subtasks not yet started; or with id and title or description (and note) to edit them."
   const day = (at: number) => new Date(at).toISOString().slice(0, 10)
   const made = (text: string) => text.match(/^Made (?:sub)?task ([0-9a-z]{12})/)?.[1] ?? "none"
   const saved = (text: string) => text.match(/^Saved as ([0-9a-z]{12})/)?.[1] ?? "none"
   const states = (server: MemoryServer) => server.calls().filter((call) => call.path.endsWith("/state"))
+  /** A server with tasks whose tasks are not plans, as CLIProxyPacer before them. */
+  const noPlans = (() => {
+    const catalog = catalogOf(true)
+    return { ...catalog, pacer: { ...catalog.pacer!, memory: { ...catalog.pacer!.memory!, plans: false } } }
+  })()
+  /** The ids of a task's subtasks, in their order. */
+  const subtasksOf = (h: Effect.Success<ReturnType<typeof setup>>, task: string) =>
+    h.started.client.task(projectID, task).pipe(Effect.map((read) => read.subtasks.map((sub) => sub.id)))
+  const steps = (...titles: string[]) => titles.map((title) => ({ title }))
+  const check =
+    "Before you work on it, check it against what you now know: when it no longer fits, replace it and the ones after it that fall with it (plan, with a note)."
 
   it.live("is unavailable, and sends nothing, while the server has memory without tasks", () =>
     Effect.gen(function* () {
@@ -1057,9 +1075,9 @@ describe("MemoryTools task", () => {
     }),
   )
 
-  it.live("lists open tasks with their subtasks under them, who made them and who works on them", () =>
+  it.live("without plans, lists open tasks with their subtasks under them, who made them and who works on them", () =>
     Effect.gen(function* () {
-      const h = yield* setup()
+      const h = yield* setup({ catalog: noPlans })
       expect(yield* h.read("task", {})).toBe("No open tasks.")
       const task = made(yield* h.read("task", { title: "Move the checks" }))
       h.place(lead, { task })
@@ -1083,6 +1101,95 @@ describe("MemoryTools task", () => {
     }),
   )
 
+  it.effect(
+    "lists each open task once with its current subtasks, who works on them, their last request and how many are closed",
+    () =>
+      Effect.gen(function* () {
+        // The answer's times are the clock's; the server's are its own.
+        const now = Date.now()
+        yield* TestClock.setTime(now)
+        const h = yield* setup()
+        h.running.add(lead)
+        h.running.add(child)
+        const task = made(
+          yield* h.read("task", {
+            title: "Move the checks",
+            subtasks: steps("First part", "Second part", "Third part"),
+          }),
+        )
+        const [first, second, third] = yield* subtasksOf(h, task)
+        yield* h.read("task", { id: first, state: "done" })
+        h.place(child, { task, subtask: third })
+        yield* h.read("task", { id: third, state: "active" }, child, "general")
+        const by = { role: "build", chat: other }
+        const bare = (yield* h.started.client.make(projectID, { title: "Bare", by })).task.id
+        const part = (yield* h.started.client.make(projectID, { title: "Bare part", parent: bare, by })).task.id
+        h.server.store.seen(lead, now - 12 * 60_000)
+        h.server.store.seen(child, now - 3 * 60 * 60_000)
+        const lines = (third: string) =>
+          [
+            "Open tasks of this project:",
+            `- [${bare}] Bare (todo; made by floris as build; 0 of 1 subtasks done or dropped)`,
+            `  - next: [${part}] Bare part (todo)`,
+            `- [${task}] Move the checks (active; made by floris as build; worked on by floris as build, last request 12 min ago; 1 of 3 subtasks done or dropped)`,
+            `  - now: [${second}] Second part (active; worked on by floris as build, last request 12 min ago)`,
+            `  - now: ${third}`,
+          ].join("\n")
+        expect(yield* h.read("task", {})).toBe(
+          lines(`[${third}] Third part (active; worked on by floris as general, last request 3 h ago)`),
+        )
+        // Its worker's chat is a chat of this openforge that does not run.
+        h.running.delete(child)
+        expect(yield* h.read("task", {})).toBe(
+          lines(
+            `[${third}] Third part (active; its chat is not running; worked on by floris as general, last request 3 h ago)`,
+          ),
+        )
+      }),
+  )
+
+  it.effect("lists an idle task apart with its last request, as not work in progress", () =>
+    Effect.gen(function* () {
+      const now = Date.now()
+      yield* TestClock.setTime(now)
+      const h = yield* setup()
+      h.running.add(lead)
+      h.running.add(child)
+      const left = made(yield* h.read("task", { title: "Left behind" }))
+      // A child outside any task makes its own.
+      const busy = made(yield* h.read("task", { title: "In progress" }, child, "general"))
+      h.server.store.seen(lead, now - 30 * 60 * 60_000)
+      h.server.store.seen(child, now - 5 * 60_000)
+      const idle = [
+        "Idle, so not work in progress: active, but no model request from their worker's chat for 24 hours:",
+        `- [${left}] Left behind (active; made by floris as build; worked on by floris as build, last request 30 h ago)`,
+      ]
+      expect(yield* h.read("task", {})).toBe(
+        [
+          "Open tasks of this project:",
+          `- [${busy}] In progress (active; made by floris as general; worked on by floris as general, last request 5 min ago)`,
+          ...idle,
+        ].join("\n"),
+      )
+      expect((yield* h.read("task", { id: left })).split("\n")[0]).toBe(
+        `Task ${left}: Left behind (active, idle; made by floris as build, ${day(now)}; worked on by floris as build, last request 30 h ago)`,
+      )
+      // Not known: by its last change, which is new.
+      h.server.store.seen(child, null)
+      h.server.store.seen(lead, now - 3 * 24 * 60 * 60_000)
+      expect(yield* h.read("task", {})).toBe(
+        [
+          "Open tasks of this project:",
+          `- [${busy}] In progress (active; made by floris as general; worked on by floris as general, last request unknown)`,
+          ...idle.slice(0, 1),
+          `- [${left}] Left behind (active; made by floris as build; worked on by floris as build, last request 3 days ago)`,
+        ].join("\n"),
+      )
+      yield* h.read("task", { id: busy, state: "done" })
+      expect((yield* h.read("task", {})).split("\n")[0]).toBe("Open tasks of this project: none but the idle ones.")
+    }),
+  )
+
   it.live("says when there are more than the 200 listed", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -1097,104 +1204,524 @@ describe("MemoryTools task", () => {
     }),
   )
 
-  it.live("makes a task from a lead outside one, a subtask from a chat inside one, and refuses a child outside", () =>
+  it.live("any chat outside a task makes one and is then inside it; inside one it makes a subtask, todo", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      expect(yield* h.read("task", { title: "Alone" }, child, "general")).toBe(
-        "error: Only a lead chat makes a task; a chat inside a task makes its subtasks.",
-      )
-      expect(h.server.calls()).toEqual([])
       const answer = yield* h.read("task", { title: "Move the checks", description: "One script." })
       const task = made(answer)
-      expect(answer).toBe(
-        `Made task ${task}: Move the checks. A subagent works on it when you start it with taskID "${task}".`,
+      expect(answer).toBe([`Made task ${task}: Move the checks. You are inside it.`, MemoryText.planStates].join("\n"))
+      expect(h.metadata(lead)).toEqual({ memory: { task } })
+      expect((yield* h.started.client.task(projectID, task)).task).toMatchObject({
+        state: "active",
+        description: "One script.",
+        worker: { role: "build", chat: lead },
+      })
+      // A child outside any task makes one too; a title an open task has answers that task.
+      expect(yield* h.read("task", { title: "Move the checks" }, child, "general")).toBe(
+        `That task exists already as ${task} (active). Set it active to work inside it.`,
       )
-      expect(yield* h.read("task", { title: "Move the checks" })).toBe(`That task exists already as ${task} (todo).`)
-      h.place(lead, { task })
+      expect(h.metadata(child)).toBeUndefined()
+      const own = made(yield* h.read("task", { title: "Alone" }, child, "general"))
+      expect(h.metadata(child)).toEqual({ memory: { task: own } })
+      expect((yield* h.started.client.task(projectID, own)).task.worker).toMatchObject({ role: "general", chat: child })
+      // Inside a task a make is a subtask of it, todo, and the chat stays where it is.
       const part = yield* h.read("task", { title: "Part" })
       const sub = made(part)
       expect(part).toBe(
         `Made subtask ${sub} of ${task}: Part. A subagent works on it when you start it with taskID "${sub}".`,
       )
+      expect(h.metadata(lead)).toEqual({ memory: { task } })
       // A chat inside a subtask makes another subtask of the same task.
       h.place(child, { task, subtask: sub })
-      const other = yield* h.read("task", { title: "Another part" }, child, "general")
-      const another = made(other)
-      expect(other).toBe(
-        `Made subtask ${another} of ${task}: Another part. A subagent works on it when you start it with taskID "${another}".`,
+      const another = made(yield* h.read("task", { title: "Another part" }, child, "general"))
+      expect((yield* h.started.client.task(projectID, another)).task).toMatchObject({ parent: task, state: "todo" })
+    }),
+  )
+
+  it.live("a make with subtasks keeps their order and puts the chat inside on the first, in one call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const answer = yield* h.read("task", {
+        title: "Move the checks: script, test, doc",
+        subtasks: [{ title: "Write scripts/check.ts", description: "One file." }, ...steps("Its test", "The API doc")],
+      })
+      const task = made(answer)
+      const read = yield* h.started.client.task(projectID, task)
+      const [first, second, third] = read.subtasks.map((sub) => sub.id)
+      expect(read.subtasks.map((sub) => [sub.title, sub.description, sub.state, sub.worker?.chat ?? null])).toEqual([
+        ["Write scripts/check.ts", "One file.", "active", lead],
+        ["Its test", "", "todo", null],
+        ["The API doc", "", "todo", null],
+      ])
+      expect(read.task).toMatchObject({ state: "active", worker: { chat: lead } })
+      expect(answer).toBe(
+        [
+          `Made task ${task}: Move the checks: script, test, doc. You are inside it, on its first subtask ${first}.`,
+          "Subtasks in order:",
+          `- now: [${first}] Write scripts/check.ts (active; worked on by floris as build)`,
+          `- [${second}] Its test (todo)`,
+          `- [${third}] The API doc (todo)`,
+          MemoryText.planStates,
+        ].join("\n"),
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: first } })
+      expect(sent(h.server).slice(0, 1)).toEqual([["POST", `/pacer/v1/memory/${projectID}/tasks`]])
+      expect(h.server.calls().length).toBe(2)
+      // A subagent inside a task stays on the task it was given: a make with subtasks there is refused, nothing sent.
+      h.place(child, { task, subtask: second })
+      expect(yield* h.read("task", { title: "More", subtasks: steps("A step") }, child, "general")).toBe(
+        `error: This chat is inside task ${task}, and a subagent stays on the task it was given: make each new step with its title alone, or replace the steps still to do with plan.`,
+      )
+      expect(h.server.calls().length).toBe(2)
+      // A lead inside a task that gives subtasks starts other work: a new task with that plan, and the chat moves
+      // into it; the first task stays as it was.
+      const other = made(yield* h.read("task", { title: "Fix the typo in the README", subtasks: steps("Fix it") }))
+      const otherRead = yield* h.started.client.task(projectID, other)
+      expect(otherRead.task).toMatchObject({ parent: null, state: "active", worker: { chat: lead } })
+      expect(h.metadata(lead)).toEqual({ memory: { task: other, subtask: otherRead.subtasks[0]!.id } })
+      expect((yield* h.started.client.task(projectID, task)).task).toMatchObject({ state: "active", parent: null })
+    }),
+  )
+
+  it.live("done on the current subtask starts the next and answers with it; after the last the task is review", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(
+        yield* h.read("task", {
+          title: "Three steps",
+          subtasks: [
+            { title: "Write it" },
+            { title: "Test it", description: "bun test in packages/core." },
+            { title: "Document it" },
+          ],
+        }),
+      )
+      const [first, second, third] = yield* subtasksOf(h, task)
+      expect(yield* h.read("task", { id: first, state: "done", note: "written" })).toBe(
+        [
+          `Subtask ${first} is done. You are now on subtask ${second} of ${task}: Test it.`,
+          "bun test in packages/core.",
+          "The rest still to do:",
+          `- [${third}] Document it`,
+          check,
+        ].join("\n"),
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: second } })
+      expect(states(h.server).at(-1)?.body).toEqual({
+        state: "done",
+        note: "written",
+        next: true,
+        by: { role: "build", chat: lead, task, subtask: first },
+      })
+      expect(yield* h.read("task", { id: second, state: "done" })).toBe(
+        [
+          `Subtask ${second} is done. You are now on subtask ${third} of ${task}: Document it.`,
+          "It is the last one.",
+          check,
+        ].join("\n"),
+      )
+      expect(yield* h.read("task", { id: third, state: "done" })).toBe(
+        `Subtask ${third} is done. Every subtask of ${task} is done or dropped, so the task is now review.`,
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task } })
+      expect((yield* h.started.client.task(projectID, task)).task).toMatchObject({
+        state: "review",
+        note: "every subtask is done or dropped",
+      })
+      // A subtask still open that is not this chat's to start: done answers it.
+      const pair = made(
+        yield* h.read("task", { title: "Two steps", subtasks: steps("Mine", "Blocked one") }, child, "general"),
+      )
+      const [mine, blocked] = yield* subtasksOf(h, pair)
+      yield* h.read("task", { id: blocked, state: "blocked", note: "no schema" })
+      expect(yield* h.read("task", { id: mine, state: "done" }, child, "general")).toBe(
+        [
+          `Subtask ${mine} is done. None of the subtasks of ${pair} is left to start; those still open:`,
+          `- [${blocked}] Blocked one (blocked)`,
+        ].join("\n"),
+      )
+      expect(h.metadata(child)).toEqual({ memory: { task: pair } })
+    }),
+  )
+
+  // The behaviour set of 2026-11-15 (workspace run/evidence/task-plans/behaviour): opus gave a new plan its new title
+  // in the same call, and was refused with the forms; models that joined a seeded task were left on the task itself.
+  it.live("a plan with a new title edits the title with the same note, in one call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Docs: A, B", subtasks: steps("A", "B") }))
+      const answer = yield* h.read("task", {
+        id: task,
+        plan: steps("C"),
+        note: "B was already done",
+        title: "Docs: A, C",
+      })
+      expect(answer).toContain("Its title now: Docs: A, C")
+      const read = yield* h.started.client.task(projectID, task)
+      expect(read.task.title).toBe("Docs: A, C")
+      expect(read.subtasks.map((sub) => [sub.title, sub.state])).toEqual([
+        // The plan drops the caller's own active step too, and its first new one takes its place.
+        ["A", "dropped"],
+        ["B", "dropped"],
+        ["C", "active"],
+      ])
+      expect(read.changes[0]).toMatchObject({ note: "B was already done", title: "Docs: A, C" })
+    }),
+  )
+
+  it.live(
+    "setting a task active joins its plan: the chat's own step, else the first not started while none is active",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const task = made(yield* h.read("task", { title: "Seeded: A, B", subtasks: steps("A", "B") }))
+        const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+        // The lead works on A and its chat runs: a child that joins stays on the task itself, takes nobody's step, and
+        // is told whose step it is and how to take it over.
+        h.running.add(lead)
+        h.place(child, { task })
+        const joined = yield* h.read("task", { id: task, state: "active" }, child, "general")
+        expect(joined).toStartWith(`Task ${task} is now active; you are inside it.\n`)
+        expect(joined).toContain(`Its current subtask [${first}] A is worked on by floris as build`)
+        expect(joined).toEndWith("To take it over, as when the person asks you to, set it active.")
+        expect(h.metadata(child)).toEqual({ memory: { task } })
+        // The lead, back on the task itself, joins again and lands on its own step.
+        h.place(lead, { task })
+        expect(yield* h.read("task", { id: task, state: "active" })).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${first}.`,
+        )
+        expect(h.metadata(lead)).toEqual({ memory: { task, subtask: first } })
+        // With A done and B back to todo, nobody is on a step: the child that joins is put on B, in its name.
+        yield* h.read("task", { id: first!, state: "done" })
+        yield* h.read("task", { id: second!, state: "todo" })
+        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${second}.`,
+        )
+        expect(h.metadata(child)).toEqual({ memory: { task, subtask: second } })
+        expect((yield* h.started.client.task(projectID, second!)).task).toMatchObject({
+          state: "active",
+          worker: { chat: child },
+        })
+      }),
+  )
+
+  it.live(
+    "joining a task takes over the step of a chat that runs no more; done on a task with steps open is refused",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const task = made(yield* h.read("task", { title: "Handed over: A, B", subtasks: steps("A", "B") }))
+        const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+        // The lead's chat is known here and not running: the child that joins carries on with its step.
+        h.place(child, { task })
+        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${first}.`,
+        )
+        expect((yield* h.started.client.task(projectID, first!)).task.worker).toMatchObject({ chat: child })
+        // Done meant for the step but sent for the task is refused, with the open steps named, and sends no change.
+        const changes = () => h.server.calls().filter((call) => call.method === "POST").length
+        const before = changes()
+        expect(yield* h.read("task", { id: task, state: "done" })).toBe(
+          `error: Task ${task} still has open subtasks: [${first}] A (active); [${second}] B (todo). Set the one you finished done, or replace the rest with plan; to close the task anyway, drop them first.`,
+        )
+        expect(changes()).toBe(before)
+      }),
+  )
+
+  // The behaviour set's third run: an edit and done on a step sent together before joining; a chat working from the task
+  // itself that closed every step left the task active.
+  it.live("done on a step in progress from no task is refused; from the task itself it goes on along the plan", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Steps: A, B", subtasks: steps("A", "B") }))
+      const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+      // The lead's chat leaves every task; its done on the step in progress is refused and changes nothing.
+      h.place(lead, undefined)
+      h.running.add(lead)
+      const changes = () => h.server.calls().filter((call) => call.method === "POST").length
+      const before = changes()
+      expect(yield* h.read("task", { id: first!, state: "done" })).toBe(
+        `error: This chat is in no task, and ${first} is a step of task ${task} in progress: set that task active to join it first, then set the step done.`,
+      )
+      expect(changes()).toBe(before)
+      // Inside the task on no step, done on its own step goes on: B starts in its name.
+      h.place(lead, { task })
+      expect(yield* h.read("task", { id: first!, state: "done" })).toStartWith(
+        `Subtask ${first} is done. You are now on subtask ${second} of ${task}: B.`,
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: second } })
+    }),
+  )
+
+  it.live("a plan keeps the done and others' active subtasks, drops the rest with its note and moves the chat", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Four steps", subtasks: steps("A", "B", "C", "D") }))
+      const [a, b, c, d] = yield* subtasksOf(h, task)
+      yield* h.read("task", { id: a, state: "done" })
+      h.place(child, { task, subtask: c })
+      yield* h.read("task", { id: c, state: "active" }, child, "general")
+      const before = h.server.calls().length
+      for (const note of [undefined, " "])
+        expect(yield* h.read("task", { id: task, plan: steps("B2"), ...(note === undefined ? {} : { note }) })).toBe(
+          "error: plan needs a note that says why the plan changes.",
+        )
+      expect(h.server.calls().length).toBe(before)
+      const answer = yield* h.read("task", {
+        id: task,
+        plan: [{ title: "B2", description: "With the schema." }, { title: "D2" }],
+        note: "B needs a schema first",
+      })
+      const read = yield* h.started.client.task(projectID, task)
+      const [b2, d2] = read.subtasks.slice(4).map((sub) => sub.id)
+      expect(answer).toBe(
+        [
+          `The plan of ${task} is replaced: ${b}, ${d} dropped with your note.`,
+          "Subtasks in order:",
+          `- done: [${a}] A`,
+          `- dropped: [${b}] B`,
+          `- now: [${c}] C (active; worked on by floris as general)`,
+          `- dropped: [${d}] D`,
+          `- now: [${b2}] B2 (active; worked on by floris as build)`,
+          `- [${d2}] D2 (todo)`,
+          `You are on subtask ${b2}: B2.`,
+        ].join("\n"),
+      )
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: b2 } })
+      expect(read.subtasks.map((sub) => [sub.title, sub.state, sub.note ?? null])).toEqual([
+        ["A", "done", null],
+        ["B", "dropped", "B needs a schema first"],
+        ["C", "active", null],
+        ["D", "dropped", "B needs a schema first"],
+        ["B2", "active", null],
+        ["D2", "todo", null],
+      ])
+      // The server's refusal of a title a subtask kept open has.
+      expect(yield* h.read("task", { id: task, plan: steps("C"), note: "again" })).toBe(
+        `error: plan[0].title: subtask ${c} has that title and stays open`,
       )
     }),
   )
 
-  it.live("reads a task with every part, and one with none; a todo one ends with how work on it starts", () =>
+  it.live(
+    "a child is refused a plan of its lead's task, and nothing is sent; the chat that works on a task plans it",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const own = made(
+          yield* h.read("task", { title: "The child's own", subtasks: steps("X", "Y") }, child, "general"),
+        )
+        expect(yield* h.read("task", { id: own, plan: steps("Z"), note: "Y was wrong" }, child, "general")).toStartWith(
+          `The plan of ${own} is replaced: `,
+        )
+        const task = made(yield* h.read("task", { title: "The lead's plan", subtasks: steps("A", "B") }))
+        const [, b] = yield* subtasksOf(h, task)
+        h.place(child, { task, subtask: b })
+        // On a subtask its lead made, the child sets it review, not done: the line on the state is the one without
+        // plans.
+        const active = yield* h.read("task", { id: b, state: "active" }, child, "general")
+        expect(active).toContain(MemoryText.states)
+        expect(active).not.toContain(MemoryText.planStates)
+        const posts = () => h.server.calls().filter((call) => call.method === "POST").length
+        const before = posts()
+        expect(yield* h.read("task", { id: task, plan: steps("Mine"), note: "a better way" }, child, "general")).toBe(
+          `error: Only a lead chat or the chat that works on ${task} replaces its plan.`,
+        )
+        expect(posts()).toBe(before)
+        expect((yield* subtasksOf(h, task)).length).toBe(2)
+      }),
+  )
+
+  it.live("edits a task's title and description, kept in its history; a child edits what it made or works on", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const bare = made(yield* h.read("task", { title: "Bare" }))
-      const task = made(
-        yield* h.read("task", { title: "Move the checks", description: "One script.\nDone when it passes." }),
+      const task = made(yield* h.read("task", { title: "Old title", description: "One script." }))
+      expect(yield* h.read("task", { id: task, title: "New title", note: "named the file" })).toBe(
+        `Edited task ${task}. Its title now: New title`,
       )
-      h.place(lead, { task })
-      const sub = made(yield* h.read("task", { title: "First part" }))
-      yield* h.read("task", { id: task, state: "blocked", note: "the file is not there" })
-      yield* h.read("task", { id: task, state: "active" })
-      const entry = saved(
-        yield* h.read("remember", { text: "The script is scripts/check.ts.", kind: "verified", basis: "ls" }),
+      expect(yield* h.read("task", { id: task, description: "" })).toBe(
+        `Edited task ${task}; it has no description now. Its title now: New title`,
+      )
+      expect(yield* h.read("task", { id: task, title: "New title" })).toBe(
+        `Task ${task} has that already, so nothing changed. Its title: New title`,
       )
       const read = yield* h.started.client.task(projectID, task)
-      const at = day(read.task.at)
+      expect(read.task).toMatchObject({ title: "New title", description: "", state: "active" })
+      expect((yield* h.read("task", { id: task })).split("\n").slice(1)).toEqual([
+        "Changes, newest first:",
+        `- ${day(read.changes[0]!.at)} description cleared by floris as build`,
+        `- ${day(read.changes[1]!.at)} title edited to "New title" by floris as build: named the file`,
+        `- ${day(read.changes[2]!.at)} active by floris as build`,
+      ])
+      const before = h.server.calls().filter((call) => call.method === "POST").length
+      expect(yield* h.read("task", { id: task, title: "Mine now" }, child, "general")).toBe(
+        `error: Only a lead chat, the chat that made ${task} or the one that works on it edits it.`,
+      )
+      expect(h.server.calls().filter((call) => call.method === "POST").length).toBe(before)
+      h.place(child, { task })
+      const part = made(yield* h.read("task", { title: "A part" }, child, "general"))
+      expect(yield* h.read("task", { id: part, description: "The first half." }, child, "general")).toBe(
+        `Edited task ${part}. Its title now: A part`,
+      )
+    }),
+  )
+
+  it.live("reads a task's subtasks in order, the current one marked and the done and dropped folded short", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(
+        yield* h.read("task", {
+          title: "Four steps",
+          description: "Done when all pass.",
+          subtasks: steps("A", "B", "C", "D"),
+        }),
+      )
+      const [a, b, c, d] = yield* subtasksOf(h, task)
+      yield* h.read("task", { id: a, state: "done" })
+      yield* h.read("task", { id: c, state: "dropped", note: "not needed" })
+      yield* h.read("task", { id: d, state: "dropped", note: "not needed either" })
+      const read = yield* h.started.client.task(projectID, task)
       expect(yield* h.read("task", { id: task })).toBe(
         [
-          `Task ${task}: Move the checks (active; made by floris as build, ${at}; worked on by floris as build)`,
-          "One script.",
-          "Done when it passes.",
-          "Subtasks:",
-          `- [${sub}] First part (todo)`,
+          `Task ${task}: Four steps (active; made by floris as build, ${day(read.task.at)}; worked on by floris as build, last request unknown)`,
+          "Done when all pass.",
+          "Subtasks in order, 3 of 4 done or dropped:",
+          `- done: [${a}] A`,
+          `- now: [${b}] B (active; worked on by floris as build, last request unknown)`,
+          `- dropped: [${c}] C; [${d}] D`,
           "Changes, newest first:",
           `- ${day(read.changes[0]!.at)} active by floris as build`,
-          `- ${day(read.changes[1]!.at)} blocked by floris as build: the file is not there`,
-          "Entries:",
-          MemoryText.entry(yield* h.started.client.read(projectID, entry)),
         ].join("\n"),
       )
-      const nobody = (id: string) =>
-        `Nobody works on it yet: start a subagent with taskID "${id}", or set it active to work on it yourself.`
-      // Back to todo, with every part: the line comes after all of them.
-      yield* h.read("task", { id: task, state: "todo" })
-      const again = yield* h.started.client.task(projectID, task)
-      expect(yield* h.read("task", { id: task })).toBe(
-        [
-          `Task ${task}: Move the checks (todo; made by floris as build, ${at}; worked on by floris as build)`,
-          "One script.",
-          "Done when it passes.",
-          "Subtasks:",
-          `- [${sub}] First part (todo)`,
-          "Changes, newest first:",
-          `- ${day(again.changes[0]!.at)} todo by floris as build`,
-          `- ${day(again.changes[1]!.at)} active by floris as build`,
-          `- ${day(again.changes[2]!.at)} blocked by floris as build: the file is not there`,
-          "Entries:",
-          MemoryText.entry(yield* h.started.client.read(projectID, entry)),
-          nobody(task),
-        ].join("\n"),
-      )
-      expect(yield* h.read("task", { id: sub })).toBe(
-        [`Task ${sub}: First part (todo; made by floris as build, ${at})`, `Subtask of ${task}.`, nobody(sub)].join(
-          "\n",
-        ),
-      )
-      expect(yield* h.read("task", { id: bare })).toBe(
-        [`Task ${bare}: Bare (todo; made by floris as build, ${at})`, nobody(bare)].join("\n"),
-      )
-      // Blocked, review and done add nothing either.
-      for (const [state, note] of [
-        ["blocked", "wrong"],
-        ["review", undefined],
-        ["done", undefined],
-      ] as const) {
-        yield* h.read("task", { id: bare, state, ...(note ? { note } : {}) })
-        expect(yield* h.read("task", { id: bare })).not.toContain("Nobody works on it yet")
-      }
+      // Set active, its part of the start block says what to do with a plan's subtasks.
+      expect(yield* h.read("task", { id: b, state: "active" })).toContain(MemoryText.planStates)
     }),
+  )
+
+  it.live(
+    "dropped needs a note, refused before anything is sent; with one it closes the task and takes the chat out",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const task = made(yield* h.read("task", { title: "Given up" }))
+        const before = h.server.calls().length
+        for (const note of [undefined, "", "  "])
+          expect(yield* h.read("task", { id: task, state: "dropped", ...(note === undefined ? {} : { note }) })).toBe(
+            "error: dropped needs a note that says why it is given up.",
+          )
+        expect(h.server.calls().length).toBe(before)
+        expect(yield* h.read("task", { id: task, state: "dropped", note: "not needed" })).toBe(
+          `Task ${task} is now dropped.`,
+        )
+        expect(h.metadata(lead)).toEqual({})
+        expect(yield* h.read("task", {})).toBe("No open tasks.")
+      }),
+  )
+
+  it.live("on a server without plans each new form is refused and sends nothing; done is as before", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ catalog: noPlans })
+      const answer = yield* h.read("task", { title: "Move the checks" })
+      const task = made(answer)
+      expect(answer).toBe(
+        `Made task ${task}: Move the checks. A subagent works on it when you start it with taskID "${task}".`,
+      )
+      expect(h.metadata(lead)).toBeUndefined()
+      const before = h.server.calls().length
+      for (const [input, what] of [
+        [{ title: "Planned", subtasks: steps("A") }, "Making a task with subtasks"],
+        [{ id: task, plan: steps("A"), note: "n" }, "Replacing the subtasks with plan"],
+        [{ id: task, title: "New" }, "Editing a task"],
+        [{ id: task, description: "d" }, "Editing a task"],
+        [{ id: task, state: "dropped", note: "n" }, "The state dropped"],
+      ] as const)
+        expect(yield* h.read("task", input)).toBe(
+          `error: ${what} is unavailable: memory on this server has no task plans yet. The other forms of task work as before.`,
+        )
+      expect(h.server.calls().length).toBe(before)
+      // Done on the subtask the chat is on starts nothing.
+      h.place(lead, { task })
+      const one = made(yield* h.read("task", { title: "One" }))
+      const two = made(yield* h.read("task", { title: "Two" }))
+      yield* h.read("task", { id: one, state: "active" })
+      expect(yield* h.read("task", { id: one, state: "done" })).toBe(`Task ${one} is now done.`)
+      expect(states(h.server).at(-1)?.body).not.toHaveProperty("next")
+      expect((yield* h.started.client.task(projectID, two)).task.state).toBe("todo")
+      expect(h.metadata(lead)).toEqual({ memory: { task } })
+    }),
+  )
+
+  it.live(
+    "without plans, reads a task with every part, and one with none; a todo one ends with how work on it starts",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ catalog: noPlans })
+        const bare = made(yield* h.read("task", { title: "Bare" }))
+        const task = made(
+          yield* h.read("task", { title: "Move the checks", description: "One script.\nDone when it passes." }),
+        )
+        h.place(lead, { task })
+        const sub = made(yield* h.read("task", { title: "First part" }))
+        yield* h.read("task", { id: task, state: "blocked", note: "the file is not there" })
+        yield* h.read("task", { id: task, state: "active" })
+        const entry = saved(
+          yield* h.read("remember", { text: "The script is scripts/check.ts.", kind: "verified", basis: "ls" }),
+        )
+        const read = yield* h.started.client.task(projectID, task)
+        const at = day(read.task.at)
+        expect(yield* h.read("task", { id: task })).toBe(
+          [
+            `Task ${task}: Move the checks (active; made by floris as build, ${at}; worked on by floris as build)`,
+            "One script.",
+            "Done when it passes.",
+            "Subtasks:",
+            `- [${sub}] First part (todo)`,
+            "Changes, newest first:",
+            `- ${day(read.changes[0]!.at)} active by floris as build`,
+            `- ${day(read.changes[1]!.at)} blocked by floris as build: the file is not there`,
+            "Entries:",
+            MemoryText.entry(yield* h.started.client.read(projectID, entry)),
+          ].join("\n"),
+        )
+        const nobody = (id: string) =>
+          `Nobody works on it yet: start a subagent with taskID "${id}", or set it active to work on it yourself.`
+        // Back to todo, with every part: the line comes after all of them.
+        yield* h.read("task", { id: task, state: "todo" })
+        const again = yield* h.started.client.task(projectID, task)
+        expect(yield* h.read("task", { id: task })).toBe(
+          [
+            `Task ${task}: Move the checks (todo; made by floris as build, ${at}; worked on by floris as build)`,
+            "One script.",
+            "Done when it passes.",
+            "Subtasks:",
+            `- [${sub}] First part (todo)`,
+            "Changes, newest first:",
+            `- ${day(again.changes[0]!.at)} todo by floris as build`,
+            `- ${day(again.changes[1]!.at)} active by floris as build`,
+            `- ${day(again.changes[2]!.at)} blocked by floris as build: the file is not there`,
+            "Entries:",
+            MemoryText.entry(yield* h.started.client.read(projectID, entry)),
+            nobody(task),
+          ].join("\n"),
+        )
+        expect(yield* h.read("task", { id: sub })).toBe(
+          [`Task ${sub}: First part (todo; made by floris as build, ${at})`, `Subtask of ${task}.`, nobody(sub)].join(
+            "\n",
+          ),
+        )
+        expect(yield* h.read("task", { id: bare })).toBe(
+          [`Task ${bare}: Bare (todo; made by floris as build, ${at})`, nobody(bare)].join("\n"),
+        )
+        // Blocked, review and done add nothing either.
+        for (const [state, note] of [
+          ["blocked", "wrong"],
+          ["review", undefined],
+          ["done", undefined],
+        ] as const) {
+          yield* h.read("task", { id: bare, state, ...(note ? { note } : {}) })
+          expect(yield* h.read("task", { id: bare })).not.toContain("Nobody works on it yet")
+        }
+      }),
   )
 
   it.live(
@@ -1215,21 +1742,26 @@ describe("MemoryTools task", () => {
         expect(yield* set(task, "blocked")).toBe(
           `Task ${task} is blocked. Stop here and say in your answer what is wrong with it.`,
         )
-        expect(yield* set(task, "active")).toStartWith(`Task ${task} is now active; you are inside it.`)
+        // A task whose plan has a step not started, while none is active, puts the chat on that step: here the
+        // lead's todo subtask, which becomes the child's.
+        expect(yield* set(task, "active")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${elsewhere}.`,
+        )
+        expect(h.metadata(child)).toEqual({ memory: { task, subtask: elsewhere } })
         const before = states(h.server).length
         for (const state of ["done", "todo"])
           expect(yield* set(task, state)).toBe(
             `error: Only a lead chat or the chat that made it sets ${state} on ${task}.`,
           )
-        expect(yield* set(elsewhere, "active")).toBe(
-          `error: Only a lead chat or the chat that made it sets active on ${elsewhere}.`,
-        )
         expect(states(h.server).length).toBe(before)
         // Its own subtask: any state, though it is not inside it.
         const own = made(yield* h.read("task", { title: "My part" }, child, "general"))
         expect(yield* set(own, "done")).toBe(`Task ${own} is now done.`)
         // A lead sets any state of any task.
-        expect(yield* set(elsewhere, "done", lead)).toBe(`Task ${elsewhere} is now done.`)
+        // The child's step closed by the lead: the lead takes no next step, and with every step closed the task is review.
+        expect(yield* set(elsewhere, "done", lead)).toBe(
+          `Task ${elsewhere} is now done. Every subtask of ${task} is done or dropped, so that task is now review.`,
+        )
         expect(yield* set(task, "todo", lead)).toBe(`Task ${task} is now todo.`)
       }),
   )
@@ -1247,68 +1779,73 @@ describe("MemoryTools task", () => {
     }),
   )
 
-  it.live("active puts the chat inside the task and answers its part of the start block; done takes it out", () =>
-    Effect.gen(function* () {
-      const h = yield* setup()
-      const task = made(yield* h.read("task", { title: "Move the checks", description: "One script." }))
-      expect(yield* h.read("task", { id: task, state: "active" })).toBe(
-        [
-          `Task ${task} is now active; you are inside it.`,
-          `Your task [${task}]: Move the checks (active)`,
-          "One script.",
-          MemoryText.states,
-        ].join("\n"),
-      )
-      // What was said with a change of state is in the answer, after the line on the state and before the notes.
-      yield* h.read("task", { id: task, state: "review", note: "Run bun run gen first." })
-      const said = new Date((yield* h.started.client.task(projectID, task)).changes[0]!.at).toISOString().slice(0, 10)
-      expect(yield* h.read("task", { id: task, state: "active" })).toBe(
-        [
-          `Task ${task} is now active; you are inside it.`,
-          `Your task [${task}]: Move the checks (active)`,
-          "One script.",
-          MemoryText.states,
-          "Said with the task's changes of state, newest first:",
-          `- ${said} review by floris as build: Run bun run gen first.`,
-        ].join("\n"),
-      )
-      expect(h.metadata(lead)).toEqual({ memory: { task } })
-      const entry = saved(yield* h.read("remember", { text: "Noted in the task.", kind: "verified", basis: "ls" }))
-      const sub = made(yield* h.read("task", { title: "A part", description: "The first half." }))
-      expect(yield* h.read("task", { id: sub, state: "active" })).toBe(
-        [
-          `Task ${sub} is now active; you are inside it.`,
-          `Your task [${sub}]: A part (active)`,
-          `Part of task [${task}]: Move the checks.`,
-          "The first half.",
-          MemoryText.states,
-          // The subtask has said nothing; the task's said line follows.
-          "Said with the task's changes of state, newest first:",
-          `- ${said} review by floris as build: Run bun run gen first.`,
-          "What was noted in the task, newest first:",
-          MemoryText.entry(yield* h.started.client.read(projectID, entry)),
-        ].join("\n"),
-      )
-      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: sub } })
-      expect(yield* h.read("task", { id: sub, state: "done" })).toBe(`Task ${sub} is now done.`)
-      expect(h.metadata(lead)).toEqual({ memory: { task } })
-      expect(yield* h.read("task", { id: task, state: "done" })).toBe(`Task ${task} is now done.`)
-      expect(h.metadata(lead)).toEqual({})
-    }),
+  it.live(
+    "without plans, active puts the chat inside the task and answers its part of the start block; done takes it out",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ catalog: noPlans })
+        const task = made(yield* h.read("task", { title: "Move the checks", description: "One script." }))
+        expect(yield* h.read("task", { id: task, state: "active" })).toBe(
+          [
+            `Task ${task} is now active; you are inside it.`,
+            `Your task [${task}]: Move the checks (active)`,
+            "One script.",
+            MemoryText.states,
+          ].join("\n"),
+        )
+        // What was said with a change of state is in the answer, after the line on the state and before the notes.
+        yield* h.read("task", { id: task, state: "review", note: "Run bun run gen first." })
+        const said = new Date((yield* h.started.client.task(projectID, task)).changes[0]!.at).toISOString().slice(0, 10)
+        expect(yield* h.read("task", { id: task, state: "active" })).toBe(
+          [
+            `Task ${task} is now active; you are inside it.`,
+            `Your task [${task}]: Move the checks (active)`,
+            "One script.",
+            MemoryText.states,
+            "Said with the task's changes of state, newest first:",
+            `- ${said} review by floris as build: Run bun run gen first.`,
+          ].join("\n"),
+        )
+        expect(h.metadata(lead)).toEqual({ memory: { task } })
+        const entry = saved(yield* h.read("remember", { text: "Noted in the task.", kind: "verified", basis: "ls" }))
+        const sub = made(yield* h.read("task", { title: "A part", description: "The first half." }))
+        expect(yield* h.read("task", { id: sub, state: "active" })).toBe(
+          [
+            `Task ${sub} is now active; you are inside it.`,
+            `Your task [${sub}]: A part (active)`,
+            `Part of task [${task}]: Move the checks.`,
+            "The first half.",
+            MemoryText.states,
+            // The subtask has said nothing; the task's said line follows.
+            "Said with the task's changes of state, newest first:",
+            `- ${said} review by floris as build: Run bun run gen first.`,
+            "What was noted in the task, newest first:",
+            MemoryText.entry(yield* h.started.client.read(projectID, entry)),
+          ].join("\n"),
+        )
+        expect(h.metadata(lead)).toEqual({ memory: { task, subtask: sub } })
+        expect(yield* h.read("task", { id: sub, state: "done" })).toBe(`Task ${sub} is now done.`)
+        expect(h.metadata(lead)).toEqual({ memory: { task } })
+        expect(yield* h.read("task", { id: task, state: "done" })).toBe(`Task ${task} is now done.`)
+        expect(h.metadata(lead)).toEqual({})
+      }),
   )
 
-  it.live("any other combination of fields is refused with the four forms, and nothing is sent", () =>
+  it.live("any other combination of fields is refused with the six forms, and nothing is sent", () =>
     Effect.gen(function* () {
       const h = yield* setup()
       for (const input of [
-        { id: "k3f9x2m7q4tz", title: "t" },
         { state: "done" },
         { note: "n" },
         { id: "k3f9x2m7q4tz", note: "n" },
         { description: "d" },
         { title: "t", state: "todo" },
         { title: "t", note: "n" },
-        { id: "k3f9x2m7q4tz", description: "d" },
+        { subtasks: [{ title: "s" }] },
+        { title: "t", plan: [{ title: "s" }] },
+        { id: "k3f9x2m7q4tz", subtasks: [{ title: "s" }] },
+        { id: "k3f9x2m7q4tz", plan: [{ title: "s" }], state: "done" },
+        { id: "k3f9x2m7q4tz", title: "t", state: "done" },
       ])
         expect(yield* h.read("task", input)).toBe(forms)
       expect(h.server.calls()).toEqual([])
@@ -1350,7 +1887,8 @@ describe("MemoryTools task", () => {
   it.live("remember with scope task writes for the chat's task, inside a subtask too; outside one it is refused", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const task = made(yield* h.read("task", { title: "The task" }))
+      const task = (yield* h.started.client.make(projectID, { title: "The task", by: { role: "build", chat: lead } }))
+        .task.id
       const sub = (yield* h.started.client.make(projectID, {
         title: "The part",
         parent: task,
@@ -1481,6 +2019,46 @@ describe("MemoryTools task", () => {
         { global: false, roles: [], tasks: [task] },
         { global: true, roles: ["general"], tasks: [task] },
       ])
+    }),
+  )
+
+  it.live("recall with task searches only that task's entries, from any chat; another scope with it is refused", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const by = { role: "build", chat: lead }
+      const [one, two] = yield* Effect.forEach(["One", "Two"], (title) =>
+        h.started.client.make(projectID, { title, by }).pipe(Effect.map((made) => made.task.id)),
+      )
+      h.place(child, { task: one })
+      const first = yield* h.save(
+        { text: "The zebra cache of task one.", kind: "verified", basis: "ls" },
+        child,
+        "general",
+      )
+      h.place(child, { task: two })
+      const second = yield* h.save(
+        { text: "The zebra cache of task two.", kind: "verified", basis: "ls" },
+        child,
+        "general",
+      )
+      const role = yield* h.save({ text: "The zebra cache of the role.", kind: "verified", basis: "ls" })
+      // The lead is in no task.
+      const found = yield* h.read("recall", { query: "zebra cache", task: one })
+      expect(found).toContain(`[${first}]`)
+      for (const id of [second, role]) expect(found).not.toContain(`[${id}]`)
+      expect(yield* h.read("recall", { query: "zebra cache", task: two, scope: "task" }, child, "general")).toContain(
+        `[${second}]`,
+      )
+      const searches = () => h.server.calls().filter((call) => call.path.endsWith("/search"))
+      expect(searches().map((call) => (call.body as { scopes: unknown }).scopes)).toEqual([
+        { global: false, roles: [], tasks: [one] },
+        { global: false, roles: [], tasks: [two] },
+      ])
+      for (const scope of ["all", "role", "global"])
+        expect(yield* h.read("recall", { query: "zebra", task: one, scope })).toBe(
+          "error: With task, recall searches only that task's entries: leave scope out, or set it to task.",
+        )
+      expect(searches().length).toBe(2)
     }),
   )
 })

@@ -3,7 +3,7 @@ import {
   canonicalToolName,
   executeCallSummary,
   finiteNumber,
-  goalCallLabel,
+  taskCallLabel,
   primitiveInputSummary,
   toolDisplayMetadata,
   webSearchProviderLabel,
@@ -21,16 +21,38 @@ test("normalizes shared tool primitives", () => {
   expect(primitiveInputSummary({ path: "src/a.ts", line: 2 }, ["path"])).toBe("[line=2]")
 })
 
-test("labels a task call that makes a goal, and no other call", () => {
-  expect(goalCallLabel("task", { kind: "goal", title: " Board\n UI " })).toBe("Goal: Board UI")
-  expect(goalCallLabel("task", { kind: "goal" })).toBe("Goal")
-  expect(goalCallLabel("task", { title: "Board UI", goal: "g1" })).toBeUndefined()
-  expect(goalCallLabel("task", { id: "t1", goal: "g1" })).toBeUndefined()
-  expect(goalCallLabel("remember", { kind: "goal", title: "x" })).toBeUndefined()
-  expect(goalCallLabel("task", undefined)).toBeUndefined()
+test("labels a task call that makes a goal, turns a task into one or files a found task, and no other call", () => {
+  expect(taskCallLabel("task", { kind: "goal", title: " Board\n UI " })).toBe("Goal: Board UI")
+  expect(taskCallLabel("task", { kind: "goal" })).toBe("Goal")
+  expect(taskCallLabel("task", { title: "Board UI", goal: "g1" })).toBeUndefined()
+  expect(taskCallLabel("task", { id: "t1", goal: "g1" })).toBeUndefined()
+  expect(taskCallLabel("remember", { kind: "goal", title: "x" })).toBeUndefined()
+  expect(taskCallLabel("task", undefined)).toBeUndefined()
+  // A task turned into a goal: the title CPP's answer gave, else the task's id.
+  expect(taskCallLabel("task", { id: "t4", kind: "goal" }, { id: "t4", title: " Board\n UI " })).toBe(
+    "Goal from task: Board UI",
+  )
+  expect(taskCallLabel("task", { id: "t4", kind: "goal" })).toBe("Goal from task: t4")
+  expect(taskCallLabel("task", { id: "t4", kind: "goal" }, { title: 3 })).toBe("Goal from task: t4")
+  // A found task.
+  expect(taskCallLabel("task", { title: " Flaky\n test ", found: true })).toBe("Found: Flaky test")
+  expect(taskCallLabel("task", { found: true })).toBe("Found")
+  expect(taskCallLabel("task", { title: "Flaky test", found: false })).toBeUndefined()
+  expect(taskCallLabel("remember", { title: "x", found: true })).toBeUndefined()
   // Called from a Code Mode program, it shows the same.
   expect(executeCallSummary({ tool: "task", status: "completed", input: { kind: "goal", title: "Board" } })).toBe(
     "Goal: Board",
+  )
+  expect(
+    executeCallSummary({
+      tool: "task",
+      status: "completed",
+      input: { id: "t4", kind: "goal" },
+      metadata: { title: "Board" },
+    }),
+  ).toBe("Goal from task: Board")
+  expect(executeCallSummary({ tool: "task", status: "completed", input: { title: "Flaky", found: true } })).toBe(
+    "Found: Flaky",
   )
   expect(executeCallSummary({ tool: "task", status: "completed", input: { id: "t1", goal: "g1" } })).toBe(
     "task [id=t1, goal=g1]",

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import type { JsonValue } from "@opencode/client"
 import { normalizeTool, toolInlineInfo, toolOutputText, toolPath, toolScroll } from "../../src/mini/tool"
 import { canonicalToolPart } from "./fixture/tool-part"
 
@@ -93,18 +94,18 @@ describe("Mini tool presentation", () => {
 
   // The goals board: a task call that makes a goal shows as the goal; the other task calls keep their rows.
   test("shows a task call that makes a goal as the goal", () => {
-    const task = (input: Record<string, string>) =>
+    const task = (input: Record<string, JsonValue>, metadata: Record<string, JsonValue> = {}) =>
       canonicalToolPart(
         "task",
-        { status: "completed", input, metadata: {}, content: [{ type: "text", text: "" }] },
+        { status: "completed", input, metadata, content: [{ type: "text", text: "" }] },
         "call-task",
       )
-    const frame = (input: Record<string, string>) => ({
+    const frame = (input: Record<string, JsonValue>, meta: Record<string, JsonValue> = {}) => ({
       directory: "/work/project",
       raw: "",
       name: "task",
       input,
-      meta: {},
+      meta,
       state: {},
       status: "running",
       error: "",
@@ -114,6 +115,17 @@ describe("Mini tool presentation", () => {
     const goal = { kind: "goal", title: "Task tool improvements" }
     expect(toolInlineInfo(task(goal))).toEqual({ icon: "⚙", title: "Goal: Task tool improvements" })
     expect(toolScroll("start", frame(goal))).toBe("⚙ Goal: Task tool improvements")
+    // The later items: a task turned into a goal, and a found task.
+    const promoted = { id: "t8n2k4m7q9xz", kind: "goal" }
+    expect(toolInlineInfo(task(promoted, { title: "Board UI" }))).toEqual({
+      icon: "⚙",
+      title: "Goal from task: Board UI",
+    })
+    expect(toolInlineInfo(task(promoted)).title).toBe("Goal from task: t8n2k4m7q9xz")
+    expect(toolScroll("start", frame(promoted, { title: "Board UI" }))).toBe("⚙ Goal from task: Board UI")
+    const found = { title: "Flaky test", found: true }
+    expect(toolInlineInfo(task(found))).toEqual({ icon: "⚙", title: "Found: Flaky test" })
+    expect(toolScroll("start", frame(found))).toBe("⚙ Found: Flaky test")
     const move = { id: "t8n2k4m7q9xz", goal: "g4k2m8q1z7xa" }
     expect(toolInlineInfo(task(move)).title).toBe(`task ${JSON.stringify(move)}`)
     expect(toolScroll("start", frame(move))).toBe("⚙ task [id=t8n2k4m7q9xz, goal=g4k2m8q1z7xa]")

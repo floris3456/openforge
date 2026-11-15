@@ -739,15 +739,26 @@ describe("goals", () => {
   const goal = "g4k2m8q1z7xa"
   /** CPP's answer to making a goal; even one that named a place would not move the chat. */
   const goals = (request: Parameters<NonNullable<typeof server.control.answer>>[0]) =>
-    request.method === "POST" && request.path === "/pacer/v1/tools/task" && MemoryTask.goalCall("task", request.body)
-      ? Response.json({
-          text: `Made goal ${goal} (fake).`,
-          data: null,
+    request.method === "POST" && request.path === "/pacer/v1/tools/task" && MemoryTask.promotion("task", request.body)
+      ? // A task turned into a goal: the chat that was inside it is in no task now (the later items' spec, 10).
+        Response.json({
+          text: `[${request.body.id}] is a goal now; its steps are its tasks.`,
+          data: [{ goal: { id: request.body.id, title: "Fix the typo", kind: "goal" } }],
           error: null,
-          metadata: { id: goal },
-          place: { task: goal, subtask: null },
+          metadata: { id: request.body.id },
+          place: null,
         })
-      : server.pass(request)
+      : request.method === "POST" &&
+          request.path === "/pacer/v1/tools/task" &&
+          MemoryTask.goalCall("task", request.body)
+        ? Response.json({
+            text: `Made goal ${goal} (fake).`,
+            data: null,
+            error: null,
+            metadata: { id: goal },
+            place: { task: goal, subtask: null },
+          })
+        : server.pass(request)
   /** The bodies of the chat's task calls as CPP got them. */
   const sent = () =>
     server.received.filter((item) => item.path === "/pacer/v1/tools/task").map((item) => item.body as unknown)
@@ -815,6 +826,36 @@ describe("goals", () => {
       yield* h.prompt("run the tests and note the goal")
       expect(yield* h.checks()).toHaveLength(1)
       expect((yield* metadataOf(h))?.memory).toEqual({ task: h.task!.id })
+    }),
+  )
+
+  // The later items (workspace reference `docs/reference/task-system-later-api.md`, "openforge"): only a goal made from
+  // nothing is the goal call; turning a task into a goal moves the chat as CPP's place says, and is a task call.
+  it.live("turning a task into a goal moves the chat as CPP says, counts as the task call, and names the goal", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task" })
+      server.control.answer = goals
+      const before = sent().length
+      const promoted = { id: h.task!.id, kind: "goal" }
+      yield* h.llm.push(
+        TestLLM.toolCall("call-shell", "shell", { command: "bun test" }),
+        TestLLM.toolCall("call-promote", "task", promoted),
+        TestLLM.text("Promoted.", "promoted"),
+      )
+      yield* h.prompt("run the tests and make the task a goal")
+      expect(sent().slice(before)).toEqual([promoted])
+      expect(yield* h.checks()).toEqual([])
+      expect((yield* metadataOf(h))?.memory).toBeUndefined()
+      const messages = yield* h.session.messages({ sessionID: h.sessionID, order: "asc" })
+      const call = messages
+        .flatMap((message) => (message.type === "assistant" ? message.content : []))
+        .find((part) => part.type === "tool" && part.id === "call-promote")
+      expect(
+        call?.type === "tool" && call.state.status === "completed" ? call.state.metadata : undefined,
+      ).toMatchObject({
+        id: h.task!.id,
+        title: "Fix the typo",
+      })
     }),
   )
 

@@ -28,12 +28,59 @@ export function inside(metadata: SessionSchema.Metadata | undefined): Inside | u
 }
 
 /**
- * Whether a call of CPP's `task` tool makes a goal (workspace reference `docs/reference/goals-board-api.md`, "The task
- * tool"): it never puts the chat inside anything, and it is no task call for the check at the end of a turn. Every
- * other call, `goal` on a task among them, is one as before.
+ * Whether a call of CPP's `task` tool makes a goal from nothing (workspace reference `docs/reference/goals-board-api.md`,
+ * "The task tool"; `docs/reference/task-system-later-api.md`, "openforge"): `kind: "goal"` without `id`. It never puts
+ * the chat inside anything, and it is no task call for the check at the end of a turn. Every other call is one as
+ * before: `goal` on a task, and `task({id, kind: "goal"})`, which turns a task into a goal and may move the chat.
  */
 export function goalCall(name: string, input: unknown) {
-  return name === "task" && typeof input === "object" && input !== null && "kind" in input && input.kind === "goal"
+  return (
+    name === "task" &&
+    typeof input === "object" &&
+    input !== null &&
+    "kind" in input &&
+    input.kind === "goal" &&
+    (!("id" in input) || input.id === undefined)
+  )
+}
+
+/** Whether a call of CPP's `task` tool turns task `id` into a goal: `kind: "goal"` with `id`. */
+export function promotion(name: string, input: unknown): input is { readonly id: string; readonly kind: "goal" } {
+  return (
+    name === "task" &&
+    typeof input === "object" &&
+    input !== null &&
+    "kind" in input &&
+    input.kind === "goal" &&
+    "id" in input &&
+    typeof input.id === "string"
+  )
+}
+
+/**
+ * The title of the goal a promotion made, as CPP's answer's data names it: the first goal or task of that id with a
+ * title, wherever it sits in the answers. Undefined when none does.
+ */
+export function promotedTitle(data: unknown, id: string): string | undefined {
+  const seen = new Set<unknown>()
+  const find = (value: unknown, depth: number): string | undefined => {
+    if (depth > 4 || typeof value !== "object" || value === null || seen.has(value)) return
+    seen.add(value)
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = find(item, depth + 1)
+        if (found) return found
+      }
+      return
+    }
+    const record = value as Record<string, unknown>
+    if (record.id === id && typeof record.title === "string" && record.title.trim()) return record.title
+    for (const key of ["goal", "task"]) {
+      const found = find(record[key], depth + 1)
+      if (found) return found
+    }
+  }
+  return find(data, 0)
 }
 
 /** CPP's place as the session's metadata keeps it. */

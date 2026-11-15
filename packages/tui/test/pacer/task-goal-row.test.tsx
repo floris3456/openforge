@@ -25,7 +25,7 @@ const TASK = "t8n2k4m7q9xz"
 
 type Input = Record<string, JsonValue>
 
-function call(id: string, input: Input, failed?: string): SessionMessageAssistantTool {
+function call(id: string, input: Input, failed?: string, metadata: Input = {}): SessionMessageAssistantTool {
   return {
     type: "tool",
     id,
@@ -33,7 +33,7 @@ function call(id: string, input: Input, failed?: string): SessionMessageAssistan
     time: { created: 10, completed: 11 },
     state: failed
       ? { status: "error", input, metadata: {}, error: { type: "tool.execution", message: failed } }
-      : { status: "completed", input, metadata: {}, content: [{ type: "text", text: "CPP's text" }] },
+      : { status: "completed", input, metadata, content: [{ type: "text", text: "CPP's text" }] },
   }
 }
 
@@ -56,7 +56,7 @@ async function transcript(messages: SessionMessageInfo[]) {
   const listening = Promise.withResolvers<void>()
   const setup = await createAppFixture({
     width: 120,
-    height: 30,
+    height: 36,
     args: { sessionID: SESSION },
     config: { animations: false, session: { sidebar: "hide", grouping: "none" } },
     fetch: (url) => {
@@ -97,6 +97,10 @@ describe("task calls in the chat", () => {
       call("call_task", { title: "Board UI", goal: GOAL }),
       call("call_move", { id: TASK, goal: GOAL }),
       call("call_state", { id: TASK, state: "active" }),
+      // The later items (workspace reference `docs/reference/task-system-later-api.md`, "openforge").
+      call("call_promote", { id: TASK, kind: "goal" }, undefined, { id: TASK, title: "Board  UI" }),
+      call("call_promote_untitled", { id: TASK, kind: "goal" }),
+      call("call_found", { title: "Flaky test", found: true }),
     ]
     const expected = [
       "✓ Goal: Task tool improvements",
@@ -105,6 +109,9 @@ describe("task calls in the chat", () => {
       `✓ task [title=Board UI, goal=${GOAL}]`,
       `✓ task [id=${TASK}, goal=${GOAL}]`,
       `✓ task [id=${TASK}, state=active]`,
+      "✓ Goal from task: Board UI",
+      `✓ Goal from task: ${TASK}`,
+      "✓ Found: Flaky test",
     ]
     await using setup = await transcript(chat(parts))
     await until(() => rows(setup.captureCharFrame()).length === expected.length, 5_000).catch(() => {

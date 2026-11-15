@@ -79,7 +79,7 @@ export const Plugin = {
                   // Not as the failure's cause, which would make it an unknown error rather than the tool's.
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
                 // CPP keeps the chat's place; openforge's own hooks read it from the session's metadata. Making a goal
-                // never moves the chat.
+                // from nothing never moves the chat; turning a task into one may.
                 if (session && answer.place !== undefined && !MemoryTask.goalCall(name, args)) {
                   const place = MemoryTask.fromPlace(answer.place)
                   if (!MemoryTask.at(session.metadata, place))
@@ -93,7 +93,12 @@ export const Plugin = {
                     message: answer.text || answer.error.message,
                     metadata: answer.metadata,
                   })
-                return { content: answer.text, metadata: answer.metadata }
+                // The row of a task turned into a goal names it ("Goal from task: <title>"), from CPP's answer.
+                const title =
+                  MemoryTask.promotion(name, args) && typeof answer.metadata.title !== "string"
+                    ? MemoryTask.promotedTitle(answer.data, args.id)
+                    : undefined
+                return { content: answer.text, metadata: title ? { ...answer.metadata, title } : answer.metadata }
               }),
           })
       })

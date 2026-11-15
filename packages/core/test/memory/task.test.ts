@@ -45,7 +45,20 @@ describe("MemoryTask", () => {
       ["task", undefined],
       ["task", "kind goal"],
       ["remember", { kind: "goal" }],
+      // A task turned into a goal is a task call that may move the chat (the later items).
+      ["task", { id: "t4", kind: "goal" }],
     ] as const)
       expect(MemoryTask.goalCall(name, input)).toBe(false)
+  })
+  test("tells a call that turns a task into a goal, and finds the goal's title in CPP's data", () => {
+    expect(MemoryTask.promotion("task", { id: "t4", kind: "goal" })).toBe(true)
+    expect(MemoryTask.promotion("task", { kind: "goal", title: "Board" })).toBe(false)
+    expect(MemoryTask.promotion("task", { id: "t4", goal: "g1" })).toBe(false)
+    expect(MemoryTask.promotion("remember", { id: "t4", kind: "goal" })).toBe(false)
+    expect(MemoryTask.promotedTitle([{ goal: { id: "t4", title: "Board" } }], "t4")).toBe("Board")
+    expect(MemoryTask.promotedTitle({ task: { id: "t4", title: "Board" } }, "t4")).toBe("Board")
+    expect(MemoryTask.promotedTitle([{ task: { id: "t9", title: "Other" } }], "t4")).toBeUndefined()
+    expect(MemoryTask.promotedTitle([{ goal: { id: "t4", title: " " } }], "t4")).toBeUndefined()
+    expect(MemoryTask.promotedTitle(null, "t4")).toBeUndefined()
   })
 })

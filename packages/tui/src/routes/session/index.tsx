@@ -44,7 +44,7 @@ import {
   canonicalToolName,
   executeCalls,
   executeCallSummary,
-  goalCallLabel,
+  taskCallLabel,
   finiteNumber,
   primitiveInputSummary,
   toolDisplayContent,
@@ -2741,7 +2741,7 @@ function GenericTool(props: ToolProps) {
         part={props.part}
         onClick={expandable() ? () => setExpanded((value) => !value) : undefined}
       >
-        {genericToolSummary(props.tool, props.input)}
+        {genericToolSummary(props.tool, props.input, props.metadata)}
       </InlineTool>
       <Show when={expanded()}>
         <box paddingLeft={3 + INLINE_TOOL_ICON_WIDTH}>
@@ -2775,9 +2775,9 @@ function GenericTool(props: ToolProps) {
   )
 }
 
-export function genericToolSummary(tool: string, input: Record<string, unknown>) {
-  const goal = goalCallLabel(tool, input)
-  if (goal) return goal
+export function genericToolSummary(tool: string, input: Record<string, unknown>, metadata?: Record<string, unknown>) {
+  const label = taskCallLabel(tool, input, metadata)
+  if (label) return label
   const args = primitiveInputSummary(input).replace(/\s+/g, " ")
   return `${tool}${args ? ` ${args}` : ""}`
 }

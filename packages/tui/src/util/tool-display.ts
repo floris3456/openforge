@@ -7,13 +7,30 @@ export function canonicalToolName(name: string) {
 }
 
 /**
- * The row of a call of CLIProxyPacer's `task` tool that makes a goal (`kind: "goal"`), as "Goal: <title>"; undefined
- * for every other call, which shows as before.
+ * The row of a call of CLIProxyPacer's `task` tool that a person reads as what it made, undefined for every other call,
+ * which shows as before: a goal made (`kind: "goal"` without `id`) as "Goal: <title>", a task turned into a goal
+ * (`kind: "goal"` with `id`) as "Goal from task: <title>" (the title CPP's answer gave, else the task's id), and a found
+ * task (`found: true`) as "Found: <title>".
  */
-export function goalCallLabel(tool: string, input: Record<string, unknown> | undefined) {
-  if (tool !== "task" || input?.kind !== "goal") return
-  const title = typeof input.title === "string" ? input.title.replace(/\s+/g, " ").trim() : ""
-  return title ? `Goal: ${title}` : "Goal"
+export function taskCallLabel(
+  tool: string,
+  input: Record<string, unknown> | undefined,
+  metadata?: Record<string, unknown>,
+) {
+  if (tool !== "task" || !input) return
+  const line = (value: unknown) => (typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "")
+  if (input.kind === "goal" && typeof input.id === "string") {
+    const title = line(metadata?.title) || line(input.id)
+    return title ? `Goal from task: ${title}` : "Goal from task"
+  }
+  if (input.kind === "goal") {
+    const title = line(input.title)
+    return title ? `Goal: ${title}` : "Goal"
+  }
+  if (input.found === true) {
+    const title = line(input.title)
+    return title ? `Found: ${title}` : "Found"
+  }
 }
 
 export function finiteNumber(value: unknown): number | undefined {
@@ -57,8 +74,8 @@ export function executeCalls(value: unknown): ExecuteCall[] {
 }
 
 export function executeCallSummary(call: ExecuteCall) {
-  const goal = goalCallLabel(call.tool, call.input)
-  if (goal) return goal
+  const label = taskCallLabel(call.tool, call.input, call.metadata)
+  if (label) return label
   const args = primitiveInputSummary(call.input ?? {}).replace(/\s+/g, " ")
   return `${call.tool}${args ? ` ${args}` : ""}`
 }

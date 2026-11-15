@@ -679,6 +679,13 @@ describe("the check at the end of a turn", () => {
           }).toEqual({ input, checks: [expected(h.subtask!)] })
         }
 
+        // A child inside the task itself, whose active subtask its lead made, gets none: the tool would refuse it that
+        // step's state (the overnight tests of 2026-11-15).
+        const handed = yield* setup({ inside: "active subtask", subtaskBy: "lead", child: true, agent: "explore" })
+        yield* handed.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+        yield* handed.prompt("go on")
+        expect(yield* handed.checks()).toEqual([])
+
         // A child inside the task itself sets it done, and is told to answer again.
         const child = yield* setup({ inside: "task", child: true, agent: "explore" })
         yield* child.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))

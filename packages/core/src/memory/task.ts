@@ -99,7 +99,13 @@ const layer = Layer.effect(
             message: `There is no task ${taskID}: memory on this server has no tasks, so no subagent was started.`,
           })
         const project = yield* projectOf(parent)
-        const task = (yield* named(project, parent).task(project, taskID).pipe(Effect.mapError(fail))).task
+        const read = yield* named(project, parent).task(project, taskID).pipe(Effect.mapError(fail))
+        // A lead that names its task for a child while it is on one of its steps hands over that step: the child works
+        // on it and may set it review (the overnight tests of 2026-11-15: 2 of 3 leads gave the task's id).
+        const task =
+          (read.task.parent
+            ? undefined
+            : read.subtasks.find((sub) => sub.state === "active" && sub.worker?.chat === parent.id)) ?? read.task
         const place = placeOf(task)
         return { parent: parent.id, project, task, inside: place, metadata: placed(parent.metadata, place) }
       }),

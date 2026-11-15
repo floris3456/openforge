@@ -309,7 +309,7 @@ describe("MemoryTools offering", () => {
       })
       // The workspace's spec `docs/specs/task-plans.md`, sections 1 to 4.
       expect(description("task")).toBe(
-        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first, or set an existing one active to join it: a new task's title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done even if you stop there: the next one becomes current, which you need not start now, and the answer gives it; after the last, the task goes to review. Join or make the task in a step of its own before your first change; after that, send task calls in the same step as your other tool calls where you can: alone one costs a whole request. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
+        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first, or set an existing one active to join it: a new task's title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done even if you stop there: the next one becomes current, which you need not start now, and the answer gives it; after the last, the task goes to review. Join or make the task in a step of its own before your first change; after that, send each task call with the step's other tool calls when it has any, but never add a call only to keep one company. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
       )
       expect(fields("recall").task).toBe(
         "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
@@ -1405,6 +1405,38 @@ describe("MemoryTools task", () => {
       }),
   )
 
+  // The overnight tests of 2026-11-15: makes that said state active were refused with the forms (5 of 60), and a
+  // dropped task kept its steps open.
+  it.live("a make may say state active, which a new task gets anyway; inside a task it starts the new subtask", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Steps: A", subtasks: steps("A"), state: "active" }))
+      expect((yield* h.started.client.task(projectID, task)).task.state).toBe("active")
+      const sub = made(yield* h.read("task", { title: "B", state: "active" }))
+      expect((yield* h.started.client.task(projectID, sub)).task).toMatchObject({ state: "active", parent: task })
+      expect(h.metadata(lead)).toEqual({ memory: { task, subtask: sub } })
+    }),
+  )
+
+  it.live("dropping a task drops its open subtasks with the same note, and the chat leaves it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Steps: A, B, C", subtasks: steps("A", "B", "C") }))
+      const [first] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+      yield* h.read("task", { id: first!, state: "done" })
+      expect(yield* h.read("task", { id: task, state: "dropped", note: "the test exists already" })).toBe(
+        `Task ${task} is now dropped, and its 2 open subtasks with it.`,
+      )
+      const read = yield* h.started.client.task(projectID, task)
+      expect(read.subtasks.map((sub) => [sub.title, sub.state, sub.note ?? null])).toEqual([
+        ["A", "done", null],
+        ["B", "dropped", "the test exists already"],
+        ["C", "dropped", "the test exists already"],
+      ])
+      expect(h.metadata(lead)).toEqual({})
+    }),
+  )
+
   it.live(
     "joining a task takes over the step of a chat that runs no more; done on a task with steps open is refused",
     () =>
@@ -1422,7 +1454,7 @@ describe("MemoryTools task", () => {
         const changes = () => h.server.calls().filter((call) => call.method === "POST").length
         const before = changes()
         expect(yield* h.read("task", { id: task, state: "done" })).toBe(
-          `error: Task ${task} still has open subtasks: [${first}] A (active); [${second}] B (todo). Set the one you finished done, or replace the rest with plan; to close the task anyway, drop them first.`,
+          `error: Task ${task} still has open subtasks: [${first}] A (active); [${second}] B (todo). Set the one you finished done (review when it is another chat's), or replace the rest with plan; to close the task without them, drop them first; dropping the task drops them with it.`,
         )
         expect(changes()).toBe(before)
       }),
@@ -1738,7 +1770,10 @@ describe("MemoryTools task", () => {
           `error: Only a lead chat or the chat that made it sets active on ${task}.`,
         )
         h.place(child, { task })
-        expect(yield* set(task, "review")).toBe(`Task ${task} is now review.`)
+        // Review on the task while a step of it is open is refused, as done is (the overnight tests of 2026-11-15).
+        expect(yield* set(task, "review")).toBe(
+          `error: Task ${task} still has open subtasks: [${elsewhere}] Another task (todo). Set the one you finished done (review when it is another chat's), or replace the rest with plan; to close the task without them, drop them first; dropping the task drops them with it.`,
+        )
         expect(yield* set(task, "blocked")).toBe(
           `Task ${task} is blocked. Stop here and say in your answer what is wrong with it.`,
         )
@@ -1754,6 +1789,8 @@ describe("MemoryTools task", () => {
             `error: Only a lead chat or the chat that made it sets ${state} on ${task}.`,
           )
         expect(states(h.server).length).toBe(before)
+        // The step it is on: review.
+        expect(yield* set(elsewhere, "review")).toBe(`Task ${elsewhere} is now review.`)
         // Its own subtask: any state, though it is not inside it.
         const own = made(yield* h.read("task", { title: "My part" }, child, "general"))
         expect(yield* set(own, "done")).toBe(`Task ${own} is now done.`)

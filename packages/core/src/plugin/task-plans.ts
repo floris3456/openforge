@@ -82,6 +82,16 @@ export const Plugin = {
       if (calls.includes("task") || !calls.some((name) => worked.has(name))) return
       const item = yield* plans.current(session, inside)
       if (item?.state !== "active") return
+      // A child asks only for what the task tool lets it set: the task or step it is inside, or a step it made. A step
+      // of its lead's that it is not on is its lead's to set (the overnight tests of 2026-11-15: the check asked for a
+      // review the tool refused, in 2 of 3 subagent runs).
+      if (
+        session.parentID !== undefined &&
+        item.id !== inside.task &&
+        item.id !== inside.subtask &&
+        !(item.parent && item.by.chat === session.id)
+      )
+        return
       yield* ctx.session.synthetic({
         sessionID,
         text: MemoryPlans.check(item, session),

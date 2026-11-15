@@ -365,7 +365,7 @@ describe("SubagentTool", () => {
           const fields = (definition?.inputSchema as { properties: Record<string, { description?: string }> })
             .properties
           expect(fields.taskID?.description).toBe(
-            "The id of a task (the task tool) this subagent is to work on; give it whenever the work is a task",
+            "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. Your task's id while you are on one of its steps hands that step to the subagent.",
           )
           expect(
             yield* executeTool(registry, {
@@ -1108,6 +1108,30 @@ describe("SubagentTool", () => {
           expect(child.metadata).toEqual({ memory: { task: task.id, subtask: sub.id } })
           expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: child.id } })
           expect((yield* h.read(task.id)).state).toBe("todo")
+        }),
+      ),
+    )
+
+    // The overnight tests of 2026-11-15: 2 of 3 leads gave their task's id for one step they were on.
+    tasksIt.live("on the task's id while its lead is on one of its steps, the child is handed that step", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("The task")
+          const sub = yield* h.make("A part", task.id)
+          const other = yield* h.make("Another part", task.id)
+          yield* Effect.promise(() =>
+            store("POST", `${h.base}/tasks/${sub.id}/state`, {
+              state: "active",
+              by: { role: "build", chat: h.parent.id, task: task.id, subtask: sub.id },
+            }),
+          )
+          h.meanwhile(undefined)
+          const settled = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: task.id })
+          const child = yield* h.sessions.get(outputSessionID(settled.metadata))
+          expect(child.metadata).toEqual({ memory: { task: task.id, subtask: sub.id } })
+          expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: child.id } })
+          expect((yield* h.read(other.id)).state).toBe("todo")
         }),
       ),
     )

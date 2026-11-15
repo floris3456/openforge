@@ -1691,7 +1691,10 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       yield* s.admit("Echo before moving")
-      yield* s.llm.push(TestLLM.toolCall("call-move", "echo", { text: "moving" }), TestLLM.text("Done", "text-after-move"))
+      yield* s.llm.push(
+        TestLLM.toolCall("call-move", "echo", { text: "moving" }),
+        TestLLM.text("Done", "text-after-move"),
+      )
       const tools = yield* s.blockTools()
       const run = yield* s.resume.pipe(Effect.forkChild)
       yield* tools.started
@@ -3566,6 +3569,30 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
     expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
     expect((yield* s.context)[0]).toMatchObject({ type: "compaction", status: "completed", reason: "auto" })
+  })
+
+  // Workspace evidence overnight-2026-11-15, part 1: a step read 24,565 characters of code after a request of 17,613
+  // tokens, 6,387 below a point of 24,000. At 4 characters a token the code was put at 6,141 tokens, so the step went
+  // out, at 27,743. The chat's requests had run at 2.3–2.5 characters a token.
+  scenario("compacts before a step whose new tool result of code takes the prompt past the point", function* (s) {
+    s.currentModel = testModel("code-point", { context: 200_000, output: 32_000, compact: 24_000 })
+    const line = "export const scale = (input: number, factor = 2) => input * factor\n"
+    const code = line.repeat(Math.ceil(24_565 / line.length)).slice(0, 24_565)
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 17_613, nonCachedInputTokens: 17_613 } },
+        LLMEvent.toolCall({ id: "call_code", name: "echo", input: { text: code } }),
+      ),
+      TestLLM.text("## Objective\n- Explain the module", "code-summary"),
+      TestLLM.text("It scales its input.", "code-final"),
+    )
+    // The measured request held a pasted module: about 2.4 characters a token with the system prompt and tools.
+    yield* s.runPrompt(`Explain this module:\n${line.repeat(500)}`)
+
+    expect(s.requests).toHaveLength(3)
+    expect(isSummaryRequest(s.requests[1])).toBe(true)
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Explain the module\n</summary>")
+    expect((yield* s.context).map((message) => message.type)).toEqual(["compaction", "assistant"])
   })
 
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {

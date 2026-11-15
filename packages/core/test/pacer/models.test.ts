@@ -414,6 +414,20 @@ describe("PacerModels", () => {
       const read = yield* told({ web_search: search, remember: { title: "Remember" }, recall: "no" })
       expect(read && Object.fromEntries(read)).toEqual({ web_search: search })
       for (const unread of [undefined, null, ["web_search"]]) expect(yield* told(unread)).toBeUndefined()
+      // Web tools in Code Mode: where the meta places a tool, and a Code Mode tool's definition.
+      const definition = { name: "web_search", description: "Search the web.", input_schema: { type: "object" } }
+      const placed = yield* told({
+        web_search: { ...search, codemode: true, definition },
+        remember: { ...search, codemode: false },
+      })
+      expect(placed && Object.fromEntries(placed)).toEqual({
+        web_search: {
+          ...search,
+          codemode: true,
+          definition: { description: "Search the web.", input_schema: { type: "object" } },
+        },
+        remember: { ...search, codemode: false },
+      })
     }),
   )
 

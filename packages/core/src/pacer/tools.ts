@@ -143,6 +143,8 @@ export interface Interface {
   /** The tools the current endpoint's lists named, with their meta; empty without an endpoint. */
   readonly known: () => Effect.Effect<Known>
   readonly knownChanges: () => Stream.Stream<Known>
+  /** Whether the list the chat holds names the tool; undefined while it holds none, as before its first read. */
+  readonly holds: (sessionID: SessionID, name: string) => boolean | undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerTools") {}
@@ -150,7 +152,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pa
 const Definition = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
-  input_schema: Schema.Record(Schema.String, Schema.Unknown),
+  input_schema: Schema.Record(Schema.String, Schema.Json),
 })
 const decodeDefinition = Schema.decodeUnknownOption(Definition)
 const ListAnswer = Schema.Struct({
@@ -212,13 +214,21 @@ export const layer = Layer.effect(
               Effect.map((value): Known => new Map(Object.entries(Option.getOrElse(decodeKnown(value), () => ({}))))),
             )
     const known = yield* SubscriptionRef.make<Known>(yield* load(yield* endpoints.get()))
-    /** Adds what a list or capabilities read from the current endpoint names; kept only when it changed something. */
-    const learn = (endpoint: PacerEndpoint.Endpoint | undefined, meta: Known) =>
+    /**
+     * Adds what a list or capabilities read from the current endpoint names; kept only when it changed something. A
+     * Code Mode tool's definition is one for every chat: capabilities' replaces the held one, and a list's (whose bytes
+     * are that chat's copy) only fills one missing, so chats' copies don't take turns in the catalog.
+     */
+    const learn = (endpoint: PacerEndpoint.Endpoint | undefined, meta: Known, from: "capabilities" | "list") =>
       Effect.gen(function* () {
         const current = yield* SubscriptionRef.get(known)
-        const fresh = [...meta].filter(([name, meta]) => {
+        const fresh = [...meta].flatMap(([name, item]): Array<[string, Meta]> => {
           const held = current.get(name)
-          return held === undefined || JSON.stringify(held) !== JSON.stringify(meta)
+          const next =
+            from === "list" && item.codemode === true && held?.definition !== undefined
+              ? { ...item, definition: held.definition }
+              : item
+          return held === undefined || JSON.stringify(held) !== JSON.stringify(next) ? [[name, next]] : []
         })
         if (fresh.length === 0 || endpoint === undefined) return
         const next: Known = new Map([...current, ...fresh])
@@ -309,7 +319,7 @@ export const layer = Layer.effect(
                 return { list, answered: true }
               }).pipe(
                 Effect.tap((read) =>
-                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list.meta) : Effect.void,
+                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list.meta, "list") : Effect.void,
                 ),
               ),
             ),
@@ -447,7 +457,7 @@ export const layer = Layer.effect(
         Effect.gen(function* () {
           state.absent = false
           const tools = catalog?.pacer?.tools
-          if (tools) yield* learn(yield* endpoints.get(), tools)
+          if (tools) yield* learn(yield* endpoints.get(), tools, "capabilities")
         }),
       ),
       Effect.forkScoped({ startImmediately: true }),
@@ -473,6 +483,7 @@ export const layer = Layer.effect(
       call,
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),
+      holds: (sessionID, name) => chats.get(sessionID)?.list?.byName.has(name),
     })
   }),
 )
@@ -489,20 +500,21 @@ export const node = makeGlobalNode({
  * itself, and a tool without meta it understands is asked as {@link fallback} says.
  */
 function parse(answer: typeof ListAnswer.Type): List {
-  const definitions = answer.tools.claude.flatMap((entry) =>
-    Option.toArray(decodeDefinition(entry)).map(
-      (item) => new ToolDefinition({ name: item.name, description: item.description, inputSchema: item.input_schema }),
-    ),
+  const entries = answer.tools.claude.flatMap((entry) => Option.toArray(decodeDefinition(entry)))
+  const definitions = entries.map(
+    (item) => new ToolDefinition({ name: item.name, description: item.description, inputSchema: item.input_schema }),
   )
   return {
     version: answer.version,
     definitions,
     byName: new Map(definitions.map((item) => [item.name, item])),
     meta: new Map(
-      definitions.map((item) => [
-        item.name,
-        Option.getOrElse(decodeMeta(answer.meta?.[item.name]), () => fallback(item.name)),
-      ]),
+      entries.map((item) => {
+        const meta = Option.getOrElse(decodeMeta(answer.meta?.[item.name]), () => fallback(item.name))
+        // A Code Mode tool is described in the catalog by its definition, which the list holds beside its meta.
+        if (meta.codemode !== true || meta.definition !== undefined) return [item.name, meta]
+        return [item.name, { ...meta, definition: { description: item.description, input_schema: item.input_schema } }]
+      }),
     ),
   }
 }

@@ -44,6 +44,15 @@ export const ToolMeta = Schema.Struct({
   /** The arguments whose values the permission is asked on: the first one a call holds; none, `*`. */
   subject: Schema.Array(Schema.String),
   read_only: Schema.Boolean,
+  /** In the code-execution tool (Code Mode) rather than on the direct list; a server without the field: direct. */
+  codemode: Schema.optional(Schema.Boolean),
+  /**
+   * A Code Mode tool's definition, which describes it in Code Mode's catalog and `search` for every chat: as
+   * capabilities give it, else as a list read named it.
+   */
+  definition: Schema.optional(
+    Schema.Struct({ description: Schema.String, input_schema: Schema.Record(Schema.String, Schema.Json) }),
+  ),
 })
 export interface ToolMeta extends Schema.Schema.Type<typeof ToolMeta> {}
 const decodeToolMeta = Schema.decodeUnknownOption(ToolMeta)

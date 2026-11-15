@@ -2,11 +2,12 @@ export * as SessionContext from "./context.js"
 
 import { Model } from "../model.js"
 import { Permission } from "../permission.js"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
 import { Agent } from "../agent.js"
 import { Config } from "../config.js"
 import { ImageBank } from "../image/bank.js"
 import type { ImageFit } from "../image/fit.js"
+import type { CodeModeCatalog } from "../codemode/catalog.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -16,6 +17,8 @@ import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
 import { McpInstructions } from "../mcp/instructions.js"
 import { McpTool } from "../tool/mcp.js"
+import { PacerOffer } from "../pacer/offer.js"
+import { PacerTools } from "../pacer/tools.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
 import { SkillInstructions } from "../skill/instructions.js"
 import { Tool } from "../tool.js"
@@ -24,6 +27,7 @@ import { SessionHistory } from "./history.js"
 import { InstructionEntry } from "./instruction-entry.js"
 import { SessionMessage } from "./message.js"
 import { SessionModelRequest } from "./model-request.js"
+import { SessionPromptStart } from "./prompt-start.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
@@ -96,6 +100,8 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
     const config = yield* Effect.serviceOption(Config.Service)
+    const pacerTools = yield* PacerTools.Service
+    const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     const images = (model: SessionRunnerModel.Resolved) => ImageBank.applies(config, model)
 
     const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
@@ -132,6 +138,31 @@ const layer = Layer.effect(
       return { agent, primary, selected }
     })
 
+    /**
+     * openforge: Code Mode's catalog as the chat's step gets it. A tool CPP moved into Code Mode that the chat's recorded
+     * start still holds as a direct tool stays out of it while that record holds, and comes with the next cold point.
+     */
+    const catalogOf = Effect.fnUntraced(function* (
+      session: SessionSchema.Info,
+      agent: Agent.ID,
+      catalog: CodeModeCatalog.Inventory,
+    ) {
+      const moved = PacerOffer.codemode(yield* pacerTools.known())
+      if (moved.size === 0 || Option.isNone(starts)) return catalog
+      const resolved = yield* resolveModel(session).pipe(Effect.option)
+      if (Option.isNone(resolved)) return catalog
+      const recorded = yield* starts.value.recorded({
+        sessionID: session.id,
+        agent,
+        model: resolved.value.ref,
+        ...(resolved.value.cache?.ttl === undefined ? {} : { ttl: resolved.value.cache.ttl }),
+      })
+      return PacerOffer.catalog(
+        catalog,
+        new Set((recorded ?? []).flatMap((tool) => (moved.has(tool.name) ? [tool.name] : []))),
+      )
+    })
+
     const select = Effect.fn("SessionContext.select")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
@@ -162,7 +193,9 @@ const layer = Layer.effect(
         // prompt-cache prefix: user-level catalog and guidance, then project instructions, then
         // the date and environment, which vary by day and directory.
         instructions: Instructions.combine([
-          CodeModeInstructions.make(loaded.tools.codeModeCatalog),
+          CodeModeInstructions.make(
+            loaded.tools.codeModeCatalog && (yield* catalogOf(session, agent.id, loaded.tools.codeModeCatalog)),
+          ),
           loaded.mcp,
           loaded.references,
           loaded.skills,
@@ -226,9 +259,11 @@ export const node = makeLocationNode({
     Location.node,
     McpInstructions.node,
     McpTool.node,
+    PacerTools.node,
     ReferenceInstructions.node,
     SessionRunnerModel.node,
     SessionModelRequest.node,
+    SessionPromptStart.node,
     SessionStore.node,
     SkillInstructions.node,
     Tool.node,

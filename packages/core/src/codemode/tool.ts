@@ -29,6 +29,8 @@ const ExecuteCall = Schema.Struct({
   tool: Schema.String,
   status: Schema.Literals(["running", "completed", "error"]),
   input: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+  // openforge: the inner call's metadata once it settled, which its row shows as a direct call's shows its own.
+  metadata: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
 })
 
 type ExecuteCall = typeof ExecuteCall.Type
@@ -98,6 +100,8 @@ export const create = (
         const callIndex = yield* Ref.make(0)
         const files = yield* Ref.make<Array<CollectedFiles>>([])
         const calls = yield* Ref.make<Array<ExecuteCall>>([])
+        // A call's decoded input is the same object at its hooks and its execution, so its row finds its metadata.
+        const settled = new WeakMap<object, Metadata>()
         const lock = Semaphore.makeUnsafe(1)
         // Each update replaces the last, so send at most one per 100 ms; a trailing one carries the latest rows.
         // A success drops a pending one when the scope closes, since the result carries the final rows.
@@ -133,15 +137,17 @@ export const create = (
                     // Progress replaces the execute call's own, so an inner tool's updates would hide the call rows.
                     progress: () => Effect.void,
                   }).pipe(
+                    Effect.tapError((error) => Effect.sync(() => keep(settled, input, error.metadata))),
                     Effect.mapError((error) => new ToolFailure({ message: toSessionError(error).message, error })),
                   )
+                  keep(settled, input, executed.metadata)
                   const content = resultContent(executed)
                   const outputFileParts = outputFiles(content)
                   if (outputFileParts.length > 0)
                     yield* Ref.update(files, (items) => [...items, { index, files: outputFileParts }])
                   return resultValue(executed)
                 }),
-              hooks: progressHooks(record),
+              hooks: progressHooks(record, settled),
             }),
             // A failed or interrupted call keeps its last progress, so send pending rows before it settles.
             Effect.onError(() =>
@@ -184,7 +190,10 @@ export const create = (
 }
 
 // Rows appear in start order; the same call object arrives at both hooks, so a call finds its row again.
-function progressHooks(record: (update: (items: Array<ExecuteCall>) => Array<ExecuteCall>) => Effect.Effect<unknown>) {
+function progressHooks(
+  record: (update: (items: Array<ExecuteCall>) => Array<ExecuteCall>) => Effect.Effect<unknown>,
+  settled: WeakMap<object, Metadata>,
+) {
   const rows = new WeakMap<object, number>()
   const start = (call: object, entry: ExecuteCall) =>
     record((items) => {
@@ -194,9 +203,16 @@ function progressHooks(record: (update: (items: Array<ExecuteCall>) => Array<Exe
   const settle = (call: object, result: CodeMode.CallResult) => {
     const index = rows.get(call)
     if (index === undefined) return Effect.void
+    const metadata = "input" in call && isObject(call.input) ? settled.get(call.input) : undefined
     return record((items) => {
       const next = [...items]
-      next[index] = { ...items[index], status: result.status === "success" ? "completed" : "error" }
+      next[index] = {
+        ...items[index],
+        status: result.status === "success" ? "completed" : "error",
+        ...(metadata === undefined || Object.keys(metadata).length === 0
+          ? {}
+          : { metadata: metadata as Record<string, typeof Schema.Json.Type> }),
+      }
       return next
     })
   }
@@ -393,6 +409,14 @@ export function qualifiedName(registration: Info) {
   const normalized = normalizedName(registration)
   if (registration.options?.namespace === undefined) return normalized
   return `${registration.options.namespace}.${normalized}`
+}
+
+function isObject(value: unknown): value is object {
+  return typeof value === "object" && value !== null
+}
+
+function keep(settled: WeakMap<object, Metadata>, input: unknown, metadata: Metadata | undefined) {
+  if (isObject(input) && metadata !== undefined) settled.set(input, metadata)
 }
 
 // Tool inputs arrive as parsed JSON, so the JSON value cast is a boundary fact.

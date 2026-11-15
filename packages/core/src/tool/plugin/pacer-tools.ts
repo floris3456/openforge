@@ -10,13 +10,15 @@ import { PacerTools } from "../../pacer/tools.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 
-// Every tool CPP lists, as built-in tools: one direct tool per name its lists named at the current endpoint
+// Every tool CPP lists, as built-in tools: one per name its lists and capabilities named at the current endpoint
 // (`PacerTools.known`, kept across restarts, so a step resumed right after one sends the tools it had), each asking
-// the permission its meta names. Nothing here knows any of them: CPP holds their definitions, rules and texts (the
-// workspace's spec `docs/specs/cpp-tools.md`). Their definitions here never reach a model: each request puts the
-// chat's own from CPP in their place, or leaves them out (`PacerOffer`).
+// the permission its meta names, where its meta places it (`codemode`). Nothing here knows any of them: CPP holds
+// their definitions, rules and texts (the workspace's specs `docs/specs/cpp-tools.md`, `web-tools-code-mode.md`).
+// A direct tool's definition here never reaches a model: each request puts the chat's own from CPP in its place, or
+// leaves it out (`PacerOffer`). A Code Mode tool is described by CPP's definition, one for every chat, as Code Mode's
+// catalog is; a chat whose list doesn't hold it is answered that it is unavailable.
 
-/** CPP's definitions, from the chat's list, replace these on every request. */
+/** CPP's definitions, from the chat's list, replace these on every request (a Code Mode tool's: when it has none). */
 const placeholder = "One of CLIProxyPacer's tools; each request carries CLIProxyPacer's own definition instead."
 
 export const Plugin = {
@@ -42,11 +44,14 @@ export const Plugin = {
         for (const [name, meta] of state.known)
           editor.add({
             name,
-            options: { codemode: false, permission: meta.permission },
-            description: placeholder,
-            input: { type: "object" },
+            options: { codemode: meta.codemode === true, permission: meta.permission },
+            description: (meta.codemode === true ? meta.definition?.description : undefined) ?? placeholder,
+            input: (meta.codemode === true ? meta.definition?.input_schema : undefined) ?? { type: "object" },
             execute: (input, context) =>
               Effect.gen(function* () {
+                // Code Mode's tools are the registry's, not the chat's: the chat's list still decides what it has.
+                if (meta.codemode === true && calls.holds(context.sessionID, name) === false)
+                  return yield* new ToolFailure({ message: `${name} is not available in this chat.` })
                 const args = isRecord(input) ? input : {}
                 yield* permission
                   .assert({

@@ -323,6 +323,7 @@ export const layer = Layer.effect(
             ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
             system: input.start,
             definitions: now,
+            moved: PacerOffer.codemode(yield* pacerTools.known()),
           })
         : { system: input.start, definitions: yield* now }
       const definitions = start.definitions

@@ -54,7 +54,15 @@ export interface Input {
   /** The start as it is now: the agent's prompt, and the definitions, which are worked out only when needed. */
   readonly system: string | undefined
   readonly definitions: Effect.Effect<ReadonlyArray<ToolDefinition>>
+  /**
+   * Tools that leave the direct list for Code Mode: a warm chat that has one as a direct tool keeps calling it so, and
+   * its catalog gets it at the next cold point, so its reminder doesn't call it gone.
+   */
+  readonly moved?: ReadonlySet<string>
 }
+
+/** What tells whether a chat's record holds for its next step. */
+export type Chat = Pick<Input, "sessionID" | "agent" | "model" | "ttl">
 
 export interface Interface {
   /**
@@ -63,6 +71,11 @@ export interface Interface {
    * recorded one whenever the chat's agent recorded it.
    */
   readonly resolve: (input: Input) => Effect.Effect<Start>
+  /**
+   * The definitions the chat's next step sends as recorded, while its record holds (no cold point since); undefined
+   * at a cold point or with nothing recorded. Code Mode's catalog follows them (`SessionContext`).
+   */
+  readonly recorded: (input: Chat) => Effect.Effect<ReadonlyArray<ToolDefinition> | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPromptStart") {}
@@ -94,7 +107,7 @@ export const layer = Layer.effect(
     })
 
     /** Whether the chat's cache went cold since its last request, as far as it can be known. */
-    const cold = Effect.fnUntraced(function* (input: Input, row: Row) {
+    const cold = Effect.fnUntraced(function* (input: Chat, row: Row) {
       const now = yield* Clock.currentTimeMillis
       const last = Math.max(row.recorded ?? 0, row.stepped ?? 0)
       if (input.model.providerID !== PACER) return now - last >= ttl(input.ttl)
@@ -105,7 +118,7 @@ export const layer = Layer.effect(
     })
 
     /** Whether the record still holds: no cold point came since it was recorded. */
-    const warm = Effect.fnUntraced(function* (input: Input, row: Row) {
+    const warm = Effect.fnUntraced(function* (input: Chat, row: Row) {
       if (row.agent !== input.agent || row.provider !== input.model.providerID || row.model !== input.model.id)
         return false
       if (row.compaction !== row.latest) return false
@@ -129,7 +142,15 @@ export const layer = Layer.effect(
         hash === row.toldTools
           ? now.definitions
           : ((yield* definitionsOf(db, held, row.toldTools ?? "")) ?? now.definitions)
-      const text = reminder(row.toldSystem, system, told, now.definitions)
+      const text = reminder(
+        row.toldSystem,
+        system,
+        told.filter(
+          (tool) =>
+            input.moved?.has(tool.name) !== true || now.definitions.some((current) => current.name === tool.name),
+        ),
+        now.definitions,
+      )
       const published =
         text === undefined
           ? undefined
@@ -175,7 +196,16 @@ export const layer = Layer.effect(
       return start
     })
 
-    return Service.of({ resolve })
+    const recorded = Effect.fnUntraced(function* (input: Chat) {
+      if (Option.isNone(database)) return undefined
+      const db = database.value.db
+      const row = yield* read(db, input.sessionID)
+      if (!row || row.tools === null || !(yield* enabled(input.model.providerID))) return undefined
+      if (!(yield* warm(input, row))) return undefined
+      return yield* definitionsOf(db, held, row.tools)
+    })
+
+    return Service.of({ resolve, recorded })
   }),
 )
 

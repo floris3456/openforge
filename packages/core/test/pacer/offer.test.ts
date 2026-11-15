@@ -84,3 +84,46 @@ describe("PacerOffer.apply", () => {
     expect(names(PacerOffer.apply(registered, listed, known))).not.toContain("web_maps")
   })
 })
+
+// Web tools in Code Mode (workspace spec `docs/specs/web-tools-code-mode.md`): the registry gives Code Mode's `execute`
+// in place of the tools CPP's meta places there.
+describe("PacerOffer with tools in Code Mode", () => {
+  const placed: PacerTools.Known = new Map(
+    [...known].map(([name, meta]) => [name, { ...meta, codemode: true }] as const),
+  )
+  const withExecute = ["execute", "read", "webfetch", "websearch"].map(own)
+
+  test("wants the chat's list when the agent has Code Mode and CPP places a tool there", () => {
+    expect(PacerOffer.wanted(withExecute, placed)).toBe(true)
+    expect(PacerOffer.wanted(withExecute, known)).toBe(false)
+    expect(PacerOffer.wanted(["read", "websearch"].map(own), placed)).toBe(false)
+  })
+
+  test("hides upstream's websearch from a chat whose list holds web_search in Code Mode", () => {
+    expect(names(PacerOffer.apply(withExecute, all, placed))).toEqual(["execute", "read", "webfetch"])
+    // A list without web_search, or no list: upstream's search stays.
+    expect(names(PacerOffer.apply(withExecute, listOf(["web_extract"]), placed))).toEqual(
+      withExecute.map((t) => t.name),
+    )
+    expect(names(PacerOffer.apply(withExecute, undefined, placed))).toEqual(withExecute.map((t) => t.name))
+  })
+
+  test("names the tools placed in Code Mode, and takes them out of a catalog", () => {
+    expect([...PacerOffer.codemode(placed)].toSorted()).toEqual([
+      "web_crawl",
+      "web_extract",
+      "web_research",
+      "web_search",
+    ])
+    expect(PacerOffer.codemode(known).size).toBe(0)
+    const tool = (name: string) => ({ type: "tool" as const, name, description: name, signature: `tools.${name}()` })
+    const inventory = {
+      tools: [tool("web_search"), { type: "namespace" as const, name: "mcp", tools: [tool("web_search")] }, tool("x")],
+    }
+    expect(PacerOffer.catalog(inventory, new Set(["web_search"])).tools.map((entry) => entry.name)).toEqual([
+      "mcp",
+      "x",
+    ])
+    expect(PacerOffer.catalog(inventory, new Set())).toBe(inventory)
+  })
+})

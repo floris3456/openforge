@@ -19,6 +19,7 @@ import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerOffer } from "@opencode/core/pacer/offer"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { PacerWarmth } from "@opencode/core/pacer/warmth"
 import { Permission } from "@opencode/core/permission"
@@ -40,7 +41,7 @@ import { testEffect } from "./lib/effect"
 import { location, locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
-import { registerToolPlugin, toolIdentity } from "./lib/tool"
+import { codeModeListings, registerToolPlugin, toolIdentity } from "./lib/tool"
 import { catalogOf, endpointOf, fakeCpp, ownerList, settle, startTools, until, webMeta } from "./pacer/fake-tools"
 import { PluginTestLayer } from "./plugin/fixture"
 
@@ -450,7 +451,7 @@ describe("SessionModelRequest with CPP's web tools, for a chat whose start is re
         Effect.provideService(Database.Service, Context.get(base, Database.Service)),
         Effect.provideService(SessionPromptStart.Service, starts),
       )
-    return { ...h, requests: yield* requestsWith(h.started.tools), requestsWith, store }
+    return { ...h, requests: yield* requestsWith(h.started.tools), requestsWith, store, starts }
   })
 
   it.effect(
@@ -496,6 +497,103 @@ describe("SessionModelRequest with CPP's web tools, for a chat whose start is re
       const fresh = yield* h.requests.primary({ ...h.input(snapshot(all)), session: other })
       expect(names(fresh)).toEqual(["read", "webfetch", "websearch"])
     }),
+  )
+  // Web tools in Code Mode (workspace spec `docs/specs/web-tools-code-mode.md`): a chat warm at the upgrade, recorded
+  // with the web tools direct as 0.0.44 records them, keeps its request's bytes and its web tools callable until its
+  // next cold point, then has them in Code Mode. 0.0.43 shipped without this path tested, and running chats lost tools.
+  it.effect(
+    "a chat warm across the upgrade keeps its direct web tools until its next cold point, then has them in Code Mode",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* recorded()
+        const registry = yield* registryOf(h.started)
+        yield* until("registered", () => Effect.runSync(registry.snapshot()).definitions.length > 1)
+        const history = [Message.user("hello"), Message.assistant("hi"), Message.user("search it")]
+        const step = (requests: SessionModelRequest.Interface, tools: Tool.Snapshot, model = "claude-haiku-5-5") =>
+          requests.primary({ ...h.input(tools, model), messages: history })
+        const before = yield* step(h.requests, yield* registry.snapshot())
+        expect(claude(before)).toBe(cppTools(web))
+
+        // The upgrade: openforge starts again over the same store, and CPP's capabilities place the web tools in Code Mode.
+        const placed = Object.fromEntries(
+          Object.entries(webMeta).map(([name, meta]) => {
+            const tool = ownerList.tools.claude.find((item) => item.name === name)!
+            return [
+              name,
+              {
+                ...meta,
+                codemode: true,
+                definition: {
+                  description: tool.description,
+                  input_schema: JSON.parse(JSON.stringify(tool.input_schema)),
+                },
+              },
+            ]
+          }),
+        )
+        // Its lists say so too, in each tool's meta.
+        h.cpp.answers.list = () =>
+          Response.json({
+            ...ownerList,
+            meta: Object.fromEntries(
+              Object.entries(webMeta).map(([name, meta]) => [name, { ...meta, codemode: true }]),
+            ),
+          })
+        const again = yield* startTools(endpointOf(h.cpp.origin), catalogOf(true, placed), h.started.kv)
+        const upgraded = yield* registryOf(again)
+        yield* until("in Code Mode", () => Effect.runSync(upgraded.snapshot()).definitions.length === 1)
+        const now = yield* upgraded.snapshot()
+        expect(now.definitions.map((tool) => tool.name)).toEqual(["execute"])
+        const requests = yield* h.requestsWith(again.tools)
+
+        // Warm: the same tools and body, byte for byte, no reminder that calls them gone, and they run as called.
+        const warm = yield* step(requests, now)
+        expect(JSON.stringify(warm.request.tools)).toBe(JSON.stringify(before.request.tools))
+        const bodies = yield* Effect.forEach([before, warm], (prepared) => compileRequest(prepared.request))
+        expect(JSON.stringify(bodies[1]?.body)).toBe(JSON.stringify(bodies[0]?.body))
+        const direct = yield* warm.executeTool({
+          sessionID: session.id,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call_warm", name: "web_search", input: { query: "q" } },
+        })
+        expect(direct).toMatchObject({ content: [{ type: "text", text: "answered /pacer/v1/tools/web_search" }] })
+        // Its Code Mode catalog leaves them out while its record holds (`SessionContext`'s catalog follows it).
+        const chat = { sessionID: session.id, agent: Agent.ID.make("build"), model: resolved("claude-haiku-5-5").ref }
+        const held = yield* h.starts.recorded(chat)
+        const moved = PacerOffer.codemode(yield* again.tools.known())
+        const hidden = new Set((held ?? []).flatMap((tool) => (moved.has(tool.name) ? [tool.name] : [])))
+        expect([...hidden].toSorted()).toEqual(web)
+        expect(PacerOffer.catalog(now.codeModeCatalog!, hidden).tools.map((entry) => entry.name)).not.toContain(
+          "web_search",
+        )
+
+        // Its next cold point (here a switch of its model): the web tools leave the direct list for Code Mode's catalog,
+        // described as CPP describes them, and run there.
+        const cold = yield* step(requests, now, "claude-opus-5-5")
+        expect(names(cold)).toEqual(["execute"])
+        expect(
+          (yield* h.starts.recorded({ ...chat, model: resolved("claude-opus-5-5").ref }))?.map((tool) => tool.name),
+        ).toEqual(["execute"])
+        const listings = codeModeListings(now.codeModeCatalog!)
+        for (const name of web) expect(listings.some((item) => item.path === name)).toBe(true)
+        const search = ownerList.tools.claude.find((tool) => tool.name === "web_search")!.description.split("\n")[0]!
+        expect(listings.find((item) => item.path === "web_search")?.line).toContain(search.slice(0, 40))
+        const scripted = yield* cold.executeTool({
+          sessionID: session.id,
+          ...toolIdentity,
+          call: {
+            type: "tool-call",
+            id: "call_cold",
+            name: "execute",
+            input: { code: 'return await tools.web_search({ query: "q" })' },
+          },
+        })
+        expect(scripted).toMatchObject({ content: [{ type: "text", text: "answered /pacer/v1/tools/web_search" }] })
+        expect(h.cpp.calls().map((call) => call.path)).toEqual([
+          "/pacer/v1/tools/web_search",
+          "/pacer/v1/tools/web_search",
+        ])
+      }),
   )
 })
 

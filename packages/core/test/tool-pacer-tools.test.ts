@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { ToolDefinition } from "@opencode/ai/effect"
 import { Context, DateTime, Effect, Layer, SubscriptionRef } from "effect"
 import { Money } from "@opencode/schema/money"
 import { Session as SessionInfo } from "@opencode/schema/session"
@@ -21,7 +22,14 @@ import { testEffect } from "./lib/effect"
 import { locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
-import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
+import {
+  codeModeListings,
+  executeTool,
+  registerToolPlugin,
+  toolDefinitions,
+  toolIdentity,
+  waitForCodeModeTool,
+} from "./lib/tool"
 import {
   catalogOf,
   endpointOf,
@@ -410,6 +418,145 @@ describe("PacerToolsPlugin answers", () => {
       const result = yield* h.run("web_search", { query: "q" })
       expect(result.status).toBe("error")
       expect(result.error?.message).toStartWith("CLIProxyPacer could not be reached: ")
+    }),
+  )
+})
+
+// Web tools in Code Mode (workspace spec `docs/specs/web-tools-code-mode.md`): CPP's meta places each tool, and a Code
+// Mode tool is described by CPP's definition, so Code Mode's catalog and `search` show it.
+describe("PacerToolsPlugin in Code Mode", () => {
+  const placed = { ...madeMeta, codemode: true }
+  const definition = { description: made.description, input_schema: made.input_schema }
+  const inCode = (code: string) => ({ code })
+  /** Runs `code` in the registry's `execute`, as a model's call of it. */
+  const script = (registry: Tool.Interface, code: string) =>
+    executeTool(registry, {
+      sessionID,
+      ...toolIdentity,
+      call: { type: "tool-call", id: "call-execute", name: "execute", input: inCode(code) },
+    })
+
+  it.effect("registers a tool its meta places in Code Mode with capabilities' definition, beside the direct ones", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        read: false,
+        catalog: catalogOf(true, { moon_phase: { ...placed, definition }, ...webMeta }),
+      })
+      const snapshot = yield* waitForCodeModeTool(h.registry, "moon_phase")
+      // Not on the direct list; the web tools, whose meta says nothing of it, stay there.
+      expect(snapshot.definitions.map((item) => item.name)).toEqual(all.filter((name) => name !== "moon_phase"))
+      const [listing] = codeModeListings(snapshot.codeModeCatalog!).filter((item) => item.path === "moon_phase")
+      expect(listing?.line).toContain("tools.moon_phase(")
+      expect(listing?.line).toContain("day?: string")
+      expect(listing?.line).toContain(`// ${made.description}`)
+      expect(h.cpp.lists()).toHaveLength(0)
+    }),
+  )
+
+  it.effect("runs inside execute: asks its permission, calls CPP, and its row under execute keeps CPP's metadata", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      h.cpp.answers.call = () =>
+        Response.json({ text: "Full moon in Ghent.", data: null, error: null, metadata: { provider: "Moonwatch" } })
+      const result = yield* script(h.registry, 'return await tools.moon_phase({ day: "2026-11-24" })')
+      expect(result.status).toBe("completed")
+      expect(result.content).toEqual([{ type: "text", text: "Full moon in Ghent." }])
+      expect(result.metadata?.toolCalls).toEqual([
+        { tool: "moon_phase", status: "completed", input: { day: "2026-11-24" }, metadata: { provider: "Moonwatch" } },
+      ])
+      expect(h.asked.map((item) => [item.action, item.resources])).toEqual([["astronomy", ["2026-11-24"]]])
+      expect(h.cpp.calls().map((item) => item.path)).toEqual(["/pacer/v1/tools/moon_phase"])
+    }),
+  )
+
+  it.effect("a failed call's row keeps CPP's metadata too, and the script sees CPP's text", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      h.cpp.answers.call = () =>
+        Response.json({ text: "Clouded over.", data: null, error: { code: "clouds" }, metadata: { error: "clouds" } })
+      const result = yield* script(
+        h.registry,
+        'try { await tools.moon_phase({ day: "today" }) } catch (error) { return String(error.message) }',
+      )
+      expect(result.content).toEqual([{ type: "text", text: expect.stringContaining("Clouded over.") }])
+      expect(result.metadata?.toolCalls).toEqual([
+        { tool: "moon_phase", status: "error", input: { day: "today" }, metadata: { error: "clouds" } },
+      ])
+    }),
+  )
+
+  it.effect("takes a list's definition when capabilities give none, and capabilities' over any list's", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false })
+      h.cpp.answers.list = () => Response.json({ ...listed, meta: { ...listed.meta, moon_phase: placed } })
+      yield* h.started.tools.list(step)
+      const first = yield* waitForCodeModeTool(h.registry, "moon_phase")
+      expect(codeModeListings(first.codeModeCatalog!).find((item) => item.path === "moon_phase")?.line).toContain(
+        made.description,
+      )
+      // Another chat's copy, of other bytes, doesn't take the catalog over.
+      const other = { ...made, description: "Another chat's copy of the moon." }
+      h.cpp.answers.list = () =>
+        Response.json({
+          ...listOf("7e57000000000002", [...ownerList.tools.claude, other]),
+          meta: { ...listed.meta, moon_phase: placed },
+        })
+      yield* h.started.tools.list({ ...step, sessionID: SessionInfo.ID.make("ses_pacer_tools_other") })
+      yield* settle
+      const kept = (yield* h.started.tools.known()).get("moon_phase")
+      expect(kept?.definition?.description).toBe(made.description)
+      // Capabilities' does.
+      const now = { description: "The moon, as CPP describes it now.", input_schema: made.input_schema }
+      yield* SubscriptionRef.set(h.started.catalogs, catalogOf(true, { moon_phase: { ...placed, definition: now } }))
+      yield* until("described", () =>
+        codeModeListings(Effect.runSync(h.registry.snapshot()).codeModeCatalog!).some((item) =>
+          item.line.includes(now.description),
+        ),
+      )
+    }),
+  )
+
+  it.effect("a chat whose list doesn't hold it is answered that it is unavailable, and CPP is not called", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      // Before the chat's list is read, CPP decides.
+      expect((yield* script(h.registry, 'return await tools.moon_phase({ day: "today" })')).status).toBe("completed")
+      // The chat's list, without it.
+      h.cpp.answers.list = () => Response.json(ownerList)
+      yield* h.started.tools.list(step)
+      const result = yield* script(
+        h.registry,
+        'try { await tools.moon_phase({ day: "today" }) } catch (error) { return String(error.message) }',
+      )
+      expect(result.content).toEqual([
+        { type: "text", text: expect.stringContaining("moon_phase is not available in this chat.") },
+      ])
+      expect(h.cpp.calls()).toHaveLength(1)
+    }),
+  )
+
+  it.effect("a warm chat's recorded start that offers it as a direct tool still runs it directly", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      const snapshot = yield* waitForCodeModeTool(h.registry, "moon_phase")
+      const call = { type: "tool-call" as const, id: "call-direct", name: "moon_phase", input: { day: "today" } }
+      // Offered directly by the request, as a chat recorded before the move sends it.
+      const offered = new Map([
+        [
+          "moon_phase",
+          new ToolDefinition({ name: "moon_phase", description: "As recorded.", inputSchema: made.input_schema }),
+        ],
+      ])
+      const ran = yield* snapshot.execute({ sessionID, ...toolIdentity, call, definitions: offered })
+      expect(ran.content).toEqual([{ type: "text", text: "answered /pacer/v1/tools/moon_phase" }])
+      // Not offered directly: as any tool the request doesn't hold.
+      const refused = yield* snapshot
+        .execute({ sessionID, ...toolIdentity, call, definitions: new Map() })
+        .pipe(Effect.flip)
+      expect(refused.message).toContain('No tool named "moon_phase"')
     }),
   )
 })

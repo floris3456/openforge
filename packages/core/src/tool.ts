@@ -332,7 +332,9 @@ const layer = Layer.effect(
               const name = requested?.name ?? event.tool
               if (name === "execute" && codeModeTool)
                 return yield* executeTool(codeModeTool, name, event.input, context)
-              const tool = direct.get(name)
+              // openforge: a warm chat's recorded start may offer as a direct tool one that has moved into Code Mode
+              // since; it runs as offered until the chat's next cold point (`SessionPromptStart`).
+              const tool = direct.get(name) ?? (requested ? codeModeTools.get(name) : undefined)
               if (tool) return yield* executeTool(tool, name, event.input, context)
               // A warm chat keeps offering a tool the rules in force now deny (`SessionPromptStart`): its calls are denied.
               const registered = data.tools.get(name)

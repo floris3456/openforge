@@ -41,7 +41,7 @@ export const catalogOf = (
   /**
    * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; `plans`: whether its
    * tasks are plans; `tools`: whether it serves the memory tools and memory's texts; as the small server says when
-   * left out; `goals`: whether it has goals.
+   * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items.
    */
   options: {
     readonly prompt?: boolean
@@ -49,6 +49,7 @@ export const catalogOf = (
     readonly plans?: boolean
     readonly tools?: boolean
     readonly goals?: boolean
+    readonly later?: boolean
   } = {},
 ): PacerModels.Catalog => ({
   at: 0,
@@ -74,6 +75,7 @@ export const catalogOf = (
                   summary: options.summary ?? capabilities.summary,
                   tools: options.tools ?? capabilities.tools,
                   goals: options.goals ?? false,
+                  later: options.later ?? false,
                 },
               }
             : {}),

@@ -99,6 +99,11 @@ export interface Memory {
    * openforge then tells it when a chat on it goes idle (`PacerIdle`).
    */
   readonly goals: boolean
+  /**
+   * Whether the server has the task system's later items (workspace reference
+   * `docs/reference/task-system-later-api.md`): openforge then reports a chat's edited files (`TaskFilesPlugin`).
+   */
+  readonly later: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -273,6 +278,7 @@ const MemoryBlock = Schema.Struct({
   summary: Schema.optional(Schema.Unknown),
   tools: Schema.optional(Schema.Unknown),
   goals: Schema.optional(Schema.Unknown),
+  later: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -456,6 +462,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           summary: memory.summary === true,
           tools: memory.tools === true,
           goals: memory.goals === true,
+          later: memory.later === true,
         },
       }),
     }),

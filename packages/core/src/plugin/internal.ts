@@ -115,6 +115,7 @@ import { DynamicProviderPlugin } from "./provider/dynamic.js"
 import { OpencodePlugin } from "./provider/opencode.js"
 import { WebSearchPlugins } from "./websearch/index.js"
 import { SkillPlugin } from "./skill.js"
+import { TaskFilesPlugin } from "./task-files.js"
 import { TaskPlansPlugin } from "./task-plans.js"
 import { VcsHgPlugin } from "./vcs/hg.js"
 import { ToolInputRepairPlugin } from "./tool-input-repair.js"
@@ -292,6 +293,7 @@ const pre = [
   WebSearchTool.Plugin,
   PacerToolsPlugin.Plugin,
   TaskPlansPlugin.Plugin,
+  TaskFilesPlugin.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,
 ] as const satisfies readonly InternalPlugin[]

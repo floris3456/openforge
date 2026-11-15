@@ -96,6 +96,7 @@ export interface Step {
   readonly place?: Place
 }
 const EndedAnswer = Schema.Struct({ text: maybe(Schema.String) })
+const FilesAnswer = Schema.Struct({ notice: maybe(Schema.String) })
 const TextsAnswer = Schema.Struct({ unavailable: Schema.String, refused: Schema.String })
 /** memory's texts for when CPP cannot be reached or a rule of openforge's hooks says no. */
 export interface Texts extends Schema.Schema.Type<typeof TextsAnswer> {}
@@ -228,6 +229,12 @@ export interface Interface {
   ) => Effect.Effect<Recall, Error>
   /** Reads one row of the recall log. */
   readonly recall: (project: string, id: string) => Effect.Effect<Recall, Error>
+  /** The paths an edit call of the chat changed, for its task; the clash notice, or null. */
+  readonly files: (
+    project: string,
+    input: { readonly paths: ReadonlyArray<string>; readonly at: number },
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<string | null, Error>
   /** memory's texts for when the server cannot be reached; without a project. */
   readonly texts: (options?: { readonly timeout?: Duration.Input }) => Effect.Effect<Texts, Error>
   /** The same client, its requests carrying `headers`: the chat and its project as CPP knows them (`PacerHeaders.chat`). */
@@ -301,6 +308,11 @@ export const layer = Layer.effect(
         http.get(recall(project, id), RecallAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.recall),
           Effect.mapError(failure(id, "recall")),
+        ),
+      files: (project, input, options) =>
+        http.post(`${base(project)}/files`, input, FilesAnswer, { ...options, headers }).pipe(
+          Effect.map((answer) => answer.body.notice || null),
+          Effect.mapError(failure()),
         ),
       texts: (options) =>
         http.get("/pacer/v1/memory/texts", TextsAnswer, { ...options, headers }).pipe(

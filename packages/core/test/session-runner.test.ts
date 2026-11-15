@@ -1691,7 +1691,10 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       yield* s.admit("Echo before moving")
-      yield* s.llm.push(TestLLM.toolCall("call-move", "echo", { text: "moving" }), TestLLM.text("Done", "text-after-move"))
+      yield* s.llm.push(
+        TestLLM.toolCall("call-move", "echo", { text: "moving" }),
+        TestLLM.text("Done", "text-after-move"),
+      )
       const tools = yield* s.blockTools()
       const run = yield* s.resume.pipe(Effect.forkChild)
       yield* tools.started
@@ -3567,6 +3570,147 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
     expect((yield* s.context)[0]).toMatchObject({ type: "compaction", status: "completed", reason: "auto" })
   })
+
+  // Workspace evidence overnight-2026-11-15, part 1: a step read 24,565 characters of code after a request of 17,613
+  // tokens, 6,387 below a point of 24,000. At 4 characters a token the code was put at 6,141 tokens, so the step went
+  // out, at 27,743. The chat's requests had run at 2.3–2.5 characters a token.
+  scenario("compacts before a step whose new tool result of code takes the prompt past the point", function* (s) {
+    s.currentModel = testModel("code-point", { context: 200_000, output: 32_000, compact: 24_000 })
+    const line = "export const scale = (input: number, factor = 2) => input * factor\n"
+    const code = line.repeat(Math.ceil(24_565 / line.length)).slice(0, 24_565)
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 17_613, nonCachedInputTokens: 17_613 } },
+        LLMEvent.toolCall({ id: "call_code", name: "echo", input: { text: code } }),
+      ),
+      TestLLM.text("## Objective\n- Explain the module", "code-summary"),
+      TestLLM.text("It scales its input.", "code-final"),
+    )
+    // The measured request held a pasted module: about 2.4 characters a token with the system prompt and tools.
+    yield* s.runPrompt(`Explain this module:\n${line.repeat(500)}`)
+
+    expect(s.requests).toHaveLength(3)
+    expect(isSummaryRequest(s.requests[1])).toBe(true)
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Explain the module\n</summary>")
+    expect((yield* s.context).map((message) => message.type)).toEqual(["compaction", "assistant"])
+  })
+
+  // Workspace evidence overnight-2026-11-15, part 1, "Also seen": a compaction between a step's tool calls and the
+  // request that would read their results kept them only as the recent part's 1,250 characters each, so the model
+  // read the same three files again at once.
+  for (const turn of ["after an earlier exchange", "in the chat's first turn"] as const)
+    scenario(`keeps a step's unread tool results whole beside the summary ${turn}`, function* (s) {
+      s.currentModel = testModel("unread-point", { context: 200_000, output: 32_000, compact: 30_000 })
+      if (turn === "after an earlier exchange") {
+        yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "unread-earlier", 1_000))
+        yield* s.runPrompt("Earlier question")
+      }
+      const file = Array.from({ length: 200 }, (_, index) => `${index}: export const value${index} = ${index}`).join(
+        "\n",
+      )
+      yield* s.llm.push(
+        TestLLM.complete(
+          { reason: { normalized: "tool-calls" }, usage: { inputTokens: 29_000, nonCachedInputTokens: 29_000 } },
+          LLMEvent.toolCall({ id: "call_file", name: "echo", input: { text: file } }),
+        ),
+        TestLLM.text("## Objective\n- Read the file", "unread-summary"),
+        TestLLM.text("Read it", "unread-final"),
+      )
+      s.requests.length = 0
+      yield* s.runPrompt("Read the file")
+
+      expect(s.requests).toHaveLength(3)
+      expect(isSummaryRequest(s.requests[1])).toBe(true)
+      const after = s.requests[2]
+      expect(userTexts(after)[0]).toContain(`<recent-context>\n`)
+      expect(userTexts(after)[0]).toContain(`[Tool result]: ${file}\n</recent-context>`)
+      // Calls and results reach the model in pairs: here both are text in the checkpoint.
+      const parts = after.messages.flatMap((message) => message.content)
+      expect(parts.flatMap((part) => (part.type === "tool-result" ? [part.id] : []))).toEqual(
+        parts.flatMap((part) => (part.type === "tool-call" ? [part.id] : [])),
+      )
+    })
+
+  // A step's unread results are kept whole beside the summary only up to a bound. Here one step read four files of
+  // 147,000 characters together. Kept whole, the request after the compaction went out at 63,203 tokens: at a point of
+  // 24,000 the next step compacted again, and past a window of 50,000 the provider rejected it and, with only the
+  // checkpoint left, there was nothing to compact, so the step failed.
+  for (const limit of [
+    { context: 200_000, output: 32_000, compact: 24_000 },
+    { context: 50_000, output: 8_000 },
+  ] as const)
+    scenario(
+      `keeps a step's unread results whole only up to a bound ${limit.compact ? "at a compaction point" : "near the window"}`,
+      function* (s) {
+        s.currentModel = testModel("unread-bound", limit)
+        // A provider counting 2.5 characters a token, which rejects a request larger than its window.
+        const counted = (request: LLMRequest | undefined) =>
+          Math.ceil(
+            JSON.stringify([request?.system, request?.tools, request?.messages.map((message) => message.content)])
+              .length / 2.5,
+          )
+        const answer = (...events: LLMEvent[]) =>
+          Stream.suspend(() => {
+            const tokens = counted(s.requests.at(-1))
+            return Stream.fromIterable(
+              tokens > limit.context
+                ? [
+                    LLMEvent.stepStart({ index: 0 }),
+                    LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" }),
+                  ]
+                : TestLLM.complete(
+                    {
+                      reason: { normalized: events.some(LLMEvent.is.toolCall) ? "tool-calls" : "stop" },
+                      usage: { inputTokens: tokens, nonCachedInputTokens: tokens },
+                    },
+                    ...events,
+                  ),
+            )
+          })
+        const file = (name: string, length: number) =>
+          Array.from({ length: 2_000 }, (_, index) => `${index}: export const ${name}${index} = scale(${index}, 2)`)
+            .join("\n")
+            .slice(0, length)
+        const small = file("small", 3_000)
+        const large = ["first", "second", "third"].map((name) => file(name, 48_000))
+        yield* s.llm.push(
+          answer(
+            ...[small, ...large].map((text, index) =>
+              LLMEvent.toolCall({ id: `call_read_${index}`, name: "echo", input: { text } }),
+            ),
+          ),
+          TestLLM.text("## Objective\n- Read the files", "bound-summary"),
+          answer(LLMEvent.toolCall({ id: "call_next", name: "echo", input: { text: "next" } })),
+          answer(
+            LLMEvent.textStart({ id: "bound-final" }),
+            LLMEvent.textDelta({ id: "bound-final", text: "Read them" }),
+            LLMEvent.textEnd({ id: "bound-final" }),
+          ),
+        )
+        yield* s.runPrompt("Read the four files")
+
+        expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false, false])
+        const after = s.requests[2]
+        expect(counted(after)).toBeLessThan(limit.compact ?? limit.context)
+        const checkpoint = userTexts(after)[0]
+        // The short result whole, the long ones cut to an equal share, each with the recent part's notice.
+        const results = checkpoint
+          .split("[Tool result]: ")
+          .slice(1)
+          .map((part) => part.split(/\n\[Assistant|\n\n|\n<\/recent-context>/)[0])
+        expect(results[0]).toBe(small)
+        const cut = results.slice(1).map((result) => result.split("\n[truncated]"))
+        expect(cut.map((parts) => parts.length)).toEqual([2, 2, 2])
+        expect(cut.map((parts) => parts[1])).toEqual(["", "", ""])
+        large.forEach((text, index) => {
+          expect(cut[index][0].length).toBeGreaterThan(1_250)
+          expect(cut[index][0].length).toBe(cut[0][0].length)
+          expect(text.startsWith(cut[index][0])).toBe(true)
+        })
+        // History rebuilds the recent part at each load as it was written, so the cached prefix holds.
+        expect(userTexts(s.requests[3])[0]).toBe(checkpoint)
+      },
+    )
 
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {
     s.currentModel = LanguageModel.make({ id: "native", provider: "openai", route: OpenAIResponses.route })

@@ -160,8 +160,8 @@ it.effect("compaction truncation does not split surrogate pairs", () =>
       { type: "text", text: "😀".repeat(1_250) },
     ])
 
-    expect(split).toEndWith(`[Tool result]: ${prefix}😀\n[truncated]`)
-    expect(whole).toEndWith(`[Tool result]: ${"😀".repeat(1_250)}`)
+    expect(split).toEndWith(`[Tool result]: ${prefix}😀\n[truncated]\n\n[Assistant]: Read.`)
+    expect(whole).toEndWith(`[Tool result]: ${"😀".repeat(1_250)}\n\n[Assistant]: Read.`)
   }),
 )
 
@@ -482,25 +482,26 @@ it.effect("auto compaction estimates current content against the buffered prompt
       time: { created: DateTime.makeUnsafe(0) },
     })
     const grown = { ...input(89_000, contextLimited), messages: [{ ...assistant, content: [tool] }] }
-    expect(SessionCompaction.estimateContext(grown)).toBe(90_000)
+    // The measured request holds too little text to learn from, so what came since is put at 2.5 characters a token.
+    expect(SessionCompaction.estimateContext(grown)).toBe(89_000 + 4_000 / 2.5)
     expect(yield* due(grown)).toBe(true)
     // A step estimates its prompt once and passes it; compaction decides on that instead of estimating again.
     expect(yield* due(grown, { measured: 0, estimated: 0 })).toBe(false)
     expect(yield* due(input(1_000, contextLimited), { measured: 84_000, estimated: 0 })).toBe(true)
 
     const interrupted = { ...assistant, id: SessionMessage.ID.create(), tokens: undefined }
-    expect(SessionCompaction.estimateContext({ ...grown, messages: [...grown.messages, interrupted] })).toBe(90_001)
-    // Without provider usage, include 20 tokens for the system prompt, instructions, and tool definition.
-    expect(SessionCompaction.estimateContext({ ...grown, messages: [interrupted] })).toBe(21)
+    expect(SessionCompaction.estimateContext({ ...grown, messages: [...grown.messages, interrupted] })).toBe(90_602)
+    // Without provider usage, include 31 tokens for the system prompt, instructions, and tool definition.
+    expect(SessionCompaction.estimateContext({ ...grown, messages: [interrupted] })).toBe(33)
     // Another provider's usage is not trusted either.
     const foreign = { ...assistant, model: { ...assistant.model, providerID: Provider.ID.make("other") } }
-    expect(SessionCompaction.estimateContext({ ...grown, messages: [foreign] })).toBe(21)
+    expect(SessionCompaction.estimateContext({ ...grown, messages: [foreign] })).toBe(33)
     expect(
       SessionCompaction.estimateContext({
         ...grown,
         messages: [{ ...interrupted, tokens: input(0, contextLimited).messages[0].tokens }],
       }),
-    ).toBe(21)
+    ).toBe(33)
 
     const media = [
       { type: "file", mime: "image/png", uri: `data:image/png;base64,${"a".repeat(100_000)}` },
@@ -519,16 +520,16 @@ it.effect("auto compaction estimates current content against the buffered prompt
     })
     expect(SessionCompaction.estimateContext({ ...grown, messages: [...messages, user] })).toBe(96_000)
     for (const [modalities, tokens, fallback] of [
-      [["text", "image"], 92_040, 1_520],
-      [["text", "pdf"], 93_042, 2_021],
-      [["text"], 89_082, 41],
+      [["text", "image"], 92_064, 1_532],
+      [["text", "pdf"], 93_068, 2_034],
+      [["text"], 89_132, 66],
     ] as const) {
       const selected = {
         ...grown,
         model: { ...grown.model, capabilities: { ...grown.model.capabilities, input: modalities } },
       }
       expect(SessionCompaction.estimateContext({ ...selected, messages: [...messages, user] })).toBe(tokens)
-      expect(SessionCompaction.estimateContext({ ...selected, messages: [user] })).toBe(fallback + 20)
+      expect(SessionCompaction.estimateContext({ ...selected, messages: [user] })).toBe(fallback + 31)
     }
 
     const checkpoint = Schema.decodeUnknownSync(SessionMessage.CompactionCompleted)({
@@ -540,6 +541,84 @@ it.effect("auto compaction estimates current content against the buffered prompt
       time: { created: 0, completed: 0 },
     })
     expect(yield* due({ ...grown, messages: [checkpoint] })).toBe(false)
+  }),
+)
+
+// The overnight run of 2026-11-15 (workspace evidence overnight-2026-11-15, part 1): a step read 24,565 characters of
+// code after a request of 17,613 tokens, at a compaction point of 24,000. At 4 characters a token it was put at 6,141
+// and went out at 27,743; the chat's requests had run at 2.3–2.5 characters a token.
+it.effect("sizes what came after the count at the characters a token held in the measured request", () =>
+  Effect.gen(function* () {
+    const compaction = yield* SessionCompaction.Service
+    const session = yield* insertSession(Session.ID.make("ses_chars_per_token"))
+    const system = "You are a helpful assistant."
+    const read = (text: string) =>
+      SessionMessage.AssistantTool.make({
+        type: "tool",
+        id: "call_read",
+        name: "read",
+        state: { status: "completed", input: {}, content: [{ type: "text", text }] },
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+    // The request the count measured held `system` and the user's message, `chars` characters in all.
+    const chat = (input: { chars: number; prompt: number; result: number; image?: boolean; compact?: number }) => ({
+      session,
+      model: SessionRunnerModel.resolved(model, {
+        capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+        cost: [],
+        limit: { context: 200_000, output: 32_000, ...(input.compact ? { compact: input.compact } : {}) },
+      }),
+      messages: [
+        Schema.decodeUnknownSync(SessionMessage.User)({
+          id: SessionMessage.ID.create(),
+          type: "user",
+          text: "x".repeat(input.chars - system.length),
+          ...(input.image ? { files: [{ mime: "image/png", data: "a".repeat(100), source: { type: "inline" } }] } : {}),
+          time: { created: 0 },
+        }),
+        {
+          ...Schema.decodeUnknownSync(SessionMessage.Assistant)({
+            id: SessionMessage.ID.create(),
+            type: "assistant",
+            agent: Agent.defaultID,
+            model: { id: "summary-model", providerID: "test" },
+            content: [],
+            tokens: { input: input.prompt, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            time: { created: 0, completed: 0 },
+          }),
+          content: [read("y".repeat(input.result))],
+        },
+      ],
+      agent: { id: Agent.defaultID, info: { ...Agent.Info.default(Agent.defaultID), system } },
+      initial: [],
+      tools: { definitions: [], execute: () => Effect.die("unused") },
+    })
+
+    // 40,000 characters measured at 20,000 tokens: 2 a token, so 10,000 characters since are 5,000 tokens.
+    expect(SessionCompaction.estimatePrompt(chat({ chars: 40_000, prompt: 20_000, result: 10_000 }))).toEqual({
+      measured: 20_000,
+      estimated: 5_000,
+    })
+    // The media the request held is taken off its count first, at what it is estimated at.
+    expect(
+      SessionCompaction.estimatePrompt(chat({ chars: 40_000, prompt: 21_500, result: 10_000, image: true })).estimated,
+    ).toBe(5_000)
+    // Never looser than 4 characters a token, nor denser than 1.
+    expect(SessionCompaction.estimatePrompt(chat({ chars: 40_000, prompt: 5_000, result: 10_000 })).estimated).toBe(
+      2_500,
+    )
+    expect(SessionCompaction.estimatePrompt(chat({ chars: 40_000, prompt: 100_000, result: 10_000 })).estimated).toBe(
+      10_000,
+    )
+    // A request with too little text to learn from leaves it at 2.5.
+    expect(SessionCompaction.estimatePrompt(chat({ chars: 9_000, prompt: 9_000, result: 10_000 })).estimated).toBe(
+      4_000,
+    )
+
+    // The overnight step: 42,000 characters at 17,613 tokens, then 24,565 characters of code, at a point of 24,000.
+    const step = chat({ chars: 42_000, prompt: 17_613, result: 24_565, compact: 24_000 })
+    expect(SessionCompaction.estimateContext(step)).toBe(17_613 + Math.round(24_565 / (42_000 / 17_613)))
+    expect((yield* compaction.compact({ reason: "auto", context: step })).status).toBe("completed")
   }),
 )
 
@@ -642,7 +721,16 @@ const recentWithToolOutput = (id: Session.ID, content: SessionMessage.ToolStateC
       ],
       time: { created: 0, completed: 0 },
     })
-    const messages = [user("Earlier question"), user("Read it"), assistant]
+    // A reply after the results: the model has read them, so the recent part cuts them.
+    const reply = Schema.decodeUnknownSync(SessionMessage.Assistant)({
+      id: SessionMessage.ID.create(),
+      type: "assistant",
+      agent: Agent.defaultID,
+      model: { id: "summary-model", providerID: "test" },
+      content: [{ type: "text", text: "Read." }],
+      time: { created: 0, completed: 0 },
+    })
+    const messages = [user("Earlier question"), user("Read it"), assistant, reply]
     yield* storeMessages(id, messages)
     expect(yield* compactManually(session, messages)).toEqual({
       status: "completed",

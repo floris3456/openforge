@@ -260,11 +260,7 @@ const withRecentText = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   // The recent text names attachments by mime and name only, so their bytes are never read.
   const kept = yield* Effect.forEach(yield* withParts(db, rows), decodeStoredRow, { concurrency: 1 })
-  const cut = SessionRecentText.cutsInputs(compaction)
-  const recent = kept
-    .map((message) => SessionRecentText.messageToText(message, cut))
-    .filter(Boolean)
-    .join("\n\n")
+  const recent = SessionRecentText.rebuild(kept, compaction)
   return [{ ...first, message: { ...compaction, metadata: { ...compaction.metadata, recent } } }, ...entries.slice(1)]
 })
 

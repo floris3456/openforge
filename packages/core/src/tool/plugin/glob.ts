@@ -2,6 +2,7 @@ export * as GlobTool from "./glob.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
+import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, Schema } from "effect"
 import path from "path"
 import { Environment } from "../../environment/index.js"
@@ -56,7 +57,8 @@ export const Plugin = {
         editor.add({
           name,
           options: { codemode: false },
-          description: 'Search file paths using a glob pattern (examples: "**/*.ts", "src/**/*.tsx").',
+          description:
+            'Search file paths using a glob pattern (examples: "**/*.ts", "src/**/*.tsx"). Paths are relative to the working directory, absolute outside it.',
           input: Input,
           output: Output,
           execute: (input, context) =>
@@ -120,8 +122,12 @@ export const Plugin = {
             }).pipe(
               Effect.map((result) => ({
                 output: result.entries,
+                // Relative to the working directory, which every file tool resolves a path from; absolute outside it.
                 content: toModelContent(
-                  result.entries.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
+                  result.entries.map((entry) => {
+                    const absolute = path.resolve(location.directory, entry.path)
+                    return { ...entry, path: FSUtil.contains(location.directory, absolute) ? entry.path : absolute }
+                  }),
                   result.truncated,
                 ),
                 metadata: { count: result.entries.length, truncated: result.truncated },

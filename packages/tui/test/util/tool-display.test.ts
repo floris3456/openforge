@@ -10,7 +10,7 @@ import {
 test("normalizes shared tool primitives", () => {
   expect(["bash", "task", "apply_patch", "plugin_tool"].map(canonicalToolName)).toEqual([
     "shell",
-    "subagent",
+    "task",
     "patch",
     "plugin_tool",
   ])

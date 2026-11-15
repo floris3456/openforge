@@ -1,6 +1,7 @@
 export function canonicalToolName(name: string) {
   if (name === "bash") return "shell"
-  if (name === "task") return "subagent"
+  // No `task` → `subagent`: `task` is CLIProxyPacer's task-list tool here, and the v1 migrations already rename the
+  // old subagent tool's calls and permissions to `subagent`.
   if (name === "apply_patch") return "patch"
   return name
 }

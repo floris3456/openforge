@@ -62,7 +62,7 @@ describe("Mini tool presentation", () => {
       normalizeTool({
         type: "tool",
         id: "call-subagent",
-        name: "task",
+        name: "subagent",
         state: {
           status: "running",
           input: { subagent_type: "explore", description: "Inspect" },
@@ -71,6 +71,24 @@ describe("Mini tool presentation", () => {
         time: { created: 1, ran: 1 },
       }),
     ).toMatchObject({ name: "subagent", state: { input: { agent: "explore" } } })
+  })
+
+  // `task` is CLIProxyPacer's task-list tool: a call of it is never drawn as a subagent.
+  test("keeps a task-list call a task", () => {
+    const tool = normalizeTool({
+      type: "tool",
+      id: "call-task",
+      name: "task",
+      state: {
+        status: "completed",
+        input: { id: "kyk5w018z544", state: "active" },
+        metadata: {},
+        content: [{ type: "text", text: "Task kyk5w018z544 is active." }],
+      },
+      time: { created: 1, ran: 1, completed: 2 },
+    })
+    expect(tool.name).toBe("task")
+    expect(tool.state.input).toEqual({ id: "kyk5w018z544", state: "active" })
   })
 
   test("renders the skill name from tool metadata with the input id as fallback", () => {

@@ -129,7 +129,8 @@ describe("TUI inline tool wrapping", () => {
     expect(toolDisplay("subagent")).toBe("subagent")
     // Legacy tool names normalize to their renamed views.
     expect(toolDisplay("bash")).toBe("shell")
-    expect(toolDisplay("task")).toBe("subagent")
+    // `task` is CLIProxyPacer's task-list tool, never a subagent.
+    expect(toolDisplay("task")).toBe("generic")
     expect(toolDisplay("apply_patch")).toBe("patch")
     expect(toolDisplay("patch")).toBe("patch")
     expect(toolDisplay("plugin_tool")).toBe("generic")

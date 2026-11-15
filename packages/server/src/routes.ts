@@ -36,6 +36,7 @@ import { LocationActivity } from "@opencode/core/location-activity"
 import { ModelsDev } from "@opencode/core/models-dev"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
+import { PacerIdle } from "@opencode/core/pacer/idle"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
 import { AutoUpdate } from "./auto-update"
@@ -100,6 +101,7 @@ const applicationServiceNodes = [
   PacerHttp.node,
   PacerModels.node,
   PacerNotices.node,
+  PacerIdle.node,
   AutoUpdate.node,
 ] as const
 const applicationServices = LayerNode.group(applicationServiceNodes)

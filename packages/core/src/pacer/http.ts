@@ -132,6 +132,8 @@ export interface Interface {
     schema: Schema.Codec<A, I>,
     options?: Options,
   ) => Effect.Effect<Answer<A>, Error>
+  /** A POST whose answer has no body to read, such as a 204: any 2xx is success. */
+  readonly notify: (path: string, body: unknown, options?: Options) => Effect.Effect<void, Error>
   /** A GET whose body is read as it arrives, such as the change stream. */
   readonly stream: (path: string, options?: Options) => Effect.Effect<StreamAnswer, Error>
 }
@@ -227,6 +229,18 @@ export const layer = Layer.effect(
           schema,
           options,
         ),
+      notify: (path, body, options) =>
+        Effect.gen(function* () {
+          const sent = yield* send(
+            (url) => HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(body)),
+            path,
+            options,
+            { redirect: "manual" },
+          )
+          const text = yield* sent.response.text.pipe(Effect.mapError(unreachable))
+          const refused = refusal(sent.response, text)
+          if (refused) return yield* refused
+        }).pipe(timeout(options)),
       stream: (path, options) =>
         Effect.gen(function* () {
           // Bun's fetch would end a quiet stream after five minutes; the caller watches the heartbeat instead.

@@ -94,6 +94,11 @@ export interface Memory {
    * `docs/reference/cpp-tools-api.md`). openforge offers memory only then.
    */
   readonly tools: boolean
+  /**
+   * Whether the server has goals and counts active time (workspace reference `docs/reference/goals-board-api.md`):
+   * openforge then tells it when a chat on it goes idle (`PacerIdle`).
+   */
+  readonly goals: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -267,6 +272,7 @@ const MemoryBlock = Schema.Struct({
   prompt: Schema.optional(Schema.Unknown),
   summary: Schema.optional(Schema.Unknown),
   tools: Schema.optional(Schema.Unknown),
+  goals: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -449,6 +455,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           prompt: memory.prompt === true,
           summary: memory.summary === true,
           tools: memory.tools === true,
+          goals: memory.goals === true,
         },
       }),
     }),

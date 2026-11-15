@@ -1,6 +1,6 @@
 import type { SessionMessageInfo } from "@opencode/client/promise"
 import { expect, test, type Page } from "@playwright/test"
-import { REMOTE_SERVER, seed, sessionHref } from "../utils/app"
+import { REMOTE_SERVER, provider, seed, sessionHref } from "../utils/app"
 import { fixture, mockStressTimeline } from "../utils/session-fixture"
 import { reviewTabs } from "../utils/side-panel"
 import { expectSessionTitle } from "../utils/waits"
@@ -526,6 +526,45 @@ test.describe("location", () => {
         .toBe(true)
       await page.screenshot({ path: test.info().outputPath("path-flyout-mobile.png"), animations: "disabled" })
     })
+  })
+})
+
+test.describe("context usage", () => {
+  // A CLIProxyPacer client's compaction threshold for the model is the chat's 100% (workspace spec
+  // compaction-threshold-per-client, section 3).
+  test("counts against the model's compaction point, so a chat at the point reads 100%", async ({ page }) => {
+    const messages = [
+      { id: "msg_question", type: "user", text: "Question", time: { created: 1 } },
+      {
+        id: "msg_answer",
+        type: "assistant",
+        agent: "build",
+        model: { id: "pointed", providerID: "opencode" },
+        content: [{ type: "text", text: "Answer" }],
+        tokens: { input: 500_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 2, completed: 3 },
+      },
+    ] satisfies SessionMessageInfo[]
+
+    await openSession(page, {
+      name: "CompactionPoint",
+      provider: provider({
+        id: "pointed",
+        name: "Pointed",
+        limit: { context: 1_000_000, output: 64_000, compact: 500_000 },
+      }),
+      pageMessages: () => ({ items: messages }),
+    })
+
+    const usage = page
+      .locator("[data-session-title]")
+      .getByRole("button", { name: "Toggle session context", exact: true })
+
+    await expect(usage).toContainText("500k")
+    await usage.click()
+    const stats = page.locator('[data-slot="session-usage-content"]')
+    await expect(stats).toContainText("Context Limit500,000")
+    await expect(stats).toContainText("Usage100%")
   })
 })
 

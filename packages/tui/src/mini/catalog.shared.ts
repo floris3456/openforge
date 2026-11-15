@@ -65,7 +65,10 @@ export function runProviders(providers: CurrentProvider[], models: CurrentModel[
     provider.models[model.id] = {
       name: model.name,
       cost: cost === undefined ? undefined : { input: cost },
-      limit: { context: model.limit.context },
+      limit: {
+        context: model.limit.context,
+        ...(model.limit.compact === undefined ? {} : { compact: model.limit.compact }),
+      },
       status: model.status,
       variants: Object.fromEntries((model.variants ?? []).map((variant) => [variant.id, {}])),
     }
@@ -73,6 +76,12 @@ export function runProviders(providers: CurrentProvider[], models: CurrentModel[
   }
 
   return [...grouped.values()]
+}
+
+/** What a step's context meter counts against: the model's compaction point when it has one, else its window. */
+export function contextLimit(providers: RunProvider[], model: { providerID: string; modelID: string }) {
+  const limit = providers.find((provider) => provider.id === model.providerID)?.models[model.modelID]?.limit
+  return limit?.compact ?? limit?.context
 }
 
 export async function loadRunAgents(sdk: OpenCodeClient, ref: LocationRef, signal?: AbortSignal): Promise<RunAgent[]> {

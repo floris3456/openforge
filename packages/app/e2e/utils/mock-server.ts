@@ -1428,7 +1428,12 @@ function currentModels(catalog: MockProviderCatalog) {
           cost: [{ input: model.cost?.input ?? 0, output: model.cost?.output ?? 0, cache: { read: 0, write: 0 } }],
           status: "active",
           enabled: true,
-          limit: { context: model.limit?.context ?? 200_000, output: model.limit?.output ?? 32_000 },
+          limit: {
+            context: model.limit?.context ?? 200_000,
+            output: model.limit?.output ?? 32_000,
+            // Undefined leaves the answer's JSON without it, as a model without a compaction point has.
+            compact: model.limit?.compact,
+          },
         })),
     )
 }
@@ -1553,7 +1558,13 @@ const decodeModel = Schema.decodeUnknownOption(
     id: Schema.String,
     name: Schema.String,
     api: lenient(Schema.Struct({ id: Schema.String })),
-    limit: lenient(Schema.Struct({ context: lenient(Schema.Number), output: lenient(Schema.Number) })),
+    limit: lenient(
+      Schema.Struct({
+        context: lenient(Schema.Number),
+        output: lenient(Schema.Number),
+        compact: lenient(Schema.Number),
+      }),
+    ),
     cost: lenient(Schema.Struct({ input: lenient(Schema.Number), output: lenient(Schema.Number) })),
     capabilities: lenient(Model.Capabilities),
     variants: lenient(Schema.Record(Schema.String, Schema.Unknown)),

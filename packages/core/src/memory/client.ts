@@ -7,106 +7,15 @@ import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Config } from "../config.js"
 import { PacerHttp } from "../pacer/http.js"
 
-// The memory API's routes under `/pacer/v1/memory/{project}` (the workspace's `docs/reference/memory-api.md`), for one
-// project at a time. Who may write, replace or delete what is the caller's to check: the server cannot tell a lead
-// from a child, nor one role from another.
-
-export const Kind = Schema.Literals(["words", "unverified", "verified"])
-export type Kind = typeof Kind.Type
+// What a harness asks of memory under `/pacer/v1/memory/{project}` (the workspace's `docs/reference/memory-api.md` and
+// `docs/reference/cpp-tools-api.md`, "A harness's texts"), for one project at a time: the start block, the entries
+// near a prompt, the task check, a subagent's task, what followed a search, and memory's texts. CPP holds every rule
+// and text; who asks is in the headers (`PacerHeaders.chat` with the agent), never in a body the model writes.
 
 const maybe = <S extends Schema.Top>(schema: S) => Schema.optional(Schema.NullOr(schema))
 
-export const Entry = Schema.Struct({
-  id: Schema.String,
-  kind: Kind,
-  /** Null once deleted. */
-  text: Schema.NullOr(Schema.String),
-  basis: Schema.NullOr(Schema.String),
-  scope: Schema.Literals(["global", "role", "task"]),
-  role: maybe(Schema.String),
-  task: maybe(Schema.String),
-  subtask: maybe(Schema.String),
-  by: Schema.Struct({ person: Schema.String, role: Schema.String, chat: Schema.String }),
-  /** Unix milliseconds. */
-  at: Schema.Number,
-  supersedes: maybe(Schema.String),
-  superseded_by: maybe(Schema.String),
-  deleted: maybe(Schema.Struct({ reason: maybe(Schema.String) })),
-})
-export interface Entry extends Schema.Schema.Type<typeof Entry> {}
-
-/** An entry near the one a write wrote; `score` is the cosine of their vectors. */
-export const Near = Schema.Struct({ ...Entry.fields, score: Schema.Number })
-export interface Near extends Schema.Schema.Type<typeof Near> {}
-
-/** `dropped`, given up for a new plan with a note, comes with `plans` (workspace spec `docs/specs/task-plans.md`). */
-export const State = Schema.Literals(["todo", "active", "blocked", "review", "done", "dropped"])
-export type State = typeof State.Type
-
-const Who = Schema.Struct({ person: Schema.String, role: Schema.String, chat: Schema.String })
-
-/** A task or, with a `parent`, a subtask (the memory API's section "Tasks"). */
-export const Task = Schema.Struct({
-  id: Schema.String,
-  parent: maybe(Schema.String),
-  title: Schema.String,
-  description: Schema.String,
-  state: State,
-  note: maybe(Schema.String),
-  by: Who,
-  /** Who last set it active. */
-  worker: maybe(Who),
-  /** Unix milliseconds. */
-  at: Schema.Number,
-  changed: Schema.Number,
-  /**
-   * When the worker's chat last sent a model request through CLIProxyPacer, in Unix milliseconds; null when it is not
-   * known. A server without `plans` answers neither this nor `idle`.
-   */
-  worker_seen: maybe(Schema.Number),
-  /** Active, and no model request from its worker's chat (or no change, when that is not known) for 24 hours. */
-  idle: Schema.optional(Schema.Boolean),
-})
-export interface Task extends Schema.Schema.Type<typeof Task> {}
-
-/** Done or dropped: a closed task counts as a done one does everywhere. */
-export function isClosed(task: Task) {
-  return task.state === "done" || task.state === "dropped"
-}
-
-export const Change = Schema.Struct({
-  state: State,
-  note: maybe(Schema.String),
-  by: Who,
-  at: Schema.Number,
-  /** Only on a change that edited them: the new title and description. */
-  title: Schema.optional(Schema.String),
-  description: Schema.optional(Schema.String),
-})
-export interface Change extends Schema.Schema.Type<typeof Change> {}
-
-/** One task as `GET …/tasks/{id}` answers it: its changes newest first, its subtasks oldest first, its entries. */
-const TaskRead = Schema.Struct({
-  task: Task,
-  changes: Schema.Array(Change),
-  subtasks: Schema.Array(Task),
-  entries: Schema.Array(Entry),
-})
-export interface TaskRead extends Schema.Schema.Type<typeof TaskRead> {}
-const TaskAnswer = Schema.Struct({
-  task: Task,
-  existing: Schema.optional(Schema.Boolean),
-  /** A make with subtasks: those it made, or the copy's, in order. */
-  subtasks: Schema.optional(Schema.Array(Task)),
-})
-/** `done` with `next`: the subtask, the one that starts next (null when none), and its task. */
-const Finished = Schema.Struct({ task: Task, next: Schema.NullOr(Task), parent: Task })
-export interface Finished extends Schema.Schema.Type<typeof Finished> {}
-/** A plan: the task, every subtask of it in order, and the ids of those it dropped. */
-const Planned = Schema.Struct({ task: Task, subtasks: Schema.Array(Task), dropped: Schema.Array(Schema.String) })
-export interface Planned extends Schema.Schema.Type<typeof Planned> {}
-const TaskList = Schema.Struct({ tasks: Schema.Array(Task), more: Schema.Boolean })
-export interface TaskList extends Schema.Schema.Type<typeof TaskList> {}
+/** What openforge reads of an entry an answer names: its id. */
+const Named = Schema.Struct({ id: Schema.String })
 
 /** A row of the recall log: one search or start, what followed it in the chat, and its labels. */
 export const Recall = Schema.Struct({
@@ -130,58 +39,66 @@ export const Recall = Schema.Struct({
 export interface Recall extends Schema.Schema.Type<typeof Recall> {}
 const RecallAnswer = Schema.Struct({ recall: Recall })
 
-const EntryAnswer = Schema.Struct({ entry: Entry })
-// An older server answers no `near`.
-const Written = Schema.Struct({
-  entry: Entry,
-  existing: Schema.optional(Schema.Boolean),
-  near: Schema.optional(Schema.Array(Near)),
-})
-const Found = Schema.Struct({ recall: Schema.String, entries: Schema.Array(Entry), meaning: Schema.Boolean })
-export interface Found extends Schema.Schema.Type<typeof Found> {}
-// An older server answers `start`'s task without `changes`, and its subtask as a task alone.
-const StartedTask = Schema.Struct({
-  task: Task,
-  changes: Schema.optional(Schema.Array(Change)),
-  subtasks: Schema.Array(Task),
-  entries: Schema.Array(Entry),
-})
+/** The chat's place as CPP keeps it (workspace reference `docs/reference/cpp-tools-api.md`, "The chat's place"). */
+const Place = Schema.NullOr(Schema.Struct({ task: Schema.String, subtask: maybe(Schema.String) }))
+export type Place = { readonly task: string; readonly subtask: string | null } | null
+const placeOf = (place: typeof Place.Type | undefined): Place | undefined =>
+  place === undefined ? undefined : place && { task: place.task, subtask: place.subtask ?? null }
+
+const StartedPart = Schema.Struct({ entries: Schema.optional(Schema.Array(Named)) })
 const StartedAnswer = Schema.Struct({
+  /** The whole start block, as the model reads it. */
+  text: Schema.String,
   /** Null when `limit` was 0: no search ran, and nothing is read of `meaning`. */
   recall: Schema.NullOr(Schema.String),
-  entries: Schema.Array(Entry),
-  /** With `summary`: the entries close to it that it already says, left out; absent on a server before it. */
+  entries: Schema.Array(Named),
+  /** With `summary`: the entries close to it that it already says, left out. */
   said: Schema.optional(Schema.Array(Schema.String)),
   meaning: Schema.optional(Schema.Boolean),
-  counts: Schema.Struct({ global: Schema.Number, role: Schema.Number, task: Schema.Number }),
-  // A server without tasks may answer neither.
-  task: maybe(StartedTask),
-  subtask: maybe(Schema.Union([StartedTask, Task])),
+  task: maybe(StartedPart),
+  subtask: maybe(StartedPart),
+  place: Schema.optional(Place),
 })
-type StartedAnswer = typeof StartedAnswer.Type
-/** `prompt`'s answer: the entries that match a prompt closely, at most 2, or none. */
-const Prompted = Schema.Struct({
+/** `start`'s answer: the block's text, its search, and the chat's place. */
+export interface Started {
+  readonly text: string
+  readonly recall: string | null
+  /** The ids of the entries the block holds. */
+  readonly entries: ReadonlyArray<string>
+  readonly said?: ReadonlyArray<string>
+  readonly meaning?: boolean
+  /** The ids of the entries its task part may show. */
+  readonly shown: ReadonlyArray<string>
+  readonly place?: Place
+}
+/** `prompt`'s answer: the entries that match a prompt closely, and the message that holds them, or null for none. */
+const PromptedAnswer = Schema.Struct({
   recall: Schema.NullOr(Schema.String),
-  entries: Schema.Array(Entry),
-  meaning: Schema.Boolean,
+  entries: Schema.Array(Named),
+  text: maybe(Schema.String),
 })
-export interface Prompted extends Schema.Schema.Type<typeof Prompted> {}
-/** `start`'s answer, its task and subtask as reading them answers (`changes` empty from an older server). */
-export interface Started extends Omit<StartedAnswer, "task" | "subtask"> {
-  readonly task?: TaskRead | null
-  readonly subtask?: TaskRead | null
+export interface Prompted {
+  readonly recall: string | null
+  readonly entries: ReadonlyArray<string>
+  readonly text: string | null
 }
-
-function started(answer: StartedAnswer): Started {
-  const read = (found: typeof StartedTask.Type): TaskRead => ({ ...found, changes: found.changes ?? [] })
-  const subtask = answer.subtask
-  return {
-    ...answer,
-    task: answer.task ? read(answer.task) : answer.task,
-    subtask:
-      subtask && "id" in subtask ? { task: subtask, changes: [], subtasks: [], entries: [] } : subtask && read(subtask),
-  }
+const ChatAnswer = Schema.Struct({ place: Schema.optional(Place), check: maybe(Schema.String) })
+const Failure = Schema.Struct({ code: Schema.String, message: maybe(Schema.String) })
+const StepAnswer = Schema.Struct({
+  text: maybe(Schema.String),
+  error: maybe(Failure),
+  place: Schema.optional(Place),
+})
+/** A task route's answer, as a call's: `error` a refusal whose `text` the model reads. */
+export interface Step {
+  readonly text: string
+  readonly error?: { readonly code: string; readonly message: string }
+  readonly place?: Place
 }
+const EndedAnswer = Schema.Struct({ text: maybe(Schema.String) })
+const TextsAnswer = Schema.Struct({ unavailable: Schema.String, refused: Schema.String })
+/** memory's texts for when CPP cannot be reached or a rule of openforge's hooks says no. */
+export interface Texts extends Schema.Schema.Type<typeof TextsAnswer> {}
 
 /** Who calls: the agent running the call (its role) and the chat. The model never sets it. */
 export interface By {
@@ -192,40 +109,8 @@ export interface By {
   readonly subtask?: string
 }
 
-/**
- * Which live entries a search looks in: a union of the global ones, those of the listed roles and those of the listed
- * tasks (each with its subtasks), or all.
- */
-export type Scopes =
-  | {
-      readonly global?: boolean
-      readonly roles?: ReadonlyArray<string>
-      readonly tasks?: ReadonlyArray<string>
-    }
-  | "all"
-
-export interface WriteInput {
-  readonly kind: Kind
-  readonly text: string
-  readonly basis?: string
-  readonly scope: "global" | "role" | "task"
-  readonly supersedes?: string
-  /** With `supersedes`: the replacement belongs where `scope` says, not where the replaced entry was. */
-  readonly move?: boolean
-  readonly by: By
-}
-
-export interface SearchInput {
-  readonly query: string
-  readonly scopes: Scopes
-  readonly kinds?: ReadonlyArray<Kind>
-  readonly limit: number
-  readonly by: By
-}
-
 export interface StartInput {
   readonly prompt: string
-  readonly scopes: Scopes
   /** 0 on a server with `prompt`: no search runs, and the answer has no entries and no recall. */
   readonly limit: number
   /**
@@ -235,19 +120,15 @@ export interface StartInput {
   readonly summary?: ReadonlyArray<string>
   /** With `summary`: the entries the chat still has in view, which are not answered again; at most 100. */
   readonly exclude?: ReadonlyArray<string>
-  /** The chat's task (one without a parent) and its subtask, whose parts the answer then holds. */
-  readonly task?: string
-  readonly subtask?: string
-  readonly by: By
+  /** Which of the tools the chat's agent may use: the block then speaks of them. */
+  readonly tools: { readonly recall: boolean; readonly remember: boolean; readonly task: boolean }
 }
 
 export interface PromptInput {
   /** The person's prompt, cut to its first 2,000 characters. */
   readonly prompt: string
-  readonly scopes: Scopes
   /** The entries the chat has in view, which are not answered again; at most 100. */
   readonly exclude: ReadonlyArray<string>
-  readonly by: By
 }
 
 /** What followed a search in the chat: the step after it, the person's next message, or both. */
@@ -256,52 +137,6 @@ export interface AfterInput {
   /** The entries the search returned that the step replaced or deleted. */
   readonly acted?: ReadonlyArray<{ readonly id: string; readonly how: "superseded" | "forgotten" }>
   readonly person?: string
-  readonly by: By
-}
-
-/** A subtask as a make or a plan names it. */
-export interface Step {
-  readonly title: string
-  readonly description?: string
-}
-
-export interface MakeInput {
-  readonly title: string
-  readonly description?: string
-  /** The task this is a subtask of. */
-  readonly parent?: string
-  /**
-   * On a server with plans, without `parent`: its subtasks in order, 1 to 20. The task and the first are then active,
-   * the caller their worker, the others todo.
-   */
-  readonly subtasks?: ReadonlyArray<Step>
-  readonly by: By
-}
-
-export interface ChangeInput {
-  readonly state: State
-  readonly note?: string
-  readonly by: By
-}
-
-export interface FinishInput {
-  readonly note?: string
-  readonly by: By
-}
-
-export interface PlanInput {
-  /** The new subtasks, 1 to 20, in order. */
-  readonly plan: ReadonlyArray<Step>
-  /** Why the plan changes: the dropped subtasks keep it. */
-  readonly note: string
-  readonly by: By
-}
-
-export interface EditInput {
-  readonly title?: string
-  /** An empty one clears it. */
-  readonly description?: string
-  readonly note?: string
   readonly by: By
 }
 
@@ -320,13 +155,6 @@ export class Refused extends Schema.TaggedError<Refused>()("MemoryClient.Refused
 }) {
   override get message() {
     return this.reason
-  }
-}
-
-/** No such entry in this project's memory. */
-export class Missing extends Schema.TaggedError<Missing>()("MemoryClient.Missing", { id: Schema.String }) {
-  override get message() {
-    return `There is no entry ${this.id} in this project's memory.`
   }
 }
 
@@ -350,7 +178,7 @@ export class MissingRecall extends Schema.TaggedError<MissingRecall>()("MemoryCl
  * CPP keeps this chat's project's memory from the asking key: memory is off for the project (`project_memory_off`), or
  * the key may not use it (`project_forbidden`) (workspace spec `docs/specs/cpp-projects.md`, "Memory follows the
  * project"). `project` is the project's name and `moved` whether the chat was moved into it, both unknown from a server
- * before moves. The message is what every memory tool answers while the chat still has the tools.
+ * before moves.
  */
 export class Closed extends Schema.TaggedError<Closed>()("MemoryClient.Closed", {
   type: Schema.Literals(["project_memory_off", "project_forbidden"]),
@@ -358,76 +186,39 @@ export class Closed extends Schema.TaggedError<Closed>()("MemoryClient.Closed", 
   moved: Schema.optional(Schema.Boolean),
 }) {
   override get message() {
-    const where = this.moved
-      ? "the project this chat was moved to on CLIProxyPacer's Projects page"
-      : "this chat's project on CLIProxyPacer"
-    const project = this.project === undefined ? where : `${JSON.stringify(this.project)}, ${where}`
-    const closed =
-      this.type === "project_memory_off"
-        ? `Memory is off for ${project}`
-        : `This key may not use the memory of ${project}`
-    return `${closed}: the memory tools stop working now and leave this chat at its next cold moment. Go on without them.`
+    const project = this.project === undefined ? "this chat's project" : JSON.stringify(this.project)
+    return this.type === "project_memory_off"
+      ? `Memory is off for ${project}${this.moved ? ", the project this chat was moved to" : ""}`
+      : `This key may not use the memory of ${project}${this.moved ? ", the project this chat was moved to" : ""}`
   }
 }
 
-export type Error = Unavailable | Refused | Missing | MissingTask | MissingRecall | Closed
+export type Error = Unavailable | Refused | MissingTask | MissingRecall | Closed
 
 export interface Interface {
-  /**
-   * Writes one entry, or replaces the one `supersedes` names; `existing` when a live exact copy answered instead.
-   * `near`: the at most 3 live entries of the project nearest to the one written, best first; empty when nothing was
-   * written or the server made no vector for it.
-   */
-  readonly write: (
-    project: string,
-    input: WriteInput,
-  ) => Effect.Effect<{ readonly entry: Entry; readonly existing: boolean; readonly near: ReadonlyArray<Near> }, Error>
-  /** Reads one entry of the project, live or not. */
-  readonly read: (project: string, id: string) => Effect.Effect<Entry, Error>
-  /** Deletes one entry's text for good. */
-  readonly forget: (
-    project: string,
-    id: string,
-    input: { readonly reason: string; readonly by: By },
-  ) => Effect.Effect<Entry, Error>
-  readonly search: (project: string, input: SearchInput) => Effect.Effect<Found, Error>
-  /** The parts of a chat's start block, in one call. */
+  /** The chat's start block, in one call; `tools` names what it may speak of. */
   readonly start: (
     project: string,
     input: StartInput,
     options?: { readonly timeout?: Duration.Input },
   ) => Effect.Effect<Started, Error>
-  /** The entries that match a person's prompt closely, or none. */
+  /** The entries that match a person's prompt closely, and their message, or none. */
   readonly prompt: (
     project: string,
     input: PromptInput,
     options?: { readonly timeout?: Duration.Input },
   ) => Effect.Effect<Prompted, Error>
-  /**
-   * Makes a task, or a subtask of `parent`; `existing` when an open task (not done nor dropped) had that title and
-   * parent. `subtasks`: with the input's, those made, or the copy's, in order; empty otherwise.
-   */
-  readonly make: (
+  /** The chat's place, and the task check's line while its task or subtask is active, else null. */
+  readonly chat: (
     project: string,
-    input: MakeInput,
-  ) => Effect.Effect<{ readonly task: Task; readonly existing: boolean; readonly subtasks: ReadonlyArray<Task> }, Error>
-  /** The open tasks and subtasks, newest first, at most 200; `more` when there are others. */
-  readonly tasks: (project: string) => Effect.Effect<TaskList, Error>
-  readonly task: (project: string, id: string) => Effect.Effect<TaskRead, Error>
-  /** Sets a task's state and note; `active` makes the caller its worker. */
-  readonly change: (project: string, id: string, input: ChangeInput) => Effect.Effect<Task, Error>
-  /**
-   * On a server with plans: sets a subtask done, then the first `todo` one of its task's subtasks active, the caller its
-   * worker; when none is `todo` and every one is done or dropped, the task goes to review.
-   */
-  readonly finish: (project: string, id: string, input: FinishInput) => Effect.Effect<Finished, Error>
-  /**
-   * On a server with plans: replaces the subtasks of a task (one without a parent) not yet started, those `todo` and
-   * the caller's chat's `active` one, which are dropped with the note; the plan's follow all the others.
-   */
-  readonly plan: (project: string, id: string, input: PlanInput) => Effect.Effect<Planned, Error>
-  /** On a server with plans: edits a task's title or description, keeping the change in its history. */
-  readonly edit: (project: string, id: string, input: EditInput) => Effect.Effect<Task, Error>
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<{ readonly place?: Place; readonly check: string | null }, Error>
+  /** With the lead's headers, before a subagent is started on task `id`: the child's place to be, or a refusal. */
+  readonly assign: (project: string, id: string) => Effect.Effect<Step, Error>
+  /** With the child's headers, before its first step: sets task `id` active in its name. */
+  readonly begin: (project: string, id: string) => Effect.Effect<Step, Error>
+  /** What the subagent's answer gets after it when task `id` is no longer active, else null. */
+  readonly ended: (project: string, id: string) => Effect.Effect<string | null, Error>
   /** Adds what followed to a search's row of the recall log; each part is kept once, the first that comes. */
   readonly after: (
     project: string,
@@ -437,6 +228,8 @@ export interface Interface {
   ) => Effect.Effect<Recall, Error>
   /** Reads one row of the recall log. */
   readonly recall: (project: string, id: string) => Effect.Effect<Recall, Error>
+  /** memory's texts for when the server cannot be reached; without a project. */
+  readonly texts: (options?: { readonly timeout?: Duration.Input }) => Effect.Effect<Texts, Error>
   /** The same client, its requests carrying `headers`: the chat and its project as CPP knows them (`PacerHeaders.chat`). */
   readonly withHeaders: (headers: Readonly<Record<string, string>>) => Interface
 }
@@ -448,130 +241,55 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const http = yield* PacerHttp.Service
     const base = (project: string) => `/pacer/v1/memory/${encodeURIComponent(project)}`
-    const entry = (project: string, id: string) => `${base(project)}/entries/${encodeURIComponent(id)}`
     const task = (project: string, id: string) => `${base(project)}/tasks/${encodeURIComponent(id)}`
     const recall = (project: string, id: string) => `${base(project)}/recalls/${encodeURIComponent(id)}`
 
     const make = (headers: Readonly<Record<string, string>>): Interface => ({
-      write: (project, input) =>
-        http
-          .post(
-            `${base(project)}/entries`,
-            {
-              kind: input.kind,
-              text: input.text,
-              ...(input.basis === undefined ? {} : { basis: input.basis }),
-              scope: input.scope,
-              by: input.by,
-              supersedes: input.supersedes ?? null,
-              ...(input.move === undefined ? {} : { move: input.move }),
-            },
-            Written,
-            { headers },
-          )
-          .pipe(
-            Effect.map((answer) => ({
-              entry: answer.body.entry,
-              existing: answer.body.existing === true,
-              near: answer.body.near ?? [],
-            })),
-            Effect.mapError(failure(input.supersedes)),
-          ),
-      read: (project, id) =>
-        http.get(entry(project, id), EntryAnswer, { headers }).pipe(
-          Effect.map((answer) => answer.body.entry),
-          Effect.mapError(failure(id)),
-        ),
-      forget: (project, id, input) =>
-        http.post(`${entry(project, id)}/forget`, input, EntryAnswer, { headers }).pipe(
-          Effect.map((answer) => answer.body.entry),
-          Effect.mapError(failure(id)),
-        ),
-      search: (project, input) =>
-        http
-          .post(
-            `${base(project)}/search`,
-            {
-              query: input.query,
-              scopes: input.scopes,
-              ...(input.kinds ? { kinds: input.kinds } : {}),
-              limit: input.limit,
-              by: input.by,
-            },
-            Found,
-            { headers },
-          )
-          .pipe(
-            Effect.map((answer) => answer.body),
-            Effect.mapError(failure()),
-          ),
       start: (project, input, options) =>
-        http
-          .post(
-            `${base(project)}/start`,
-            { ...input, task: input.task ?? null, subtask: input.subtask ?? null },
-            StartedAnswer,
-            { ...options, headers },
-          )
-          .pipe(
-            Effect.map((answer) => started(answer.body)),
-            Effect.mapError(failure()),
-          ),
+        http.post(`${base(project)}/start`, input, StartedAnswer, { ...options, headers }).pipe(
+          Effect.map((answer) => ({
+            text: answer.body.text,
+            recall: answer.body.recall,
+            entries: answer.body.entries.map((item) => item.id),
+            ...(answer.body.said === undefined ? {} : { said: answer.body.said }),
+            ...(answer.body.meaning === undefined ? {} : { meaning: answer.body.meaning }),
+            shown: [...(answer.body.task?.entries ?? []), ...(answer.body.subtask?.entries ?? [])].map(
+              (item) => item.id,
+            ),
+            ...(answer.body.place === undefined ? {} : { place: placeOf(answer.body.place) }),
+          })),
+          Effect.mapError(failure()),
+        ),
       prompt: (project, input, options) =>
-        http.post(`${base(project)}/prompt`, input, Prompted, { ...options, headers }).pipe(
-          Effect.map((answer) => answer.body),
+        http.post(`${base(project)}/prompt`, input, PromptedAnswer, { ...options, headers }).pipe(
+          Effect.map((answer) => ({
+            recall: answer.body.recall,
+            entries: answer.body.entries.map((item) => item.id),
+            text: answer.body.text ?? null,
+          })),
           Effect.mapError(failure()),
         ),
-      make: (project, input) =>
-        http
-          .post(
-            `${base(project)}/tasks`,
-            {
-              title: input.title,
-              ...(input.description === undefined ? {} : { description: input.description }),
-              parent: input.parent ?? null,
-              ...(input.subtasks === undefined ? {} : { subtasks: input.subtasks }),
-              by: input.by,
-            },
-            TaskAnswer,
-            { headers },
-          )
-          .pipe(
-            Effect.map((answer) => ({
-              task: answer.body.task,
-              existing: answer.body.existing === true,
-              subtasks: answer.body.subtasks ?? [],
-            })),
-            Effect.mapError(failure(input.parent, "task")),
-          ),
-      tasks: (project) =>
-        http.get(`${base(project)}/tasks`, TaskList, { headers }).pipe(
-          Effect.map((answer) => answer.body),
+      chat: (project, options) =>
+        http.get(`${base(project)}/chat`, ChatAnswer, { ...options, headers }).pipe(
+          Effect.map((answer) => ({
+            ...(answer.body.place === undefined ? {} : { place: placeOf(answer.body.place) }),
+            check: answer.body.check ?? null,
+          })),
           Effect.mapError(failure()),
         ),
-      task: (project, id) =>
-        http.get(task(project, id), TaskRead, { headers }).pipe(
-          Effect.map((answer) => answer.body),
+      assign: (project, id) =>
+        http.post(`${task(project, id)}/assign`, {}, StepAnswer, { headers }).pipe(
+          Effect.map((answer) => step(answer.body)),
           Effect.mapError(failure(id, "task")),
         ),
-      change: (project, id, input) =>
-        http.post(`${task(project, id)}/state`, input, TaskAnswer, { headers }).pipe(
-          Effect.map((answer) => answer.body.task),
+      begin: (project, id) =>
+        http.post(`${task(project, id)}/start`, {}, StepAnswer, { headers }).pipe(
+          Effect.map((answer) => step(answer.body)),
           Effect.mapError(failure(id, "task")),
         ),
-      finish: (project, id, input) =>
-        http.post(`${task(project, id)}/state`, { ...input, state: "done", next: true }, Finished, { headers }).pipe(
-          Effect.map((answer) => answer.body),
-          Effect.mapError(failure(id, "task")),
-        ),
-      plan: (project, id, input) =>
-        http.post(`${task(project, id)}/plan`, input, Planned, { headers }).pipe(
-          Effect.map((answer) => answer.body),
-          Effect.mapError(failure(id, "task")),
-        ),
-      edit: (project, id, input) =>
-        http.post(`${task(project, id)}/edit`, input, TaskAnswer, { headers }).pipe(
-          Effect.map((answer) => answer.body.task),
+      ended: (project, id) =>
+        http.get(`${task(project, id)}/ended`, EndedAnswer, { headers }).pipe(
+          Effect.map((answer) => answer.body.text ?? null),
           Effect.mapError(failure(id, "task")),
         ),
       after: (project, id, input, options) =>
@@ -583,6 +301,11 @@ export const layer = Layer.effect(
         http.get(recall(project, id), RecallAnswer, { headers }).pipe(
           Effect.map((answer) => answer.body.recall),
           Effect.mapError(failure(id, "recall")),
+        ),
+      texts: (options) =>
+        http.get("/pacer/v1/memory/texts", TextsAnswer, { ...options, headers }).pipe(
+          Effect.map((answer) => answer.body),
+          Effect.mapError(failure()),
         ),
       withHeaders: make,
     })
@@ -609,7 +332,7 @@ export function project(entries: Parameters<typeof Config.latest>[0], projectID:
  * entry is that entry missing; on any other route, or without the server's type, the proxy has no memory. A project's
  * memory kept from the key is {@link Closed}.
  */
-function failure(id?: string, thing: "entry" | "task" | "recall" = "entry") {
+function failure(id?: string, thing: "task" | "recall" = "task") {
   return (error: PacerHttp.Error): Error => {
     if (
       (error._tag === "PacerHttp.NoPacer" && error.type === "project_memory_off") ||
@@ -621,13 +344,17 @@ function failure(id?: string, thing: "entry" | "task" | "recall" = "entry") {
         ...(error.moved === undefined ? {} : { moved: error.moved }),
       })
     if (error._tag === "PacerHttp.NotFound" && id !== undefined)
-      return thing === "task"
-        ? new MissingTask({ id })
-        : thing === "recall"
-          ? new MissingRecall({ id })
-          : new Missing({ id })
+      return thing === "task" ? new MissingTask({ id }) : new MissingRecall({ id })
     if (error._tag === "PacerHttp.Unexpected" && (error.status === 400 || error.status === 409))
       return new Refused({ reason: error.reason })
     return new Unavailable({ reason: error.message })
+  }
+}
+
+function step(answer: typeof StepAnswer.Type): Step {
+  return {
+    text: answer.text ?? "",
+    ...(answer.error ? { error: { code: answer.error.code, message: answer.error.message ?? "" } } : {}),
+    ...(answer.place === undefined ? {} : { place: placeOf(answer.place) }),
   }
 }

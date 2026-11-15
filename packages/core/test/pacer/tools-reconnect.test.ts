@@ -6,6 +6,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { KV } from "@opencode/core/kv"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -69,17 +70,23 @@ const start = Effect.fnUntraced(function* (origin: string) {
       changes: () => SubscriptionRef.changes(endpoints),
     }),
   )
-  const bus = Context.get(
-    yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]))),
-    Bus.Service,
-  )
+  const base = yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, KV.node])))
+  const bus = Context.get(base, Bus.Service)
   const http = Layer.fresh(PacerHttp.layer).pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpointLayer))
   const models = Layer.fresh(PacerModels.layer).pipe(Layer.provide(http), Layer.provide(endpointLayer))
   const context = yield* Layer.build(
     Layer.mergeAll(
       models,
       Layer.fresh(PacerTools.layer).pipe(
-        Layer.provide(Layer.mergeAll(http, endpointLayer, models, Layer.succeed(Bus.Service, bus))),
+        Layer.provide(
+          Layer.mergeAll(
+            http,
+            endpointLayer,
+            models,
+            Layer.succeed(Bus.Service, bus),
+            Layer.succeed(KV.Service, Context.get(base, KV.Service)),
+          ),
+        ),
       ),
     ),
   )
@@ -208,7 +215,7 @@ describe("PacerTools across a reconnect of CPP's stream", () => {
         h.tools.seen(chat, "0123456789abcdef")
         expect(yield* h.tools.list(step(chat))).toBe(back!)
         expect(warnings.map((item) => (item as ReadonlyArray<unknown>)[0])).toEqual([
-          "could not read CLIProxyPacer's web tools",
+          "could not read CLIProxyPacer's tools",
         ])
       }),
     ),

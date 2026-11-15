@@ -275,7 +275,11 @@ export const Plugin = {
                   ))
 
               // Known and left so: when setting the task active fails, the child session made above already exists.
-              if (assigned) yield* tasks.activate(assigned, { id: child.id, role: agent.id })
+              if (assigned) {
+                const metadata = yield* tasks.activate(assigned, child, agent.id)
+                if (metadata)
+                  yield* sessions.setMetadata({ sessionID: child.id, metadata }).pipe(Effect.ignore)
+              }
               const background = input.background === true
               yield* context.progress({ sessionID: child.id, status: "running" })
 

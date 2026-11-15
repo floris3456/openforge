@@ -79,6 +79,8 @@ describe("PacerTools.list", () => {
       const read = cpp.lists()[0]!
       expect(read.method).toBe("GET")
       expect(read.query.get("model")).toBe("claude-haiku-5-5")
+      // The memory tools too, while the chat has memory (workspace reference `docs/reference/cpp-tools-api.md`).
+      expect(read.query.get("include")).toBe("memory")
       expect(read.headers.get("authorization")).toBe("Bearer client-key-test")
       expect(read.headers.get("x-pacer-session")).toBe(PacerSessionID.make(child))
       expect(read.headers.get("x-pacer-parent-session")).toBe(PacerSessionID.make(chat))
@@ -92,6 +94,9 @@ describe("PacerTools.list", () => {
       ])
       // Name, description and schema as CPP wrote them, byte for byte.
       expect(claude(first)).toBe(ownerClaude)
+      // Each tool's meta beside it, which the endpoint's known tools now hold.
+      expect(Object.fromEntries(first!.meta)).toEqual(ownerList.meta)
+      expect(Object.fromEntries(yield* tools.known())).toEqual(ownerList.meta)
 
       // The same objects on every request until the list is read again.
       const again = yield* tools.list(step(child, "claude-haiku-5-5", chat))
@@ -269,7 +274,7 @@ describe("PacerTools.list", () => {
         expect(yield* Fiber.join(waiting)).toBeUndefined()
         expect(warnings).toEqual([
           [
-            "went on without CLIProxyPacer's web tools: no answer to their list",
+            "went on without CLIProxyPacer's tools: no answer to their list",
             {
               sessionID: chat,
               waited: "58s",
@@ -590,6 +595,7 @@ describe("PacerTools.call", () => {
         expect(answer).toEqual({
           text: "answered /pacer/v1/tools/web_search",
           data: { tool: "web_search", provider: "tavily", cost_nano_usd: 8_000_000 },
+          metadata: { provider: "Tavily" },
         })
         const sent = cpp.calls()[0]!
         expect(sent.method).toBe("POST")
@@ -609,6 +615,7 @@ describe("PacerTools.call", () => {
           text: "Web search failed: no search can serve this call now. Go on without it.",
           data: { tool: "web_search", rule: "search.default", attempts: [] },
           error: { code: "unavailable", message: "no search can serve this call now" },
+          metadata: {},
         })
         expect(cpp.calls()[1]?.headers.get("x-pacer-parent-session")).toBeNull()
       }),

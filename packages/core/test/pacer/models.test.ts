@@ -492,6 +492,7 @@ describe("PacerModels", () => {
             projects: false,
             prompt: false,
             summary: false,
+            tools: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -523,6 +524,8 @@ describe("PacerModels", () => {
           projects: false,
           prompt: true,
         })
+        // A server that serves the memory tools and memory's texts says so.
+        expect((yield* told({ ...block, embedding: null, tools: true }))?.pacer?.memory).toMatchObject({ tools: true })
         // A server whose start takes a compaction's summary says so.
         expect((yield* told({ ...block, embedding: null, prompt: true, summary: true }))?.pacer?.memory).toMatchObject({
           prompt: true,

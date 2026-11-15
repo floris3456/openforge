@@ -33,7 +33,7 @@ import { SessionPromptStart } from "@opencode/core/session/prompt-start"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { Tool } from "@opencode/core/tool"
-import { PacerWebTools } from "@opencode/core/tool/plugin/pacer-web"
+import { PacerToolsPlugin } from "@opencode/core/tool/plugin/pacer-tools"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
@@ -490,9 +490,9 @@ const sessions = Layer.mock(Sessions.Service, {
   },
 })
 const pluginNode = makeLocationNode({
-  name: "test/model-request-pacer-web-tool-plugin",
-  layer: Layer.effectDiscard(registerToolPlugin(PacerWebTools.Plugin)),
-  deps: [Tool.node, Permission.node, PacerEndpoint.node, PacerTools.node, PacerProject.node, Sessions.node],
+  name: "test/model-request-pacer-tools-plugin",
+  layer: Layer.effectDiscard(registerToolPlugin(PacerToolsPlugin.Plugin)),
+  deps: [Tool.node, Permission.node, PacerTools.node, PacerProject.node, Sessions.node],
 })
 /** The real tool registry with CPP's web tools as built-in tools, over the setup's PacerTools; every ask allowed. */
 const registryOf = Effect.fnUntraced(function* (started: Effect.Success<ReturnType<typeof startTools>>) {

@@ -32,7 +32,6 @@ import { Database } from "../database/database.js"
 import { ImageBank } from "../image/bank.js"
 import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
-import { MemoryOffer } from "../memory/offer.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerOffer } from "../pacer/offer.js"
 import { PacerProject } from "../pacer/project.js"
@@ -294,16 +293,13 @@ export const layer = Layer.effect(
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
       }
-      // What decides the tools now: the memory tools as the chat's start block in view offers them (`MemoryOffer`), and
-      // CPP's web tools as the chat's list defines them, before any hook, so plugins' hooks see and may change them.
+      // What decides the tools now: CPP's tools, its memory tools among them, as the chat's list defines them, before
+      // any hook, so plugins' hooks see and may change them.
       const now = Effect.gen(function* () {
-        const offered =
-          Option.isSome(database) && tools.definitions.some((tool) => MemoryOffer.tools.has(tool.name))
-            ? MemoryOffer.apply(tools.definitions, yield* MemoryOffer.offered(database.value.db, session.id))
-            : tools.definitions
-        if (!PacerOffer.wanted(offered)) return offered
+        const known = yield* pacerTools.known()
+        if (!PacerOffer.wanted(tools.definitions, known)) return tools.definitions
         return PacerOffer.apply(
-          offered,
+          tools.definitions,
           yield* pacerTools.list({
             sessionID: session.id,
             parentID: session.parentID,
@@ -312,6 +308,7 @@ export const layer = Layer.effect(
             step: kind === "primary",
             continues: input.messages.some((message) => message.role === "assistant"),
           }),
+          known,
         )
       })
       // A warm chat sends its start as recorded at its latest cold point, whatever changed since (`SessionPromptStart`).

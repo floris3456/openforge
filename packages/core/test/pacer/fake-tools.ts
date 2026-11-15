@@ -5,13 +5,23 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { KV } from "@opencode/core/kv"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerTools } from "@opencode/core/pacer/tools"
-import owner from "./fixtures/tools.json"
+import list from "./fixtures/tools.json"
 
-/** The owner's CPP's list (`run/evidence/cpp-step-2/owner-list`, read without a chat): all four tools. */
+/** Each web tool's `meta`, as CPP's list gives it beside the tools (workspace reference `docs/reference/cpp-tools-api.md`). */
+export const webMeta = {
+  web_search: { title: "Web search", permission: "websearch", subject: ["query"], read_only: true },
+  web_extract: { title: "Web extract", permission: "webfetch", subject: ["job_id", "urls"], read_only: true },
+  web_crawl: { title: "Web crawl", permission: "webfetch", subject: ["job_id", "url"], read_only: true },
+  web_research: { title: "Web research", permission: "websearch", subject: ["job_id", "question"], read_only: true },
+}
+const owner = { ...list, meta: webMeta }
+
+/** The owner's CPP's list (`run/evidence/cpp-step-2/owner-list`, read without a chat): all four tools, with meta. */
 export const ownerList = owner
 /** The `claude` shape's bytes as CPP wrote them. */
 export const ownerClaude = JSON.stringify(owner.tools.claude)
@@ -49,6 +59,7 @@ export const fakeCpp = Effect.acquireRelease(
           text: `answered ${request.path}`,
           data: { tool: request.path.split("/").at(-1), provider: "tavily", cost_nano_usd: 8_000_000 },
           error: null,
+          metadata: { provider: "Tavily" },
         }),
     }
     const gate = { held: false, release: () => {}, aborted: 0 }
@@ -105,6 +116,13 @@ export const catalogOf = (webTools: boolean | "no pacer"): PacerModels.Catalog =
 export const startTools = Effect.fnUntraced(function* (
   endpoint: PacerEndpoint.Endpoint | undefined,
   catalog: PacerModels.Catalog | undefined = catalogOf(true),
+  /** The key-value store of an earlier start, kept across this one. */
+  kept?: KV.Interface,
+  /**
+   * What the endpoint's lists named before, as an earlier start of openforge kept it: the four web tools by default,
+   * so that a request offers them before its chat's list is read; none with `{}`.
+   */
+  known: Readonly<Record<string, PacerTools.Meta>> = webMeta,
 ) {
   const endpoints = yield* SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpoint)
   const catalogs = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(catalog)
@@ -115,10 +133,10 @@ export const startTools = Effect.fnUntraced(function* (
       changes: () => SubscriptionRef.changes(endpoints),
     }),
   )
-  const bus = Context.get(
-    yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node]))),
-    Bus.Service,
-  )
+  const base = yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node, Bus.node, KV.node])))
+  const bus = Context.get(base, Bus.Service)
+  const kv = kept ?? Context.get(base, KV.Service)
+  if (endpoint && !kept && Object.keys(known).length > 0) yield* kv.set(PacerTools.knownKey(endpoint), { ...known })
   // Fresh: a test layer whose graph has these (the plugin fixture's) would hand back its own, which have no CPP.
   const context = yield* Layer.build(
     Layer.fresh(PacerTools.layer).pipe(
@@ -135,11 +153,12 @@ export const startTools = Effect.fnUntraced(function* (
             }),
           ),
           Layer.succeed(Bus.Service, bus),
+          Layer.succeed(KV.Service, kv),
         ),
       ),
     ),
   )
-  return { tools: Context.get(context, PacerTools.Service), bus, endpoints, catalogs }
+  return { tools: Context.get(context, PacerTools.Service), bus, kv, endpoints, catalogs }
 })
 
 /** Waits, in real time and at most 5 s, until `check` holds: for what the server sees, which no event announces. */

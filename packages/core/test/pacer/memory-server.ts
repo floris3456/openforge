@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { callerOf, makeHarness } from "./memory-harness"
 import { close, nearest, search, tokenizer, waiting, words, type Scopes } from "./memory-search"
 
 /**
@@ -21,6 +22,10 @@ import { close, nearest, search, tokenizer, waiting, words, type Scopes } from "
  * subtask, a plan that replaces the subtasks not yet started, edits, and `dropped`. When a task's worker last sent a
  * model request is what `seen()` says of its chat, as CLIProxyPacer sees each request.
  *
+ * CLIProxyPacer's harness side (the workspace's reference `docs/reference/cpp-tools-api.md`) is `memory-harness.ts`'s:
+ * the memory tools in the tool list and their calls, the texts of a start and a prompt, the task check, a subagent's
+ * task and memory's texts, who asks taken from the headers.
+ *
  * As a script: `bun memory-server.ts --port <n> --key <key>[=<label>] [--key …] [--file <path>]
  * [--embedding-url <url> --embedding-model <name> [--embedding-key <key>]]`.
  */
@@ -36,6 +41,7 @@ export const capabilities = {
   projects: true,
   prompt: true,
   summary: true,
+  tools: true,
 }
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
@@ -298,15 +304,28 @@ export function startMemoryServer(input: {
     return known?.moved ?? moveOf(key, known?.parent, steps - 1)
   }
 
+  const harness = makeHarness(store)
+  /** The project a chat's memory is in, or undefined when it has none, for a route without the project in its path. */
+  const memoryOf = (key: string, request: Request) => {
+    const identity = request.headers.get("x-pacer-project")
+    if (identity === null) return undefined
+    const project = moveOf(key, request.headers.get("x-pacer-session") ?? undefined) ?? identity
+    const setting = projects.get(project)
+    if ((setting && !setting.memory) || (setting?.keys && !setting.keys.has(key))) return undefined
+    return project
+  }
+  const keyOf = (request: Request) => request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1] ?? ""
   const guarded =
-    <R extends Request>(handle: (request: R, person: string, project: string) => Response | Promise<Response>) =>
+    <R extends Request>(
+      handle: (request: R, person: string, project: string, key: string) => Response | Promise<Response>,
+    ) =>
     (request: R) => {
       const key = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1]
       if (!key) return Response.json({ error: "Missing API key" }, { status: 401 })
       const person = people.get(key)
       if (!person) return Response.json({ error: "Invalid API key" }, { status: 401 })
       const identity = (request as Request & { params?: Record<string, string> }).params?.project
-      if (identity === undefined) return handle(request, person, "")
+      if (identity === undefined) return handle(request, person, "", key)
       const moved = moveOf(key, request.headers.get("x-pacer-session") ?? undefined)
       const project = moved ?? identity
       const setting = projects.get(project)
@@ -326,7 +345,7 @@ export function startMemoryServer(input: {
           `this key may not use the memory of ${where}: allow it for this project on CLIProxyPacer's Projects page`,
           named,
         )
-      return handle(request, person, project)
+      return handle(request, person, project, key)
     }
 
   const server = Bun.serve({
@@ -361,14 +380,57 @@ export function startMemoryServer(input: {
         ),
       },
       "/pacer/v1/memory/:project/start": {
-        POST: guarded(async (request, person, project) =>
-          store.start(projectOf(project), await bodyOf(request), person),
-        ),
+        POST: guarded(async (request, person, project, key) => {
+          const body = await bodyOf(request)
+          return body.tools === undefined
+            ? store.start(projectOf(project), body, person)
+            : harness.start(callerOf(request, key, person, projectOf(project)), body)
+        }),
       },
       "/pacer/v1/memory/:project/prompt": {
-        POST: guarded(async (request, person, project) =>
-          store.prompt(projectOf(project), await bodyOf(request), person),
+        POST: guarded(async (request, person, project, key) => {
+          const body = await bodyOf(request)
+          return body.by === undefined
+            ? harness.prompt(callerOf(request, key, person, projectOf(project)), body)
+            : store.prompt(projectOf(project), body, person)
+        }),
+      },
+      "/pacer/v1/memory/:project/chat": {
+        GET: guarded((request, person, project, key) => harness.chat(callerOf(request, key, person, project))),
+      },
+      "/pacer/v1/memory/:project/tasks/:id/assign": {
+        POST: guarded((request, person, project, key) =>
+          harness.assign(callerOf(request, key, person, project), request.params.id),
         ),
+      },
+      "/pacer/v1/memory/:project/tasks/:id/start": {
+        POST: guarded((request, person, project, key) =>
+          harness.begin(callerOf(request, key, person, project), request.params.id),
+        ),
+      },
+      "/pacer/v1/memory/:project/tasks/:id/ended": {
+        GET: guarded((request, person, project, key) =>
+          harness.ended(callerOf(request, key, person, project), request.params.id),
+        ),
+      },
+      "/pacer/v1/memory/texts": { GET: guarded(() => harness.texts()) },
+      "/pacer/v1/tools": {
+        GET: guarded((request) => harness.list(request, memoryOf(keyOf(request), request) !== undefined)),
+      },
+      "/pacer/v1/tools/:name": {
+        POST: guarded(async (request, person) => {
+          const key = keyOf(request)
+          const project = memoryOf(key, request)
+          if (project === undefined)
+            return Response.json({
+              text: "Memory is off for this chat (fake).",
+              data: null,
+              error: { code: "unavailable", message: "no memory" },
+              metadata: {},
+              place: null,
+            })
+          return harness.call(callerOf(request, key, person, project), request.params.name, await bodyOf(request))
+        }),
       },
       "/pacer/v1/memory/:project/tasks": {
         POST: guarded(async (request, person, project) =>
@@ -464,6 +526,10 @@ export function startMemoryServer(input: {
      * one; null as for a chat it never saw. Tasks answer it as `worker_seen`, and it decides whether one is idle.
      */
     seen: (chat: string, at: number | null) => store.seen(chat, at),
+    /** Sets the place CPP keeps for a chat of `key`, by its `X-Pacer-Session`. */
+    place: harness.place,
+    /** The place kept for a chat of `key`; undefined when none was kept. */
+    placeOf: harness.placeOf,
     stop: async () => {
       store.stop()
       await server.stop(true)

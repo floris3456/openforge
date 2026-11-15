@@ -1,7 +1,7 @@
 export * as MemoryStart from "./start.js"
 
 import { and, desc, eq, sql } from "drizzle-orm"
-import { Clock, Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
@@ -17,19 +17,20 @@ import { MemoryClient } from "./client.js"
 import { MemoryFollowed } from "./followed.js"
 import { MemoryKnown } from "./known.js"
 import { MemoryOffer } from "./offer.js"
-import { MemoryPlans } from "./plans.js"
 import { MemoryPrompt } from "./prompt.js"
 import { MemorySummary } from "./summary.js"
 import { MemoryTask } from "./task.js"
-import { MemoryText } from "./text.js"
+import { MemoryTexts } from "./texts.js"
 
 // The start block (the workspace's spec `docs/specs/memory.md`, section 3): one durable synthetic message per span of
-// a chat the model sees, put in at the step boundary before the step's request is built. As with file instructions
+// a chat the model sees, put in at the step boundary before the step's request is built. CPP writes it (`POST …/start`
+// with the tools the agent may use, workspace reference `docs/reference/cpp-tools-api.md`); openforge decides when it
+// goes in, and its line in the person's view. As with file instructions
 // (`SessionInstructions`), the message's metadata is the only ledger: a block that a compaction or a revert took out
 // of view is built again, from the chat's newest prompt and, after a compaction on a server with `summary`, with the
 // entries close to its summary (`MemorySummary`). It is stored, so every step of the span sends the same bytes.
 // It goes in only where the chat's prompt cache is new anyway, before the span's first step: a chat that stepped
-// without one gets none, nor the memory tools (`MemoryOffer`), until its next compaction. So does a chat whose project
+// without one gets none until its next compaction; its memory tools are its tool list's (`PacerOffer`). So does a chat whose project
 // CPP keeps memory from (`MemoryClient.Closed`, workspace spec `docs/specs/cpp-projects.md`).
 
 /** How long the start call may take before the chat goes on without it. */
@@ -48,15 +49,9 @@ export interface Interface {
     readonly session: SessionSchema.Info
     /** The agent the chat runs as: its role. */
     readonly agent: string
-    /** Whether the chat has the `recall` tool, which the block then names. */
+    /** Which of CPP's memory tools the agent may use, for CPP to say in the block (`tools` of its start). */
     readonly recall: boolean
-    /** Whether the chat has the `remember` tool: the block then says that memory is its to keep true. */
     readonly remember: boolean
-    /**
-     * Whether the agent may use the `task` tool: when the server has tasks, inside a task the block then says what to
-     * do with the task's state; with plans, a lead's block lists the project's other tasks, and a chat in no task is
-     * told to make one first (`MemoryPlans`).
-     */
     readonly task: boolean
   }) => Effect.Effect<void>
 }
@@ -74,23 +69,34 @@ const layer = Layer.effect(
     const catalogs = yield* PacerModels.Service
     const client = yield* MemoryClient.Service
     const prompts = yield* MemoryPrompt.Service
+    const texts = yield* MemoryTexts.Service
     // What followed a search is added beside the chat; built with the start block, it runs wherever chats run.
     yield* MemoryFollowed.Service
+
+    // What a server said of memory, for a chat that starts before its catalog is read again. A catalog is set only
+    // while the endpoint it was read from is still the current one (`PacerModels.refresh`).
+    yield* catalogs.changes().pipe(
+      Stream.runForEach((catalog) =>
+        Effect.gen(function* () {
+          const endpoint = yield* endpoints.get()
+          if (catalog && endpoint) yield* MemoryKnown.write(kv, endpoint, catalog)
+        }),
+      ),
+      Effect.forkScoped({ startImmediately: true }),
+    )
 
     const ensure = Effect.fn("MemoryStart.ensure")(function* (input: Parameters<Interface["ensure"]>[0]) {
       const endpoint = yield* endpoints.get()
       if (endpoint === undefined) return
-      // Whether the server has memory before anything of the chat is looked up: on a server without it, a step costs
-      // memory nothing.
+      // Whether the server serves memory before anything of the chat is looked up: on a server without it, a step
+      // costs memory nothing.
       const catalog = yield* catalogs.get()
-      // Not read yet, as right after a start: as the server was last known. Whether it has tasks is known only once
-      // the catalog is read; till the chat's next compaction it has none.
-      if (!(catalog ? catalog.pacer?.memory !== undefined : yield* MemoryKnown.read(kv, endpoint))) return
+      // Not read yet, as right after a start: as the server was last known.
+      if (!(catalog ? catalog.pacer?.memory?.tools === true : yield* MemoryKnown.read(kv, endpoint))) return
       const sessionID = input.session.id
       const last = yield* MemoryOffer.newestBlock(db, sessionID)
       if (last?.visible) return
       if (yield* MemoryOffer.stepped(db, sessionID)) return
-      const tasks = catalog?.pacer?.memory?.tasks === true
       // A server that answers each prompt gives the block no entries: they come with the prompts.
       const limit = catalog?.pacer?.memory?.prompt === true ? 0 : LIMIT
       const chat = yield* projects.chat(input.session.projectID)
@@ -98,37 +104,14 @@ const layer = Layer.effect(
       if (project === undefined) return
       const prompt = yield* newestPrompt(sessionID)
       if (!prompt) return
-      const inside = MemoryTask.inside(input.session.metadata)
-      const by = { role: input.agent, chat: sessionID, ...inside }
-      const offered = { ...input, task: input.task && tasks }
       const memory = client.withHeaders(
-        PacerHeaders.chat({ sessionID, parentID: input.session.parentID, project: chat.headers }),
+        PacerHeaders.chat({ sessionID, parentID: input.session.parentID, project: chat.headers, agent: input.agent }),
       )
-      // Task plans (`MemoryPlans`), for a chat with the task tool: a lead sees the project's other tasks, read beside
-      // the start call and left out when the list fails, and a chat in no task is told to make one first.
-      const plans = catalog?.pacer?.memory?.plans === true
-      const lead = input.session.parentID === undefined
-      const now = yield* Clock.currentTimeMillis
-      const others =
-        offered.task && plans && lead
-          ? memory.tasks(project).pipe(
-              Effect.timeout(TIMEOUT),
-              Effect.map((list) => MemoryPlans.others(list, inside?.task, now)),
-              Effect.catch((error) =>
-                Effect.logInfo("memory's tasks could not be read for the start block", { reason: error.message }).pipe(
-                  Effect.as([]),
-                ),
-              ),
-            )
-          : Effect.succeed([])
-      const outside = offered.task && plans && !inside ? [MemoryPlans.outside] : []
       const request = {
         // Cut as the server counts, in code points.
         prompt: [...prompt].slice(0, 2_000).join(""),
-        scopes: { global: true, roles: [by.role], ...(inside ? { tasks: [inside.task] } : {}) },
         limit,
-        ...inside,
-        by,
+        tools: { recall: input.recall, remember: input.remember, task: input.task },
       }
       // After a compaction, the entries close to its summary; a chat's first block has none to search.
       const compaction =
@@ -159,37 +142,20 @@ const layer = Layer.effect(
               )
           : plain.pipe(Effect.map((started) => ({ started, summary: false })))
       ).pipe(
-        Effect.zip(others, { concurrent: true }),
-        Effect.map(([answer, listed]) => ({
-          text: [
-            MemoryText.block(
-              answer.started,
-              by.role,
-              offered,
-              inside !== undefined,
-              answer.summary,
-              plans ? { chat: sessionID, lead } : undefined,
-            ),
-            ...listed,
-            ...outside,
-          ].join("\n"),
+        Effect.map((answer) => ({
+          text: answer.started.text,
           description: lineOf(answer.started, answer.summary),
+          place: answer.started.place,
           memory: {
             project,
             recall: answer.started.recall,
-            entries: answer.started.entries.map((entry) => entry.id),
+            entries: answer.started.entries,
             ...(answer.started.said ? { said: answer.started.said } : {}),
             // What the task part may show, so that a prompt's entries leave them out.
-            shown: [...(answer.started.task?.entries ?? []), ...(answer.started.subtask?.entries ?? [])].map(
-              (entry) => entry.id,
-            ),
-            tasks,
-            // What the chat works under till its next cold point (`MemoryPlans.planned`). A block built while memory
-            // could not be reached records none: the chat starts without memory, and no task could be made in it.
-            ...(plans ? { plans } : {}),
+            shown: answer.started.shown,
           },
         })),
-        // CPP keeps the project's memory from this key: no block, so no memory tools, till the chat's next cold point.
+        // CPP keeps the project's memory from this key: no block till the chat's next cold point.
         Effect.catchTag("MemoryClient.Closed", (closed) =>
           Effect.logInfo("memory is closed to this chat's project", {
             project,
@@ -199,18 +165,31 @@ const layer = Layer.effect(
           }).pipe(Effect.as(undefined)),
         ),
         Effect.catch((error) =>
-          Effect.logWarning("memory's start block could not be read", { reason: error.message }).pipe(
-            // A chat that had a block before keeps it: after a compaction its message is still stored. A revert deletes
-            // the messages it takes back, the block among them, so a failure right after one gives the one line.
-            Effect.as({
-              text: last?.text ?? MemoryText.unavailable,
+          Effect.gen(function* () {
+            yield* Effect.logWarning("memory's start block could not be read", { reason: error.message })
+            // A chat that had a block before keeps it: after a compaction its message is still stored. A revert
+            // deletes the messages it takes back, the block among them, so a failure right after one gives CPP's line
+            // for memory out of reach, as it was last read; none when it never was.
+            const text = last?.text ?? (yield* texts.get())?.unavailable
+            if (text === undefined) return undefined
+            return {
+              text,
               description: last ? "Memory as before" : "Memory unavailable",
-              memory: { project, unavailable: true, tasks },
-            }),
-          ),
+              place: undefined,
+              memory: { project, unavailable: true },
+            }
+          }),
         ),
       )
       if (block === undefined) return
+      if (block.place !== undefined) {
+        const place = MemoryTask.fromPlace(block.place)
+        if (!MemoryTask.at(input.session.metadata, place))
+          yield* bus.publish(SessionEvent.MetadataUpdated, {
+            sessionID,
+            metadata: MemoryTask.placed(input.session.metadata, place),
+          })
+      }
       yield* bus.publish(SessionEvent.Synthetic, {
         sessionID,
         text: block.text,
@@ -255,6 +234,7 @@ export const node = makeLocationNode({
     MemoryClient.node,
     MemoryFollowed.node,
     MemoryPrompt.node,
+    MemoryTexts.node,
   ],
 })
 

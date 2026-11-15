@@ -40,6 +40,7 @@ const capabilities = await fetch(`${url}/pacer/v1/capabilities`, {
           projects?: unknown
           prompt?: unknown
           summary?: unknown
+          tools?: unknown
         }
       }
     }>,
@@ -50,6 +51,7 @@ const recalls = capabilities.pacer?.memory?.recalls === true
 const projects = capabilities.pacer?.memory?.projects === true
 const prompt = capabilities.pacer?.memory?.prompt === true
 const summary = capabilities.pacer?.memory?.summary === true
+const tools = capabilities.pacer?.memory?.tools === true
 // The group "a moved chat" runs against the small server, and against CLIProxyPacer with its management key once its
 // closed answers say `moved` (a project never turned on answers project_memory_off). The subagent's case there needs
 // MEMORY_CONTRACT_MODEL, a model it serves: only a model request names a chat's parent to it.
@@ -72,6 +74,7 @@ memoryContract(
         projects,
         prompt,
         summary,
+        tools,
         setProject: async (identity, setting) => server.project(identity, setting),
         moves: {
           known: async (chat, key) => server.chat(key, chat),
@@ -112,5 +115,6 @@ memoryContract(
         projects,
         prompt,
         summary,
+        tools,
       },
 )

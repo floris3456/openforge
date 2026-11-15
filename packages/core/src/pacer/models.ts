@@ -60,6 +60,11 @@ export interface Memory {
    * memory API's section "Start", `summary`).
    */
   readonly summary: boolean
+  /**
+   * Whether the server serves the memory tools in each chat's tool list and memory's texts (workspace reference
+   * `docs/reference/cpp-tools-api.md`). openforge offers memory only then.
+   */
+  readonly tools: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -231,6 +236,7 @@ const MemoryBlock = Schema.Struct({
   projects: Schema.optional(Schema.Unknown),
   prompt: Schema.optional(Schema.Unknown),
   summary: Schema.optional(Schema.Unknown),
+  tools: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -402,6 +408,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           projects: memory.projects === true,
           prompt: memory.prompt === true,
           summary: memory.summary === true,
+          tools: memory.tools === true,
         },
       }),
     }),

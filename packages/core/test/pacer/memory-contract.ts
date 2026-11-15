@@ -34,6 +34,11 @@ export type Target = {
   /** Whether they say `summary`: the group "summary" runs only then. */
   readonly summary: boolean
   /**
+   * Whether they say `tools`: the server serves the memory tools and memory's texts (the workspace's reference
+   * `docs/reference/cpp-tools-api.md`); the group "harness" runs only then.
+   */
+  readonly tools?: boolean
+  /**
    * Switches a project's memory and names the keys that may use it (all when left out or null), as CLIProxyPacer's
    * Projects page does; the group "projects" runs only with it.
    */
@@ -3826,6 +3831,83 @@ export function memoryContract(target: Target) {
       ...(target.projects ? { projects: true } : {}),
       ...(target.prompt ? { prompt: true } : {}),
       ...(target.summary ? { summary: true } : {}),
+      ...(target.tools ? { tools: true } : {}),
+    })
+  })
+
+  // What a harness reads of the routes openforge uses from this release: the shapes it decodes, not the words.
+  describe.if(target.tools === true)("harness", () => {
+    const chat = (extra: Readonly<Record<string, string>> = {}) => ({
+      "x-pacer-session": crypto.randomUUID(),
+      "x-pacer-agent": "build",
+      "x-pacer-chat": `ses_contract_${random()}`,
+      ...extra,
+    })
+    test("the list holds the memory tools with their meta only with include=memory, for a chat in a project", async () => {
+      const memory = project("harness-list")
+      await memory.verified("Harness lists hold memory tools.")
+      const headers = chat({ "x-pacer-project": memory.id })
+      const listed = await answered(send("GET", "/pacer/v1/tools?model=m&include=memory", undefined, undefined, undefined, headers))
+      const names = (listed.tools.claude as Array<{ name: string }>).map((tool) => tool.name)
+      expect(names.filter((name) => ["remember", "recall", "forget", "task"].includes(name))).toEqual([
+        "remember",
+        "recall",
+        "forget",
+        "task",
+      ])
+      for (const name of names)
+        expect(listed.meta[name]).toEqual({
+          title: expect.any(String),
+          permission: expect.any(String),
+          subject: expect.any(Array),
+          read_only: expect.any(Boolean),
+        })
+      expect(listed.meta.recall).toMatchObject({ permission: "recall", read_only: true })
+      expect(listed.meta.remember).toMatchObject({ permission: "remember", read_only: false })
+      const without = await answered(send("GET", "/pacer/v1/tools?model=m", undefined, undefined, undefined, headers))
+      expect((without.tools.claude as Array<{ name: string }>).map((tool) => tool.name)).not.toContain("remember")
+    })
+    test("a memory tool's call answers text, data, error, metadata and the chat's place", async () => {
+      const memory = project("harness-call")
+      await memory.verified("Harness calls answer their place.")
+      const headers = chat({ "x-pacer-project": memory.id })
+      const recalled = await answered(
+        send("POST", "/pacer/v1/tools/recall", { query: "harness place" }, undefined, undefined, headers),
+      )
+      expect(recalled).toMatchObject({ text: expect.any(String), error: null, place: null })
+      expect(recalled.metadata).toMatchObject({ project: memory.id, entries: expect.any(Array) })
+    })
+    test("a start with tools answers the block's text and the place; a prompt without by its message or null", async () => {
+      const memory = project("harness-start")
+      await memory.verified("Harness starts write their block.")
+      const started = await answered(
+        send(
+          "POST",
+          `/pacer/v1/memory/${memory.id}/start`,
+          { prompt: "harness starts", limit: 5, tools: { recall: true, remember: true, task: true } },
+          undefined,
+          undefined,
+          chat(),
+        ),
+      )
+      expect(started).toMatchObject({ text: expect.any(String), entries: expect.any(Array), place: null })
+      expect(started.text).not.toBe("")
+      const prompted = await answered(
+        send("POST", `/pacer/v1/memory/${memory.id}/prompt`, { prompt: "nothing near", exclude: [] }, undefined, undefined, chat()),
+      )
+      expect(prompted.entries).toEqual(expect.any(Array))
+      expect(prompted.text === null || typeof prompted.text === "string").toBe(true)
+    })
+    test("the chat route answers its place and check; memory's texts are two strings", async () => {
+      const memory = project("harness-chat")
+      await memory.verified("Harness chats have a place.")
+      expect(
+        await answered(send("GET", `/pacer/v1/memory/${memory.id}/chat`, undefined, undefined, undefined, chat())),
+      ).toEqual({ place: null, check: null })
+      expect(await answered(send("GET", "/pacer/v1/memory/texts", undefined, undefined, undefined, chat()))).toEqual({
+        unavailable: expect.any(String),
+        refused: expect.any(String),
+      })
     })
   })
 

@@ -28,6 +28,11 @@ export const Plugin = {
   id: "opencode.task-plans",
   effect: Effect.fn("TaskPlansPlugin")(function* (ctx: Context) {
     const plans = yield* MemoryPlans.Service
+    // Whether a chat called a tool that changes something since its last check, as this process saw its calls. The
+    // check reads the chat only then: a read at the end of every turn waits behind every other chat's writes on the
+    // one database connection (the load check of 0.0.40: with 50 chats at once, the 95th percentile turn +24 %). A
+    // chat this process has not seen call a tool, one a restart resumed for instance, is checked as before.
+    const changed = new Map<Session.ID, boolean>()
 
     /** Why the call is refused, or undefined when it runs. */
     const refusal = Effect.fnUntraced(function* (tool: string, sessionID: Session.ID) {
@@ -42,6 +47,7 @@ export const Plugin = {
 
     yield* ctx.tool.hook("execute.before", (event) =>
       Effect.gen(function* () {
+        changed.set(event.sessionID, changed.get(event.sessionID) === true || worked.has(event.tool))
         // The guard is never a condition of the call: a failure here lets it run.
         const refused = yield* refusal(event.tool, event.sessionID).pipe(
           Effect.catchCause((cause) =>
@@ -66,6 +72,8 @@ export const Plugin = {
     ) {
       // The chat's own subagent, shell or image job wakes it with its notice, and the hook runs again then.
       if (background.some((work) => work.sessionID === sessionID)) return
+      if (changed.get(sessionID) === false) return
+      changed.set(sessionID, false)
       const session = yield* ctx.session.get({ sessionID })
       const inside = MemoryTask.inside(session.metadata)
       if (!inside) return

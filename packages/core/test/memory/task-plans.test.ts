@@ -280,6 +280,8 @@ const it = testEffect(layer)
 const memory = Effect.provide(MemoryClient.Service, client)
 /** The services of each test, built for it, that the task-plans plugin is registered with. */
 const registered = new WeakSet<PluginHooks.Interface>()
+/** The chats the plugin read, one entry a read. */
+const reads: Session.ID[] = []
 const by = { role: "build", chat: "ses_task_plans_maker" }
 
 /**
@@ -366,7 +368,8 @@ const setup = Effect.fnUntraced(function* (
       TaskPlansPlugin.Plugin,
       {
         session: {
-          get: (input) => session.get(input.sessionID),
+          get: (input) =>
+            Effect.sync(() => reads.push(input.sessionID)).pipe(Effect.andThen(session.get(input.sessionID))),
           context: (input) => session.context(input.sessionID),
           synthetic: session.synthetic,
           hook: (name, callback, options) => hooks.register("session", name, callback, options),
@@ -645,6 +648,26 @@ describe("the check at the end of a turn", () => {
         yield* h.prompt(`run the tests, turn ${turn}`)
       }
       expect(yield* h.checks()).toHaveLength(2)
+    }),
+  )
+
+  // The load check of 0.0.40: a read at the end of every turn waited behind the other chats' writes, the 95th
+  // percentile turn +24 % with 50 chats at once.
+  it.live("reads the chat only after a turn that called a tool that changes something", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task" })
+      const read = () => reads.filter((id) => id === h.sessionID).length
+      // The first turn this openforge sees: it may have changed something before a restart, so it is read.
+      yield* h.llm.push(TestLLM.text("Hello.", "hello"))
+      yield* h.prompt("hello")
+      expect(read()).toBe(1)
+      yield* h.llm.push(TestLLM.text("Nothing to change.", "nothing"))
+      yield* h.prompt("anything to change?")
+      expect(read()).toBe(1)
+      yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "bun test" }), TestLLM.text("Ran.", "ran"))
+      yield* h.prompt("run the tests")
+      expect(read()).toBe(2)
+      expect(yield* h.checks()).toHaveLength(1)
     }),
   )
 

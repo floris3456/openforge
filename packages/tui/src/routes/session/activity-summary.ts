@@ -7,7 +7,8 @@ import type {
 import { canonicalToolName, executeCalls } from "../../util/tool-display"
 import { visitEntries } from "./anchor-view"
 import { instructionPaths, type PartRef, type SessionEntry, type SessionNode } from "./grouping/session"
-import { reasoningContent } from "./message-parts"
+import { webTool } from "../../pacer/web-tools"
+import { reasoningContent, toolDisplay } from "./message-parts"
 import { resolvePart } from "./rows"
 
 type Item = {
@@ -98,4 +99,26 @@ function isActive(item: Item, closed: boolean) {
   if (item.part.type === "reasoning")
     return !closed && item.part.time?.completed === undefined && item.message.time.completed === undefined
   return item.part.state.status === "streaming" || item.part.state.status === "running"
+}
+
+/**
+ * A folded run of reads and searches, e.g. "Explored: 3 searches, 1 research": each tool counted by its noun, as the
+ * exploration group and a script's run of web calls show it.
+ */
+export function explorationLabel(tools: readonly string[], completed: boolean) {
+  const counts = tools.reduce<Record<string, number>>((result, name) => {
+    const tool = toolDisplay(name)
+    const noun =
+      tool === "grep" || tool === "glob" || tool === "websearch"
+        ? "search"
+        : tool === "webfetch"
+          ? "fetch"
+          : (webTool(tool)?.noun ?? tool)
+    result[noun] = (result[noun] ?? 0) + 1
+    return result
+  }, {})
+  const names = Object.entries(counts).map(
+    ([name, count]) => `${count} ${count === 1 ? name : name.endsWith("ch") ? `${name}es` : `${name}s`}`,
+  )
+  return `${completed ? "Explored" : "Exploring"}: ${names.join(", ")}`
 }

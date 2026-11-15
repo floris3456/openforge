@@ -518,3 +518,52 @@ test("the permission a call asks names what it searches for", async () => {
   expect(flat).toContain(`Web Research "${QUESTION}"`)
   expect(flat).toContain(`Question: ${QUESTION}`)
 })
+
+// Web tools in Code Mode (workspace spec `docs/specs/web-tools-code-mode.md`): a web call inside a script shows as its
+// own row under the `execute` row, with its service's name, and a run of them folds into the line a run of direct ones
+// folds into.
+describe("web calls inside a script", () => {
+  const script = call(
+    "call_execute",
+    "execute",
+    completed({ code: "return await Promise.all([...])" }, {
+      toolCalls: [
+        { tool: "web_search", status: "completed", input: { query: QUERY }, metadata: { provider: "Tavily" } },
+        { tool: "web_research", status: "completed", input: { question: QUESTION }, metadata: { provider: "Exa" } },
+        { tool: "read", status: "completed", input: { path: "notes.md" } },
+        { tool: "web_extract", status: "completed", input: { urls: URLS }, metadata: { provider: "Firecrawl" } },
+      ],
+    } as unknown as Record<string, string>),
+  )
+
+  test("each shows as its own row under execute, with its service's name", async () => {
+    await using setup = await transcript(chat([script]))
+    await setup.frame((frame) => rows(frame).length === 3)
+    const frame = setup.captureCharFrame()
+    expect(rows(frame)).toEqual([
+      `◈ Web Search via Tavily "${QUERY}"`,
+      `◈ Web Research via Exa "${QUESTION}"`,
+      `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
+    ])
+    // Under the execute row, in the script's order, the read between them.
+    const at = (text: string) => lines(frame).findIndex((line) => line.includes(text))
+    expect(at("execute")).toBeLessThan(at("Web Search via Tavily"))
+    expect(at("Web Research via Exa")).toBeLessThan(at("read [path=notes.md]"))
+    expect(at("read [path=notes.md]")).toBeLessThan(at("Web Extract via Firecrawl"))
+  })
+
+  test("grouped, each run folds into the line direct calls fold into, and opens when clicked", async () => {
+    await using setup = await transcript(chat([script]), { grouping: "auto" })
+    await setup.frame((frame) => rows(frame).length === 2)
+    expect(rows(setup.captureCharFrame())).toEqual(["→ Explored: 1 search, 1 research", "→ Explored: 1 fetch"])
+    const row = lines(setup.captureCharFrame()).findIndex((line) => line.startsWith("→ Explored: 1 search"))
+    await setup.mockMouse.click(6, row)
+    await setup.frame((frame) => rows(frame).length === 4)
+    expect(rows(setup.captureCharFrame())).toEqual([
+      "→ Explored: 1 search, 1 research",
+      `◈ Web Search via Tavily "${QUERY}"`,
+      `◈ Web Research via Exa "${QUESTION}"`,
+      "→ Explored: 1 fetch",
+    ])
+  })
+})

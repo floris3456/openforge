@@ -19,7 +19,13 @@ export function primitiveInputSummary(input: Record<string, unknown>, omit: read
   return `[${entries.map(([key, value]) => `${key}=${String(value)}`).join(", ")}]`
 }
 
-export type ExecuteCall = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
+export type ExecuteCall = {
+  tool: string
+  status: "running" | "completed" | "error"
+  input?: Record<string, unknown>
+  /** The call's metadata once it settled, as a direct call's own. */
+  metadata?: Record<string, unknown>
+}
 
 export function executeCalls(value: unknown): ExecuteCall[] {
   if (!Array.isArray(value)) return []
@@ -28,7 +34,14 @@ export function executeCalls(value: unknown): ExecuteCall[] {
     const tool = call.tool
     const status = call.status
     if (typeof tool !== "string" || (status !== "running" && status !== "completed" && status !== "error")) return []
-    return [{ tool, status, input: isRecord(call.input) ? call.input : undefined }]
+    return [
+      {
+        tool,
+        status,
+        input: isRecord(call.input) ? call.input : undefined,
+        ...(isRecord(call.metadata) ? { metadata: call.metadata } : {}),
+      },
+    ]
   })
 }
 

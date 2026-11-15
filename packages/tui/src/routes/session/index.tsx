@@ -23,13 +23,7 @@ import { useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner, SPINNER_FRAMES } from "../../component/spinner"
 import { PatchDiff } from "../../component/patch-diff"
 import { useTheme, useThemes } from "../../context/theme"
-import {
-  BoxRenderable,
-  ScrollBoxRenderable,
-  addDefaultParsers,
-  TextAttributes,
-  RGBA,
-} from "@opentui/core"
+import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
 import {
   type PromptAttachment,
@@ -78,7 +72,7 @@ import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
 import { compactionLine } from "../../pacer/format"
 import { usePacerSession } from "../../pacer/jump"
-import { webTool, webToolJobRunning, webToolProvider, webToolSubject } from "../../pacer/web-tools"
+import { webTool, webToolJobRunning, webToolProvider, webToolSubject, webToolTitle } from "../../pacer/web-tools"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -136,6 +130,7 @@ import { INLINE_TOOL_ICON_WIDTH, InlineToolRow, ReasoningPart, TextPart, toolDis
 import { NoticeLine } from "./notice-view"
 import { defaultVerbosity, type GroupKind, type SessionEntry } from "./grouping/session"
 import { SessionGroupView } from "./group-view"
+import { explorationLabel } from "./activity-summary"
 import { useEntryAnchor } from "./anchor-view"
 import { containsAnchor, createTimelineAnchors, groupID } from "./anchors"
 import { rowsAfter, rowsBefore, rowWeight } from "./mount-budget"
@@ -1296,7 +1291,9 @@ export function Session(props: {
       },
       run: () => {
         const lastAssistantMessage = messagesBeforeRevert().findLast(
-          (msg) => msg.type === "assistant" || (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
+          (msg) =>
+            msg.type === "assistant" ||
+            (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1604,9 +1601,7 @@ export function Session(props: {
                   onMouseOut={() => setLatestHovered(false)}
                   onMouseUp={toBottom}
                 >
-                  <text
-                    fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}
-                  >
+                  <text fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}>
                     Jump to latest ↓
                   </text>
                 </box>
@@ -1652,12 +1647,7 @@ export function Session(props: {
                     }}
                   </Show>
                 </Match>
-                <Match
-                  when={
-                    session() &&
-                    currentLocation.error?.location.directory === session()!.location.directory
-                  }
-                >
+                <Match when={session() && currentLocation.error?.location.directory === session()!.location.directory}>
                   <SessionLocationMissing
                     directory={session()!.location.directory}
                     projectID={session()!.projectID}
@@ -2156,9 +2146,7 @@ function SessionNoticeMessageV2(props: { message: SessionMessageInfo }) {
   return (
     <Show
       when={completion()}
-      fallback={
-        <NoticeLine message={props.message} icon={source() === "goal" ? "◎" : "◈"} description={text()} />
-      }
+      fallback={<NoticeLine message={props.message} icon={source() === "goal" ? "◎" : "◈"} description={text()} />}
     >
       <box
         marginLeft={3}
@@ -2932,9 +2920,7 @@ function BlockTool(props: BlockToolProps) {
               <Show
                 when={props.spinner}
                 fallback={
-                  <text
-                    fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}
-                  >
+                  <text fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}>
                     {title()}
                   </text>
                 }
@@ -3108,11 +3094,7 @@ function ShellDisplay(props: {
           <Show
             when={isRunning()}
             fallback={
-              <text
-                fg={theme.text.base}
-                wrapMode={expanded() ? "word" : "char"}
-                maxHeight={expanded() ? undefined : 2}
-              >
+              <text fg={theme.text.base} wrapMode={expanded() ? "word" : "char"} maxHeight={expanded() ? undefined : 2}>
                 {limitedInput()}
               </text>
             }
@@ -3213,7 +3195,9 @@ function Read(props: ToolProps) {
         Read {pathFormatter.format(stringValue(props.input.path))}
         <Show when={props.input.offset !== undefined || props.input.limit !== undefined}>
           :{finiteNumber(props.input.offset) || 1}-
-          {props.input.limit ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1 : ""}
+          {props.input.limit
+            ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1
+            : ""}
         </Show>
       </InlineTool>
       <For each={loaded()}>
@@ -3420,6 +3404,78 @@ function ExecuteCallView(props: { call: Accessor<ExecuteCall> }) {
   )
 }
 
+/**
+ * The script's calls in order, each run of CLIProxyPacer's web calls together: they show as their direct calls do, a
+ * row each with the service's name, folded into one "Explored: …" line as a run of direct ones is.
+ */
+function executeRuns(calls: readonly ExecuteCall[]) {
+  return calls.reduce<Array<{ web: boolean; start: number; calls: ExecuteCall[] }>>((runs, call, index) => {
+    const web = webTool(call.tool) !== undefined
+    const last = runs.at(-1)
+    if (web && last?.web) last.calls.push(call)
+    else runs.push({ web, start: index, calls: [call] })
+    return runs
+  }, [])
+}
+
+function ExecuteWebCalls(props: { part: SessionMessageAssistantTool; start: number; calls: readonly ExecuteCall[] }) {
+  const ctx = use()
+  const theme = useTheme()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
+  const id = createMemo(() => `${props.part.id}:web:${props.start}`)
+  const expanded = () => !ctx.groupExploration() || ctx.groupExpanded(id(), "exploration")
+  const completed = createMemo(() => props.calls.every((call) => call.status !== "running"))
+  const label = createMemo(() =>
+    explorationLabel(
+      props.calls.map((call) => call.tool),
+      completed(),
+    ),
+  )
+  return (
+    <>
+      <Show when={ctx.groupExploration()}>
+        <box paddingLeft={3}>
+          <InlineToolRow
+            icon={completed() ? "→" : "✱"}
+            color={hover() ? theme.text.base : theme.text.muted}
+            complete={completed()}
+            pending={label()}
+            spinner={!completed()}
+            onMouseOver={() => setHover(true)}
+            onMouseOut={() => setHover(false)}
+            onMouseUp={() => {
+              if (renderer.getSelection()?.getSelectedText()) return
+              ctx.setGroupExpanded(id(), !expanded())
+            }}
+          >
+            {label()}
+          </InlineToolRow>
+        </box>
+      </Show>
+      <Show when={expanded()}>
+        <For each={props.calls}>{(call) => <ExecuteWebCall call={call} />}</For>
+      </Show>
+    </>
+  )
+}
+
+function ExecuteWebCall(props: { call: ExecuteCall }) {
+  const theme = useTheme()
+  const web = createMemo(() => webTool(props.call.tool))
+  const color = createMemo(() => (props.call.status === "error" ? theme.text.feedback.error.base : theme.text.muted))
+  return (
+    <box paddingLeft={3} flexDirection="row">
+      <box width={INLINE_TOOL_ICON_WIDTH} flexShrink={0}>
+        <text fg={color()}>{props.call.status === "error" ? "✗" : (web()?.icon ?? "›")}</text>
+      </box>
+      <text flexGrow={1} wrapMode="none" truncate fg={color()}>
+        {webToolTitle(props.call.tool, props.call.input ?? {}, props.call.metadata ?? {})}
+      </text>
+    </box>
+  )
+}
+
 // The `execute` tool streams child tool calls through metadata, not a child session like Task.
 function Execute(props: ToolProps) {
   const ctx = use()
@@ -3451,7 +3507,13 @@ function Execute(props: ToolProps) {
       >
         execute
       </InlineTool>
-      <Index each={calls()}>{(call) => <ExecuteCallView call={call} />}</Index>
+      <Index each={executeRuns(calls())}>
+        {(run) => (
+          <Show when={run().web} fallback={<ExecuteCallView call={() => run().calls[0]!} />}>
+            <ExecuteWebCalls part={props.part} start={run().start} calls={run().calls} />
+          </Show>
+        )}
+      </Index>
       <Show when={showOutput()}>
         <box paddingLeft={3}>
           <For each={outputPreview().split("\n")}>

@@ -155,7 +155,7 @@ export function check(item: MemoryClient.Task, chat: { readonly id: string; read
   const line =
     item.parent && item.by.chat !== chat.id
       ? `${head} Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`
-      : `${head} Mark what is now true with the task tool (done records it and makes the next subtask current, which you need not start now; plan replaces those not started; blocked says what is wrong), or answer that it goes on.`
+      : `${head} If it is done, set it done with the task tool now, even if you stop here: the next subtask only becomes current. If the ones still to do no longer fit, replace them with plan; if something is wrong, set it blocked; only while work on it remains, answer that it goes on.`
   return chat.parentID === undefined
     ? line
     : `${line} Then give your answer again: your lead reads only your last message.`

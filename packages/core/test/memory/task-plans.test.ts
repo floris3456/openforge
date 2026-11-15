@@ -583,7 +583,7 @@ describe("an edit outside a task", () => {
 describe("the check at the end of a turn", () => {
   /** The line for what the chat may set done: its task, or a subtask it made. */
   const line = (item: { readonly id: string; readonly title: string }) =>
-    `Task check: [${item.id}] ${item.title} is still active. Mark what is now true with the task tool (done records it and makes the next subtask current, which you need not start now; plan replaces those not started; blocked says what is wrong), or answer that it goes on.`
+    `Task check: [${item.id}] ${item.title} is still active. If it is done, set it done with the task tool now, even if you stop here: the next subtask only becomes current. If the ones still to do no longer fit, replace them with plan; if something is wrong, set it blocked; only while work on it remains, answer that it goes on.`
   /** The line for a subtask another chat made, which that chat sets done. */
   const review = (item: { readonly id: string; readonly title: string }) =>
     `Task check: [${item.id}] ${item.title} is still active. Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`

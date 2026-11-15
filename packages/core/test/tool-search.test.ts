@@ -96,8 +96,9 @@ describe("search tools", () => {
               )
               expect(result.metadata).toEqual({ count: expected.length, truncated: false })
               expect(result.content).toHaveLength(1)
+              // Relative to the working directory, as read, edit and the other file tools take them.
               expect(result.content?.[0]?.type === "text" ? result.content[0].text.split("\n").sort() : []).toEqual(
-                expected.map((file) => path.join(tmp.path, file)).sort(),
+                expected.map((file) => path.normalize(file)).sort(),
               )
             }),
           )
@@ -105,6 +106,29 @@ describe("search tools", () => {
       )
     }
   }
+
+  // Workspace evidence overnight-2026-11-15, long chats, finding 4: 300 absolute paths of 143 characters, 70 of them
+  // the project's folder, put 17,000 tokens in one result.
+  it.live("glob in a subfolder answers paths relative to the working directory", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() =>
+        Promise.all(
+          ["src/a.ts", "src/deep/b.ts", "other/c.ts"].map((file) => Bun.write(path.join(tmp.path, file), "\n")),
+        ),
+      )
+      for (const searched of ["src", path.join(tmp.path, "src")])
+        yield* withTools(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            const result = yield* executeTool(registry, call("glob", { path: searched, pattern: "**/*.ts" }))
+            expect(result.status).toBe("completed")
+            expect(result.content?.[0]?.type === "text" ? result.content[0].text.split("\n").sort() : []).toEqual(
+              [path.join("src", "a.ts"), path.join("src", "deep", "b.ts")].sort(),
+            )
+          }),
+        )
+    }),
+  )
 
   it.live("bounds omitted glob and grep limits", () =>
     Effect.acquireUseRelease(
@@ -351,6 +375,8 @@ describe("search tools", () => {
               expect(result.status).toBe("completed")
               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "glob"])
               expect(assertions[0]?.resources).toEqual([path.join(outside.path, "*").replaceAll("\\", "/")])
+              // Outside the working directory a path stays absolute.
+              expect(result.content).toEqual([{ type: "text", text: path.join(outside.path, "outside.txt") }])
             }),
           ),
         )
@@ -385,7 +411,7 @@ describe("search tools", () => {
               expect(assertions.map((input) => input.action)).toEqual(["glob"])
               expect(result).toMatchObject({
                 output: [{ path: path.join("linked", "outside.txt"), type: "file" }],
-                content: [{ type: "text", text: path.join(active.path, "linked", "outside.txt") }],
+                content: [{ type: "text", text: path.join("linked", "outside.txt") }],
               })
             }),
           ),

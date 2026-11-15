@@ -95,6 +95,15 @@ describe("ConfigCompactionPlugin.Plugin", () => {
           text: "Recent context",
           time: { created: DateTime.makeUnsafe(1) },
         }),
+        // Answered, so a request carried them: what came after the last reply would be sent as itself instead.
+        Schema.decodeUnknownSync(SessionMessage.Assistant)({
+          id: SessionMessage.ID.create(),
+          type: "assistant",
+          agent: Agent.defaultID,
+          model: { id: "test-model", providerID: "test-provider" },
+          content: [{ type: "text", text: "Recent answer" }],
+          time: { created: 2, completed: 2 },
+        }),
       ]
       expect(
         yield* compaction.compact({

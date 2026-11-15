@@ -26,6 +26,7 @@ import { Project } from "@opencode/schema/project"
 import { AbsolutePath, RelativePath } from "../schema.js"
 import type { SessionSchema } from "./schema.js"
 import { SessionHistory } from "./history.js"
+import { SessionRecentText } from "./recent-text.js"
 import { ProjectTable } from "../project/sql.js"
 
 type DatabaseService = Database.Interface["db"]
@@ -224,20 +225,29 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
           time_updated: row.time_updated,
           data: media ? yield* SessionBlob.externalizeRow(db, row.data) : row.data,
         }
-        // A summary references the first message it kept, which the fork copied under a new ID.
-        const keepID = row.type === "compaction" ? row.data.metadata?.keepID : undefined
-        if (!Schema.is(SessionMessage.ID)(keepID)) return copy
-        const kept = yield* db
-          .select({ seq: SessionMessageTable.seq })
-          .from(SessionMessageTable)
-          .where(and(eq(SessionMessageTable.session_id, event.data.parentID), eq(SessionMessageTable.id, keepID)))
-          .get()
-          .pipe(Effect.orDie)
-        if (!kept) return copy
-        return {
-          ...copy,
-          data: { ...row.data, metadata: { ...row.data.metadata, keepID: forkedID(kept.seq) } },
-        }
+        // A summary references messages it kept (the first, an unread step, the first no request carried), which the
+        // fork copied under new IDs.
+        const metadata = row.type === "compaction" ? row.data.metadata : undefined
+        const references = yield* Effect.forEach(
+          ["keepID", SessionRecentText.UNREAD, SessionRecentText.UNSENT].flatMap((key) => {
+            const id = metadata?.[key]
+            return Schema.is(SessionMessage.ID)(id) ? [{ key, id }] : []
+          }),
+          (reference) =>
+            db
+              .select({ seq: SessionMessageTable.seq })
+              .from(SessionMessageTable)
+              .where(
+                and(eq(SessionMessageTable.session_id, event.data.parentID), eq(SessionMessageTable.id, reference.id)),
+              )
+              .get()
+              .pipe(
+                Effect.orDie,
+                Effect.map((kept) => (kept ? [[reference.key, forkedID(kept.seq)] as const] : [])),
+              ),
+        ).pipe(Effect.map((found) => found.flat()))
+        if (references.length === 0) return copy
+        return { ...copy, data: { ...row.data, metadata: { ...metadata, ...Object.fromEntries(references) } } }
       }),
     )
     yield* db.insert(SessionMessageTable).values(values).run().pipe(Effect.orDie)

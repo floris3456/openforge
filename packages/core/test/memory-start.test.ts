@@ -582,6 +582,7 @@ describe("MemoryStart through the runner", () => {
         scope: "global",
       })
       const quokka = yield* h.write({ kind: "verified", text: "Quokka lint is strict.", basis: "ran", scope: "global" })
+      yield* h.llm.push(TestLLM.text("At noon.", "noon"))
       yield* h.prompt("zebra deploys?")
       yield* h.llm.push(TestLLM.text("## Objective\n- summary", "summary"))
       yield* h.session.compact({ sessionID: h.sessionID })
@@ -658,6 +659,7 @@ describe("MemoryStart through the runner", () => {
 
       const k = yield* setup()
       yield* k.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
+      yield* k.llm.push(TestLLM.text("At noon.", "noon"))
       yield* k.prompt("zebra?")
       const first = (yield* k.blocks())[0]
       yield* k.llm.push(TestLLM.text("## Objective\n- summary", "summary"))
@@ -1603,6 +1605,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       basis: "b",
       scope: "global",
     })
+    yield* h.llm.push(TestLLM.text("Strict.", "strict"))
     yield* h.prompt("zebra lint?")
     yield* h.llm.push(TestLLM.text(summary, "summary"))
     yield* h.session.compact({ sessionID: h.sessionID })
@@ -1659,6 +1662,7 @@ describe("MemoryStart after a compaction: the summary", () => {
     Effect.gen(function* () {
       const h = yield* near()
       yield* h.write({ kind: "verified", text: "Zebra lint is strict.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.text("Hello.", "hello"))
       yield* h.prompt("hello")
       yield* h.llm.push(TestLLM.text("## Objective\nPaint the shed.", "summary"))
       yield* h.session.compact({ sessionID: h.sessionID })
@@ -1674,6 +1678,7 @@ describe("MemoryStart after a compaction: the summary", () => {
     Effect.gen(function* () {
       const h = yield* near()
       const said = yield* h.write({ kind: "verified", text: "Ship it soon.", basis: "b", scope: "global" })
+      yield* h.llm.push(TestLLM.text("Hello.", "hello"))
       yield* h.prompt("hello")
       yield* h.llm.push(TestLLM.text(summary, "summary"))
       yield* h.session.compact({ sessionID: h.sessionID })
@@ -1708,6 +1713,7 @@ describe("MemoryStart after a compaction: the summary", () => {
           const { said: _, ...rest } = (await response.json()) as Record<string, unknown>
           return Response.json(rest, { status: response.status })
         })
+      yield* h.llm.push(TestLLM.text("Hello.", "hello"))
       yield* h.prompt("hello")
       yield* h.llm.push(TestLLM.text(summary, "summary"))
       yield* h.session.compact({ sessionID: h.sessionID })

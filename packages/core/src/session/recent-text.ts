@@ -31,6 +31,40 @@ export const UNREAD = "unreadID"
 /** Set beside `UNREAD`: the characters the outputs from that step on keep together (`outputCap`). */
 export const UNREAD_CHARS = "unreadChars"
 
+/**
+ * Set on a compaction's metadata when it is written, when it kept messages after the chat's last assistant message: the
+ * first of them (`unsent`). No request carried those, not the prompt that was to start the step nor the synthetic
+ * messages beside it, so history sends them after the checkpoint as the messages they are, in order, and the recent
+ * part holds only what came before. A compaction without it keeps them all in its recent part, as before.
+ */
+export const UNSENT = "unsentID"
+
+/** Set by history, in memory only, on a compaction it sent messages after (`UNSENT`): how many. */
+const MOVED = "moved"
+
+export const moved = (message: SessionMessage.CompactionCompleted) =>
+  typeof message.metadata?.[MOVED] === "number" ? message.metadata[MOVED] : 0
+
+/** The compaction as history sends it: `recent` its recent part, `count` the messages it sends after it. */
+export const withRecent = (message: SessionMessage.CompactionCompleted, recent: string, count: number) => ({
+  ...message,
+  metadata: { ...message.metadata, recent, ...(count > 0 ? { [MOVED]: count } : {}) },
+})
+
+/**
+ * Whether a message no request carried goes after the checkpoint as itself. Not an assistant's, which there only
+ * started a step the provider turned down, an earlier compaction, or an instruction update, which the instructions
+ * sent after the compaction already hold.
+ */
+export const sendsAsItself = (type: SessionMessage.Info["type"]) =>
+  type !== "assistant" && type !== "compaction" && type !== "system"
+
+/** Where the messages no request carried start: the first after the last assistant message that `sendsAsItself`. */
+export const unsent = (messages: ReadonlyArray<SessionMessage.Info>) => {
+  const last = messages.findLastIndex((message) => message.type === "assistant")
+  return messages.findIndex((message, index) => index > last && sendsAsItself(message.type))
+}
+
 /** The recent part's text from the messages it kept, cut as `compaction` records it was written to. */
 export const rebuild = (
   kept: ReadonlyArray<SessionMessage.Info | SessionStored.User>,

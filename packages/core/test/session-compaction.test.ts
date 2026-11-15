@@ -26,6 +26,8 @@ import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Token } from "@opencode/core/util/token"
 import { SessionProjector } from "@opencode/core/session/projector"
+import { SessionRecentText } from "@opencode/core/session/recent-text"
+import { MemoryOffer } from "@opencode/core/memory/offer"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
@@ -206,12 +208,13 @@ it.effect("forks rebuild the recent text of a summary they copied", () =>
     const parentID = Session.ID.make("ses_fork_recent_parent")
     const childID = Session.ID.make("ses_fork_recent_child")
     const session = yield* insertSession(parentID)
-    const messages = [textUser("Earlier question"), textUser("Kept question")]
+    const messages = [textUser("Earlier question"), textUser("Kept question"), reply("Kept answer")]
     yield* storeMessages(parentID, messages)
     expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
     const store = yield* SessionStore.Service
     const [parent] = yield* store.context(parentID)
-    expect(parent).toMatchObject({ type: "compaction", metadata: { recent: "[User]: Kept question" } })
+    const recent = "[User]: Kept question\n\n[Assistant]: Kept answer"
+    expect(parent).toMatchObject({ type: "compaction", metadata: { recent } })
 
     const bus = yield* Bus.Service
     yield* bus.publish(SessionEvent.Forked, {
@@ -220,8 +223,67 @@ it.effect("forks rebuild the recent text of a summary they copied", () =>
       boundary: { type: "through", messageID: parent.id },
     })
     const [child] = yield* store.context(childID)
-    expect(child).toMatchObject({ type: "compaction", metadata: { recent: "[User]: Kept question" } })
+    expect(child).toMatchObject({ type: "compaction", metadata: { recent } })
     expect(child.metadata?.keepID).not.toBe(parent.metadata?.keepID)
+  }),
+)
+
+it.effect("forks keep a summary's unread step and the messages it sends as themselves, under the fork's IDs", () =>
+  Effect.gen(function* () {
+    const parentID = Session.ID.make("ses_fork_unsent_parent")
+    const childID = Session.ID.make("ses_fork_unsent_child")
+    yield* insertSession(parentID)
+    const asked = textUser("Read the file")
+    const file = "export const value = 1\n".repeat(150)
+    // Its tool settled after the request that called it: the model has not read the result.
+    const unread = Schema.decodeUnknownSync(SessionMessage.Assistant)({
+      id: SessionMessage.ID.create(),
+      type: "assistant",
+      agent: Agent.defaultID,
+      model: { id: "summary-model", providerID: "test" },
+      content: [
+        {
+          type: "tool",
+          id: "call_read",
+          name: "read",
+          state: { status: "completed", input: {}, content: [{ type: "text", text: file }] },
+          time: { created: 0 },
+        },
+      ],
+      time: { created: 0, completed: 1 },
+    })
+    // A prompt steered in after the step: the compaction sends it as itself.
+    const prompt = textUser("Then fix it")
+    const compaction = SessionMessage.CompactionCompleted.make({
+      ...completedSummary("## Objective\n- Fix the file"),
+      metadata: {
+        keepID: asked.id,
+        [SessionRecentText.UNREAD]: unread.id,
+        [SessionRecentText.UNREAD_CHARS]: 10_000,
+        [SessionRecentText.UNSENT]: prompt.id,
+        [SessionRecentText.CUT_INPUTS]: "cut",
+      },
+    })
+    yield* storeMessages(parentID, [asked, unread, prompt, compaction])
+    const store = yield* SessionStore.Service
+    const parent = yield* store.context(parentID)
+    expect(parent.map((message) => message.type)).toEqual(["compaction", "user"])
+    const recent = `[User]: Read the file\n\n[Assistant tool call]: read({})\n[Tool result]: ${file}`
+    expect(parent[0]).toMatchObject({ metadata: { recent } })
+
+    const bus = yield* Bus.Service
+    yield* bus.publish(SessionEvent.Forked, {
+      sessionID: childID,
+      parentID,
+      boundary: { type: "through", messageID: compaction.id },
+    })
+    const child = yield* store.context(childID)
+    expect(child.map((message) => message.type)).toEqual(["compaction", "user"])
+    expect(child[0]).toMatchObject({ metadata: { recent } })
+    expect(child[1]).toMatchObject({ type: "user", text: "Then fix it" })
+    expect(child[1]?.id).not.toBe(prompt.id)
+    for (const key of [SessionRecentText.UNREAD, SessionRecentText.UNSENT])
+      expect(child[0]?.metadata?.[key]).not.toBe(parent[0]?.metadata?.[key])
   }),
 )
 
@@ -333,6 +395,155 @@ it.effect("history never decodes rows before the latest compaction or its kept t
   }),
 )
 
+// Workspace evidence overnight-2026-11-15, recheck 1: a compaction came before any request carried the prompt, which then
+// reached the model only in the checkpoint's recent part, as "historical context, not as new instructions".
+it.effect("history sends what a compaction kept after the last reply as itself, only when the compaction says so", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const run = (marked: boolean) =>
+      Effect.gen(function* () {
+        const id = Session.ID.make(`ses_unsent_${marked ? "marked" : "unmarked"}`)
+        yield* insertSession(id)
+        const asked = textUser("Which paths have no tests?")
+        const prompt = textUser("Write tests for the first three.")
+        const entries = SessionMessage.Synthetic.make({
+          id: SessionMessage.ID.create(),
+          type: "synthetic",
+          text: "Memory close to the prompt",
+          time: { created: DateTime.makeUnsafe(0) },
+        })
+        // An instruction update, which the instructions after the compaction hold, and a step the provider turned down.
+        const update = SessionMessage.System.make({
+          id: SessionMessage.ID.create(),
+          type: "system",
+          text: "Instructions changed",
+          time: { created: DateTime.makeUnsafe(0) },
+        })
+        const refused = Schema.decodeUnknownSync(SessionMessage.Assistant)({
+          id: SessionMessage.ID.create(),
+          type: "assistant",
+          agent: Agent.defaultID,
+          model: { id: "summary-model", providerID: "test" },
+          content: [],
+          time: { created: 0 },
+        })
+        const after = textUser("Go on")
+        const compaction = SessionMessage.CompactionCompleted.make({
+          ...completedSummary("## Objective\n- Find the untested paths"),
+          metadata: { keepID: asked.id, ...(marked ? { [SessionRecentText.UNSENT]: prompt.id } : {}) },
+        })
+        yield* storeMessages(id, [
+          asked,
+          reply("Three paths have none."),
+          prompt,
+          entries,
+          update,
+          refused,
+          compaction,
+          after,
+        ])
+        return {
+          ids: { compaction: compaction.id, prompt: prompt.id, entries: entries.id, after: after.id },
+          history: yield* SessionHistory.load(db, id, resolved.ref),
+          synthetics: yield* SessionHistory.synthetics(db, id),
+        }
+      })
+
+    // Written before the marker: everything it kept is its recent part, as before.
+    const unmarked = yield* run(false)
+    expect(unmarked.history.map((message) => message.type)).toEqual(["compaction", "user"])
+    expect(unmarked.history[0]).toMatchObject({
+      metadata: {
+        recent: [
+          "[User]: Which paths have no tests?",
+          "[Assistant]: Three paths have none.",
+          "[User]: Write tests for the first three.",
+          "[Synthetic context]: Memory close to the prompt",
+        ].join("\n\n"),
+      },
+    })
+    expect(unmarked.synthetics).toEqual([])
+
+    const marked = yield* run(true)
+    expect(marked.history.map((message) => message.id)).toEqual([
+      marked.ids.compaction,
+      marked.ids.prompt,
+      marked.ids.entries,
+      marked.ids.after,
+    ])
+    expect(marked.history[0]).toMatchObject({
+      metadata: { recent: "[User]: Which paths have no tests?\n\n[Assistant]: Three paths have none." },
+    })
+    const sent = toLLMMessages(marked.history, resolved.ref)
+    expect(sent.map((message) => message.role)).toEqual(["user", "user", "user", "user"])
+    expect(JSON.stringify(sent[0])).not.toContain("Write tests")
+    expect(sent.slice(1).map((message) => message.content)).toEqual([
+      [{ type: "text", text: "Write tests for the first three." }],
+      [{ type: "text", text: "Memory close to the prompt" }],
+      [{ type: "text", text: "Go on" }],
+    ])
+    // The synthetic messages history sends, as instruction files' reminders are deduplicated against.
+    expect(marked.synthetics.map((message) => message.id)).toEqual([marked.ids.entries])
+  }),
+)
+
+// The size check before the step after the compaction: no step measured the prompt yet, so it is estimated, once.
+it.effect("the prompt a compaction sends as itself counts once, as estimated, until a step measures it", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const id = Session.ID.make("ses_unsent_estimate")
+    const session = yield* insertSession(id)
+    const asked = textUser("Which paths have no tests?")
+    const prompt = textUser("Write tests for the first three of those untested paths, each in a file of its own.")
+    const compaction = SessionMessage.CompactionCompleted.make({
+      ...completedSummary("## Objective\n- Find the untested paths"),
+      metadata: { keepID: asked.id, [SessionRecentText.UNSENT]: prompt.id },
+    })
+    yield* storeMessages(id, [asked, reply("Three paths have none."), prompt, compaction])
+    const history = yield* SessionHistory.load(db, id, resolved.ref)
+    expect(history.map((message) => message.id)).toEqual([compaction.id, prompt.id])
+    const [checkpoint] = history
+    if (checkpoint?.type !== "compaction" || checkpoint.status !== "completed") throw new Error("expected a summary")
+    expect(SessionRecentText.kept(checkpoint)).not.toContain(prompt.text)
+
+    const estimate = SessionCompaction.estimatePrompt(loaded(session, history))
+    const without = SessionCompaction.estimatePrompt(loaded(session, history.slice(0, 1)))
+    expect(estimate.measured).toBe(0)
+    // Before any measurement, prompt text is put at 2.5 characters a token.
+    expect(estimate.estimated - without.estimated).toBe(Token.estimate(prompt.text, 2.5))
+    // A step's count holds it from then on.
+    expect(SessionCompaction.estimatePrompt(loaded(session, [...history, measured("On it.", 9_000)]))).toEqual({
+      measured: 9_100,
+      estimated: 0,
+    })
+  }),
+)
+
+// A block among them is in the model's view, so memory builds no second one after the compaction (spec memory, section 3).
+it.effect("memory's start block among what a compaction sends as itself stays in view", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    for (const marked of [false, true]) {
+      const id = Session.ID.make(`ses_unsent_block_${marked ? "marked" : "unmarked"}`)
+      yield* insertSession(id)
+      const prompt = textUser("Fix the typo")
+      const block = SessionMessage.Synthetic.make({
+        id: SessionMessage.ID.create(),
+        type: "synthetic",
+        text: "Memory: nothing yet",
+        metadata: { memory: { project: "prj", entries: [], tasks: false } },
+        time: { created: DateTime.makeUnsafe(0) },
+      })
+      const compaction = SessionMessage.CompactionCompleted.make({
+        ...completedSummary("## Objective\n- Fix the typo"),
+        metadata: { keepID: prompt.id, ...(marked ? { [SessionRecentText.UNSENT]: prompt.id } : {}) },
+      })
+      yield* storeMessages(id, [textUser("Earlier"), reply("Done"), prompt, block, compaction])
+      expect((yield* MemoryOffer.newestBlock(db, id))?.visible).toBe(marked)
+    }
+  }),
+)
+
 const completedSummary = (summary: string) =>
   SessionMessage.CompactionCompleted.make({
     id: SessionMessage.ID.create(),
@@ -349,6 +560,20 @@ const textUser = (text: string) =>
     type: "user",
     text,
     time: { created: DateTime.makeUnsafe(0) },
+  })
+
+/**
+ * The model's reply to the messages before it, so a request carried them: what comes after a chat's last reply is
+ * sent after the summary as itself, never summarized (`SessionRecentText.UNSENT`).
+ */
+const reply = (text: string) =>
+  Schema.decodeUnknownSync(SessionMessage.Assistant)({
+    id: SessionMessage.ID.create(),
+    type: "assistant",
+    agent: Agent.defaultID,
+    model: { id: "summary-model", providerID: "test" },
+    content: [{ type: "text", text }],
+    time: { created: 0, completed: 1 },
   })
 
 // openforge: the person's own words are kept after the summary by CLIProxyPacer's list of earlier messages, which no
@@ -788,6 +1013,7 @@ it.effect("manual compaction summarizes short context instead of no-op", () =>
         text: "User shell pwd completed: /project",
         time: { created: DateTime.makeUnsafe(2) },
       }),
+      reply("The project is at /project."),
     ]
 
     const delta = yield* bus
@@ -868,6 +1094,7 @@ it.effect("marks a CLIProxyPacer summary as its chat's compaction, with openforg
         text: "Summarize this paced chat.",
         time: { created: DateTime.makeUnsafe(0) },
       }),
+      reply("Paced."),
     ]
     const compaction = yield* SessionCompaction.Service
     const inputID = SessionMessage.ID.create()
@@ -907,6 +1134,7 @@ it.effect("summary updates include the retained tail in compaction hooks and the
         text: "The latest request supersedes the previous objective.",
         time: { created: DateTime.makeUnsafe(1) },
       }),
+      reply("Understood."),
     ]
     const context = loaded(session, messages)
     const expected = SessionModelRequest.baseTranscript({ ...context, agent: context.agent.info }).messages
@@ -933,7 +1161,7 @@ it.effect("summary compaction past the ceiling keeps the conversation unchanged 
     requests = []
     const session = yield* insertSession(Session.ID.make("ses_compaction_near_window"))
     // About 182k estimated tokens: past the 170k ceiling, within the 184k left after reserving room for the summary.
-    const messages = ["first", "second"].map((label) =>
+    const prompts = ["first", "second"].map((label) =>
       SessionMessage.User.make({
         id: SessionMessage.ID.create(),
         type: "user",
@@ -941,11 +1169,12 @@ it.effect("summary compaction past the ceiling keeps the conversation unchanged 
         time: { created: DateTime.makeUnsafe(0) },
       }),
     )
+    const messages = [...prompts, reply("Read both.")]
 
     expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
     expect(requests).toHaveLength(1)
-    expect(requests[0].messages).toHaveLength(3)
-    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: messages[0].text }])
+    expect(requests[0].messages).toHaveLength(4)
+    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: prompts[0].text }])
     expect(requests[0].generation?.maxTokens).toBeLessThan(20_000)
   }),
 )
@@ -958,7 +1187,7 @@ it.effect(
       const session = yield* insertSession(Session.ID.make("ses_compaction_older_fallback"))
       // About 190k estimated tokens in total, past the 184k left for the summary. The 160k before the retained
       // 30k latest exchange fits the 170k ceiling.
-      const messages = [
+      const prompts = [
         ["older", 640_000],
         ["latest", 120_000],
       ].map(([label, size]) =>
@@ -969,11 +1198,12 @@ it.effect(
           time: { created: DateTime.makeUnsafe(0) },
         }),
       )
+      const messages = [...prompts, reply("Read both.")]
 
       expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
       expect(requests).toHaveLength(1)
       expect(requests[0].messages).toHaveLength(2)
-      expect(requests[0].messages[0].content).toEqual([{ type: "text", text: messages[0].text }])
+      expect(requests[0].messages[0].content).toEqual([{ type: "text", text: prompts[0].text }])
       expect(requests[0].messages[1].content).toEqual([{ type: "text", text: SessionCompaction.buildPrompt(false) }])
     }),
 )
@@ -993,6 +1223,7 @@ it.effect("compaction lowers the output limit when it sends a request it could n
         time: { created: DateTime.makeUnsafe(0) },
       }),
       textUser("Next question"),
+      reply("Next answer"),
     ]
 
     expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
@@ -1013,6 +1244,7 @@ it.effect("compaction keeps the output limit for a request that fits its target"
         text: "x".repeat(640_000),
         time: { created: DateTime.makeUnsafe(0) },
       }),
+      reply("Read it."),
     ]
 
     expect(yield* compactManually(session, messages)).toEqual({ status: "completed" })
@@ -1036,6 +1268,7 @@ it.effect("compaction hooks can supply the summary instead of the model", () =>
         text: "Hooked compaction should see this conversation.",
         time: { created: DateTime.makeUnsafe(0) },
       },
+      reply("Seen."),
     ]
     let contexts = 0
     yield* hooks.register("session", "context", () => Effect.sync(() => contexts++))
@@ -1118,6 +1351,7 @@ it.effect("forked session compaction reuses the fork root prompt cache key", () 
         text: "Summarize the forked conversation.",
         time: { created: DateTime.makeUnsafe(0) },
       }),
+      reply("Forked."),
     ]
     expect(yield* compactManually(session, messages, SessionMessage.ID.make("msg_fork_compaction"))).toEqual({
       status: "completed",
@@ -1404,6 +1638,38 @@ it.effect("automatic compaction swaps in the background summary without another 
   }),
 )
 
+it.effect("a background summary swapped in sends the prompt no request carried after it as itself", () =>
+  Effect.gen(function* () {
+    requests = []
+    const store = yield* SessionStore.Service
+    const compaction = yield* enablePrecompute
+    const sessionID = Session.ID.make("ses_precompute_unsent")
+    const session = yield* insertSession(sessionID)
+    const history = precomputeHistory()
+    const prompt = textUser("Fourth question")
+    yield* storeMessages(sessionID, [...history.due, prompt])
+
+    yield* compaction.precompute(Effect.succeed(loaded(session, history.near)))
+    expect(yield* compaction.compact({ reason: "auto", context: loaded(session, [...history.due, prompt]) })).toEqual({
+      status: "completed",
+    })
+
+    expect(requests).toHaveLength(1)
+    expect(JSON.stringify(requests[0].messages)).not.toContain("Fourth question")
+    expect(yield* store.context(sessionID)).toMatchObject([
+      {
+        type: "compaction",
+        metadata: {
+          keepID: history.anchor.id,
+          [SessionRecentText.UNSENT]: prompt.id,
+          recent: "[Assistant]: Second answer\n\n[User]: Third question\n\n[Assistant]: Third answer",
+        },
+      },
+      { type: "user", id: prompt.id, text: "Fourth question" },
+    ])
+  }),
+)
+
 it.effect("automatic compaction waits for a background summary still being written", () =>
   Effect.gen(function* () {
     requests = []
@@ -1594,7 +1860,8 @@ it.effect("a chat compacted at its point still goes out whole while the model's 
     requests = []
     const session = yield* insertSession(Session.ID.make("ses_compaction_point_room"))
     // About 150k estimated tokens: past the 100k point, within the 184k the 200k window leaves for the summary.
-    const messages = ["first", "second"].map((label) => textUser(`${label} ${"x".repeat(300_000)}`))
+    const prompts = ["first", "second"].map((label) => textUser(`${label} ${"x".repeat(300_000)}`))
+    const messages = [...prompts, reply("Read.")]
 
     expect(
       yield* SessionCompaction.Service.use((compaction) =>
@@ -1605,8 +1872,8 @@ it.effect("a chat compacted at its point still goes out whole while the model's 
       ),
     ).toEqual({ status: "completed" })
     expect(requests).toHaveLength(1)
-    expect(requests[0].messages).toHaveLength(3)
-    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: messages[0].text }])
+    expect(requests[0].messages).toHaveLength(4)
+    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: prompts[0].text }])
   }),
 )
 

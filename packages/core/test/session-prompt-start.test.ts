@@ -466,6 +466,7 @@ describe("SessionPromptStart: the changes at the chat's next cold point", () => 
       yield* h.prompt("one")
       yield* h.prompted("Be brief.")
       yield* h.tools((editor) => editor.add(extra()))
+      yield* h.llm.push(TestLLM.text("Two.", "two"))
       yield* h.prompt("two")
       yield* h.compact
       yield* h.prompt("three")

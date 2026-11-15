@@ -385,6 +385,15 @@ export const layer = Layer.effect(
         return { status: "skipped" }
       const native =
         trigger.reason !== "move" && trigger.reason !== "cold" && context.model.compaction?.type === "native"
+      // Before the chat's first request, or right after a compaction, a summary would hold nothing a request carried:
+      // what none did is sent as itself (`splitConversation`), so the step goes out as it is.
+      if (
+        trigger.reason === "auto" &&
+        !native &&
+        SessionRecentText.unsent(context.messages) >= 0 &&
+        splitConversation(context.messages, settings.keep) === undefined
+      )
+        return { status: "skipped" }
       const picks =
         trigger.reason === "move" || trigger.reason === "cold" || trigger.reason === "manual"
           ? trigger.models
@@ -479,11 +488,12 @@ export const layer = Layer.effect(
     /**
      * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
      * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
-     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
-     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
-     * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
-     * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
-     * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
+     * `keep` and to no message that no request carried (a prefix of the step's, so its cache still reads), with a
+     * summary's headers (`X-Pacer-Session`, its parent, `X-Pacer-Kind: compaction`), in the Responses format
+     * (`PacerSummaries.responses`). The answer's summary is kept as openforge's own, those recent messages beside it, so
+     * they go out once, not also in CLIProxyPacer's list of the user's messages; its compaction item is dropped. A
+     * failure with `fallback` (a refusal, a failed request, no readable summary, no answer within
+     * `PacerSummaries.WAIT`) leaves the summary to openforge.
      */
     const writeOnPacer = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -493,7 +503,7 @@ export const layer = Layer.effect(
       const context = trigger.context
       const split = splitConversation(context.messages, keep)
       if (split === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
-      const prepared = yield* prepare(context, context.messages, budget)
+      const prepared = yield* prepare(context, split.sent, budget)
       // A compaction hook that supplies the summary itself writes it, as for any chat.
       if (prepared.event.result)
         return { ...(yield* fromHook(context, prepared.event.result)), writer: { by: "openforge" } } satisfies Result
@@ -619,18 +629,32 @@ export const layer = Layer.effect(
       if (Exit.isFailure(exit)) return undefined
       // Background calls were billed as they finished; the compaction's message still shows what it cost.
       held.usage.forEach((usage) => addSpent(context.session.id, usage))
-      // The kept messages start at the response the summary was written up to, so they hold the last step.
+      // The kept messages start at the response the summary was written up to, so they hold the last step, and what no
+      // request carried since.
       return {
         ...exit.value,
-        metadata: { keepID: held.keepID, ...unreadMetadata(unreadStep(context.messages)), ...exit.value.metadata },
+        metadata: {
+          keepID: held.keepID,
+          ...unreadMetadata(unreadStep(context.messages)),
+          ...unsentMetadata(context.messages),
+          ...exit.value.metadata,
+        },
       }
     })
 
     const due = (context: SessionContext.Loaded, ceiling: number, estimate?: Estimate) => {
       const messages = context.messages
-      // A compaction just completed; let the runner rebuild the request from it first.
+      // A compaction just completed; let the runner rebuild the request from it first. History sends what it kept that
+      // no request carried after it, which is not new either.
       const last = messages.at(-1)
       if (last?.type === "compaction" && last.status === "completed") return false
+      const first = messages[0]
+      if (
+        first?.type === "compaction" &&
+        first.status === "completed" &&
+        messages.length === 1 + SessionRecentText.moved(first)
+      )
+        return false
       // An encrypted native window estimates as nothing, so wait for a response to measure it.
       const measured = messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
       if (measured < messages.findLastIndex(SessionHistory.isNativeCompaction)) return false
@@ -656,6 +680,12 @@ export const layer = Layer.effect(
      *
      * E = one exchange: a user message and the replies to it. S = a summary. [S + "…"] = one checkpoint: a summary
      * plus the newest `keep` tokens of messages, referenced by their first message and sent as text.
+     *
+     * A prompt that came after the last reply, which no request carried, is neither summarized nor sent as text: the
+     * summary request ends at that reply, and the prompt follows the checkpoint as itself (`SessionRecentText.UNSENT`):
+     *
+     *   compacting:  [system][S1 + "E9 E10"][E11 … E18][prompt]           E19's user message U19 is not in it
+     *   later:       [S2 + "…"][U19][new messages…]
      */
     const summarize = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -664,11 +694,12 @@ export const layer = Layer.effect(
       background?: Background,
     ): Effect.fn.Return<Result, Failure> {
       const context = trigger.context
-      const messages = background?.messages ?? context.messages
-      const split = splitConversation(messages, keep)
+      const split = splitConversation(background?.messages ?? context.messages, keep, background === undefined)
       if (split === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
-      // A background summary covers all of its messages; what follows them is kept when it is swapped in.
+      // A background summary covers all of its messages; what follows them is kept when it is swapped in. What no
+      // request carried is kept as itself, so the summary request holds only what the model already read.
       const keepID = background ? undefined : split.keepID
+      const messages = split.sent
 
       const previous = previousCompaction(messages)
       const prompt = ImageBudget.summaryPrompt(
@@ -839,6 +870,9 @@ export const layer = Layer.effect(
             : estimateRequest(shrink.history) <= target
               ? shrink.history
               : undefined
+        // The history before the tail fits by its characters, which then size it, also when it is the whole request:
+        // when nothing after the last reply was sent, there is no tail to take off.
+        const history = measured !== undefined && total(measured) > fit && unchanged === shrink.history
         const request =
           unchanged ??
           flattenAndDropOldest(shrink.history, context, target) ??
@@ -857,7 +891,7 @@ export const layer = Layer.effect(
           })
         }
 
-        const size = request === prepared.request ? measured : undefined
+        const size = request === prepared.request && !history ? measured : undefined
         const attempt = yield* Effect.result(send(request, size))
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
@@ -1227,23 +1261,43 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
  * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary. A compaction
  * between a step's tool calls and the request that would read their results keeps that step too, its results whole up
  * to `unreadChars` (`metadata`, `SessionRecentText.UNREAD`): a summary written from the requests the model saw has
- * none of them. Undefined when there is nothing to compact.
+ * none of them. What came after the last assistant message, which no request carried, is always kept, and sent after
+ * the checkpoint as itself (`SessionRecentText.UNSENT`): the summary is written from `sent`, the messages before it.
+ * Undefined when there is nothing to compact, or nothing but those. `unsentKept` false, as for a background summary,
+ * which covers what came before a response, treats the messages as all sent.
  */
-const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
+const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number, unsentKept = true) => {
   const entries = messages.flatMap((message) => {
     const text = SessionRecentText.messageToText(message, true)
     return text ? [{ message, text }] : []
   })
   if (entries.length === 0) return undefined
+  const unsent = unsentKept ? SessionRecentText.unsent(messages) : -1
+  const sent = unsent < 0 ? messages : messages.slice(0, unsent)
+  const previous = previousCompaction(messages)
+  if (
+    unsent >= 0 &&
+    !sent.some((message) => SessionRecentText.messageToText(message, true)) &&
+    !(previous && SessionRecentText.kept(previous))
+  )
+    return undefined
 
-  const start = recentStart(entries, keep, previousCompaction(messages))
+  const start = recentStart(entries, keep, previous)
   const step = unreadStep(messages)
   const unread = step ? entries.findIndex((entry) => entry.message.id === step.id) : -1
+  const from = Math.min(
+    ...[entries[start], entries[unread]].map((entry) => (entry ? messages.indexOf(entry.message) : messages.length)),
+    unsent < 0 ? messages.length : unsent,
+  )
   return {
-    keepID: entries[unread < 0 ? start : Math.min(start, unread)]?.message.id,
-    metadata: unreadMetadata(unread < 0 ? undefined : step),
+    keepID: messages[from]?.id,
+    sent,
+    metadata: { ...unreadMetadata(unread < 0 ? undefined : step), ...unsentMetadata(messages, unsent) },
   }
 }
+
+const unsentMetadata = (messages: ReadonlyArray<SessionMessage.Info>, index = SessionRecentText.unsent(messages)) =>
+  index < 0 ? {} : { [SessionRecentText.UNSENT]: messages[index].id }
 
 /** The last step, when its local tool calls settled after the request that made them: the model has not read them. */
 const unreadStep = (messages: ReadonlyArray<SessionMessage.Info>) => {
@@ -1310,7 +1364,8 @@ const recentStart = (
   if (latestUser > 0) return latestUser
 
   // One exchange, nothing older. Summarize it all and keep nothing, unless a previous summary already
-  // kept recent text, in which case keep everything and summarize only the summary before it.
+  // kept recent text, in which case keep everything and summarize only the summary before it. What no request carried
+  // is kept either way (`splitConversation`).
   return previous && SessionRecentText.kept(previous) ? 0 : entries.length
 }
 

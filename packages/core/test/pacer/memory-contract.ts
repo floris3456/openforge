@@ -278,6 +278,15 @@ type Body = {
   counts: { global: number; role: number; task: number }
   error: { type: string; message: string; project?: { id: string; name: string }; moved?: boolean }
   pacer: { memory: Record<string, unknown> }
+  /** The harness's routes (the workspace's reference `docs/reference/cpp-tools-api.md`). */
+  tools: { claude: Array<{ name: string }> }
+  meta: Record<string, unknown>
+  text: string | null
+  metadata: Record<string, unknown>
+  place: { task: string; subtask: string | null } | null
+  check: string | null
+  unavailable: string
+  refused: string
 }
 
 const ID = /^[0-9abcdefghjkmnpqrstvwxyz]{12}$/
@@ -3901,13 +3910,10 @@ export function memoryContract(target: Target) {
     test("the chat route answers its place and check; memory's texts are two strings", async () => {
       const memory = project("harness-chat")
       await memory.verified("Harness chats have a place.")
-      expect(
-        await answered(send("GET", `/pacer/v1/memory/${memory.id}/chat`, undefined, undefined, undefined, chat())),
-      ).toEqual({ place: null, check: null })
-      expect(await answered(send("GET", "/pacer/v1/memory/texts", undefined, undefined, undefined, chat()))).toEqual({
-        unavailable: expect.any(String),
-        refused: expect.any(String),
-      })
+      const read = await answered(send("GET", `/pacer/v1/memory/${memory.id}/chat`, undefined, undefined, undefined, chat()))
+      expect([read.place, read.check]).toEqual([null, null])
+      const texts = await answered(send("GET", "/pacer/v1/memory/texts", undefined, undefined, undefined, chat()))
+      expect([typeof texts.unavailable, typeof texts.refused]).toEqual(["string", "string"])
     })
   })
 

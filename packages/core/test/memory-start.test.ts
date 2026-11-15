@@ -19,12 +19,11 @@ import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryKnown } from "@opencode/core/memory/known"
 import { MemoryStart } from "@opencode/core/memory/start"
-import { MemoryText } from "@opencode/core/memory/text"
+import { MemoryTexts } from "@opencode/core/memory/texts"
 import { MemoryPromptTable } from "@opencode/core/memory/prompt.sql"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerModels } from "@opencode/core/pacer/models"
-import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
@@ -47,7 +46,7 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SkillInstructions } from "@opencode/core/skill/instructions"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
-import { MemoryTools } from "@opencode/core/tool/plugin/memory"
+import { PacerTools } from "@opencode/core/pacer/tools"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -59,9 +58,9 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
 import { permissionLayer } from "./lib/permission"
-import { registerToolPlugin } from "./lib/tool"
 import { settle, until } from "./pacer/fake-tools"
-import { catalogOf, endpointAt, key, startProxied } from "./memory/fixture"
+import { texts } from "./pacer/memory-harness"
+import { catalogOf, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied, type Received } from "./memory/fixture"
 import { startFakeEmbedding } from "./pacer/memory-embedding"
 
 // The start block through the real runner: what each model request holds, over the small memory server. One server
@@ -157,45 +156,8 @@ const echo = makeLocationNode({
   ),
   deps: [Tool.node],
 })
-// Memory's own tools, registered as in openforge. Their calls here read only the chat, which the store answers.
-const memoryTools = makeLocationNode({
-  name: "test/memory-start-memory-tools",
-  layer: Layer.effectDiscard(
-    Effect.gen(function* () {
-      const store = yield* SessionStore.Service
-      yield* registerToolPlugin(MemoryTools.Plugin).pipe(
-        Effect.provide(
-          Layer.mock(Session.Service, {
-            get: (sessionID) =>
-              store
-                .get(sessionID)
-                .pipe(
-                  Effect.flatMap((found) =>
-                    found ? Effect.succeed(found) : Effect.fail(new Session.NotFoundError({ sessionID })),
-                  ),
-                ),
-            revert: {
-              stage: () => Effect.die("unused"),
-              clear: () => Effect.die("unused"),
-              commit: () => Effect.die("unused"),
-            },
-          }),
-        ),
-      )
-    }),
-  ),
-  deps: [
-    Tool.node,
-    Permission.node,
-    PacerEndpoint.node,
-    PacerModels.node,
-    MemoryClient.node,
-    PacerProject.node,
-    SessionStore.node,
-    Config.node,
-    KV.node,
-  ],
-})
+// CPP's tools as openforge registers them, the memory tools among them.
+const memoryTools = pacerToolsNode("test/memory-start-pacer-tools")
 /** The test's database, counting its lookups (`select`). */
 const lookups = { count: 0 }
 const counting = Layer.effect(
@@ -259,6 +221,8 @@ const layer = AppNodeBuilder.build(
     Tool.node,
     echo,
     memoryTools,
+    PacerTools.node,
+    MemoryTexts.node,
     Config.node,
     Snapshot.node,
     SessionRunnerLLM.node,
@@ -289,8 +253,6 @@ const setup = Effect.fnUntraced(function* (
   input: {
     readonly agent?: string
     readonly child?: boolean
-    /** The task the chat is inside: `inside` makes it from the chat's project before the chat is stored. */
-    readonly inside?: (project: string) => Effect.Effect<{ task: string; subtask?: string }>
     /** The server the chat's memory is on, and its catalog: the file's one, as before prompts were answered. */
     readonly served?: ReturnType<typeof startProxied>
     readonly catalog?: PacerModels.Catalog
@@ -333,8 +295,7 @@ const setup = Effect.fnUntraced(function* (
     .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
-  const memory = yield* Effect.provide(MemoryClient.Service, client)
-  const inside = input.inside ? yield* input.inside(project) : undefined
+  const inside = undefined as { task: string; subtask?: string } | undefined
   const insert = (id: Session.ID, parent?: Session.ID, agent?: string) =>
     db
       .insert(SessionTable)
@@ -355,6 +316,12 @@ const setup = Effect.fnUntraced(function* (
   yield* insert(lead)
   const sessionID = input.child ? Session.ID.make(`${lead}_child`) : lead
   if (input.child) yield* insert(sessionID, lead, input.agent)
+  // What an earlier chat did once at the endpoint: read a list that named the memory tools, and memory's texts.
+  if (pacer.endpoint && pacer.catalog?.pacer?.memory?.tools) {
+    yield* primeTools(project)
+    const memoryTexts = yield* MemoryTexts.Service
+    yield* poll("memory's texts are kept", () => Effect.runSync(memoryTexts.get()) !== undefined)
+  }
   const session = yield* Session.Service
   const llm = yield* TestLLM.Test
   const requests = yield* LLMRequests
@@ -367,11 +334,15 @@ const setup = Effect.fnUntraced(function* (
     llm,
     /** The model requests of this test. */
     requests: () => requests.slice(started),
-    write: (input: Omit<MemoryClient.WriteInput, "by">, role = "build", where: string = project) =>
-      memory.write(where, { ...input, by: by(role) }).pipe(
-        Effect.map((written) => written.entry),
-        Effect.orDie,
-      ),
+    /** Writes an entry through the memory API, as a chat of 0.0.42 did. */
+    write: (input: Readonly<Record<string, unknown>>, role = "build", where: string = project) =>
+      Effect.promise(() =>
+        fetch(`${server.store.url}/pacer/v1/memory/${where}/entries`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ ...input, by: by(role) }),
+        }).then((answer) => answer.json() as Promise<{ entry: { id: string; text: string; at: number } }>),
+      ).pipe(Effect.map((written) => written.entry)),
     prompt: (text: string) =>
       session.prompt({ sessionID, text, resume: false }).pipe(Effect.andThen(session.resume(sessionID))),
     /** The start blocks the chat holds, in order. */
@@ -472,15 +443,19 @@ const unsent = (text: string | undefined) => {
   expect(text).toEndWith("\n</system-reminder>")
   return (text ?? "").slice("<system-reminder>\n".length, -"\n</system-reminder>".length)
 }
-const day = (entry: MemoryClient.Entry) => new Date(entry.at).toISOString().slice(0, 10)
-const opening =
-  "Memory: what agents and people of this project noted earlier. It may be wrong or out of date; the code, the evidence and the person's words in this chat win over it."
-const states =
-  "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
-const planStates =
-  "With the task tool: when a subtask of your own plan is done, set it done: the next one of your plan becomes current, which you need not start now; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note, and a new title when it names them) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
-const keep =
-  "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
+/** The start block as the small server's CPP side writes it: CPP's words are CPP's to test. */
+const fakeBlock = (
+  role: string,
+  entries: ReadonlyArray<{ readonly id: string; readonly text: string }>,
+  tools = { recall: true, remember: true, task: true },
+) =>
+  [
+    `Memory (fake) for ${role}:`,
+    ...entries.map((entry) => `- [${entry.id}] ${entry.text}`),
+    `tools: recall ${tools.recall}, remember ${tools.remember}, task ${tools.task}`,
+  ].join("\n")
+const unavailable = texts.unavailable
+const all = ["echo", "forget", "recall", "remember", "task"]
 
 describe("MemoryStart through the runner", () => {
   it.live("puts the block after the first prompt, in the first request, with the default search's entries", () =>
@@ -504,29 +479,19 @@ describe("MemoryStart through the runner", () => {
       )
       yield* h.prompt("zebra deploys")
 
-      const block = [
-        opening,
-        "What memory holds nearest to this prompt; it may not be about it:",
-        // Equal scores: the nearer scope first.
-        `- [${own.id}] Zebra deploys use the train. (words of floris, noted as build; role build; ${day(own)})`,
-        `- [${global.id}] Zebra deploys run at noon. (verified by floris as build; global; ${day(global)}; basis: cron)`,
-        `Memory holds 1 global entry and 1 of role build; recall finds them.`,
-        keep,
-      ].join("\n")
+      // CPP's block, as its answer gives it: the chat's role's entries and the global ones, the nearer scope first.
+      const block = fakeBlock("build", [own, global])
       expect(userTexts(h.requests()[0])).toEqual(["zebra deploys", sent(block)])
       expect(yield* h.blocks()).toEqual([block])
       expect(yield* h.lines()).toEqual(["Memory nearest to the prompt"])
       for (const id of [otherRole.id, otherProject.id]) expect(block).not.toContain(id)
+      // Who asks is the headers'; the body names what the agent may use.
       expect(h.starts().map((call) => call.body)).toEqual([
-        {
-          prompt: "zebra deploys",
-          scopes: { global: true, roles: ["build"] },
-          limit: 5,
-          by: { role: "build", chat: h.sessionID },
-          task: null,
-          subtask: null,
-        },
+        { prompt: "zebra deploys", limit: 5, tools: { recall: true, remember: true, task: true } },
       ])
+      expect(h.starts()[0]?.pacer).toMatchObject({ "x-pacer-agent": "build", "x-pacer-chat": h.sessionID })
+      // And the chat's tools are CPP's, from the chat's list.
+      expect(names(h.requests()[0])).toEqual(all)
     }),
   )
 
@@ -542,9 +507,7 @@ describe("MemoryStart through the runner", () => {
 
       const empty = yield* setup()
       yield* empty.prompt("nothing is stored here")
-      expect(userTexts(empty.requests()[0])[1]).toBe(
-        sent([opening, "Memory holds 0 global entries and 0 of role build; recall finds them.", keep].join("\n")),
-      )
+      expect(userTexts(empty.requests()[0])[1]).toBe(sent(fakeBlock("build", [])))
       expect(yield* empty.lines()).toEqual(["Memory"])
     }),
   )
@@ -562,7 +525,7 @@ describe("MemoryStart through the runner", () => {
       const requests = h.requests()
       expect(requests).toHaveLength(3)
       const blocks = requests.map((request) =>
-        userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:")),
+        userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory (fake)")),
       )
       expect(blocks[0]).toHaveLength(1)
       expect(blocks[1]).toEqual(blocks[0])
@@ -598,7 +561,7 @@ describe("MemoryStart through the runner", () => {
       expect(blocks[0]).toContain(zebra.id)
       expect(blocks[1]).toContain(quokka.id)
       const last = userTexts(h.requests().at(-1))
-      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual(blocks.slice(1, 2).map(sent))
+      expect(last.filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual(blocks.slice(1, 2).map(sent))
     }),
   )
 
@@ -643,8 +606,8 @@ describe("MemoryStart through the runner", () => {
       yield* h.revert(first!)
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* h.prompt("walrus lint?")
-      expect(yield* h.blocks()).toEqual([MemoryText.unavailable])
-      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(sent(MemoryText.unavailable))
+      expect(yield* h.blocks()).toEqual([unavailable])
+      expect(userTexts(h.requests().at(-1)).at(-1)).toBe(sent(unavailable))
     }),
   )
 
@@ -654,8 +617,8 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () =>
         Response.json({ error: { type: "unavailable", message: "store not open" } }, { status: 503 })
       yield* h.prompt("zebra?")
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
-      expect(MemoryText.unavailable).toBe("Memory is unavailable right now, so this chat starts without it.")
+      // CPP's line for memory out of reach, as its texts last said.
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(unavailable)])
 
       const k = yield* setup()
       yield* k.write({ kind: "verified", text: "Zebra deploys run at noon.", basis: "cron", scope: "global" })
@@ -668,7 +631,7 @@ describe("MemoryStart through the runner", () => {
       server.control.answer = () => new Response("bad gateway", { status: 502 })
       yield* k.prompt("quokka?")
       expect(yield* k.blocks()).toEqual([first, first])
-      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([
+      expect(userTexts(k.requests().at(-1)).filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual([
         sent(first ?? ""),
       ])
     }),
@@ -677,14 +640,16 @@ describe("MemoryStart through the runner", () => {
   it.effect("waits at most 2 seconds for the server, then the chat goes on with the one line", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      // Released however the test ends, so a failure here holds up no other test of the file's one server.
-      yield* Effect.acquireRelease(Effect.sync(server.hold), (release) => Effect.sync(release))
+      // Only the start hangs; released however the test ends, so no other test of the file's one server waits on it.
+      const hung = Promise.withResolvers<Response>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
+      server.control.answer = (request) => (request.path.endsWith("/start") ? hung.promise : server.pass(request))
       const run = yield* h.prompt("zebra?").pipe(Effect.forkChild({ startImmediately: true }))
       yield* until("the start request arrived", () => h.starts().length === 1)
       expect(h.requests()).toHaveLength(0)
       yield* TestClock.adjust("2 seconds")
       yield* Fiber.join(run)
-      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
+      expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(unavailable)])
     }),
   )
 
@@ -720,9 +685,8 @@ describe("MemoryStart through the runner", () => {
         pacer.catalog = today()
         yield* gate.release
         yield* Fiber.join(run)
-        // Whether the server has tasks is known only once its catalog is read: till the next compaction, none.
-        const expected = known ? ["echo", "forget", "recall", "remember"] : ["echo"]
-        for (const request of h.requests()) expect(names(request)).toEqual(expected)
+        // The tools are the chat's list's, read whatever the catalog; the block goes as the server was last known.
+        for (const request of h.requests()) expect(names(request)).toEqual(all)
         expect(h.requests().map((request) => blocksIn(request).length)).toEqual(known ? [1, 1] : [0, 0])
       }
       yield* kv.remove(key)
@@ -741,15 +705,16 @@ describe("MemoryStart through the runner", () => {
       const block = unsent(userTexts(h.requests()[0])[1])
       expect(block).toContain(own.id)
       expect(block).not.toContain(lead.id)
-      expect(block).toEndWith(`Memory holds 0 global entries and 1 of role explore; recall finds them.\n${keep}`)
-      expect(h.starts()[0]?.body).toMatchObject({
-        scopes: { global: true, roles: ["explore"] },
-        by: { role: "explore", chat: h.sessionID },
+      expect(block).toStartWith("Memory (fake) for explore:")
+      expect(h.starts()[0]?.pacer).toMatchObject({
+        "x-pacer-agent": "explore",
+        "x-pacer-chat": h.sessionID,
+        "x-pacer-parent-session": PacerSessionID.make(h.lead),
       })
     }),
   )
 
-  it.live("names recall only in a chat that has the tool", () =>
+  it.live("tells CPP the chat has no recall when its agent may not use it", () =>
     Effect.gen(function* () {
       const h = yield* setup({ child: true, agent: "reader" })
       const own = yield* h.write(
@@ -759,21 +724,11 @@ describe("MemoryStart through the runner", () => {
       yield* h.prompt("where are the zebra files?")
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).not.toContain("recall")
-      expect(userTexts(request)[1]).toBe(
-        sent(
-          [
-            opening,
-            "What memory holds nearest to this prompt; it may not be about it:",
-            `- [${own.id}] Zebra files live in src. (unverified by floris as reader; role reader; ${day(own)}; basis: ls)`,
-            "Memory holds 0 global entries and 1 of role reader.",
-            keep,
-          ].join("\n"),
-        ),
-      )
+      expect(userTexts(request)[1]).toBe(sent(fakeBlock("reader", [own], { recall: false, remember: true, task: true })))
     }),
   )
 
-  it.live("says that memory is the chat's to keep true only in a chat that can save", () =>
+  it.live("tells CPP the chat cannot save when its agent may not remember", () =>
     Effect.gen(function* () {
       const h = yield* setup({ child: true, agent: "viewer" })
       const own = yield* h.write(
@@ -784,25 +739,12 @@ describe("MemoryStart through the runner", () => {
       const request = h.requests()[0]
       expect(request?.tools.map((tool) => tool.name)).toContain("recall")
       expect(request?.tools.map((tool) => tool.name)).not.toContain("remember")
-      expect(userTexts(request)[1]).toBe(
-        sent(
-          [
-            opening,
-            "What memory holds nearest to this prompt; it may not be about it:",
-            `- [${own.id}] Zebra files live in src. (unverified by floris as viewer; role viewer; ${day(own)}; basis: ls)`,
-            `Memory holds 0 global entries and 1 of role viewer; recall finds them.`,
-          ].join("\n"),
-        ),
-      )
+      expect(userTexts(request)[1]).toBe(sent(fakeBlock("viewer", [own], { recall: true, remember: false, task: true })))
     }),
   )
 })
 
 describe("MemoryStart while the server's memory comes and goes", () => {
-  const withTasks = (tasks: boolean) => {
-    const catalog = today()
-    return { ...catalog, pacer: { ...catalog.pacer!, memory: { ...catalog.pacer!.memory!, tasks } } }
-  }
   const compact = (h: Effect.Success<ReturnType<typeof setup>>) =>
     Effect.gen(function* () {
       yield* h.llm.push(TestLLM.text("## Objective\n- summary", "summary"))
@@ -872,40 +814,14 @@ describe("MemoryStart while the server's memory comes and goes", () => {
         expect(JSON.stringify(request.tools)).toBe(JSON.stringify(first?.tools))
         expect(blocksIn(request)).toEqual(block)
       }
-      // The call answers that memory is unavailable, and nothing reaches the server.
-      expect(JSON.stringify(h.requests().at(-1)?.messages)).toContain(
-        "Memory is unavailable right now, so the work goes on without it.",
-      )
-      expect(server.calls().filter((call) => call.path.endsWith("/search"))).toEqual([])
+      // The call is CPP's to answer, as every call of a tool the chat still has.
+      expect(server.received.filter((call) => call.path === "/pacer/v1/tools/recall")).toHaveLength(1)
 
       const k = yield* setup()
       pacer.catalog = catalogOf(false)
       yield* k.prompt("zebra?")
       expect(names(k.requests()[0])).toEqual(["echo"])
       expect(blocksIn(k.requests()[0])).toEqual([])
-    }),
-  )
-
-  it.live("tasks coming or going change no running chat's tools; a new chat gets task as the server says", () =>
-    Effect.gen(function* () {
-      for (const [from, to] of [
-        [false, true],
-        [true, false],
-      ]) {
-        const h = yield* setup()
-        pacer.catalog = withTasks(from)
-        yield* h.prompt("zebra?")
-        const first = h.requests()[0]
-        expect(names(first).includes("task")).toBe(from)
-        pacer.catalog = withTasks(to)
-        yield* h.prompt("and on fridays?")
-        expect(JSON.stringify(h.requests().at(-1)?.tools)).toBe(JSON.stringify(first?.tools))
-
-        const k = yield* setup()
-        pacer.catalog = withTasks(to)
-        yield* k.prompt("zebra?")
-        expect(names(k.requests()[0]).includes("task")).toBe(to)
-      }
     }),
   )
 
@@ -956,6 +872,8 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
           "x-pacer-project": h.project,
           "x-pacer-project-name": "project",
           "x-pacer-session": PacerSessionID.make(h.sessionID),
+          "x-pacer-agent": "build",
+          "x-pacer-chat": h.sessionID,
         },
       ])
     }),
@@ -1024,323 +942,18 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
     }),
   )
 
-  it.live("a 500, or memory off for the whole server, gives the unavailable block as before", () =>
+  it.live("a 500, or memory off for the whole server, gives CPP's unavailable block; the tools stay the list's", () =>
     Effect.gen(function* () {
       for (const answer of [
         () => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }),
         () => Response.json({ error: { type: "not_found", message: "memory is off" } }, { status: 404 }),
       ]) {
         const h = yield* setup()
-        server.control.answer = answer
+        server.control.answer = (request) => (request.path.endsWith("/start") ? answer() : server.pass(request))
         yield* h.prompt("zebra?")
-        expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(MemoryText.unavailable)])
+        expect(userTexts(h.requests()[0])).toEqual(["zebra?", sent(unavailable)])
         expect(names(h.requests()[0])).toEqual(["echo", "forget", "recall", "remember", "task"])
       }
-    }),
-  )
-})
-
-describe("MemoryStart inside a task", () => {
-  const memoryOf = Effect.provide(MemoryClient.Service, client)
-  const make = (project: string, title: string, description?: string, parent?: string) =>
-    memoryOf.pipe(
-      Effect.flatMap((memory) =>
-        memory.make(project, {
-          title,
-          ...(description === undefined ? {} : { description }),
-          ...(parent ? { parent } : {}),
-          by: by("build"),
-        }),
-      ),
-      Effect.map((made) => made.task),
-      Effect.orDie,
-    )
-  const ids: { task: string; subtask: string } = { task: "", subtask: "" }
-  /** A change of the task's state, said by a child. */
-  const set = (project: string, id: string, state: MemoryClient.State, note?: string) =>
-    memoryOf.pipe(
-      Effect.flatMap((memory) =>
-        memory.change(project, id, {
-          state,
-          ...(note === undefined ? {} : { note }),
-          by: { role: "general", chat: "ses_child" },
-        }),
-      ),
-      Effect.map((changed) => new Date(changed.changed).toISOString().slice(0, 10)),
-      Effect.orDie,
-    )
-  /** An entry noted in the task. */
-  const note = (project: string, text: string) =>
-    memoryOf.pipe(
-      Effect.flatMap((memory) =>
-        memory.write(project, {
-          kind: "verified",
-          text,
-          basis: "b",
-          scope: "task",
-          by: { ...by("build"), task: ids.task },
-        }),
-      ),
-      Effect.map((written) => written.entry),
-      Effect.orDie,
-    )
-
-  it.live(
-    "begins with the task and its description; what was said and noted in it and the nearest entries come under the opening",
-    () =>
-      Effect.gen(function* () {
-        const h = yield* setup({
-          inside: (project) =>
-            make(project, "Move the checks", "One script.\nDone when it passes.").pipe(
-              Effect.map((task) => {
-                ids.task = task.id
-                return { task: task.id }
-              }),
-            ),
-        })
-        const noted = yield* note(h.project, "The script is scripts/check.ts.")
-        const found = yield* set(h.project, ids.task, "review", "Run bun run gen first, then bun test.")
-        // A later change without a note: what was said with the first stays.
-        yield* set(h.project, ids.task, "active")
-        const global = yield* h.write({
-          kind: "verified",
-          text: "Zebra deploys run at noon.",
-          basis: "cron",
-          scope: "global",
-        })
-        yield* h.prompt("zebra deploys")
-        expect(userTexts(h.requests()[0])[1]).toBe(
-          sent(
-            [
-              `Your task [${ids.task}]: Move the checks (active)`,
-              "One script.",
-              "Done when it passes.",
-              states,
-              opening,
-              "Said with the task's changes of state, newest first:",
-              `- ${found} review by floris as general: Run bun run gen first, then bun test.`,
-              "What was noted in the task, newest first:",
-              MemoryText.entry(noted),
-              "What memory holds nearest to this prompt; it may not be about it:",
-              MemoryText.entry(global),
-              `Memory holds 1 global entry and 0 of role build, 1 of this task; recall finds them.`,
-              keep,
-            ].join("\n"),
-          ),
-        )
-        expect(h.starts()[0]?.body).toMatchObject({
-          scopes: { global: true, roles: ["build"], tasks: [ids.task] },
-          task: ids.task,
-          subtask: null,
-          by: { role: "build", chat: h.sessionID, task: ids.task },
-        })
-      }),
-  )
-
-  it.live("with nothing noted in the task, the notes are left out with their heading", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({
-        inside: (project) =>
-          make(project, "Move the checks", "One script.").pipe(
-            Effect.map((task) => {
-              ids.task = task.id
-              return { task: task.id }
-            }),
-          ),
-      })
-      const global = yield* h.write({
-        kind: "verified",
-        text: "Zebra deploys run at noon.",
-        basis: "cron",
-        scope: "global",
-      })
-      yield* h.prompt("zebra deploys")
-      expect(userTexts(h.requests()[0])[1]).toBe(
-        sent(
-          [
-            `Your task [${ids.task}]: Move the checks (todo)`,
-            "One script.",
-            states,
-            opening,
-            "What memory holds nearest to this prompt; it may not be about it:",
-            MemoryText.entry(global),
-            `Memory holds 1 global entry and 0 of role build, 0 of this task; recall finds them.`,
-            keep,
-          ].join("\n"),
-        ),
-      )
-    }),
-  )
-
-  it.live("inside a subtask begins with the subtask and the task it is part of", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({
-        child: true,
-        agent: "explore",
-        inside: (project) =>
-          make(project, "Move the checks", "One script.").pipe(
-            Effect.flatMap((task) => make(project, "The first half", "Only the lint part.", task.id)),
-            Effect.map((sub) => {
-              ids.task = sub.parent!
-              ids.subtask = sub.id
-              return { task: sub.parent!, subtask: sub.id }
-            }),
-          ),
-      })
-      yield* h.prompt("go on")
-      expect(userTexts(h.requests()[0])[1]).toBe(
-        sent(
-          [
-            `Your task [${ids.subtask}]: The first half (todo)`,
-            `Part of task [${ids.task}]: Move the checks.`,
-            "Only the lint part.",
-            states,
-            opening,
-            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-            keep,
-          ].join("\n"),
-        ),
-      )
-      expect(h.starts()[0]?.body).toMatchObject({ task: ids.task, subtask: ids.subtask })
-    }),
-  )
-
-  it.live("inside a subtask what was said with the subtask's changes comes before the task's", () =>
-    Effect.gen(function* () {
-      const said: string[] = []
-      const h = yield* setup({
-        child: true,
-        agent: "explore",
-        inside: (project) =>
-          make(project, "Move the checks", "One script.").pipe(
-            Effect.flatMap((task) => make(project, "The first half", "Only the lint part.", task.id)),
-            Effect.tap((sub) =>
-              Effect.gen(function* () {
-                said.push(`- ${yield* set(project, sub.parent!, "blocked", "The old script is gone.")} blocked`)
-                said.push(`- ${yield* set(project, sub.parent!, "active")}`)
-                said.push(`- ${yield* set(project, sub.id, "review", "Lint runs from scripts/lint.ts.")} review`)
-              }),
-            ),
-            Effect.map((sub) => {
-              ids.task = sub.parent!
-              ids.subtask = sub.id
-              return { task: sub.parent!, subtask: sub.id }
-            }),
-          ),
-      })
-      yield* h.prompt("go on")
-      expect(userTexts(h.requests()[0])[1]).toBe(
-        sent(
-          [
-            `Your task [${ids.subtask}]: The first half (review)`,
-            `Part of task [${ids.task}]: Move the checks.`,
-            "Only the lint part.",
-            states,
-            opening,
-            "Said with the task's changes of state, newest first:",
-            `${said[2]} by floris as general: Lint runs from scripts/lint.ts.`,
-            `${said[0]} by floris as general: The old script is gone.`,
-            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-            keep,
-          ].join("\n"),
-        ),
-      )
-    }),
-  )
-
-  it.live("inside a subtask without a description the line on the state follows the task it is part of", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({
-        child: true,
-        agent: "explore",
-        inside: (project) =>
-          make(project, "Move the checks").pipe(
-            Effect.flatMap((task) => make(project, "The first half", undefined, task.id)),
-            Effect.map((sub) => {
-              ids.task = sub.parent!
-              ids.subtask = sub.id
-              return { task: sub.parent!, subtask: sub.id }
-            }),
-          ),
-      })
-      yield* h.prompt("go on")
-      expect(userTexts(h.requests()[0])[1]).toBe(
-        sent(
-          [
-            `Your task [${ids.subtask}]: The first half (todo)`,
-            `Part of task [${ids.task}]: Move the checks.`,
-            states,
-            opening,
-            "Memory holds 0 global entries and 0 of role explore, 0 of this task; recall finds them.",
-            keep,
-          ].join("\n"),
-        ),
-      )
-    }),
-  )
-
-  it.live("a chat without the task tool gets no line on the task's state", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({
-        child: true,
-        agent: "untasked",
-        inside: (project) =>
-          make(project, "Move the checks", "One script.").pipe(
-            Effect.map((task) => {
-              ids.task = task.id
-              return { task: task.id }
-            }),
-          ),
-      })
-      yield* h.prompt("go on")
-      const request = h.requests()[0]
-      expect(request?.tools.map((tool) => tool.name)).not.toContain("task")
-      expect(userTexts(request)[1]).toBe(
-        sent(
-          [
-            `Your task [${ids.task}]: Move the checks (todo)`,
-            "One script.",
-            opening,
-            "Memory holds 0 global entries and 0 of role untasked, 0 of this task; recall finds them.",
-            keep,
-          ].join("\n"),
-        ),
-      )
-    }),
-  )
-
-  it.live("keeps the task part within 4,000 characters: the oldest entries go first, then the description's end", () =>
-    Effect.gen(function* () {
-      const long = "d".repeat(1_000)
-      const h = yield* setup({
-        inside: (project) =>
-          make(project, "Long task", long).pipe(
-            Effect.map((task) => {
-              ids.task = task.id
-              return { task: task.id }
-            }),
-          ),
-      })
-      const written: MemoryClient.Entry[] = []
-      for (const n of Array.from({ length: 12 }, (_, index) => index))
-        written.push(yield* note(h.project, `Entry ${n} ${"e".repeat(300)}.`))
-      yield* h.prompt("go on")
-      const block = unsent(userTexts(h.requests()[0])[1])
-      // The assignment above the opening and the notes under it are bounded together.
-      const assignment = block.slice(0, block.indexOf(`\n${opening}\n`))
-      const notes = block.slice(block.indexOf(`${opening}\n`) + opening.length + 1, block.indexOf("\nMemory holds "))
-      // The line on the task's state is kept and counts.
-      expect(assignment).toBe(`Your task [${ids.task}]: Long task (todo)\n${long}\n${states}`)
-      expect(notes).toStartWith("What was noted in the task, newest first:\n")
-      const part = `${assignment}\n${notes}`
-      expect([...part].length).toBeLessThanOrEqual(MemoryText.TASK_CHARACTERS)
-      expect([...part].length).toBeGreaterThan(MemoryText.TASK_CHARACTERS - 400)
-      // The newest entries are there, the oldest are not.
-      const kept = written.filter((entry) => part.includes(entry.id))
-      expect(kept.length).toBeGreaterThan(0)
-      expect(kept.length).toBeLessThan(written.length)
-      expect(kept).toEqual(written.slice(written.length - kept.length))
-      expect(part).toContain(long)
     }),
   )
 })
@@ -1352,7 +965,8 @@ describe("MemoryPrompt through the runner", () => {
   afterAll(() => prompted.stop().then(() => embedding.stop()))
   const near = (input: Parameters<typeof setup>[0] = {}) =>
     setup({ ...input, served: prompted, catalog: catalogOf(true, { plans: false }) })
-  const line = "Memory holds these entries close to this prompt; they may be wrong or out of date:"
+  const line = "Memory close to the prompt (fake):"
+  const entry = (item: { readonly id: string; readonly text: string }) => `- [${item.id}] ${item.text}`
   /** The user-role texts of a request as a provider gets them, roles and texts only, up to and with `prompt`. */
   const upTo = (request: LLMRequest | undefined, prompt: string) => {
     const messages = (request?.messages ?? []).map((message) => ({ role: message.role, content: message.content }))
@@ -1375,11 +989,9 @@ describe("MemoryPrompt through the runner", () => {
       yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "one" }), TestLLM.text("done", "text-done"))
       yield* h.prompt("how do we release")
 
-      const block = [opening, "Memory holds 2 global entries and 0 of role build; recall finds them.", keep].join("\n")
-      const message = [line, MemoryText.entry(close)].join("\n")
-      expect(message).toBe(
-        `${line}\n- [${close.id}] Releases ship through the train. (verified by floris as build; global; ${day(close)}; basis: b)`,
-      )
+      const block = fakeBlock("build", [])
+      // CPP's message of the close entries, as its answer gives it.
+      const message = [line, entry(close)].join("\n")
       const requests = h.requests()
       expect(requests).toHaveLength(2)
       // The step that answers no new prompt sends the same, and asks nothing.
@@ -1387,19 +999,15 @@ describe("MemoryPrompt through the runner", () => {
         expect(userTexts(request)).toEqual(["how do we release", sent(block), sent(message)])
       expect((h.starts()[0]?.body as { limit: number }).limit).toBe(0)
       expect(yield* h.lines()).toEqual(["Memory"])
-      expect(h.prompts().map((call) => call.body)).toEqual([
-        {
-          prompt: "how do we release",
-          scopes: { global: true, roles: ["build"] },
-          exclude: [],
-          by: { role: "build", chat: h.sessionID },
-        },
-      ])
+      // Who asks is the headers'.
+      expect(h.prompts().map((call) => call.body)).toEqual([{ prompt: "how do we release", exclude: [] }])
       expect(h.prompts().map((call) => call.pacer)).toEqual([
         {
           "x-pacer-project": h.project,
           "x-pacer-project-name": "project",
           "x-pacer-session": PacerSessionID.make(h.sessionID),
+          "x-pacer-agent": "build",
+          "x-pacer-chat": h.sessionID,
         },
       ])
       // Recorded by its message: no row of its own.
@@ -1433,8 +1041,8 @@ describe("MemoryPrompt through the runner", () => {
       ])
       const last = userTexts(h.requests().at(-1))
       expect(last.filter((text) => text.startsWith(`<system-reminder>\n${line}`))).toEqual([
-        sent([line, MemoryText.entry(first)].join("\n")),
-        sent([line, MemoryText.entry(second)].join("\n")),
+        sent([line, entry(first)].join("\n")),
+        sent([line, entry(second)].join("\n")),
       ])
       // Nothing after the prompt no entry was close to: the next text is the prompt after it.
       expect(last[last.indexOf("zebra lint") + 1]).toBe("and the release tag?")
@@ -1453,12 +1061,8 @@ describe("MemoryPrompt through the runner", () => {
         if (!answer)
           prompted.control.answer = (request) =>
             request.path.endsWith("/prompt")
-              ? Response.json({ recall: null, entries: [], meaning: true })
-              : fetch(`${prompted.store.url}${request.path}`, {
-                  method: request.method,
-                  headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-                  ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-                })
+              ? Response.json({ recall: null, entries: [], meaning: true, text: null })
+              : prompted.pass(request)
         yield* h.prompt("how do we release")
         prompted.control.answer = undefined
         const request = h.requests().at(-1)
@@ -1492,12 +1096,8 @@ describe("MemoryPrompt through the runner", () => {
       const h = yield* near()
       yield* h.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
       yield* h.prompt("zebra lint")
-      const forward = (request: { method: string; path: string; body: unknown }) =>
-        fetch(`${prompted.store.url}${request.path}`, {
-          method: request.method,
-          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        })
+      const forward = (request: Received) =>
+        prompted.pass(request)
       const hung = Promise.withResolvers<Response>()
       yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
       prompted.control.answer = (request) => (request.path.endsWith("/prompt") ? hung.promise : forward(request))
@@ -1565,7 +1165,7 @@ describe("MemoryPrompt through the runner", () => {
       yield* old.write({ kind: "verified", text: "Releases ship through the train.", basis: "b", scope: "global" })
       yield* old.prompt("how do we release")
       expect(old.prompts()).toEqual([])
-      expect(userTexts(old.requests()[0])[1]).toContain("What memory holds nearest to this prompt")
+      expect(userTexts(old.requests()[0])[1]).toContain("Releases ship through the train.")
       expect((old.starts()[0]?.body as { limit: number }).limit).toBe(5)
 
       const closed = yield* near()
@@ -1590,10 +1190,9 @@ describe("MemoryStart after a compaction: the summary", () => {
   afterAll(() => summarized.stop().then(() => embedding.stop()))
   const near = (input: Parameters<typeof setup>[0] = {}) =>
     setup({ served: summarized, catalog: catalogOf(true, { plans: false }), ...input })
-  const line = "Memory holds these entries close to this chat's summary:"
+  /** What the block holds after a compaction: CPP's text of the entries close to the summary. */
+  const closeTo = (entries: ReadonlyArray<{ readonly id: string; readonly text: string }>) => fakeBlock("build", entries)
   const summary = "Before any heading.\n\n## Objective\nShip it soon.\n\n## Empty\n\n## Next\n- zebra lint"
-  const counts = (global: number) =>
-    `Memory holds ${global} global ${global === 1 ? "entry" : "entries"} and 0 of role build; recall finds them.`
   type Started = { prompt: string; limit: number; summary?: string[]; exclude?: string[] }
   const bodies = (h: Effect.Success<ReturnType<typeof setup>>) => h.starts().map((call) => call.body as Started)
   /** A chat that had a first prompt and a compaction with `summary`, and the entry close to it. */
@@ -1630,14 +1229,14 @@ describe("MemoryStart after a compaction: the summary", () => {
       })
       const blocks = yield* h.blocks()
       expect(blocks).toHaveLength(2)
-      expect(blocks[0]).not.toContain(line)
-      expect(blocks[1]).toBe([opening, line, MemoryText.entry(close), counts(1), keep].join("\n"))
+      expect(blocks[0]).toBe(fakeBlock("build", []))
+      expect(blocks[1]).toBe(closeTo([close]))
       expect(yield* h.lines()).toEqual(["Memory", "Memory close to the summary"])
       // Every step after the compaction sends the block as it was built.
       const after = h.requests().filter((request) => userTexts(request).includes(sent(blocks[1]!)))
       expect(after.length).toBeGreaterThanOrEqual(2)
       for (const request of after)
-        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory:"))).toEqual([
+        expect(userTexts(request).filter((text) => text.startsWith("<system-reminder>\nMemory (fake)"))).toEqual([
           sent(blocks[1]!),
         ])
       // Its entries are in view: a later prompt leaves them out.
@@ -1669,7 +1268,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* h.session.resume(h.sessionID)
       yield* h.prompt("what now?")
       expect(bodies(h)[1]?.summary).toEqual(["## Objective\nPaint the shed."])
-      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.blocks())[1]).toBe(closeTo([]))
       expect((yield* h.lines())[1]).toBe("Memory · nothing close to the summary")
     }),
   )
@@ -1685,7 +1284,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* h.session.resume(h.sessionID)
       yield* h.prompt("what now?")
       // The model gets the block as when nothing is close: only the line in the chat's view tells them apart.
-      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.blocks())[1]).toBe(closeTo([]))
       expect((yield* h.lines())[1]).toBe("Memory · the summary already says the 1 entry close to it")
       expect(bodies(h)[1]?.summary).toBeDefined()
       const recall = yield* h.blockRecall()
@@ -1704,11 +1303,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* h.write({ kind: "verified", text: "Ship it soon.", basis: "b", scope: "global" })
       // As CLIProxyPacer before it answered `said`.
       summarized.control.answer = (request) =>
-        fetch(`${summarized.store.url}${request.path}`, {
-          method: request.method,
-          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        }).then(async (response) => {
+        summarized.pass(request).then(async (response) => {
           if (!request.path.endsWith("/start")) return response
           const { said: _, ...rest } = (await response.json()) as Record<string, unknown>
           return Response.json(rest, { status: response.status })
@@ -1746,18 +1341,14 @@ describe("MemoryStart after a compaction: the summary", () => {
       )?.metadata?.keepID
       expect(kept).toBeDefined()
       expect(bodies(h)[1]?.exclude).toEqual([close.id])
-      expect((yield* h.blocks())[1]).not.toContain(line)
+      expect((yield* h.blocks())[1]).toBe(closeTo([]))
     }),
   )
 
   it.effect("waits at most 5 seconds for the summary; a timeout or an error give the block without the line", () =>
     Effect.gen(function* () {
-      const forward = (request: { method: string; path: string; body: unknown }) =>
-        fetch(`${summarized.store.url}${request.path}`, {
-          method: request.method,
-          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        })
+      const forward = (request: Received) =>
+        summarized.pass(request)
       const withSummary = (request: { path: string; body: unknown }) =>
         request.path.endsWith("/start") && (request.body as Started).summary !== undefined
       const { h } = yield* compacted()
@@ -1772,7 +1363,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* Fiber.join(run)
       // Asked again without the summary: the block as without one.
       expect(bodies(h).map((body) => body.summary !== undefined)).toEqual([false, true, false])
-      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.blocks())[1]).toBe(closeTo([]))
       expect((yield* h.lines())[1]).toBe("Memory")
 
       const { h: k } = yield* compacted()
@@ -1783,7 +1374,7 @@ describe("MemoryStart after a compaction: the summary", () => {
       yield* k.prompt("what now?")
       summarized.control.answer = undefined
       expect(bodies(k).map((body) => body.summary !== undefined)).toEqual([false, true, false])
-      expect((yield* k.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* k.blocks())[1]).toBe(closeTo([]))
     }),
   )
 
@@ -1795,7 +1386,7 @@ describe("MemoryStart after a compaction: the summary", () => {
         [0, undefined, undefined],
         [0, undefined, undefined],
       ])
-      expect((yield* h.blocks())[1]).toBe([opening, counts(1), keep].join("\n"))
+      expect((yield* h.blocks())[1]).toBe(closeTo([]))
     }),
   )
 
@@ -1840,9 +1431,6 @@ const step = (text: string, ...calls: ReadonlyArray<readonly [string, Record<str
     ...calls.map(([name, input], index) => LLMEvent.toolCall({ id: `call-${name}-${index}`, name, input })),
   )
 const json = (value: unknown) => JSON.stringify(value)
-// Built here rather than written out, so no secret scanner reads this file as holding one.
-const fill = (length: number) => "Q7x".repeat(length).slice(0, length)
-
 describe("MemoryFollowed through the runner", () => {
   it.live("names the chat to CPP on the start call and what followed, a subagent's with its lead's", () =>
     Effect.gen(function* () {
@@ -1861,11 +1449,14 @@ describe("MemoryFollowed through the runner", () => {
       yield* lead.llm.push(TestLLM.text("Ok.", "ok"))
       yield* lead.prompt("The other one.")
       yield* eventually("the person's message was added", () => lead.afters(block).length === 2)
-      expect([...lead.starts(), ...lead.afters()].map((call) => call.pacer)).toEqual([
-        as(lead.sessionID),
-        as(lead.sessionID),
-        as(lead.sessionID),
-      ])
+      // The start names who asks too; what followed carries it in its body, as the memory API takes it.
+      const asking = (sessionID: Session.ID, agent: string, parentID?: Session.ID) => ({
+        ...as(sessionID, parentID),
+        "x-pacer-agent": agent,
+        "x-pacer-chat": sessionID,
+      })
+      expect(lead.starts().map((call) => call.pacer)).toEqual([asking(lead.sessionID, "build")])
+      expect(lead.afters().map((call) => call.pacer)).toEqual([as(lead.sessionID), as(lead.sessionID)])
       // `by.chat` stays the session's own ID.
       expect(lead.afters().map((call) => (call.body as { by: { chat: string } }).by.chat)).toEqual([
         lead.sessionID,
@@ -1878,10 +1469,8 @@ describe("MemoryFollowed through the runner", () => {
       yield* child.prompt("where are the zebra files?")
       const its = yield* child.blockRecall()
       yield* eventually("the subagent's step was added", () => child.afters(its).length === 1)
-      expect([...child.starts(), ...child.afters()].map((call) => call.pacer)).toEqual([
-        as(child.sessionID, child.lead),
-        as(child.sessionID, child.lead),
-      ])
+      expect(child.starts().map((call) => call.pacer)).toEqual([asking(child.sessionID, "explore", child.lead)])
+      expect(child.afters().map((call) => call.pacer)).toEqual([as(child.sessionID, child.lead)])
     }),
   )
 
@@ -2006,23 +1595,6 @@ describe("MemoryFollowed through the runner", () => {
       }),
   )
 
-  it.live("takes secrets out of both texts, each as [secret]", () =>
-    Effect.gen(function* () {
-      const h = yield* setup()
-      const key = ["sk", "ant", "api03", fill(24)].join("-")
-      const token = ["ghp", fill(30)].join("_")
-      yield* h.llm.push(TestLLM.text(`The key is ${key}, keep it.`, "key"))
-      yield* h.prompt("zebra?")
-      const block = yield* h.blockRecall()
-      yield* eventually("the block's row was added to", () => h.afters(block).length === 1)
-      expect((h.afters(block)[0]?.body as { step: string }).step).toBe("The key is [secret], keep it.")
-      yield* h.llm.push(TestLLM.text("Ok.", "ok"))
-      yield* h.prompt(`Use ${token} instead`)
-      yield* eventually("the person's message was added", () => h.afters(block).length === 2)
-      expect((h.afters(block)[1]?.body as { person: string }).person).toBe("Use [secret] instead")
-    }),
-  )
-
   it.live("sends nothing while capabilities do not say recalls", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -2044,12 +1616,8 @@ describe("MemoryFollowed through the runner", () => {
   it.effect("a hanging or failing server never holds up a step: one try, dropped after 2 seconds", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      const forward = (request: { method: string; path: string; body: unknown }) =>
-        fetch(`${server.store.url}${request.path}`, {
-          method: request.method,
-          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-          ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        })
+      const forward = (request: Received) =>
+        server.pass(request)
       // Every row hangs; the rest goes through.
       const hung = Promise.withResolvers<Response>()
       yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
@@ -2076,277 +1644,6 @@ describe("MemoryFollowed through the runner", () => {
       yield* until("the person's message was tried", () => h.afters().length === 4)
       yield* settle
       expect(h.afters()).toHaveLength(4)
-    }),
-  )
-})
-
-describe("MemoryStart with task plans", () => {
-  const planned = () => catalogOf(true, { prompt: false, plans: true })
-  const memoryOf = Effect.provide(MemoryClient.Service, client)
-  const make = (project: string, title: string) =>
-    memoryOf.pipe(
-      Effect.flatMap((memory) => memory.make(project, { title, by: by("build") })),
-      Effect.map((made) => ({ task: made.task.id })),
-      Effect.orDie,
-    )
-  const hours = (count: number) => count * 3_600_000
-  /** A task as the project's list answers it on a server with plans; active, worked on by a lead. */
-  const listed = (id: string, ago: number, fields: Partial<MemoryClient.Task> = {}): MemoryClient.Task => ({
-    id,
-    parent: null,
-    title: `Task ${id}`,
-    description: "",
-    state: "active",
-    note: null,
-    by: { person: "floris", role: "build", chat: "ses_other_lead" },
-    worker: { person: "floris", role: "build", chat: "ses_other_lead" },
-    at: Date.now() - hours(100),
-    // A second more, as the block's time is taken just before the list is asked for.
-    changed: Date.now() - ago - 1_000,
-    worker_seen: Date.now() - ago - 1_000,
-    idle: false,
-    ...fields,
-  })
-  /** The small server, with the project's list as `list` answers it. */
-  const answering = (list: () => Response | Promise<Response>) => {
-    server.control.answer = (request) =>
-      request.method === "GET" && /\/pacer\/v1\/memory\/[^/]+\/tasks$/.test(request.path)
-        ? list()
-        : fetch(`${server.store.url}${request.path}`, {
-            method: request.method,
-            headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-          })
-  }
-  /** The list calls of the chat's project. */
-  const lists = (h: Effect.Success<ReturnType<typeof setup>>) =>
-    server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/tasks`)
-  const metadataOf = (h: Effect.Success<ReturnType<typeof setup>>) =>
-    h.session
-      .messages({ sessionID: h.sessionID, order: "asc" })
-      .pipe(
-        Effect.map((messages) =>
-          messages.flatMap((message) =>
-            message.type === "synthetic" && message.metadata?.memory !== undefined ? [message.metadata.memory] : [],
-          ),
-        ),
-      )
-  const counts = (role: string, task?: boolean) =>
-    `Memory holds 0 global entries and 0 of role ${role}${task ? ", 0 of this task" : ""}; recall finds them.`
-  const header = "Other active tasks of this project, the newest changed first:"
-  const idleHeader =
-    "Idle tasks of this project (idle: no model request from its chat for 24 hours; not work in progress; a lead may close it, its note naming the evidence):"
-
-  it.live(
-    "a lead's block lists the other leads' active tasks with their current subtask, the idle ones apart, and leaves its own out",
-    () =>
-      Effect.gen(function* () {
-        const own = { task: "" }
-        const h = yield* setup({
-          catalog: planned(),
-          inside: (project) =>
-            make(project, "Move the checks").pipe(
-              Effect.tap((made) =>
-                Effect.sync(() => {
-                  own.task = made.task
-                }),
-              ),
-            ),
-        })
-        answering(() =>
-          Response.json({
-            tasks: [
-              listed(own.task, hours(1)),
-              listed("other1", hours(5), { title: "memory.ts: plan on the task tool, its test, the API doc" }),
-              listed("sub1", hours(3), { parent: "other1", title: "its test" }),
-              listed("sub0", hours(4), { parent: "other1", title: "plan on the task tool", state: "done" }),
-              listed("other2", 20 * 60_000, {
-                title: "The Tasks page",
-                worker: { person: "anna", role: "plan", chat: "ses_anna" },
-              }),
-              listed("idle1", hours(30), { title: "Release 0.0.40", idle: true }),
-              listed("idle2", hours(80), { title: "Old docs", idle: true, worker_seen: null }),
-              listed("todo1", hours(2), { state: "todo", worker: null }),
-            ],
-            more: false,
-          }),
-        )
-        yield* h.prompt("go on")
-        const block = [
-          `Your task [${own.task}]: Move the checks (todo)`,
-          planStates,
-          opening,
-          counts("build", true),
-          keep,
-          header,
-          "- [other2] The Tasks page (anna as plan; changed 20 min ago)",
-          "- [other1] memory.ts: plan on the task tool, its test, the API doc (floris as build; now [sub1] its test; changed 3 h ago)",
-          idleHeader,
-          "- [idle1] Release 0.0.40 (floris as build; last model request 30 h ago)",
-          "- [idle2] Old docs (floris as build; changed 3 d ago)",
-        ].join("\n")
-        expect(userTexts(h.requests()[0])[1]).toBe(sent(block))
-        expect(lists(h).map((call) => call.pacer)).toEqual([
-          {
-            "x-pacer-project": h.project,
-            "x-pacer-project-name": "project",
-            "x-pacer-session": PacerSessionID.make(h.sessionID),
-          },
-        ])
-        expect(yield* metadataOf(h)).toMatchObject([{ tasks: true, plans: true }])
-      }),
-  )
-
-  it.live("lists at most 10 tasks a group, the newest changed first, and says how many more there are", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
-      const ids = Array.from({ length: 12 }, (_, index) => `t${index}`)
-      answering(() =>
-        Response.json({
-          tasks: [
-            ...ids.map((id, index) => listed(id, hours(index + 1))),
-            ...ids.map((id, index) => listed(`i${id}`, hours(30 + index), { idle: true })),
-          ],
-          more: false,
-        }),
-      )
-      yield* h.prompt("go on")
-      const lines = unsent(userTexts(h.requests()[0])[1]).split("\n")
-      const active = lines.slice(lines.indexOf(header) + 1, lines.indexOf(idleHeader))
-      expect(active).toEqual([
-        ...ids.slice(0, 10).map((id, index) => `- [${id}] Task ${id} (floris as build; changed ${index + 1} h ago)`),
-        "and 2 more: task() lists them.",
-      ])
-      expect(lines.slice(lines.indexOf(idleHeader) + 1)).toEqual([
-        ...ids
-          .slice(0, 10)
-          .map((id, index) => `- [i${id}] Task i${id} (floris as build; last model request ${30 + index} h ago)`),
-        "and 2 more: task() lists them.",
-      ])
-    }),
-  )
-
-  it.live("a chat in no task, a lead or a child, is told to make one first", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({ catalog: planned() })
-      yield* h.prompt("fix the typo")
-      expect(userTexts(h.requests()[0])[1]).toBe(
-        sent(
-          [
-            opening,
-            counts("build"),
-            keep,
-            "This chat is in no task: before changing anything, make one with the task tool, or set an existing one active.",
-          ].join("\n"),
-        ),
-      )
-      // An empty project lists nothing.
-      expect(lists(h)).toHaveLength(1)
-
-      const child = yield* setup({ catalog: planned(), child: true, agent: "explore" })
-      yield* child.prompt("fix the typo")
-      expect(userTexts(child.requests()[0])[1]).toBe(
-        sent(
-          [
-            opening,
-            counts("explore"),
-            keep,
-            "This chat is in no task: before changing anything, make one with the task tool, or set an existing one active.",
-          ].join("\n"),
-        ),
-      )
-      expect(yield* metadataOf(child)).toMatchObject([{ plans: true }])
-    }),
-  )
-
-  it.live("a child on a subtask its lead made is told to set it review; on the task itself, to plan its own", () =>
-    Effect.gen(function* () {
-      const subtaskOf = (project: string) =>
-        memoryOf.pipe(
-          Effect.flatMap((memory) =>
-            memory
-              .make(project, { title: "Move the checks", by: by("build") })
-              .pipe(
-                Effect.flatMap((made) =>
-                  memory.make(project, { title: "its test", parent: made.task.id, by: by("build") }),
-                ),
-              ),
-          ),
-          Effect.map((sub) => ({ task: sub.task.parent!, subtask: sub.task.id })),
-          Effect.orDie,
-        )
-      const given = yield* setup({ catalog: planned(), child: true, agent: "explore", inside: subtaskOf })
-      yield* given.prompt("go on")
-      const lines = unsent(userTexts(given.requests()[0])[1]).split("\n")
-      expect(lines).toContain(states)
-      expect(lines).not.toContain(planStates)
-
-      const own = yield* setup({
-        catalog: planned(),
-        child: true,
-        agent: "explore",
-        inside: (project) => make(project, "Move the checks"),
-      })
-      yield* own.prompt("go on")
-      expect(unsent(userTexts(own.requests()[0])[1]).split("\n")).toContain(planStates)
-    }),
-  )
-
-  it.live("a child's block inside a task holds none of these lines, and its project's list is not read", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({
-        catalog: planned(),
-        child: true,
-        agent: "explore",
-        inside: (project) => make(project, "Move the checks"),
-      })
-      answering(() => Response.json({ tasks: [listed("other1", hours(2))], more: false }))
-      yield* h.prompt("go on")
-      const block = unsent(userTexts(h.requests()[0])[1])
-      expect(block).toEndWith(`${counts("explore", true)}\n${keep}`)
-      expect(lists(h)).toEqual([])
-    }),
-  )
-
-  it.live("the block is as before on a server without plans, and for a chat without the task tool", () =>
-    Effect.gen(function* () {
-      const before = [opening, counts("build"), keep].join("\n")
-      const h = yield* setup()
-      yield* h.prompt("fix the typo")
-      expect(userTexts(h.requests()[0])[1]).toBe(sent(before))
-      expect(lists(h)).toEqual([])
-      const [memory] = yield* metadataOf(h)
-      expect(memory).not.toHaveProperty("plans")
-
-      const untasked = yield* setup({ catalog: planned(), child: true, agent: "untasked" })
-      yield* untasked.prompt("fix the typo")
-      expect(userTexts(untasked.requests()[0])[1]).toBe(sent([opening, counts("untasked"), keep].join("\n")))
-      expect(lists(untasked)).toEqual([])
-    }),
-  )
-
-  it.live("a list that fails leaves the lines out, and the block goes in", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
-      answering(() => Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 }))
-      yield* h.prompt("go on")
-      expect(lists(h)).toHaveLength(1)
-      expect(unsent(userTexts(h.requests()[0])[1])).toEndWith(`${counts("build", true)}\n${keep}`)
-      expect(yield* metadataOf(h)).toMatchObject([{ plans: true }])
-    }),
-  )
-
-  it.effect("waits at most 2 seconds for the list, beside the start call", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({ catalog: planned(), inside: (project) => make(project, "Move the checks") })
-      const hung = Promise.withResolvers<Response>()
-      yield* Effect.addFinalizer(() => Effect.sync(() => hung.resolve(new Response(null, { status: 503 }))))
-      answering(() => hung.promise)
-      const run = yield* h.prompt("go on").pipe(Effect.forkChild({ startImmediately: true }))
-      yield* until("the list was asked for", () => lists(h).length === 1 && h.starts().length === 1)
-      yield* TestClock.adjust("2 seconds")
-      yield* Fiber.join(run)
-      expect(unsent(userTexts(h.requests()[0])[1])).toEndWith(`${counts("build", true)}\n${keep}`)
     }),
   )
 })

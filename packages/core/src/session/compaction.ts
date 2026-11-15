@@ -503,7 +503,7 @@ export const layer = Layer.effect(
       const cold = trigger.reason === "cold" || header?.cold
       return {
         text,
-        ...(split.keepID ? { metadata: { keepID: split.keepID } } : {}),
+        ...(split.keepID ? { metadata: { keepID: split.keepID, ...split.metadata } } : {}),
         writer: {
           by: "cliproxypacer",
           ...(cold !== undefined ? { cold } : {}),
@@ -602,7 +602,11 @@ export const layer = Layer.effect(
       if (Exit.isFailure(exit)) return undefined
       // Background calls were billed as they finished; the compaction's message still shows what it cost.
       held.usage.forEach((usage) => addSpent(context.session.id, usage))
-      return { ...exit.value, metadata: { keepID: held.keepID, ...exit.value.metadata } }
+      // The kept messages start at the response the summary was written up to, so they hold the last step.
+      return {
+        ...exit.value,
+        metadata: { keepID: held.keepID, ...unreadMetadata(unreadStep(context.messages)), ...exit.value.metadata },
+      }
     })
 
     const due = (context: SessionContext.Loaded, ceiling: number, estimate?: Estimate) => {
@@ -720,7 +724,7 @@ export const layer = Layer.effect(
       )
       if (!keepID) return result
       // A compaction hook may choose its own kept range.
-      return { ...result, metadata: { keepID, ...result.metadata } }
+      return { ...result, metadata: { keepID, ...split.metadata, ...result.metadata } }
     })
 
     /**
@@ -1203,7 +1207,9 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
   })
 
 /**
- * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary.
+ * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary. A compaction
+ * between a step's tool calls and the request that would read their results keeps that step too, its results whole
+ * (`metadata`, `SessionRecentText.UNREAD`): a summary written from the requests the model saw has none of them.
  * Undefined when there is nothing to compact.
  */
 const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
@@ -1213,11 +1219,29 @@ const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: n
   })
   if (entries.length === 0) return undefined
 
-  const first = entries[recentStart(entries, keep, previousCompaction(messages))]
+  const start = recentStart(entries, keep, previousCompaction(messages))
+  const step = unreadStep(messages)
+  const unread = step ? entries.findIndex((entry) => entry.message.id === step.id) : -1
   return {
-    keepID: first?.message.id,
+    keepID: entries[unread < 0 ? start : Math.min(start, unread)]?.message.id,
+    metadata: unreadMetadata(unread < 0 ? undefined : step),
   }
 }
+
+/** The last step, when its local tool calls settled after the request that made them: the model has not read them. */
+const unreadStep = (messages: ReadonlyArray<SessionMessage.Info>) => {
+  const last = messages.findLast((message) => message.type === "assistant")
+  if (last?.type !== "assistant") return undefined
+  const settled = last.content.some(
+    (part) =>
+      part.type === "tool" &&
+      part.executed !== true &&
+      (part.state.status === "completed" || part.state.status === "error"),
+  )
+  return settled ? last : undefined
+}
+
+const unreadMetadata = (step: SessionMessage.Info | undefined) => (step ? { [SessionRecentText.UNREAD]: step.id } : {})
 
 /** The request without the retained tail, which starts at the message with ID `from`. */
 const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) => {

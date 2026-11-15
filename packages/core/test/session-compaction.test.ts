@@ -160,8 +160,8 @@ it.effect("compaction truncation does not split surrogate pairs", () =>
       { type: "text", text: "😀".repeat(1_250) },
     ])
 
-    expect(split).toEndWith(`[Tool result]: ${prefix}😀\n[truncated]`)
-    expect(whole).toEndWith(`[Tool result]: ${"😀".repeat(1_250)}`)
+    expect(split).toEndWith(`[Tool result]: ${prefix}😀\n[truncated]\n\n[Assistant]: Read.`)
+    expect(whole).toEndWith(`[Tool result]: ${"😀".repeat(1_250)}\n\n[Assistant]: Read.`)
   }),
 )
 
@@ -721,7 +721,16 @@ const recentWithToolOutput = (id: Session.ID, content: SessionMessage.ToolStateC
       ],
       time: { created: 0, completed: 0 },
     })
-    const messages = [user("Earlier question"), user("Read it"), assistant]
+    // A reply after the results: the model has read them, so the recent part cuts them.
+    const reply = Schema.decodeUnknownSync(SessionMessage.Assistant)({
+      id: SessionMessage.ID.create(),
+      type: "assistant",
+      agent: Agent.defaultID,
+      model: { id: "summary-model", providerID: "test" },
+      content: [{ type: "text", text: "Read." }],
+      time: { created: 0, completed: 0 },
+    })
+    const messages = [user("Earlier question"), user("Read it"), assistant, reply]
     yield* storeMessages(id, messages)
     expect(yield* compactManually(session, messages)).toEqual({
       status: "completed",

@@ -21,10 +21,22 @@ export const CUT_INPUTS = "recentInputs"
 export const cutsInputs = (message: SessionMessage.CompactionCompleted) => message.metadata?.[CUT_INPUTS] === "cut"
 
 /**
- * One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. `cutInputs`
- * cuts a tool call's input to the length a tool's output is cut to.
+ * Set on a compaction's metadata when it is written between a step's tool calls and the request that would have read
+ * their results: that step's message ID. The model has read nothing from there on, so the recent part shows those
+ * results, and what follows them, whole. A compaction without it cuts them as before.
  */
-export const messageToText = (message: SessionMessage.Info | SessionStored.User, cutInputs: boolean): string => {
+export const UNREAD = "unreadID"
+
+/**
+ * One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. `cutInputs`
+ * cuts a tool call's input to the length a tool's output is cut to; `cutOutputs` false keeps outputs whole.
+ */
+export const messageToText = (
+  message: SessionMessage.Info | SessionStored.User,
+  cutInputs: boolean,
+  cutOutputs = true,
+): string => {
+  const output = (value: string) => (cutOutputs ? truncateToolOutput(value) : value)
   switch (message.type) {
     // Earlier summaries and instruction updates are handled outside the recent part.
     case "compaction":
@@ -58,7 +70,7 @@ export const messageToText = (message: SessionMessage.Info | SessionStored.User,
           const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
           const call = `[Assistant tool call]: ${part.name}(${cutInputs ? truncateToolOutput(input) : input})`
           if (part.state.status === "completed") {
-            return [call, `[Tool result]: ${truncateToolOutput(serializeToolContent(part.state.content))}`]
+            return [call, `[Tool result]: ${output(serializeToolContent(part.state.content))}`]
           }
           if (part.state.status === "error") return [call, `[Tool error]: ${part.state.error.message}`]
           return [call]
@@ -73,7 +85,7 @@ export const messageToText = (message: SessionMessage.Info | SessionStored.User,
 
     case "shell":
       if (message.metadata?.background === true) return ""
-      return `[Shell]: ${message.command}\n${truncateToolOutput(message.output?.output ?? "")}`
+      return `[Shell]: ${message.command}\n${output(message.output?.output ?? "")}`
 
     default:
       return ""

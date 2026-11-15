@@ -3595,6 +3595,42 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.context).map((message) => message.type)).toEqual(["compaction", "assistant"])
   })
 
+  // Workspace evidence overnight-2026-11-15, part 1, "Also seen": a compaction between a step's tool calls and the
+  // request that would read their results kept them only as the recent part's 1,250 characters each, so the model
+  // read the same three files again at once.
+  for (const turn of ["after an earlier exchange", "in the chat's first turn"] as const)
+    scenario(`keeps a step's unread tool results whole beside the summary ${turn}`, function* (s) {
+      s.currentModel = testModel("unread-point", { context: 200_000, output: 32_000, compact: 30_000 })
+      if (turn === "after an earlier exchange") {
+        yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "unread-earlier", 1_000))
+        yield* s.runPrompt("Earlier question")
+      }
+      const file = Array.from({ length: 200 }, (_, index) => `${index}: export const value${index} = ${index}`).join(
+        "\n",
+      )
+      yield* s.llm.push(
+        TestLLM.complete(
+          { reason: { normalized: "tool-calls" }, usage: { inputTokens: 29_000, nonCachedInputTokens: 29_000 } },
+          LLMEvent.toolCall({ id: "call_file", name: "echo", input: { text: file } }),
+        ),
+        TestLLM.text("## Objective\n- Read the file", "unread-summary"),
+        TestLLM.text("Read it", "unread-final"),
+      )
+      s.requests.length = 0
+      yield* s.runPrompt("Read the file")
+
+      expect(s.requests).toHaveLength(3)
+      expect(isSummaryRequest(s.requests[1])).toBe(true)
+      const after = s.requests[2]
+      expect(userTexts(after)[0]).toContain(`<recent-context>\n`)
+      expect(userTexts(after)[0]).toContain(`[Tool result]: ${file}\n</recent-context>`)
+      // Calls and results reach the model in pairs: here both are text in the checkpoint.
+      const parts = after.messages.flatMap((message) => message.content)
+      expect(parts.flatMap((part) => (part.type === "tool-result" ? [part.id] : []))).toEqual(
+        parts.flatMap((part) => (part.type === "tool-call" ? [part.id] : [])),
+      )
+    })
+
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {
     s.currentModel = LanguageModel.make({ id: "native", provider: "openai", route: OpenAIResponses.route })
     modelLimits.set("native", { context: 11_000, output: 1_000 })

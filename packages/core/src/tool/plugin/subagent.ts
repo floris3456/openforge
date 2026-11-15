@@ -53,7 +53,7 @@ export const Input = Schema.Struct({
   }),
   taskID: Schema.optionalKey(Schema.String).annotate({
     description:
-      "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. Your task's id while you are on one of its steps hands that step to the subagent.",
+      "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. While you are on a step of a task, that task's own id is refused.",
   }),
 })
 

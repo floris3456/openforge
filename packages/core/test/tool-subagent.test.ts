@@ -365,7 +365,7 @@ describe("SubagentTool", () => {
           const fields = (definition?.inputSchema as { properties: Record<string, { description?: string }> })
             .properties
           expect(fields.taskID?.description).toBe(
-            "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. Your task's id while you are on one of its steps hands that step to the subagent.",
+            "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. While you are on a step of a task, that task's own id is refused.",
           )
           expect(
             yield* executeTool(registry, {
@@ -1112,28 +1112,38 @@ describe("SubagentTool", () => {
       ),
     )
 
-    // The overnight tests of 2026-11-15: 2 of 3 leads gave their task's id for one step they were on.
-    tasksIt.live("on the task's id while its lead is on one of its steps, the child is handed that step", () =>
-      withDir((dir) =>
-        Effect.gen(function* () {
-          const h = yield* prepare(dir)
-          const task = yield* h.make("The task")
-          const sub = yield* h.make("A part", task.id)
-          const other = yield* h.make("Another part", task.id)
-          yield* Effect.promise(() =>
-            store("POST", `${h.base}/tasks/${sub.id}/state`, {
-              state: "active",
-              by: { role: "build", chat: h.parent.id, task: task.id, subtask: sub.id },
-            }),
-          )
-          h.meanwhile(undefined)
-          const settled = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: task.id })
-          const child = yield* h.sessions.get(outputSessionID(settled.metadata))
-          expect(child.metadata).toEqual({ memory: { task: task.id, subtask: sub.id } })
-          expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: child.id } })
-          expect((yield* h.read(other.id)).state).toBe("todo")
-        }),
-      ),
+    // The overnight tests of 2026-11-15: 2 of 3 leads gave their task's id for one step; the step cannot be told (its
+    // own, or the next one: recheck 2 handed a child the lead's own step while it did the next).
+    tasksIt.live(
+      "on the task's id while its lead is on one of its steps, it is refused with the open steps and no child is made",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            const task = yield* h.make("The task")
+            const sub = yield* h.make("A part", task.id)
+            const other = yield* h.make("Another part", task.id)
+            yield* Effect.promise(() =>
+              store("POST", `${h.base}/tasks/${sub.id}/state`, {
+                state: "active",
+                by: { role: "build", chat: h.parent.id, task: task.id, subtask: sub.id },
+              }),
+            )
+            h.meanwhile(undefined)
+            const settled = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: task.id })
+            expect(settled.status).toBe("error")
+            expect(settled.error?.message).toBe(
+              `You are on step [${sub.id}] A part of task ${task.id}: give taskID the id of the step the subagent is to do, not the task's. Its open steps: [${sub.id}] A part (yours); [${other.id}] Another part (todo). No subagent was started.`,
+            )
+            expect(yield* h.children).toEqual([])
+            expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: h.parent.id } })
+            expect((yield* h.read(other.id)).state).toBe("todo")
+            // The step's own id goes ahead.
+            const started = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: other.id })
+            const child = yield* h.sessions.get(outputSessionID(started.metadata))
+            expect(child.metadata).toEqual({ memory: { task: task.id, subtask: other.id } })
+          }),
+        ),
     )
 
     tasksIt.live("an unknown task id is refused and no child is made", () =>

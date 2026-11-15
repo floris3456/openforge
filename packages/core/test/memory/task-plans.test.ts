@@ -25,6 +25,7 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryPlans } from "@opencode/core/memory/plans"
+import { MemoryTask } from "@opencode/core/memory/task"
 import { MemoryTexts } from "@opencode/core/memory/texts"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -727,6 +728,111 @@ describe("the check at the end of a turn", () => {
       yield* h.session.synthetic({ sessionID: h.sessionID, text: "Subagent finished" })
       yield* h.session.wait(h.sessionID)
       expect(yield* h.checks()).toHaveLength(1)
+    }),
+  )
+})
+
+// Goals (the workspace's reference `docs/reference/goals-board-api.md`, "The task tool"): the tool's `kind` and `goal`
+// go to CPP as they are; making a goal never puts the chat inside anything and is no task call for the check, a task
+// made in a goal puts the chat inside it as any task, and moving a task to a goal leaves the chat where it was.
+describe("goals", () => {
+  const goal = "g4k2m8q1z7xa"
+  /** CPP's answer to making a goal; even one that named a place would not move the chat. */
+  const goals = (request: Parameters<NonNullable<typeof server.control.answer>>[0]) =>
+    request.method === "POST" && request.path === "/pacer/v1/tools/task" && MemoryTask.goalCall("task", request.body)
+      ? Response.json({
+          text: `Made goal ${goal} (fake).`,
+          data: null,
+          error: null,
+          metadata: { id: goal },
+          place: { task: goal, subtask: null },
+        })
+      : server.pass(request)
+  /** The bodies of the chat's task calls as CPP got them. */
+  const sent = () =>
+    server.received.filter((item) => item.path === "/pacer/v1/tools/task").map((item) => item.body as unknown)
+  const metadataOf = (h: Effect.Success<ReturnType<typeof setup>>) =>
+    h.session.get(h.sessionID).pipe(Effect.map((session) => session.metadata))
+
+  it.live("making a goal never puts the chat inside it: an edit after it is still refused", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      server.control.answer = goals
+      const before = sent().length
+      const written = file("goal.txt")
+      const made = { kind: "goal", title: "Task tool improvements", description: "Done when leads see each other" }
+      yield* h.llm.push(
+        TestLLM.toolCall("call-goal", "task", made),
+        TestLLM.toolCall("call-write", "write", { path: written.name, content: "new" }),
+        TestLLM.text("I make a task next.", "after"),
+      )
+      yield* h.prompt("plan the goal")
+      expect(yield* h.results()).toEqual([
+        { name: "task", status: "completed", error: undefined },
+        { name: "write", status: "error", error: refused },
+      ])
+      expect(written.read()).toBeUndefined()
+      expect(sent().slice(before)).toEqual([made])
+      expect((yield* metadataOf(h))?.memory).toBeUndefined()
+    }),
+  )
+
+  it.live("a task made in a goal puts the chat inside it, and the edit goes ahead", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      server.control.answer = goals
+      const before = sent().length
+      const written = file("in-goal.txt")
+      const made = { title: "Board UI", goal, subtasks: [{ title: "The row" }] }
+      yield* h.llm.push(
+        TestLLM.toolCall("call-task", "task", made),
+        TestLLM.toolCall("call-write", "write", { path: written.name, content: "new" }),
+        TestLLM.text("Written.", "after"),
+      )
+      yield* h.prompt("build the board")
+      expect(yield* h.results()).toEqual([
+        { name: "task", status: "completed", error: undefined },
+        { name: "write", status: "completed", error: undefined },
+      ])
+      expect(written.read()).toBe("new")
+      expect(sent().slice(before)).toEqual([made])
+      const place = server.store.placeOf(key, PacerSessionID.make(h.sessionID))
+      expect(place?.task).toBeString()
+      expect((yield* metadataOf(h))?.memory).toEqual({ task: place!.task, subtask: place!.subtask! })
+    }),
+  )
+
+  it.live("making a goal is no task call for the check: a turn that changed something still gets one", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task" })
+      server.control.answer = goals
+      yield* h.llm.push(
+        TestLLM.toolCall("call-shell", "shell", { command: "bun test" }),
+        TestLLM.toolCall("call-goal", "task", { kind: "goal", title: "Task tool improvements" }),
+        TestLLM.text("Ran.", "ran"),
+        TestLLM.text("It goes on.", "goes-on"),
+      )
+      yield* h.prompt("run the tests and note the goal")
+      expect(yield* h.checks()).toHaveLength(1)
+      expect((yield* metadataOf(h))?.memory).toEqual({ task: h.task!.id })
+    }),
+  )
+
+  it.live("moving a task to a goal is an edit: the chat stays where it was, and it counts as the task call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task" })
+      server.control.answer = goals
+      const before = sent().length
+      yield* h.llm.push(
+        TestLLM.toolCall("call-shell", "shell", { command: "bun test" }),
+        TestLLM.toolCall("call-move", "task", { id: h.task!.id, goal }),
+        TestLLM.text("Moved.", "moved"),
+      )
+      yield* h.prompt("run the tests and move the task")
+      expect(yield* h.checks()).toEqual([])
+      expect(sent().slice(before)).toEqual([{ id: h.task!.id, goal }])
+      expect((yield* metadataOf(h))?.memory).toEqual({ task: h.task!.id })
+      expect(server.store.placeOf(key, PacerSessionID.make(h.sessionID))).toEqual({ task: h.task!.id, subtask: null })
     }),
   )
 })

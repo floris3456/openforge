@@ -35,4 +35,17 @@ describe("MemoryTask", () => {
     expect(MemoryTask.at({}, undefined)).toBe(true)
     expect(MemoryTask.at({ memory: { task: "a" } }, undefined)).toBe(false)
   })
+  test("tells a call that makes a goal from every other task call", () => {
+    expect(MemoryTask.goalCall("task", { kind: "goal", title: "Board" })).toBe(true)
+    for (const [name, input] of [
+      ["task", { title: "Board UI", goal: "g1" }],
+      ["task", { id: "t1", goal: "g1" }],
+      ["task", { id: "g1", title: "Board" }],
+      ["task", {}],
+      ["task", undefined],
+      ["task", "kind goal"],
+      ["remember", { kind: "goal" }],
+    ] as const)
+      expect(MemoryTask.goalCall(name, input)).toBe(false)
+  })
 })

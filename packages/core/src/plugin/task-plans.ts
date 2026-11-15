@@ -81,11 +81,11 @@ export const Plugin = {
       const turn = messages.slice(messages.findLastIndex((message) => message.type === "user") + 1)
       if (turn.some((message) => message.type === "synthetic" && message.metadata?.source === SOURCE)) return
       const calls = turn.flatMap((message) =>
-        message.type === "assistant"
-          ? message.content.flatMap((part) => (part.type === "tool" ? [part.name] : []))
-          : [],
+        message.type === "assistant" ? message.content.flatMap((part) => (part.type === "tool" ? [part] : [])) : [],
       )
-      if (calls.includes("task") || !calls.some((name) => worked.has(name))) return
+      // Making a goal is no work on the chat's task.
+      if (calls.some((call) => call.name === "task" && !MemoryTask.goalCall(call.name, call.state.input))) return
+      if (!calls.some((call) => worked.has(call.name))) return
       // Which task it names, and whether one, is CPP's to say.
       const text = yield* plans.check(session)
       if (text === null) return

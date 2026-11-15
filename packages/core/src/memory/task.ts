@@ -27,6 +27,15 @@ export function inside(metadata: SessionSchema.Metadata | undefined): Inside | u
   return found._tag === "Some" ? found.value : undefined
 }
 
+/**
+ * Whether a call of CPP's `task` tool makes a goal (workspace reference `docs/reference/goals-board-api.md`, "The task
+ * tool"): it never puts the chat inside anything, and it is no task call for the check at the end of a turn. Every
+ * other call, `goal` on a task among them, is one as before.
+ */
+export function goalCall(name: string, input: unknown) {
+  return name === "task" && typeof input === "object" && input !== null && "kind" in input && input.kind === "goal"
+}
+
 /** CPP's place as the session's metadata keeps it. */
 export function fromPlace(
   place: { readonly task: string; readonly subtask: string | null } | null,

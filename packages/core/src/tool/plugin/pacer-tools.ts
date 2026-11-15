@@ -78,8 +78,9 @@ export const Plugin = {
                   })
                   // Not as the failure's cause, which would make it an unknown error rather than the tool's.
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
-                // CPP keeps the chat's place; openforge's own hooks read it from the session's metadata.
-                if (session && answer.place !== undefined) {
+                // CPP keeps the chat's place; openforge's own hooks read it from the session's metadata. Making a goal
+                // never moves the chat.
+                if (session && answer.place !== undefined && !MemoryTask.goalCall(name, args)) {
                   const place = MemoryTask.fromPlace(answer.place)
                   if (!MemoryTask.at(session.metadata, place))
                     yield* sessions

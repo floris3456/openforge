@@ -399,6 +399,24 @@ describe("PacerModels", () => {
     }),
   )
 
+  it.live("reads capabilities' pacer.tools, each tool on its own; absent without the field", () =>
+    Effect.gen(function* () {
+      const told = (tools: unknown) =>
+        Effect.gen(function* () {
+          const server = yield* serve({
+            ...cpp(),
+            "/pacer/v1/capabilities": () => Response.json({ ...capabilities, pacer: { ...capabilities.pacer, tools } }),
+          })
+          const { models } = yield* start(endpoint(server.origin))
+          return (yield* until(models, loaded))?.pacer?.tools
+        })
+      const search = { title: "Web search", permission: "websearch", subject: ["query"], read_only: true }
+      const read = yield* told({ web_search: search, remember: { title: "Remember" }, recall: "no" })
+      expect(read && Object.fromEntries(read)).toEqual({ web_search: search })
+      for (const unread of [undefined, null, ["web_search"]]) expect(yield* told(unread)).toBeUndefined()
+    }),
+  )
+
   // Workspace spec `docs/specs/compaction-threshold-per-client.md`: the key's entry for a model, below its window, is
   // where its chats compact. CLIProxyPacer's `capabilities` notice reads capabilities again (`PacerConnection`, which
   // calls `refresh`), so a changed entry moves the point.

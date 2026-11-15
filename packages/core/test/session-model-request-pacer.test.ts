@@ -41,7 +41,7 @@ import { location, locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { registerToolPlugin, toolIdentity } from "./lib/tool"
-import { catalogOf, endpointOf, fakeCpp, ownerList, settle, startTools, until } from "./pacer/fake-tools"
+import { catalogOf, endpointOf, fakeCpp, ownerList, settle, startTools, until, webMeta } from "./pacer/fake-tools"
 import { PluginTestLayer } from "./plugin/fixture"
 
 const it = testEffect(PluginTestLayer)
@@ -112,10 +112,21 @@ const placedAt = (remote?: string) =>
 /** SessionModelRequest with PacerTools over a fake CPP; the chat `session`, in a location with `place`'s remote. */
 const setup = Effect.fnUntraced(function* (
   webTools = true,
-  options: { readonly session?: Session.Info; readonly remote?: string } = {},
+  options: {
+    readonly session?: Session.Info
+    readonly remote?: string
+    readonly catalog?: PacerModels.Catalog
+    /** What an earlier start kept of the endpoint's tools: the web tools by default; `{}` for none. */
+    readonly known?: Readonly<Record<string, PacerTools.Meta>>
+  } = {},
 ) {
   const cpp = yield* fakeCpp
-  const started = yield* startTools(endpointOf(cpp.origin), catalogOf(webTools))
+  const started = yield* startTools(
+    endpointOf(cpp.origin),
+    options.catalog ?? catalogOf(webTools),
+    undefined,
+    options.known,
+  )
   const requests = yield* SessionModelRequest.Service.pipe(
     Effect.provide(SessionModelRequest.layer),
     Effect.provideService(SessionModelTransport.Service, transport),
@@ -353,6 +364,43 @@ describe("SessionModelRequest with CPP's web tools", () => {
   )
 })
 
+describe("SessionModelRequest on the first start after the upgrade, with nothing kept of CPP's tools", () => {
+  /** The real registry over a store that keeps nothing yet, once it registered what it knows. */
+  const first = Effect.fnUntraced(function* (catalog: PacerModels.Catalog) {
+    const h = yield* setup(true, { catalog, known: {} })
+    const registry = yield* registryOf(h.started)
+    yield* settle
+    return { ...h, registry }
+  })
+
+  it.effect("a new chat's first step offers the CPP tools its list holds and runs them", () =>
+    Effect.gen(function* () {
+      const h = yield* first(catalogOf(true, webMeta))
+      const prepared = yield* h.requests.primary(h.input(yield* h.registry.snapshot()))
+      expect(claude(prepared)).toBe(cppTools(web))
+      expect(h.cpp.lists()).toHaveLength(1)
+      const result = yield* prepared.executeTool({
+        sessionID: session.id,
+        ...toolIdentity,
+        call: { type: "tool-call", id: "call_first", name: "web_search", input: { query: "q" } },
+      })
+      expect(result).toMatchObject({ content: [{ type: "text", text: "answered /pacer/v1/tools/web_search" }] })
+    }),
+  )
+
+  it.effect("on a server whose capabilities lack pacer.tools, the first step goes without, as before", () =>
+    Effect.gen(function* () {
+      const h = yield* first(catalogOf(true))
+      const prepared = yield* h.requests.primary(h.input(yield* h.registry.snapshot()))
+      expect(claude(prepared)).toBe("[]")
+      // The list it read registers them for the chat's later steps.
+      yield* until("registered", () => Effect.runSync(h.registry.snapshot()).definitions.length > 1)
+      const later = yield* h.requests.primary(h.input(yield* h.registry.snapshot()))
+      expect(claude(later)).toBe(cppTools(web))
+    }),
+  )
+})
+
 describe("SessionModelRequest with CPP's web tools, for a chat whose start is recorded", () => {
   /** The requests over a database holding the chat, with the start of each chat recorded (`SessionPromptStart`). */
   const recorded = Effect.fnUntraced(function* () {
@@ -393,15 +441,43 @@ describe("SessionModelRequest with CPP's web tools, for a chat whose start is re
       ),
       SessionPromptStart.Service,
     )
-    const requests = yield* SessionModelRequest.Service.pipe(
-      Effect.provide(SessionModelRequest.layer),
-      Effect.provideService(SessionModelTransport.Service, transport),
-      Effect.provideService(PacerTools.Service, h.started.tools),
-      Effect.provideService(Database.Service, Context.get(base, Database.Service)),
-      Effect.provideService(SessionPromptStart.Service, starts),
-    )
-    return { ...h, requests, store }
+    /** The requests over `tools`: another PacerTools is openforge started again over the same database. */
+    const requestsWith = (tools: PacerTools.Interface) =>
+      SessionModelRequest.Service.pipe(
+        Effect.provide(SessionModelRequest.layer),
+        Effect.provideService(SessionModelTransport.Service, transport),
+        Effect.provideService(PacerTools.Service, tools),
+        Effect.provideService(Database.Service, Context.get(base, Database.Service)),
+        Effect.provideService(SessionPromptStart.Service, starts),
+      )
+    return { ...h, requests: yield* requestsWith(h.started.tools), requestsWith, store }
   })
+
+  it.effect(
+    "a chat resumed right after the upgrade's restart has executors for its frozen tools on its first step",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* recorded()
+        const history = [Message.user("hello"), Message.assistant("hi"), Message.user("go on")]
+        const first = yield* h.requests.primary({ ...h.input(snapshot(all)), messages: history })
+        expect(claude(first)).toBe(cppTools(web))
+
+        // openforge started again with nothing kept of the endpoint's tools, as the first start of a release that
+        // keeps them: the catalog's pacer.tools gives their executors before the chat's list is read.
+        const again = yield* startTools(endpointOf(h.cpp.origin), catalogOf(true, webMeta), undefined, {})
+        const registry = yield* registryOf(again)
+        yield* until("registered", () => Effect.runSync(registry.snapshot()).definitions.length > 1)
+        const requests = yield* h.requestsWith(again.tools)
+        const resumed = yield* requests.primary({ ...h.input(yield* registry.snapshot()), messages: history })
+        expect(JSON.stringify(resumed.request.tools)).toBe(JSON.stringify(first.request.tools))
+        const result = yield* resumed.executeTool({
+          sessionID: session.id,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call_resumed", name: "web_search", input: { query: "q" } },
+        })
+        expect(result).toMatchObject({ content: [{ type: "text", text: "answered /pacer/v1/tools/web_search" }] })
+      }),
+  )
 
   it.effect("keeps a warm chat's web tools byte for byte when CPP's catalog drops them; a new chat goes without", () =>
     Effect.gen(function* () {

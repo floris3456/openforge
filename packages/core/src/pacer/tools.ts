@@ -34,21 +34,13 @@ import { PacerModels } from "./models.js"
 // warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
 
 /** What a client needs to run one of CPP's tools: the list's `meta` of it. */
-export const Meta = Schema.Struct({
-  /** What a person sees the tool called. */
-  title: Schema.String,
-  /** The permission action a call asks under. */
-  permission: Schema.String,
-  /** The arguments whose values the permission is asked on: the first one a call holds; none, `*`. */
-  subject: Schema.Array(Schema.String),
-  read_only: Schema.Boolean,
-})
-export interface Meta extends Schema.Schema.Type<typeof Meta> {}
+export const Meta = PacerModels.ToolMeta
+export type Meta = PacerModels.ToolMeta
 
 /**
- * The tools of an endpoint and their meta, from every list read there and kept across restarts, so that a step resumed
- * right after one has their executors before its chat's list is read again. Keyed by the set-up address's root, as
- * each address of a pair is the same CPP.
+ * The tools of an endpoint and their meta, from every capabilities read (`pacer.tools`) and list read there, kept
+ * across restarts: the first chat after an upgrade, and a step resumed right after a restart, have their executors
+ * before any chat's list is read. Keyed by the set-up address's root, as each address of a pair is the same CPP.
  */
 export type Known = ReadonlyMap<string, Meta>
 
@@ -220,11 +212,11 @@ export const layer = Layer.effect(
               Effect.map((value): Known => new Map(Object.entries(Option.getOrElse(decodeKnown(value), () => ({}))))),
             )
     const known = yield* SubscriptionRef.make<Known>(yield* load(yield* endpoints.get()))
-    /** Adds what a list read from the current endpoint names; kept only when it changed something. */
-    const learn = (endpoint: PacerEndpoint.Endpoint | undefined, list: List) =>
+    /** Adds what a list or capabilities read from the current endpoint names; kept only when it changed something. */
+    const learn = (endpoint: PacerEndpoint.Endpoint | undefined, meta: Known) =>
       Effect.gen(function* () {
         const current = yield* SubscriptionRef.get(known)
-        const fresh = [...list.meta].filter(([name, meta]) => {
+        const fresh = [...meta].filter(([name, meta]) => {
           const held = current.get(name)
           return held === undefined || JSON.stringify(held) !== JSON.stringify(meta)
         })
@@ -317,7 +309,7 @@ export const layer = Layer.effect(
                 return { list, answered: true }
               }).pipe(
                 Effect.tap((read) =>
-                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list) : Effect.void,
+                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list.meta) : Effect.void,
                 ),
               ),
             ),
@@ -449,8 +441,15 @@ export const layer = Layer.effect(
       ),
       Effect.forkScoped({ startImmediately: true }),
     )
+    // The catalog is the current endpoint's: another endpoint's is dropped before its first read there.
     yield* catalogs.changes().pipe(
-      Stream.runForEach(() => Effect.sync(() => void (state.absent = false))),
+      Stream.runForEach((catalog) =>
+        Effect.gen(function* () {
+          state.absent = false
+          const tools = catalog?.pacer?.tools
+          if (tools) yield* learn(yield* endpoints.get(), tools)
+        }),
+      ),
       Effect.forkScoped({ startImmediately: true }),
     )
     yield* bus.subscribe([SessionEvent.Compaction.Ended, SessionEvent.Deleted]).pipe(

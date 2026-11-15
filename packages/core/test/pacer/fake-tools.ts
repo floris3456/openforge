@@ -106,9 +106,20 @@ export type FakeCpp = Effect.Success<typeof fakeCpp>
 export const endpointOf = (origin: string, key = "client-key-test") =>
   PacerEndpoint.resolve({ baseURL: `${origin}/v1`, apiKey: key }, undefined)!
 
-export const catalogOf = (webTools: boolean | "no pacer"): PacerModels.Catalog => ({
+/** A catalog; `tools` is capabilities' `pacer.tools`, which a server before it leaves out. */
+export const catalogOf = (
+  webTools: boolean | "no pacer",
+  tools?: Readonly<Record<string, PacerTools.Meta>>,
+): PacerModels.Catalog => ({
   at: 0,
-  pacer: webTools === "no pacer" ? null : { compactTokens: ["auto", "before-cold"], webTools },
+  pacer:
+    webTools === "no pacer"
+      ? null
+      : {
+          compactTokens: ["auto", "before-cold"],
+          webTools,
+          ...(tools ? { tools: new Map(Object.entries(tools)) } : {}),
+        },
   models: [],
 })
 

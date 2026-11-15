@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Permission } from "@opencode/core/permission"
@@ -21,7 +22,17 @@ import { locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolDefinitions, toolIdentity } from "./lib/tool"
-import { endpointOf, fakeCpp, listOf, ownerList, startTools, until } from "./pacer/fake-tools"
+import {
+  catalogOf,
+  endpointOf,
+  fakeCpp,
+  listOf,
+  ownerList,
+  settle,
+  startTools,
+  until,
+  webMeta,
+} from "./pacer/fake-tools"
 
 // The one plugin that runs every tool CPP lists (workspace spec `docs/specs/cpp-tools.md`): it knows none of them, so a
 // made-up tool of a test list is registered, asks its permission and is called as the web tools are.
@@ -72,10 +83,12 @@ const listed = {
 const step = { sessionID, parentID, model: "claude-haiku-5-5", step: true, continues: false }
 
 /** The real registry with the plugin, over a fake CPP whose list the chat has read once. */
-const setup = Effect.fnUntraced(function* (options: { readonly read?: boolean } = {}) {
+const setup = Effect.fnUntraced(function* (
+  options: { readonly read?: boolean; readonly catalog?: PacerModels.Catalog } = {},
+) {
   const cpp = yield* fakeCpp
   cpp.answers.list = () => Response.json(listed)
-  const started = yield* startTools(endpointOf(cpp.origin), undefined, undefined, {})
+  const started = yield* startTools(endpointOf(cpp.origin), options.catalog, undefined, {})
   const chat = { current: info }
   const asked: Array<Permission.AssertInput & { readonly calls: number }> = []
   const context = yield* Layer.build(
@@ -115,6 +128,41 @@ const names = (registry: Tool.Interface, permissions?: Permission.Ruleset) =>
 const all = ["moon_phase", "web_crawl", "web_extract", "web_research", "web_search", "execute"]
 
 describe("PacerToolsPlugin registration", () => {
+  it.effect("with an empty store, registers every tool capabilities' pacer.tools names before any list is read", () =>
+    Effect.gen(function* () {
+      // The first start after the upgrade: nothing kept, the catalog read at start names what the key may be listed.
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { ...webMeta, moon_phase: madeMeta }) })
+      yield* until("registered", () => Effect.runSync(names(h.registry)).length > 1)
+      expect(yield* names(h.registry)).toEqual(all)
+      expect(h.cpp.lists()).toHaveLength(0)
+      // Kept for the next start, and runs as any.
+      const kept = yield* h.started.kv.get(PacerTools.knownKey(endpointOf(h.cpp.origin)))
+      expect((kept as Record<string, unknown>).moon_phase).toEqual(madeMeta)
+      expect((yield* h.run("moon_phase", { day: "today" })).status).toBe("completed")
+      expect(h.asked.map((item) => [item.action, item.resources])).toEqual([["astronomy", ["today"]]])
+    }),
+  )
+
+  it.effect("adds what each later capabilities read names, and keeps the ones it no longer names", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, webMeta) })
+      yield* until("registered", () => Effect.runSync(names(h.registry)).length > 1)
+      expect(yield* names(h.registry)).toEqual(all.filter((name) => name !== "moon_phase"))
+      // Memory switched on adds its tools; one whose meta this version can't read was dropped by the catalog.
+      yield* SubscriptionRef.set(h.started.catalogs, catalogOf(true, { moon_phase: madeMeta }))
+      yield* until("added", () => Effect.runSync(names(h.registry)).includes("moon_phase"))
+      expect(yield* names(h.registry)).toEqual(all)
+    }),
+  )
+
+  it.effect("on a server whose capabilities lack pacer.tools, registers none until a list is read", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true) })
+      yield* settle
+      expect(yield* names(h.registry)).toEqual(["execute"])
+    }),
+  )
+
   it.effect("registers a direct tool for every name CPP's lists named, once one was read, and none before", () =>
     Effect.gen(function* () {
       const h = yield* setup({ read: false })

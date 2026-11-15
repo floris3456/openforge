@@ -3,6 +3,7 @@ export * as PacerModels from "./models.js"
 import { Clock, Context, Effect, Layer, Option, Result, Schema, Semaphore, Stream, SubscriptionRef } from "effect"
 import type { Pacer as Shapes } from "@opencode/schema/pacer"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import { isRecord } from "@opencode/util/record"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 
@@ -26,7 +27,26 @@ export interface Pacer {
    * step (`SessionPromptStart`). A server without the field: true.
    */
   readonly freezePrompt?: boolean
+  /**
+   * `pacer.tools`: every tool the server may list to the asking key, with its meta (workspace reference
+   * `docs/reference/cpp-tools-api.md`, "Capabilities"); whether a chat has one is its list's to say. Absent on a server
+   * without the field.
+   */
+  readonly tools?: ReadonlyMap<string, ToolMeta>
 }
+
+/** What a client needs to run one of CPP's tools: its `meta`, as capabilities and each list give it. */
+export const ToolMeta = Schema.Struct({
+  /** What a person sees the tool called. */
+  title: Schema.String,
+  /** The permission action a call asks under. */
+  permission: Schema.String,
+  /** The arguments whose values the permission is asked on: the first one a call holds; none, `*`. */
+  subject: Schema.Array(Schema.String),
+  read_only: Schema.Boolean,
+})
+export interface ToolMeta extends Schema.Schema.Type<typeof ToolMeta> {}
+const decodeToolMeta = Schema.decodeUnknownOption(ToolMeta)
 
 /** The limits of the server's memory store (the memory API's capabilities). */
 export interface Memory {
@@ -206,7 +226,7 @@ const decodeLimits = Schema.decodeUnknownOption(Schema.Struct({ max_input_tokens
 /** One kind of login of a provider, with how many accounts the key has of it (capabilities' `providers[]`). */
 const Login = Schema.Struct({ provider: Schema.String, login: maybe(Schema.String), accounts: maybe(Schema.Number) })
 type Login = typeof Login.Type
-// `web_tools` and `memory` are read on their own (`webTools`, `memory`, in `pacerOf`), so a block this version does not
+// `web_tools`, `memory` and `tools` are read on their own (in `pacerOf`), so a block this version does not
 // understand leaves the rest alone.
 export const CapabilitiesAnswer = Schema.Struct({
   pacer: Schema.NullOr(
@@ -216,6 +236,7 @@ export const CapabilitiesAnswer = Schema.Struct({
       memory: Schema.optional(Schema.Unknown),
       freeze_prompt: Schema.optional(Schema.Unknown),
       addresses: Schema.optional(Schema.Unknown),
+      tools: Schema.optional(Schema.Unknown),
     }),
   ),
   providers: Items,
@@ -393,6 +414,16 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
     compactTokens: pacer.compact_tokens ?? [],
     webTools: Option.isSome(decodeWebTools(pacer.web_tools)),
     freezePrompt: pacer.freeze_prompt !== false,
+    // Each tool on its own: one whose meta this version does not understand drops only itself.
+    ...(isRecord(pacer.tools)
+      ? {
+          tools: new Map(
+            Object.entries(pacer.tools).flatMap(([name, meta]) =>
+              Option.toArray(decodeToolMeta(meta)).map((item) => [name, item] as const),
+            ),
+          ),
+        }
+      : {}),
     ...Option.match(decodeMemory(pacer.memory), {
       onNone: () => ({}),
       onSome: (memory) => ({

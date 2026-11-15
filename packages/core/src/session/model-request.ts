@@ -297,7 +297,9 @@ export const layer = Layer.effect(
       // any hook, so plugins' hooks see and may change them.
       const now = Effect.gen(function* () {
         const known = yield* pacerTools.known()
-        if (!PacerOffer.wanted(tools.definitions, known)) return tools.definitions
+        // With none known at the endpoint (a server whose capabilities lack `pacer.tools`, nothing kept yet), the
+        // list is read anyway, so that what it names is registered for the chat's later steps.
+        if (known.size > 0 && !PacerOffer.wanted(tools.definitions, known)) return tools.definitions
         return PacerOffer.apply(
           tools.definitions,
           yield* pacerTools.list({

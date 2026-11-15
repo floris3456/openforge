@@ -25,6 +25,7 @@ import { SessionHistory } from "@opencode/core/session/history"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionModelRequest } from "@opencode/core/session/model-request"
 import { SessionProjector } from "@opencode/core/session/projector"
+import { SessionRecentText } from "@opencode/core/session/recent-text"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
@@ -608,14 +609,21 @@ it.effect(
       // CLIProxyPacer's list of the user's messages holds the history's two; openforge keeps the newest beside it.
       const stored = yield* record(session.id)
       expect(stored.metadata?.keepID).toBe(messages[4]!.id)
+      // No request carried it yet: it goes after the summary as itself, where CLIProxyPacer stores it as typed.
+      expect(stored.metadata?.[SessionRecentText.UNSENT]).toBe(messages[4]!.id)
       expect(stored.summary).toContain('<message n="2">Now list three risks.</message>')
       expect(stored.writer).toEqual({ by: "cliproxypacer", cold: false, userMessages: 2 })
 
-      // The next step, as sent: the summary with the list, and the newest message exactly once.
+      // The next step, as sent: the summary with the list, and the newest message exactly once, as its own message.
       const next = yield* stepBody(context, yield* (yield* SessionStore.Service).context(session.id))
       expect(occurrences(next, cppSummary)).toBe(1)
       expect(occurrences(next, "<earlier-user-messages>")).toBe(1)
       expect(occurrences(next, newest)).toBe(1)
+      expect((next.input as unknown[]).at(-1)).toEqual({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: newest }],
+      })
     }),
 )
 

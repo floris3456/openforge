@@ -99,9 +99,25 @@ const layer = Layer.effect(
             message: `There is no task ${taskID}: memory on this server has no tasks, so no subagent was started.`,
           })
         const project = yield* projectOf(parent)
-        const task = (yield* named(project, parent).task(project, taskID).pipe(Effect.mapError(fail))).task
-        const place = placeOf(task)
-        return { parent: parent.id, project, task, inside: place, metadata: placed(parent.metadata, place) }
+        const read = yield* named(project, parent).task(project, taskID).pipe(Effect.mapError(fail))
+        // A lead that names its task while it is on one of its steps most often means one step, and which one cannot be
+        // told: its own, or one not started (the overnight tests of 2026-11-15: 2 of 3 leads gave the task's id for a
+        // step; handed the lead's own, a child worked on the next one). Refused with the steps, so the lead names it.
+        const own = read.task.parent
+          ? undefined
+          : read.subtasks.find((sub) => sub.state === "active" && sub.worker?.chat === parent.id)
+        if (own)
+          return yield* new ToolFailure({
+            message: [
+              `You are on step [${own.id}] ${own.title} of task ${read.task.id}: give taskID the id of the step the subagent is to do, not the task's.`,
+              `Its open steps: ${read.subtasks
+                .filter((sub) => !MemoryClient.isClosed(sub))
+                .map((sub) => `[${sub.id}] ${sub.title} (${sub.id === own.id ? "yours" : sub.state})`)
+                .join("; ")}. No subagent was started.`,
+            ].join(" "),
+          })
+        const place = placeOf(read.task)
+        return { parent: parent.id, project, task: read.task, inside: place, metadata: placed(parent.metadata, place) }
       }),
       activate: Effect.fn("MemoryTask.activate")(function* (assigned, child) {
         yield* named(assigned.project, { id: child.id, parentID: assigned.parent })

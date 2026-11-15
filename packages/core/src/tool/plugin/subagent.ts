@@ -52,7 +52,8 @@ export const Input = Schema.Struct({
       "Run the subagent in the background and return immediately. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress.",
   }),
   taskID: Schema.optionalKey(Schema.String).annotate({
-    description: "The id of a task (the task tool) this subagent is to work on; give it whenever the work is a task",
+    description:
+      "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. While you are on a step of a task, that task's own id is refused.",
   }),
 })
 

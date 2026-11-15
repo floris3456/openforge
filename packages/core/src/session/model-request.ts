@@ -61,7 +61,7 @@ const GENERATION_KEYS = new Set(Object.keys(GenerationOptions.fields))
 const OUTPUT_TOKEN_FALLBACK = 32_000
 // No reply needs more, however much the model allows.
 const OUTPUT_TOKEN_MAX = 256_000
-// Prompt text is estimated at about 4 characters per token, which can run low on dense text such as code.
+// Prompt text is estimated from its characters (`SessionCompaction.estimatePrompt`), which can run low on dense text.
 const ESTIMATE_ERROR = 0.15
 // Share of the window a turn leaves unused when its output limit is fitted to the room left. Providers count a few
 // tokens more than we do (chat template, tool schemas), and strict ones reject input plus output past the window.

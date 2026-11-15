@@ -9,6 +9,7 @@ import type { SessionContext } from "../session/context.js"
 import { SessionEvent } from "../session/event.js"
 import { SessionInbox } from "../session/inbox.js"
 import { SessionMessage } from "../session/message.js"
+import { SessionRecentText } from "../session/recent-text.js"
 import { ImageFit } from "./fit.js"
 import { ImageLine } from "@opencode/util/image-line"
 
@@ -176,7 +177,13 @@ export const before = Effect.fnUntraced(function* (input: {
     })
     // Not compacted: the step goes out, the images that do not fit replaced by a note.
     if (compacted.status !== "completed") return false
-    yield* carry(input.bus, sessionID, counted.held)
+    // A message no request carried follows the summary as itself, its images with it (`SessionRecentText.UNSENT`).
+    const unsent = SessionRecentText.unsent(loaded.messages)
+    const held =
+      unsent < 0
+        ? counted.held
+        : ledger(loaded.messages.slice(0, unsent), loaded.images, ImageFit.requestLimits(loaded.images)).held
+    if (held.length > 0) yield* carry(input.bus, sessionID, held)
     return true
   }
   if (counted.held.length > 0 || !counted.warn || warned(loaded.messages)) return false

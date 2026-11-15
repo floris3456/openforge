@@ -1,4 +1,14 @@
-import type { SessionMessageAssistant, SessionMessageInfo } from "../promise"
+import type { ModelInfo, SessionMessageAssistant, SessionMessageInfo } from "../promise"
+
+/**
+ * What a chat's context meter counts against: the model's compaction point when it has one (a CLIProxyPacer client's
+ * threshold), so a chat at the point shows 100%, else its context window. Undefined while neither is known. Every
+ * client counts against this, so the TUI and the desktop app agree on it.
+ */
+export function contextLimit(limit: Pick<ModelInfo["limit"], "context" | "compact"> | undefined) {
+  const tokens = limit?.compact ?? limit?.context
+  return tokens && tokens > 0 ? tokens : undefined
+}
 
 /**
  * The assistant step whose tokens fill the context window now: the latest one after the last completed

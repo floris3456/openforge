@@ -57,13 +57,14 @@ export type Editor = {
   configure: (settings: Partial<Settings>) => void
 }
 
-/** A prompt's size: `measured` is what the provider reported at the latest response, `estimated` is the text since. */
+/** A prompt's size: `measured` is what the provider reported at the latest response, `estimated` is what came since. */
 export type Estimate = { readonly measured: number; readonly estimated: number }
 
 export type Trigger =
   /**
-   * `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`. `images`
-   * (openforge, `ImageBudget`): an `auto` one whose next image would not fit, so it compacts whatever the estimate.
+   * `overflow`: the provider just rejected this context as too long. `estimate` is `estimatePrompt(context)`, which an
+   * overflow does not size its summary from (`promptSize`). `images` (openforge, `ImageBudget`): an `auto` one whose
+   * next image would not fit, so it compacts whatever the estimate.
    */
   | {
       readonly reason: "auto" | "overflow"
@@ -197,13 +198,25 @@ const TRANSCRIPT_LEVELS = [0, OUTPUTS_CLIPPED, OUTPUTS_REMOVED, USER_ONLY, OMITT
 const TRANSCRIPT_CLIP = 2_000
 const IMAGE_TOKEN_ESTIMATE = 1_500
 const PDF_TOKEN_ESTIMATE = 2_000
+/**
+ * Characters a token of prompt text holds before a chat has a measured request to learn its own from. In the overnight
+ * chats of 2026-11-15 (workspace evidence overnight-2026-11-15) whole requests, tool definitions and all, ran at about
+ * 2.5 and the code a step read at 2.2–2.4; prose runs nearer 4. At 4, a step that read 24,565 characters of code was
+ * put at 6,141 tokens, came to 10,130, and went out past the compaction point.
+ */
+const PROMPT_CHARS_PER_TOKEN = 2.5
+/** Text a measured request must hold to be learned from: below it, what a provider adds to a prompt weighs too much. */
+const LEARN_MIN_CHARS = 10_000
+/** The densest text a learned ratio allows; the loosest is `Token`'s, so no chat compacts later than it did with it. */
+const LEARNED_CHARS_PER_TOKEN_MIN = 1
 /** Share of the compaction ceiling at which a background summary starts. */
 const PRECOMPUTE_RATIO = 0.85
 /** Measured prompt tokens below which a background summary is not worth its cost. */
 const PRECOMPUTE_MIN_TOKENS = 64_000
 /**
  * The most text a swapped-in summary keeps verbatim beside it: twice `keep`, at least 30k, at most a quarter of the
- * budget. A longer tail would leave the context near the threshold, so compaction summarizes from scratch instead.
+ * budget. A longer tail would leave the context near the threshold, so compaction summarizes from scratch instead. A
+ * step's unread results keep as much whole beside a summary (`unreadChars`).
  */
 const PRECOMPUTED_TAIL_MIN = 30_000
 const PRECOMPUTED_TAIL_SHARE = 0.25
@@ -344,7 +357,8 @@ export const layer = Layer.effect(
       const agent = native || picks ? undefined : yield* agents.get(Agent.ID.make("compaction"))
       const model = picked ?? (agent?.model && (yield* resolveModel(context, agent.model))) ?? context.model
       const ceiling = calculateCeiling(model.limit, buffer)
-      // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
+      // An unknown window without a compaction point never triggers auto compaction, but the compaction request still
+      // needs a size to aim for.
       const cap = Number.isFinite(ceiling)
         ? ceiling
         : calculateCeiling({ ...model.limit, context: UNKNOWN_WINDOW }, buffer)
@@ -371,6 +385,15 @@ export const layer = Layer.effect(
         return { status: "skipped" }
       const native =
         trigger.reason !== "move" && trigger.reason !== "cold" && context.model.compaction?.type === "native"
+      // Before the chat's first request, or right after a compaction, a summary would hold nothing a request carried:
+      // what none did is sent as itself (`splitConversation`), so the step goes out as it is.
+      if (
+        trigger.reason === "auto" &&
+        !native &&
+        SessionRecentText.unsent(context.messages) >= 0 &&
+        splitConversation(context.messages, settings.keep) === undefined
+      )
+        return { status: "skipped" }
       const picks =
         trigger.reason === "move" || trigger.reason === "cold" || trigger.reason === "manual"
           ? trigger.models
@@ -384,10 +407,11 @@ export const layer = Layer.effect(
       const pacer = yield* pacerWriter(trigger, writing)
       const held = precomputed.get(context.session.id)
       precomputed.delete(context.session.id)
-      // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it.
+      // The provider just rejected this context, so the estimate ran low; the first attempt already aims below it, on
+      // the scale the summary request is shrunk on.
       const budget =
         trigger.reason === "overflow"
-          ? Math.min(model.cap, Math.floor(total(trigger.estimate ?? estimatePrompt(context)) * SHRINK_STEPS[0]))
+          ? Math.min(model.cap, Math.floor(total(promptSize(context, false)) * SHRINK_STEPS[0]))
           : model.cap
 
       const selected = model.context === context ? trigger : { ...trigger, context: model.context }
@@ -421,9 +445,25 @@ export const layer = Layer.effect(
           : pacer
             ? by({ by: "openforge", ...(pacer.fallback ? { fallback: pacer.fallback } : {}) })
             : compaction
+      // History rebuilds the recent part at every load, so the bound on an unread step's results is recorded once, here,
+      // for the chat's own model, which reads them next.
+      const bounded = (result: Result): Result =>
+        result.metadata?.[SessionRecentText.UNREAD] === undefined
+          ? result
+          : {
+              ...result,
+              metadata: {
+                ...result.metadata,
+                [SessionRecentText.UNREAD_CHARS]: unreadChars(
+                  context,
+                  Math.min(budget, calculateCeiling(context.model.limit, settings.buffer)),
+                  settings.keep,
+                ),
+              },
+            }
       return yield* written.pipe(
         Effect.matchEffect({
-          onSuccess: (result) => publish(selected, result),
+          onSuccess: (result) => publish(selected, bounded(result)),
           onFailure: (failure) => publish(selected, failure),
         }),
       )
@@ -448,11 +488,12 @@ export const layer = Layer.effect(
     /**
      * CLIProxyPacer writes the summary (spec cliproxypacer-server-summaries, section 3): `POST /v1/responses/compact`
      * with the request the chat's next step would send on `trigger.context`'s model, up to the recent messages kept by
-     * `keep` (a prefix of the step's, so its cache still reads), with a summary's headers (`X-Pacer-Session`, its
-     * parent, `X-Pacer-Kind: compaction`), in the Responses format (`PacerSummaries.responses`). The answer's summary is
-     * kept as openforge's own, those recent messages beside it, so they go out once, not also in CLIProxyPacer's list
-     * of the user's messages; its compaction item is dropped. A failure with `fallback` (a refusal, a failed request,
-     * no readable summary, no answer within `PacerSummaries.WAIT`) leaves the summary to openforge.
+     * `keep` and to no message that no request carried (a prefix of the step's, so its cache still reads), with a
+     * summary's headers (`X-Pacer-Session`, its parent, `X-Pacer-Kind: compaction`), in the Responses format
+     * (`PacerSummaries.responses`). The answer's summary is kept as openforge's own, those recent messages beside it, so
+     * they go out once, not also in CLIProxyPacer's list of the user's messages; its compaction item is dropped. A
+     * failure with `fallback` (a refusal, a failed request, no readable summary, no answer within
+     * `PacerSummaries.WAIT`) leaves the summary to openforge.
      */
     const writeOnPacer = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -462,7 +503,7 @@ export const layer = Layer.effect(
       const context = trigger.context
       const split = splitConversation(context.messages, keep)
       if (split === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
-      const prepared = yield* prepare(context, context.messages, budget)
+      const prepared = yield* prepare(context, split.sent, budget)
       // A compaction hook that supplies the summary itself writes it, as for any chat.
       if (prepared.event.result)
         return { ...(yield* fromHook(context, prepared.event.result)), writer: { by: "openforge" } } satisfies Result
@@ -489,7 +530,7 @@ export const layer = Layer.effect(
       const cold = trigger.reason === "cold" || header?.cold
       return {
         text,
-        ...(split.keepID ? { metadata: { keepID: split.keepID } } : {}),
+        ...(split.keepID ? { metadata: { keepID: split.keepID, ...split.metadata } } : {}),
         writer: {
           by: "cliproxypacer",
           ...(cold !== undefined ? { cold } : {}),
@@ -588,14 +629,32 @@ export const layer = Layer.effect(
       if (Exit.isFailure(exit)) return undefined
       // Background calls were billed as they finished; the compaction's message still shows what it cost.
       held.usage.forEach((usage) => addSpent(context.session.id, usage))
-      return { ...exit.value, metadata: { keepID: held.keepID, ...exit.value.metadata } }
+      // The kept messages start at the response the summary was written up to, so they hold the last step, and what no
+      // request carried since.
+      return {
+        ...exit.value,
+        metadata: {
+          keepID: held.keepID,
+          ...unreadMetadata(unreadStep(context.messages)),
+          ...unsentMetadata(context.messages),
+          ...exit.value.metadata,
+        },
+      }
     })
 
     const due = (context: SessionContext.Loaded, ceiling: number, estimate?: Estimate) => {
       const messages = context.messages
-      // A compaction just completed; let the runner rebuild the request from it first.
+      // A compaction just completed; let the runner rebuild the request from it first. History sends what it kept that
+      // no request carried after it, which is not new either.
       const last = messages.at(-1)
       if (last?.type === "compaction" && last.status === "completed") return false
+      const first = messages[0]
+      if (
+        first?.type === "compaction" &&
+        first.status === "completed" &&
+        messages.length === 1 + SessionRecentText.moved(first)
+      )
+        return false
       // An encrypted native window estimates as nothing, so wait for a response to measure it.
       const measured = messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
       if (measured < messages.findLastIndex(SessionHistory.isNativeCompaction)) return false
@@ -621,6 +680,12 @@ export const layer = Layer.effect(
      *
      * E = one exchange: a user message and the replies to it. S = a summary. [S + "…"] = one checkpoint: a summary
      * plus the newest `keep` tokens of messages, referenced by their first message and sent as text.
+     *
+     * A prompt that came after the last reply, which no request carried, is neither summarized nor sent as text: the
+     * summary request ends at that reply, and the prompt follows the checkpoint as itself (`SessionRecentText.UNSENT`):
+     *
+     *   compacting:  [system][S1 + "E9 E10"][E11 … E18][prompt]           E19's user message U19 is not in it
+     *   later:       [S2 + "…"][U19][new messages…]
      */
     const summarize = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -629,11 +694,12 @@ export const layer = Layer.effect(
       background?: Background,
     ): Effect.fn.Return<Result, Failure> {
       const context = trigger.context
-      const messages = background?.messages ?? context.messages
-      const split = splitConversation(messages, keep)
+      const split = splitConversation(background?.messages ?? context.messages, keep, background === undefined)
       if (split === undefined) return yield* Effect.fail(NOTHING_TO_COMPACT)
-      // A background summary covers all of its messages; what follows them is kept when it is swapped in.
+      // A background summary covers all of its messages; what follows them is kept when it is swapped in. What no
+      // request carried is kept as itself, so the summary request holds only what the model already read.
       const keepID = background ? undefined : split.keepID
+      const messages = split.sent
 
       const previous = previousCompaction(messages)
       const prompt = ImageBudget.summaryPrompt(
@@ -642,8 +708,9 @@ export const layer = Layer.effect(
       )
       const headings = SUMMARY_TEMPLATE.split("\n").filter((line) => line.startsWith("##"))
       const filled = (text: string) => text.split("\n").some((line) => headings.includes(line.trim()))
-      // Size the unchanged request with the number that decided to compact: the last response's count plus an
-      // estimate of what came after it. Characters overstate a conversation whose old reasoning the provider drops.
+      // Size the unchanged request with the last response's count plus an estimate of what came after it, at `Token`'s
+      // size, as the rest of the summary is sized. Characters overstate a conversation whose old reasoning the provider
+      // drops.
       // A hook can still make this request larger than that count; the provider then rejects it and it is resent as
       // text. An overflow already proved the count low, so it keeps the character estimate.
       const measured = trigger.reason === "overflow" ? undefined : measuredPrompt({ ...context, messages })
@@ -705,7 +772,7 @@ export const layer = Layer.effect(
       )
       if (!keepID) return result
       // A compaction hook may choose its own kept range.
-      return { ...result, metadata: { keepID, ...result.metadata } }
+      return { ...result, metadata: { keepID, ...split.metadata, ...result.metadata } }
     })
 
     /**
@@ -803,6 +870,9 @@ export const layer = Layer.effect(
             : estimateRequest(shrink.history) <= target
               ? shrink.history
               : undefined
+        // The history before the tail fits by its characters, which then size it, also when it is the whole request:
+        // when nothing after the last reply was sent, there is no tail to take off.
+        const history = measured !== undefined && total(measured) > fit && unchanged === shrink.history
         const request =
           unchanged ??
           flattenAndDropOldest(shrink.history, context, target) ??
@@ -821,7 +891,7 @@ export const layer = Layer.effect(
           })
         }
 
-        const size = request === prepared.request ? measured : undefined
+        const size = request === prepared.request && !history ? measured : undefined
         const attempt = yield* Effect.result(send(request, size))
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
@@ -1188,21 +1258,70 @@ const transcript = (context: SessionContext.Loaded, messages: ReadonlyArray<Sess
   })
 
 /**
- * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary.
- * Undefined when there is nothing to compact.
+ * The newest messages within `keep` tokens, from `keepID` on, are kept verbatim beside the summary. A compaction
+ * between a step's tool calls and the request that would read their results keeps that step too, its results whole up
+ * to `unreadChars` (`metadata`, `SessionRecentText.UNREAD`): a summary written from the requests the model saw has
+ * none of them. What came after the last assistant message, which no request carried, is always kept, and sent after
+ * the checkpoint as itself (`SessionRecentText.UNSENT`): the summary is written from `sent`, the messages before it.
+ * Undefined when there is nothing to compact, or nothing but those. `unsentKept` false, as for a background summary,
+ * which covers what came before a response, treats the messages as all sent.
  */
-const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number) => {
+const splitConversation = (messages: ReadonlyArray<SessionMessage.Info>, keep: number, unsentKept = true) => {
   const entries = messages.flatMap((message) => {
     const text = SessionRecentText.messageToText(message, true)
     return text ? [{ message, text }] : []
   })
   if (entries.length === 0) return undefined
+  const unsent = unsentKept ? SessionRecentText.unsent(messages) : -1
+  const sent = unsent < 0 ? messages : messages.slice(0, unsent)
+  const previous = previousCompaction(messages)
+  if (
+    unsent >= 0 &&
+    !sent.some((message) => SessionRecentText.messageToText(message, true)) &&
+    !(previous && SessionRecentText.kept(previous))
+  )
+    return undefined
 
-  const first = entries[recentStart(entries, keep, previousCompaction(messages))]
+  const start = recentStart(entries, keep, previous)
+  const step = unreadStep(messages)
+  const unread = step ? entries.findIndex((entry) => entry.message.id === step.id) : -1
+  const from = Math.min(
+    ...[entries[start], entries[unread]].map((entry) => (entry ? messages.indexOf(entry.message) : messages.length)),
+    unsent < 0 ? messages.length : unsent,
+  )
   return {
-    keepID: first?.message.id,
+    keepID: messages[from]?.id,
+    sent,
+    metadata: { ...unreadMetadata(unread < 0 ? undefined : step), ...unsentMetadata(messages, unsent) },
   }
 }
+
+const unsentMetadata = (messages: ReadonlyArray<SessionMessage.Info>, index = SessionRecentText.unsent(messages)) =>
+  index < 0 ? {} : { [SessionRecentText.UNSENT]: messages[index].id }
+
+/** The last step, when its local tool calls settled after the request that made them: the model has not read them. */
+const unreadStep = (messages: ReadonlyArray<SessionMessage.Info>) => {
+  const last = messages.findLast((message) => message.type === "assistant")
+  if (last?.type !== "assistant") return undefined
+  const settled = last.content.some(
+    (part) =>
+      part.type === "tool" &&
+      part.executed !== true &&
+      (part.state.status === "completed" || part.state.status === "error"),
+  )
+  return settled ? last : undefined
+}
+
+const unreadMetadata = (step: SessionMessage.Info | undefined) => (step ? { [SessionRecentText.UNREAD]: step.id } : {})
+
+/**
+ * The characters an unread step's results keep whole beside a summary, together: as much as `tailLimit` lets a summary
+ * keep verbatim, at most a quarter of `ceiling`, at the chat's own characters a token; beyond it they are cut as the
+ * rest of the recent part is. Whole, they could take the request after the compaction past the point, and compact
+ * again at the next step, or past the window, where the provider's rejection leaves nothing to compact.
+ */
+const unreadChars = (context: SessionContext.Loaded, ceiling: number, keep: number) =>
+  Math.floor(tailLimit(keep, ceiling) * charsPerToken(context))
 
 /** The request without the retained tail, which starts at the message with ID `from`. */
 const withoutTail = (request: LLMRequest, from: SessionMessage.ID | undefined) => {
@@ -1245,7 +1364,8 @@ const recentStart = (
   if (latestUser > 0) return latestUser
 
   // One exchange, nothing older. Summarize it all and keep nothing, unless a previous summary already
-  // kept recent text, in which case keep everything and summarize only the summary before it.
+  // kept recent text, in which case keep everything and summarize only the summary before it. What no request carried
+  // is kept either way (`splitConversation`).
   return previous && SessionRecentText.kept(previous) ? 0 : entries.length
 }
 
@@ -1322,56 +1442,104 @@ const total = (estimate: Estimate) => estimate.measured + estimate.estimated
 
 export const estimateContext = (context: SessionContext.Loaded) => total(estimatePrompt(context))
 
-/** The size of the prompt `context` sends. */
-export const estimatePrompt = (context: SessionContext.Loaded): Estimate => {
+/**
+ * The size of the prompt `context` sends: the latest response's count, and what came after it at the characters a
+ * token held in the request that response answered (`charsPerToken`). With no count yet, all of it at
+ * `PROMPT_CHARS_PER_TOKEN`. It decides when a chat compacts and the step's output limit.
+ */
+export const estimatePrompt = (context: SessionContext.Loaded): Estimate => promptSize(context, true)
+
+/**
+ * The prompt's size as `estimatePrompt` has it, or, not `learned`, with what came after the count at `Token`'s size:
+ * the scale a summary request is sized and shrunk on (`deliver`, `flattenAndDropOldest`), which the sizes it starts
+ * from (the overflow's budget, the unchanged request's) stay on.
+ */
+const promptSize = (context: SessionContext.Loaded, learned: boolean): Estimate => {
   const anchorIndex = context.messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
   const anchor = context.messages[anchorIndex]
-  const base = transcript(context, context.messages.slice(Math.max(0, anchorIndex)))
-  // TODO: Pass compaction history the runner has already shaped. This and `recentUserMessages` repeat the
-  // runner's unsupported-media and image-budget passes; here the image budget only sees images since the anchor,
-  // so image-heavy sessions can estimate high.
-  const exact = context.images
-  const supported = SessionModelRequest.unsupportedParts(base.messages, context.model.capabilities)
-  const sent = exact
-    ? ImageBudget.bound(supported, ImageFit.requestLimits(exact))
-    : SessionModelRequest.boundImages(supported)
+  const sent = sentFor(context, context.messages.slice(Math.max(0, anchorIndex)))
   // The anchor's usage covers its own output, but not its local tool results, which the provider never saw.
-  const unmeasured = sent.filter((message) => message.role !== "assistant" || message.id !== anchor?.id)
+  const unmeasured = sent.messages.filter((message) => message.role !== "assistant" || message.id !== anchor?.id)
 
   if (anchor?.type !== "assistant" || !anchor.tokens)
     return {
       measured: 0,
       estimated: estimateRequest(
-        { system: base.system, tools: context.tools.definitions, messages: unmeasured },
-        exact,
+        { system: sent.system, tools: context.tools.definitions, messages: unmeasured },
+        context.images,
+        (text) => Token.estimate(text, learned ? PROMPT_CHARS_PER_TOKEN : Token.CHARS_PER_TOKEN),
       ),
     }
 
   const tokens = anchor.tokens
+  const ratio = learned ? charsPerToken(context) : Token.CHARS_PER_TOKEN
   return {
     measured: tokens.input + tokens.cache.read + tokens.cache.write + tokens.output + tokens.reasoning,
-    estimated: unmeasured.reduce((sum, message) => sum + estimateMessage(message, exact), 0),
+    estimated: unmeasured.reduce(
+      (sum, message) => sum + estimateMessage(message, context.images, (text) => Token.estimate(text, ratio)),
+      0,
+    ),
+  }
+}
+
+/**
+ * The characters a token of text held in the request the latest measured response answered, the chat's own: its
+ * measured prompt, less what its media is estimated at, over its text. `PROMPT_CHARS_PER_TOKEN` with no such response,
+ * while that request holds too little text to tell, or a native window, whose tokens have no text to count.
+ */
+const charsPerToken = (context: SessionContext.Loaded) => {
+  const anchorIndex = context.messages.findLastIndex((message) => hasMeasuredPrompt(message, context.model.ref))
+  const anchor = context.messages[anchorIndex]
+  if (anchor?.type !== "assistant" || !anchor.tokens) return PROMPT_CHARS_PER_TOKEN
+  const prompt = anchor.tokens.input + anchor.tokens.cache.read + anchor.tokens.cache.write
+  const before = context.messages.slice(0, anchorIndex)
+  if (before.some(SessionHistory.isNativeCompaction)) return PROMPT_CHARS_PER_TOKEN
+  const sent = sentFor(context, before)
+  const request = { system: sent.system, tools: context.tools.definitions, messages: sent.messages }
+  const media = estimateRequest(request, context.images, () => 0)
+  const chars = estimateRequest(request, context.images, (text) => text.length) - media
+  if (chars < LEARN_MIN_CHARS || prompt <= media) return PROMPT_CHARS_PER_TOKEN
+  return Math.min(Token.CHARS_PER_TOKEN, Math.max(LEARNED_CHARS_PER_TOKEN_MIN, chars / (prompt - media)))
+}
+
+/** The system and messages a request sends for `messages`, after the runner's unsupported-media and image passes. */
+const sentFor = (context: SessionContext.Loaded, messages: ReadonlyArray<SessionMessage.Info>) => {
+  const base = transcript(context, messages)
+  // TODO: Pass compaction history the runner has already shaped. This and `recentUserMessages` repeat the
+  // runner's unsupported-media and image-budget passes; here the image budget only sees images since the anchor,
+  // so image-heavy sessions can estimate high.
+  const supported = SessionModelRequest.unsupportedParts(base.messages, context.model.capabilities)
+  return {
+    system: base.system,
+    messages: context.images
+      ? ImageBudget.bound(supported, ImageFit.requestLimits(context.images))
+      : SessionModelRequest.boundImages(supported),
   }
 }
 
 /**
  * The largest request the model takes while leaving room for its reply: `RESERVE_SHARE` of the window, or
  * `RESERVE_MIN` when that is more. A summary request that must be shrunk is aimed at the same size. A window too small
- * to give up `RESERVE_MIN` keeps `RESERVE_SHARE`.
+ * to give up `RESERVE_MIN` keeps `RESERVE_SHARE`. The model's compaction point (`limit.compact`, a CLIProxyPacer
+ * client's threshold) is a ceiling as it is, with no reserve taken off it; the lower of the two wins.
  */
 const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: Settings["buffer"]) => {
-  // With no window at all, only a provider rejection can limit the request.
+  const point = limit.compact ?? Number.POSITIVE_INFINITY
+  // With no window at all, only the compaction point or a provider rejection can limit the request.
   const window = inputWindow(limit)
-  if (window <= 0) return Number.POSITIVE_INFINITY
+  if (window <= 0) return point
   const tokens = typeof buffer === "string" ? Math.round((window * Number.parseFloat(buffer)) / 100) : buffer
   // A buffer that leaves no room, such as one set for a larger model, is ignored.
-  if (tokens !== undefined && tokens < window) return window - tokens
-  return window - Math.max(Math.floor(window * RESERVE_SHARE), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
+  if (tokens !== undefined && tokens < window) return Math.min(point, window - tokens)
+  return Math.min(
+    point,
+    window - Math.max(Math.floor(window * RESERVE_SHARE), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0),
+  )
 }
 
 /**
  * The largest summary request that leaves `RESERVE_MIN` of the window for the summary, or less when the request
- * cannot generate that much. Zero for an unknown window.
+ * cannot generate that much. Zero for an unknown window. The model's own window, whatever its compaction point.
  */
 const summaryRoom = (limit: SessionContext.Loaded["model"]["limit"], output = RESERVE_MIN) =>
   Math.max(0, inputWindow(limit) - Math.min(RESERVE_MIN, output))
@@ -1405,7 +1573,7 @@ const measuredPrompt = (context: SessionContext.Loaded) => {
     anchor.agent !== context.agent.id
   )
     return undefined
-  return estimatePrompt(context)
+  return promptSize(context, false)
 }
 
 /**
@@ -1432,42 +1600,48 @@ const fitOutput = (request: LLMRequest, limit: SessionContext.Loaded["model"]["l
   return LLMRequest.update(request, { generation: { ...request.generation, maxTokens } })
 }
 
+/** The tokens a request's text is put at; media has its own estimates. */
+type Count = (text: string) => number
+
 // `exact`: images count the visual tokens that model reads them as (`ImageFit.visualTokens`).
-const estimateRequest = (request: Pick<LLMRequest, "system" | "tools" | "messages">, exact?: ImageFit.Model) =>
-  request.system.reduce((sum, part) => sum + Token.estimate(part.text), 0) +
-  request.tools.reduce((sum, tool) => sum + estimateTool(tool), 0) +
-  request.messages.reduce((sum, message) => sum + estimateMessage(message, exact), 0)
+const estimateRequest = (
+  request: Pick<LLMRequest, "system" | "tools" | "messages">,
+  exact?: ImageFit.Model,
+  count: Count = Token.estimate,
+) =>
+  request.system.reduce((sum, part) => sum + count(part.text), 0) +
+  request.tools.reduce((sum, tool) => sum + estimateTool(tool, count), 0) +
+  request.messages.reduce((sum, message) => sum + estimateMessage(message, exact, count), 0)
 
 /** Only what providers receive; `metadata` and `native` stay local. */
-const estimateTool = (tool: ToolEntry): number => {
-  if (tool.type === "tool") return Token.estimate(tool.name + tool.description + JSON.stringify(tool.inputSchema))
+const estimateTool = (tool: ToolEntry, count: Count): number => {
+  if (tool.type === "tool") return count(tool.name + tool.description + JSON.stringify(tool.inputSchema))
   return (
-    Token.estimate(tool.name + (tool.description ?? "")) +
-    tool.tools.reduce((sum, entry) => sum + estimateTool(entry), 0)
+    count(tool.name + (tool.description ?? "")) + tool.tools.reduce((sum, entry) => sum + estimateTool(entry, count), 0)
   )
 }
 
-const estimateMessage = (message: Message, exact?: ImageFit.Model) =>
-  message.content.reduce((sum, part) => sum + estimatePart(part, exact), 0)
+const estimateMessage = (message: Message, exact?: ImageFit.Model, count: Count = Token.estimate) =>
+  message.content.reduce((sum, part) => sum + estimatePart(part, exact, count), 0)
 
-const estimatePart = (part: ContentPart, exact: ImageFit.Model | undefined): number => {
+const estimatePart = (part: ContentPart, exact: ImageFit.Model | undefined, count: Count): number => {
   // An encrypted native compaction has no locally measurable size.
-  if (part.type === "compaction") return Token.estimate(part.text ?? "")
+  if (part.type === "compaction") return count(part.text ?? "")
   if (part.type === "effort") return 0
-  if (part.type === "text" || part.type === "reasoning") return Token.estimate(part.text)
+  if (part.type === "text" || part.type === "reasoning") return count(part.text)
   if (part.type === "media")
     return estimateMedia(
       part.media.mediaType,
       exact && part.media.source.type === "base64" ? { model: exact, data: part.media.source.data } : undefined,
     )
-  if (part.type === "tool-call") return Token.estimate(part.name + (JSON.stringify(part.input) ?? ""))
+  if (part.type === "tool-call") return count(part.name + (JSON.stringify(part.input) ?? ""))
 
   if (part.result.type === "content")
     return part.result.value.reduce(
       (sum, content) =>
         sum +
         (content.type === "text"
-          ? Token.estimate(content.text)
+          ? count(content.text)
           : estimateMedia(
               content.mime,
               exact ? { model: exact, data: content.uri.slice(content.uri.indexOf(",") + 1) } : undefined,
@@ -1475,7 +1649,7 @@ const estimatePart = (part: ContentPart, exact: ImageFit.Model | undefined): num
       0,
     )
   const value = part.result.value
-  return Token.estimate(typeof value === "string" ? value : (JSON.stringify(value) ?? ""))
+  return count(typeof value === "string" ? value : (JSON.stringify(value) ?? ""))
 }
 
 const estimateMedia = (mime: string, exact?: { readonly model: ImageFit.Model; readonly data: string }) => {

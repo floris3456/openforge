@@ -4,7 +4,7 @@ import { Button } from "@opencode/ui/button"
 import { Menu } from "@opencode/ui/menu"
 import { Tooltip } from "@opencode/ui/tooltip"
 import { useI18n } from "@opencode/ui/context/i18n"
-import { lastAssistantWithUsage } from "@opencode/client/solid"
+import { contextLimit, lastAssistantWithUsage } from "@opencode/client/solid"
 import { usePlugin, type MountedSession } from "@opencode/plugin/gui"
 import { catalogModel, syncCatalog } from "./catalog"
 
@@ -48,7 +48,7 @@ export function SessionContextUsage(props: {
     const message = lastAssistantWithUsage(messages(), info()?.revert?.messageID)
 
     if (!message) return
-    const model = catalogModel(props.session, message.model)?.model
+    const limit = contextLimit(catalogModel(props.session, message.model)?.model?.limit)
 
     const total =
       message.tokens.input +
@@ -59,7 +59,7 @@ export function SessionContextUsage(props: {
 
     return {
       total,
-      usage: model?.limit.context ? Math.round((total / model.limit.context) * 100) : null,
+      usage: limit ? Math.round((total / limit) * 100) : null,
     }
   })
 

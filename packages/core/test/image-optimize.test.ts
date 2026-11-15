@@ -591,6 +591,54 @@ describe("before a step", () => {
   )
 })
 
+describe("before a step, a prompt no request carried", () => {
+  const shot = (n: number) => ({
+    line: `[Image ${n}: shot.webp, 10×10, shown at 10×10; see it again or zoom with image]`,
+    data: "A".repeat(400),
+  })
+
+  // It follows the summary as itself, its image with it (`SessionRecentText.UNSENT`), so the image is not carried again.
+  it.effect("an image it brings that would not fit compacts first, and goes out once, in the prompt", () =>
+    withEnv({ OPENFORGE_TEST_IMAGE_LIMITS: "3,1000000" }, () =>
+      Effect.gen(function* () {
+        requests = []
+        const session = yield* insertSession(Session.ID.make("ses_image_unsent"))
+        const prompt = SessionMessage.User.make({
+          id: SessionMessage.ID.create(),
+          type: "user",
+          text: "and this",
+          files: [{ data: shot(4).data, mime: "image/webp", name: "shot.webp", source: { type: "inline" } }],
+          metadata: { imageLines: [shot(4).line] },
+          time: { created: DateTime.makeUnsafe(0) },
+        })
+        const messages = [user("look"), toolImages([shot(1), shot(2), shot(3)]), prompt]
+        yield* storeMessages(session.id, messages)
+        const compaction = yield* SessionCompaction.Service
+        const bus = yield* Bus.Service
+        const store = yield* SessionStore.Service
+        expect(
+          yield* ImageBudget.before({
+            loaded: loaded(session, messages),
+            estimate: { measured: 0, estimated: 0 },
+            compaction,
+            bus,
+          }),
+        ).toBe(true)
+        // The summary is written from what was sent: the three images, not the prompt.
+        expect(requests).toHaveLength(1)
+        const sent = JSON.stringify(requests[0].messages)
+        expect(sent.match(/data:image\/webp;base64/g)).toHaveLength(3)
+        expect(sent).not.toContain("and this")
+        const after = yield* store.context(session.id)
+        expect(after.map((message) => message.id)).toEqual([after[0]!.id, prompt.id])
+        const next = JSON.stringify(toLLMMessages(after, resolved.ref))
+        expect(next.indexOf("the summary")).toBeLessThan(next.indexOf("[Image 4: shot.webp"))
+        expect(next.match(/"mediaType":"image\/webp"/g)).toHaveLength(1)
+      }),
+    ),
+  )
+})
+
 describe("other chats", () => {
   it.effect("keep today's cut of old images; a chat with optimized images never cuts one", () =>
     Effect.gen(function* () {

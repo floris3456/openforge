@@ -226,7 +226,8 @@ const messageEntries = Effect.fnUntraced(function* (
 /**
  * A summary compaction references its kept messages by `metadata.keepID` instead of storing them, so
  * history rebuilds their text from the messages between that one and the compaction, in memory only (see
- * `SessionRecentText.kept`). Compactions written before the reference have none and keep the text they stored.
+ * `SessionRecentText.kept`). Compactions written before the reference have none and keep the text they stored. Those
+ * no request carried (`SessionRecentText.UNSENT`) follow the compaction as themselves, before what came after it.
  */
 const withRecentText = Effect.fnUntraced(function* (
   db: DatabaseService,
@@ -260,12 +261,22 @@ const withRecentText = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   // The recent text names attachments by mime and name only, so their bytes are never read.
   const kept = yield* Effect.forEach(yield* withParts(db, rows), decodeStoredRow, { concurrency: 1 })
-  const cut = SessionRecentText.cutsInputs(compaction)
-  const recent = kept
-    .map((message) => SessionRecentText.messageToText(message, cut))
-    .filter(Boolean)
-    .join("\n\n")
-  return [{ ...first, message: { ...compaction, metadata: { ...compaction.metadata, recent } } }, ...entries.slice(1)]
+  const unsent = kept.findIndex((message) => message.id === compaction.metadata?.[SessionRecentText.UNSENT])
+  const recent = SessionRecentText.rebuild(unsent < 0 ? kept : kept.slice(0, unsent), compaction)
+  // Sent as they are, so their files are read whole.
+  const moved = yield* Effect.forEach(
+    yield* SessionBlob.hydrate(
+      db,
+      unsent < 0 ? [] : rows.slice(unsent).filter((row) => SessionRecentText.sendsAsItself(row.type)),
+    ),
+    (row) => decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+    { concurrency: 1 },
+  )
+  return [
+    { ...first, message: SessionRecentText.withRecent(compaction, recent, moved.length) },
+    ...moved,
+    ...entries.slice(1),
+  ]
 })
 
 export const load = Effect.fn("SessionHistory.load")(function* (
@@ -324,13 +335,15 @@ export const preview = Effect.fn("SessionHistory.preview")(function* (
 
 /**
  * The synthetic messages `load(db, sessionID, "latest")` would return, read without the rest of the transcript. Under
- * that boundary every row from the latest completed compaction on is kept, and synthetic rows carry no media.
+ * that boundary every row from the latest completed compaction on is kept, with the synthetic rows before it that it
+ * sends after it (`unsentFrom`), and synthetic rows carry no media.
  */
 export const synthetics = Effect.fn("SessionHistory.synthetics")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
 ) {
   const compaction = yield* latestCompaction(db, sessionID, "latest")
+  const from = compaction && ((yield* unsentFrom(db, sessionID, compaction.seq)) ?? compaction.seq)
   const rows = yield* db
     .select()
     .from(SessionMessageTable)
@@ -338,13 +351,47 @@ export const synthetics = Effect.fn("SessionHistory.synthetics")(function* (
       and(
         eq(SessionMessageTable.session_id, sessionID),
         eq(SessionMessageTable.type, "synthetic"),
-        compaction ? gte(SessionMessageTable.seq, compaction.seq) : undefined,
+        from === undefined ? undefined : gte(SessionMessageTable.seq, from),
       ),
     )
     .orderBy(asc(SessionMessageTable.seq))
     .all()
     .pipe(Effect.orDie)
   return yield* Effect.forEach(rows, decodeMessageRow, { concurrency: 1 })
+})
+
+/**
+ * The `seq` of the first message the compaction at `seq` sends after it as itself (`SessionRecentText.UNSENT`), when it
+ * sends any: from there to the compaction, every row that `sendsAsItself` is in the model's view, as the rows after it
+ * are.
+ */
+export const unsentFrom = Effect.fn("SessionHistory.unsentFrom")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  seq: number,
+) {
+  const compaction = yield* db
+    .select({
+      unsentID: sql<unknown>`json_extract(${SessionMessageTable.data}, ${`$.metadata.${SessionRecentText.UNSENT}`})`,
+    })
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.session_id, sessionID),
+        eq(SessionMessageTable.type, "compaction"),
+        eq(SessionMessageTable.seq, seq),
+      ),
+    )
+    .get()
+    .pipe(Effect.orDie)
+  if (!Schema.is(SessionMessage.ID)(compaction?.unsentID)) return undefined
+  const first = yield* db
+    .select({ seq: SessionMessageTable.seq })
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.id, compaction.unsentID)))
+    .get()
+    .pipe(Effect.orDie)
+  return first && first.seq < seq ? first.seq : undefined
 })
 
 /** The id and text of the session's first user message. */

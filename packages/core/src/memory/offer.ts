@@ -3,6 +3,7 @@ export * as MemoryOffer from "./offer.js"
 import { and, desc, eq, gt, gte, or, sql } from "drizzle-orm"
 import { Effect } from "effect"
 import type { Database } from "../database/database.js"
+import { SessionHistory } from "../session/history.js"
 import type { SessionMessage } from "../session/message.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
@@ -37,7 +38,8 @@ export const offered = Effect.fnUntraced(function* (db: Db, sessionID: SessionSc
 
 /**
  * The chat's newest start block, and whether it is in the model's view: after the latest completed compaction, which
- * `SessionHistory.load` starts from.
+ * `SessionHistory.load` starts from, or among what that compaction sends after it as itself, which no request had
+ * carried (`SessionHistory.unsentFrom`), looked up only for a block before it.
  */
 export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
   const block = yield* db
@@ -62,8 +64,12 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
     .pipe(Effect.orDie)
   if (!block) return undefined
   const compaction = yield* latestCompaction(db, sessionID)
+  const unsent =
+    compaction === undefined || block.seq > compaction
+      ? undefined
+      : yield* SessionHistory.unsentFrom(db, sessionID, compaction)
   return {
-    visible: compaction === undefined || block.seq > compaction,
+    visible: compaction === undefined || block.seq > compaction || (unsent !== undefined && block.seq >= unsent),
     text: typeof block.text === "string" ? block.text : undefined,
     // SQLite's JSON true; a block written before tasks were recorded offers none.
     tasks: block.tasks === 1 || block.tasks === true,

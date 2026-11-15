@@ -13,7 +13,7 @@ import type { LocationRef, OpenCodeEvent } from "@opencode/client/promise"
 import type { Config } from "../config"
 import { newSessionLocation } from "../config/new-session-location"
 import { errorMessage } from "../util/error"
-import { loadRunAgents, loadRunCommands, loadRunReferences } from "./catalog.shared"
+import { contextLimit, loadRunAgents, loadRunCommands, loadRunReferences } from "./catalog.shared"
 import {
   resolveMiniSettings,
   resolveModelInfo,
@@ -821,8 +821,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         },
         trace: log,
         onCatalogRefresh: requestCatalogRefresh,
-        contextLimit: (model) =>
-          state.providers.find((provider) => provider.id === model.providerID)?.models[model.modelID]?.limit?.context,
+        contextLimit: (model) => contextLimit(state.providers, model),
       })
       if (footer.isClosed) {
         await handle.close()

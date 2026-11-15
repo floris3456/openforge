@@ -10,7 +10,7 @@ import { useI18n } from "@opencode/ui/context/i18n"
 import { File } from "@opencode/session-ui/file"
 import { Markdown } from "@opencode/session-ui/markdown"
 import type { SessionMessageInfo } from "@opencode/client/promise"
-import { lastAssistantWithUsage } from "@opencode/client/solid"
+import { contextLimit, lastAssistantWithUsage } from "@opencode/client/solid"
 import { createKeyed, usePlugin, type MountedSession } from "@opencode/plugin/gui"
 import { catalogModel, syncCatalog } from "./catalog"
 import { fetchSessionExport, sessionExportFilename } from "./export"
@@ -114,6 +114,8 @@ export default function SessionContextTab(props: { session: MountedSession }) {
 
     if (!message) return
     const entry = catalogModel(props.session, message.model)
+    // The limit the usage counts against: the model's compaction point when it has one.
+    const limit = contextLimit(entry?.model?.limit)
 
     const total =
       message.tokens.input +
@@ -127,10 +129,10 @@ export default function SessionContextTab(props: { session: MountedSession }) {
       tokens: message.tokens,
       providerLabel: entry?.provider.name ?? message.model.providerID,
       modelLabel: entry?.model?.name ?? message.model.id,
-      limit: entry?.model?.limit.context,
+      limit,
       input: message.tokens.input,
       total,
-      usage: entry?.model?.limit.context ? Math.round((total / entry.model.limit.context) * 100) : null,
+      usage: limit ? Math.round((total / limit) * 100) : null,
     }
   })
 

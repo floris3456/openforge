@@ -1,7 +1,7 @@
 export * as Model from "./model.js"
 
 import { Schema, Struct } from "effect"
-import { optional, statics } from "./schema.js"
+import { optional, PositiveInt, statics } from "./schema.js"
 import { Provider } from "./provider.js"
 import { Compatibility, MaxTokensField, MediaInput, ReasoningField } from "./model-compatibility.js"
 import { Money } from "./money.js"
@@ -134,6 +134,11 @@ export const Info = Schema.Struct({
     context: Schema.Int,
     input: Schema.Int.pipe(optional),
     output: Schema.Int,
+    /**
+     * The prompt size a chat on the model compacts at, below its input window: a CLIProxyPacer client's threshold for
+     * the model. Unset compacts near the window, as usual. A chat's context meter counts against it.
+     */
+    compact: PositiveInt.pipe(optional),
   }),
 })
   .annotate({ identifier: "Model.Info" })

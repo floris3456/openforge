@@ -118,7 +118,12 @@ const testLLM = Layer.unwrap(
     }).pipe(Layer.merge(Layer.succeed(LLMRequests, requests)))
   }),
 )
-type ModelLimit = { readonly context: number; readonly input?: number; readonly output: number }
+type ModelLimit = {
+  readonly context: number
+  readonly input?: number
+  readonly output: number
+  readonly compact?: number
+}
 const defaultModelLimit = { context: 200_000, output: 32_000 }
 const modelLimits = new Map<string, ModelLimit>()
 const testModel = (id: string, limit: ModelLimit = defaultModelLimit) => {
@@ -1413,6 +1418,7 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("does not run the session idle hook after manual compaction of an idle session", function* (s) {
+    yield* s.llm.push(TestLLM.text("First answer", "idle-first"))
     yield* s.runPrompt("First")
     const hooks = yield* PluginHooks.Service
     const idles: Session.ID[] = []
@@ -1686,7 +1692,10 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       yield* s.admit("Echo before moving")
-      yield* s.llm.push(TestLLM.toolCall("call-move", "echo", { text: "moving" }), TestLLM.text("Done", "text-after-move"))
+      yield* s.llm.push(
+        TestLLM.toolCall("call-move", "echo", { text: "moving" }),
+        TestLLM.text("Done", "text-after-move"),
+      )
       const tools = yield* s.blockTools()
       const run = yield* s.resume.pipe(Effect.forkChild)
       yield* tools.started
@@ -2423,6 +2432,7 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("moves the epoch at compaction and narrates later changes", function* (s) {
+    yield* s.llm.push(TestLLM.text("First answer", "epoch-first"))
     yield* s.runPrompt("First")
     s.systemBaseline = "Changed before compaction"
     yield* s.llm.push(TestLLM.text("## Objective\n- summary", "epoch-summary"))
@@ -2518,6 +2528,7 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("rechecks compaction admitted during boundary context preparation", function* (s) {
+    yield* s.llm.push(TestLLM.text("Earlier work done", "earlier"))
     yield* s.runPrompt("Earlier work")
     yield* s.admit("STEER_A")
     yield* s.admit("STEER_B")
@@ -2572,6 +2583,7 @@ describe("SessionRunnerLLM", () => {
   }
 
   scenario("keeps steers durable across interrupted priority compaction and replay", function* (s) {
+    yield* s.llm.push(TestLLM.text("Earlier work done", "earlier"))
     yield* s.runPrompt("Earlier work")
     const first = yield* s.admit("STEER_A")
     const second = yield* s.admit("STEER_B")
@@ -2871,7 +2883,8 @@ describe("SessionRunnerLLM", () => {
           role: "user",
           content: [{ type: "text", text: SessionCompaction.buildPrompt(false) }],
         })
-        expect(userTexts(compact).includes("Retained recent request")).toBe(reason === "auto")
+        // An automatic compaction came before any request carried the new prompt: it follows the summary as itself.
+        expect(userTexts(compact)).not.toContain("Retained recent request")
         for (const field of [
           "model",
           "system",
@@ -3479,18 +3492,21 @@ describe("SessionRunnerLLM", () => {
     yield* s.runPrompt("Recent exact request ".repeat(180))
 
     expect(s.requests).toHaveLength(2)
-    expect(JSON.stringify(s.requests[0].messages)).toContain("Recent exact request ".repeat(180))
+    // No request carried the new prompt: the summary leaves it out, and it follows the checkpoint as itself.
+    expect(JSON.stringify(s.requests[0].messages)).not.toContain("Recent exact request")
     expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
-    expect(userTexts(s.requests[1])).toHaveLength(1)
-    expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
-    expect(userTexts(s.requests[1])[0]).toContain(`[User]: ${"Recent exact request ".repeat(180)}`)
+    expect(userTexts(s.requests[1])).toEqual([
+      expect.stringContaining("<summary>\n## Objective\n- Preserve the task\n</summary>"),
+      "Recent exact request ".repeat(180),
+    ])
+    expect(userTexts(s.requests[1])[0]).not.toContain("Recent exact request")
 
     const context = yield* store.context(sessionID)
-    expect(context.map((message) => message.type)).toEqual(["compaction", "assistant"])
+    expect(context.map((message) => message.type)).toEqual(["compaction", "user", "assistant"])
     expect(context[0]).toMatchObject({
       type: "compaction",
       summary: "## Objective\n- Preserve the task",
-      metadata: { recent: `[User]: ${"Recent exact request ".repeat(180)}` },
+      metadata: { recent: "" },
     })
     // Only a reference to the kept messages is stored; history rebuilds their text.
     const db = (yield* Database.Service).db
@@ -3507,7 +3523,7 @@ describe("SessionRunnerLLM", () => {
       .orderBy(desc(SessionMessageTable.seq))
       .get()
       .pipe(Effect.orDie)
-    expect(stored?.data).toMatchObject({ metadata: { keepID: kept?.id } })
+    expect(stored?.data).toMatchObject({ metadata: { keepID: kept?.id, unsentID: kept?.id } })
     expect(stored?.data).not.toHaveProperty("recent")
 
     s.requests.length = 0
@@ -3520,13 +3536,241 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests).toHaveLength(2)
     expect(userTexts(s.requests[0])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
-    expect(userTexts(s.requests[0])[0]).toContain("Recent exact request")
+    // The prompt the last compaction sent after it went out and was answered: now it is summarized.
+    expect(userTexts(s.requests[0]).slice(1, -1)).toEqual(["Recent exact request ".repeat(180)])
+    expect(JSON.stringify(s.requests[0].messages)).not.toContain("Newest exact request")
     expect(userTexts(s.requests[0]).at(-1)).toBe(SessionCompaction.buildPrompt(true))
-    expect((yield* store.context(sessionID))[0]).toMatchObject({
-      type: "compaction",
-      summary: "## Objective\n- Preserve the updated task",
-      metadata: { recent: `[User]: ${"Newest exact request ".repeat(180)}` },
+    expect(yield* store.context(sessionID)).toMatchObject([
+      { type: "compaction", summary: "## Objective\n- Preserve the updated task", metadata: { recent: "" } },
+      { type: "user", text: "Newest exact request ".repeat(180) },
+      { type: "assistant" },
+    ])
+  })
+
+  // Workspace spec compaction-threshold-per-client, section 3. The point moves as a capabilities change moves it: the
+  // model resolved at each step carries the catalog's limits then.
+  scenario("compacts a chat once its prompt reaches its model's compaction point, which may move", function* (s) {
+    const limit = { context: 200_000, output: 32_000 }
+    s.currentModel = testModel("pointed", { ...limit, compact: 30_000 })
+    yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "pointed-first", 29_000))
+    yield* s.runPrompt("Earlier question")
+    // Below the point, far below the window's own ceiling: no compaction.
+    yield* s.llm.push(TestLLM.textWithUsage("Second answer", "pointed-second", 30_500))
+    yield* s.runPrompt("Second question")
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+
+    // Past the old point, below the new one.
+    modelLimits.set("pointed", { ...limit, compact: 40_000 })
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.textWithUsage("Third answer", "pointed-third", 31_000))
+    yield* s.runPrompt("Third question")
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+
+    // At the point as it is now, with no reserve taken off it: compacted before the next step.
+    modelLimits.set("pointed", { ...limit, compact: 31_000 })
+    s.requests.length = 0
+    yield* s.llm.push(
+      TestLLM.text("## Objective\n- Preserve the task", "pointed-summary"),
+      TestLLM.textWithUsage("Continued", "pointed-final", 1_000),
+    )
+    yield* s.runPrompt("Fourth question")
+    expect(s.requests).toHaveLength(2)
+    expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
+    expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
+    expect((yield* s.context)[0]).toMatchObject({ type: "compaction", status: "completed", reason: "auto" })
+  })
+
+  // Workspace evidence overnight-2026-11-15, part 1: a step read 24,565 characters of code after a request of 17,613
+  // tokens, 6,387 below a point of 24,000. At 4 characters a token the code was put at 6,141 tokens, so the step went
+  // out, at 27,743. The chat's requests had run at 2.3–2.5 characters a token.
+  scenario("compacts before a step whose new tool result of code takes the prompt past the point", function* (s) {
+    s.currentModel = testModel("code-point", { context: 200_000, output: 32_000, compact: 24_000 })
+    const line = "export const scale = (input: number, factor = 2) => input * factor\n"
+    const code = line.repeat(Math.ceil(24_565 / line.length)).slice(0, 24_565)
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 17_613, nonCachedInputTokens: 17_613 } },
+        LLMEvent.toolCall({ id: "call_code", name: "echo", input: { text: code } }),
+      ),
+      TestLLM.text("## Objective\n- Explain the module", "code-summary"),
+      TestLLM.text("It scales its input.", "code-final"),
+    )
+    // The measured request held a pasted module: about 2.4 characters a token with the system prompt and tools.
+    yield* s.runPrompt(`Explain this module:\n${line.repeat(500)}`)
+
+    expect(s.requests).toHaveLength(3)
+    expect(isSummaryRequest(s.requests[1])).toBe(true)
+    expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Explain the module\n</summary>")
+    expect((yield* s.context).map((message) => message.type)).toEqual(["compaction", "assistant"])
+  })
+
+  // Workspace evidence overnight-2026-11-15, part 1, "Also seen": a compaction between a step's tool calls and the
+  // request that would read their results kept them only as the recent part's 1,250 characters each, so the model
+  // read the same three files again at once.
+  for (const turn of ["after an earlier exchange", "in the chat's first turn"] as const)
+    scenario(`keeps a step's unread tool results whole beside the summary ${turn}`, function* (s) {
+      s.currentModel = testModel("unread-point", { context: 200_000, output: 32_000, compact: 30_000 })
+      if (turn === "after an earlier exchange") {
+        yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "unread-earlier", 1_000))
+        yield* s.runPrompt("Earlier question")
+      }
+      const file = Array.from({ length: 200 }, (_, index) => `${index}: export const value${index} = ${index}`).join(
+        "\n",
+      )
+      yield* s.llm.push(
+        TestLLM.complete(
+          { reason: { normalized: "tool-calls" }, usage: { inputTokens: 29_000, nonCachedInputTokens: 29_000 } },
+          LLMEvent.toolCall({ id: "call_file", name: "echo", input: { text: file } }),
+        ),
+        TestLLM.text("## Objective\n- Read the file", "unread-summary"),
+        TestLLM.text("Read it", "unread-final"),
+      )
+      s.requests.length = 0
+      yield* s.runPrompt("Read the file")
+
+      expect(s.requests).toHaveLength(3)
+      expect(isSummaryRequest(s.requests[1])).toBe(true)
+      const after = s.requests[2]
+      expect(userTexts(after)[0]).toContain(`<recent-context>\n`)
+      expect(userTexts(after)[0]).toContain(`[Tool result]: ${file}\n</recent-context>`)
+      // Calls and results reach the model in pairs: here both are text in the checkpoint.
+      const parts = after.messages.flatMap((message) => message.content)
+      expect(parts.flatMap((part) => (part.type === "tool-result" ? [part.id] : []))).toEqual(
+        parts.flatMap((part) => (part.type === "tool-call" ? [part.id] : [])),
+      )
     })
+
+  // A step's unread results are kept whole beside the summary only up to a bound. Here one step read four files of
+  // 147,000 characters together. Kept whole, the request after the compaction went out at 63,203 tokens: at a point of
+  // 24,000 the next step compacted again, and past a window of 50,000 the provider rejected it and, with only the
+  // checkpoint left, there was nothing to compact, so the step failed.
+  for (const limit of [
+    { context: 200_000, output: 32_000, compact: 24_000 },
+    { context: 50_000, output: 8_000 },
+  ] as const)
+    scenario(
+      `keeps a step's unread results whole only up to a bound ${limit.compact ? "at a compaction point" : "near the window"}`,
+      function* (s) {
+        s.currentModel = testModel("unread-bound", limit)
+        // A provider counting 2.5 characters a token, which rejects a request larger than its window.
+        const counted = (request: LLMRequest | undefined) =>
+          Math.ceil(
+            JSON.stringify([request?.system, request?.tools, request?.messages.map((message) => message.content)])
+              .length / 2.5,
+          )
+        const answer = (...events: LLMEvent[]) =>
+          Stream.suspend(() => {
+            const tokens = counted(s.requests.at(-1))
+            return Stream.fromIterable(
+              tokens > limit.context
+                ? [
+                    LLMEvent.stepStart({ index: 0 }),
+                    LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" }),
+                  ]
+                : TestLLM.complete(
+                    {
+                      reason: { normalized: events.some(LLMEvent.is.toolCall) ? "tool-calls" : "stop" },
+                      usage: { inputTokens: tokens, nonCachedInputTokens: tokens },
+                    },
+                    ...events,
+                  ),
+            )
+          })
+        const file = (name: string, length: number) =>
+          Array.from({ length: 2_000 }, (_, index) => `${index}: export const ${name}${index} = scale(${index}, 2)`)
+            .join("\n")
+            .slice(0, length)
+        const small = file("small", 3_000)
+        const large = ["first", "second", "third"].map((name) => file(name, 48_000))
+        yield* s.llm.push(
+          answer(
+            ...[small, ...large].map((text, index) =>
+              LLMEvent.toolCall({ id: `call_read_${index}`, name: "echo", input: { text } }),
+            ),
+          ),
+          TestLLM.text("## Objective\n- Read the files", "bound-summary"),
+          answer(LLMEvent.toolCall({ id: "call_next", name: "echo", input: { text: "next" } })),
+          answer(
+            LLMEvent.textStart({ id: "bound-final" }),
+            LLMEvent.textDelta({ id: "bound-final", text: "Read them" }),
+            LLMEvent.textEnd({ id: "bound-final" }),
+          ),
+        )
+        yield* s.runPrompt("Read the four files")
+
+        expect(s.requests.map(isSummaryRequest)).toEqual([false, true, false, false])
+        const after = s.requests[2]
+        expect(counted(after)).toBeLessThan(limit.compact ?? limit.context)
+        const checkpoint = userTexts(after)[0]
+        // The short result whole, the long ones cut to an equal share, each with the recent part's notice.
+        const results = checkpoint
+          .split("[Tool result]: ")
+          .slice(1)
+          .map((part) => part.split(/\n\[Assistant|\n\n|\n<\/recent-context>/)[0])
+        expect(results[0]).toBe(small)
+        const cut = results.slice(1).map((result) => result.split("\n[truncated]"))
+        expect(cut.map((parts) => parts.length)).toEqual([2, 2, 2])
+        expect(cut.map((parts) => parts[1])).toEqual(["", "", ""])
+        large.forEach((text, index) => {
+          expect(cut[index][0].length).toBeGreaterThan(1_250)
+          expect(cut[index][0].length).toBe(cut[0][0].length)
+          expect(text.startsWith(cut[index][0])).toBe(true)
+        })
+        // History rebuilds the recent part at each load as it was written, so the cached prefix holds.
+        expect(userTexts(s.requests[3])[0]).toBe(checkpoint)
+      },
+    )
+
+  // Workspace evidence overnight-2026-11-15, recheck 1: the point was due before a step's first request, so the chat
+  // compacted 23 ms after the prompt came. No request had carried it, and it reached the model only in the checkpoint's
+  // recent part, under "historical context, not as new instructions"; CLIProxyPacer's list of the person's messages,
+  // built from the typed text it stored, lost it.
+  scenario("sends a prompt that no request carried after the checkpoint as itself", function* (s) {
+    s.currentModel = testModel("unsent-point", { context: 200_000, output: 32_000, compact: 24_000 })
+    yield* s.llm.push(TestLLM.textWithUsage("Three paths have no tests.", "unsent-earlier", 23_990))
+    yield* s.runPrompt("Which paths have no tests?")
+    s.requests.length = 0
+    const prompt = "Write tests for the first three of those untested paths."
+    yield* s.llm.push(
+      TestLLM.text("## Objective\n- Find the untested paths", "unsent-summary"),
+      TestLLM.textWithUsage("Tests written", "unsent-final", 2_000),
+    )
+    yield* s.runPrompt(prompt)
+
+    expect(s.requests.map(isSummaryRequest)).toEqual([true, false])
+    // The summary is written from what the model already read, which ends at its last reply.
+    const summary = userTexts(s.requests[0])
+    expect(summary).toEqual(["Which paths have no tests?", SessionCompaction.buildPrompt(false)])
+    const after = s.requests[1]
+    expect(messageRoles(after)).toEqual(["user", "user"])
+    const [checkpoint, sent] = userTexts(after)
+    expect(checkpoint).toContain("<summary>\n## Objective\n- Find the untested paths\n</summary>")
+    // Everything fits `keep`, so the recent part keeps only the latest exchange: the prompt, which goes as itself.
+    expect(checkpoint).not.toContain("<recent-context>")
+    expect(checkpoint).not.toContain(prompt)
+    expect(sent).toBe(prompt)
+    // The timeline is as it was; only the request puts the prompt after the compaction.
+    expect((yield* s.session.messages({ sessionID, order: "asc" })).map((message) => message.type)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "compaction",
+      "assistant",
+    ])
+    expect((yield* s.context).map((message) => message.type)).toEqual(["compaction", "user", "assistant"])
+  })
+
+  // A compaction before the chat's first request would put its only prompt into the summary.
+  scenario("sends a chat's first prompt as itself when it is past the point before any request", function* (s) {
+    s.currentModel = testModel("unsent-first", { context: 200_000, output: 32_000, compact: 200 })
+    const prompt = "Explain this module:\n" + "export const scale = (input: number) => input * 2\n".repeat(40)
+    yield* s.llm.push(TestLLM.textWithUsage("It doubles its input.", "unsent-first-answer", 2_500))
+    yield* s.runPrompt(prompt)
+
+    expect(s.requests.map(isSummaryRequest)).toEqual([false])
+    expect(userTexts(s.requests[0])).toEqual([prompt])
+    expect((yield* s.context).map((message) => message.type)).toEqual(["user", "assistant"])
   })
 
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {
@@ -3664,9 +3908,14 @@ describe("SessionRunnerLLM", () => {
 
     expect(s.requests).toHaveLength(3)
     expect(userTexts(s.requests[1]).at(-1)).toContain("## Objective")
+    // The rejected step's prompt reached no model: the summary leaves it out, and it follows the checkpoint as itself.
+    expect(userTexts(s.requests[1])).not.toContain("Continue")
     expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Recover overflow\n</summary>")
+    expect(userTexts(s.requests[2])[0]).not.toContain("Continue")
+    expect(userTexts(s.requests[2]).slice(1)).toEqual(["Continue"])
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Recover overflow" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "stop" },
     ])
     yield* replaySessionProjection(sessionID)
@@ -3693,6 +3942,7 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Moved summary\n</summary>")
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Moved summary" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "stop" },
     ])
   })
@@ -3873,6 +4123,7 @@ describe("SessionRunnerLLM", () => {
           model: expect.objectContaining({ id: "replacement" }),
           summary: "## Objective\n- Cold summary",
         },
+        { type: "user", text: "Continue" },
         { type: "assistant", finish: "stop" },
       ])
     },
@@ -4120,6 +4371,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(3)
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Recover unknown limit" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "stop" },
     ])
   })
@@ -4136,6 +4388,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Recover undersized limit" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "stop" },
     ])
   })
@@ -4153,6 +4406,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(3)
     expect(yield* s.context).toMatchObject([
       { type: "compaction" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "error", error: { message: "prompt too long" } },
     ])
   })
@@ -4178,6 +4432,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(3)
     expect(yield* s.context).toMatchObject([
       { type: "compaction", summary: "## Objective\n- Recover raw overflow" },
+      { type: "user", text: "Continue" },
       { type: "assistant", finish: "stop" },
     ])
   })
@@ -5183,6 +5438,7 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("settles an abandoned compaction before delivering another manual compaction", function* (s) {
+    yield* s.llm.push(TestLLM.text("Answered before the crash", "before-crash"))
     yield* s.runPrompt("History before the crash")
     const previous = SessionMessage.ID.create()
     yield* s.bus.publish(SessionEvent.Compaction.Started, {

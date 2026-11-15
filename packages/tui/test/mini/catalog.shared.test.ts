@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { OpenCode } from "@opencode/client/promise"
-import { loadRunReferences, runProviders } from "../../src/mini/catalog.shared"
+import { contextLimit, loadRunReferences, runProviders } from "../../src/mini/catalog.shared"
 import { catalogModel, catalogProvider } from "./fixture/catalog"
 
 afterEach(() => {
@@ -72,5 +72,23 @@ describe("run catalog shared", () => {
         },
       },
     ])
+  })
+
+  test("counts a step's context against the model's compaction point when it has one, else its window", () => {
+    const pointed = catalogModel({ id: "pointed", providerID: "cpp", context: 1_000_000 })
+    const providers = runProviders(
+      [catalogProvider("cpp", "CLIProxyPacer")],
+      [
+        { ...pointed, limit: { ...pointed.limit, compact: 500_000 } },
+        catalogModel({ id: "plain", providerID: "cpp", context: 200_000 }),
+      ],
+    )
+
+    expect(providers[0]?.models.pointed?.limit).toEqual({ context: 1_000_000, compact: 500_000 })
+    expect(contextLimit(providers, { providerID: "cpp", modelID: "pointed" })).toBe(500_000)
+    // Without a point, as before: the model's window.
+    expect(providers[0]?.models.plain?.limit).toEqual({ context: 200_000 })
+    expect(contextLimit(providers, { providerID: "cpp", modelID: "plain" })).toBe(200_000)
+    expect(contextLimit(providers, { providerID: "cpp", modelID: "unknown" })).toBeUndefined()
   })
 })

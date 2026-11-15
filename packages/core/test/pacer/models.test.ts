@@ -399,6 +399,68 @@ describe("PacerModels", () => {
     }),
   )
 
+  // Workspace spec `docs/specs/compaction-threshold-per-client.md`: the key's entry for a model, below its window, is
+  // where its chats compact. CLIProxyPacer's `capabilities` notice reads capabilities again (`PacerConnection`, which
+  // calls `refresh`), so a changed entry moves the point.
+  it.live("reads each model's compaction point from capabilities' compaction_limits, and a new read moves it", () =>
+    Effect.gen(function* () {
+      const limits: Record<string, unknown> = {
+        "claude-test-1": { max_input_tokens: 60_000, max_output_tokens: null },
+        // Without an entry CPP answers the model's context itself.
+        "vendor/slashed-1": { max_input_tokens: 128_000, max_output_tokens: null },
+        "manual-1": { max_input_tokens: 30_000 },
+      }
+      const server = yield* serve({
+        ...cpp(),
+        "/pacer/v1/capabilities": () =>
+          Response.json({
+            ...capabilities,
+            models: [
+              ...capabilities.models.map((model) =>
+                typeof model === "object" && model.id in limits
+                  ? { ...model, compaction_limits: limits[model.id] }
+                  : model,
+              ),
+              // No context known: without an entry CPP answers null, so a number is an entry.
+              { id: "manual-1", routes: [{ provider: "provc" }], compaction_limits: limits["manual-1"] },
+            ],
+          }),
+      })
+      const { models } = yield* start(endpoint(server.origin))
+      const points = (catalog: PacerModels.Catalog | undefined) =>
+        Object.fromEntries((catalog?.models ?? []).map((model) => [model.id, model.compact]))
+      expect(points(yield* until(models, loaded))).toEqual({
+        "claude-test-1": 60_000,
+        // Pinned to a provider: its base model's.
+        "provb/claude-test-1": 60_000,
+        "vendor/slashed-1": undefined,
+        "custom-1": undefined,
+        "manual-1": 30_000,
+      })
+
+      limits["claude-test-1"] = { max_input_tokens: 80_000 }
+      // Above the window it could never be reached: none.
+      limits["vendor/slashed-1"] = { max_input_tokens: 200_000 }
+      // A shape this version does not read leaves the model's other facts alone.
+      limits["manual-1"] = "thirty thousand"
+      yield* models.refresh()
+      const moved = yield* models.get()
+      expect(points(moved)).toEqual({
+        "claude-test-1": 80_000,
+        "provb/claude-test-1": 80_000,
+        "vendor/slashed-1": undefined,
+        "custom-1": undefined,
+        "manual-1": undefined,
+      })
+      expect(moved?.models.find((model) => model.id === "manual-1")?.providers).toEqual(["provc"])
+
+      // The entry removed: CPP answers the context again, or null where the routes disagree.
+      limits["claude-test-1"] = { max_input_tokens: null }
+      yield* models.refresh()
+      expect(points(yield* models.get())["claude-test-1"]).toBeUndefined()
+    }),
+  )
+
   it.live(
     "says the server has memory, with its limits, while capabilities' pacer block holds memory of version 1",
     () =>

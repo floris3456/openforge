@@ -21,10 +21,78 @@ export const CUT_INPUTS = "recentInputs"
 export const cutsInputs = (message: SessionMessage.CompactionCompleted) => message.metadata?.[CUT_INPUTS] === "cut"
 
 /**
- * One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. `cutInputs`
- * cuts a tool call's input to the length a tool's output is cut to.
+ * Set on a compaction's metadata when it is written between a step's tool calls and the request that would have read
+ * their results: that step's message ID. The model has read nothing from there on, so the recent part shows those
+ * results, and the outputs that follow them, whole while together they fit `UNREAD_CHARS`. A compaction without it
+ * cuts them as before.
  */
-export const messageToText = (message: SessionMessage.Info | SessionStored.User, cutInputs: boolean): string => {
+export const UNREAD = "unreadID"
+
+/** Set beside `UNREAD`: the characters the outputs from that step on keep together (`outputCap`). */
+export const UNREAD_CHARS = "unreadChars"
+
+/**
+ * Set on a compaction's metadata when it is written, when it kept messages after the chat's last assistant message: the
+ * first of them (`unsent`). No request carried those, not the prompt that was to start the step nor the synthetic
+ * messages beside it, so history sends them after the checkpoint as the messages they are, in order, and the recent
+ * part holds only what came before. A compaction without it keeps them all in its recent part, as before.
+ */
+export const UNSENT = "unsentID"
+
+/** Set by history, in memory only, on a compaction it sent messages after (`UNSENT`): how many. */
+const MOVED = "moved"
+
+export const moved = (message: SessionMessage.CompactionCompleted) =>
+  typeof message.metadata?.[MOVED] === "number" ? message.metadata[MOVED] : 0
+
+/** The compaction as history sends it: `recent` its recent part, `count` the messages it sends after it. */
+export const withRecent = (message: SessionMessage.CompactionCompleted, recent: string, count: number) => ({
+  ...message,
+  metadata: { ...message.metadata, recent, ...(count > 0 ? { [MOVED]: count } : {}) },
+})
+
+/**
+ * Whether a message no request carried goes after the checkpoint as itself. Not an assistant's, which there only
+ * started a step the provider turned down, an earlier compaction, or an instruction update, which the instructions
+ * sent after the compaction already hold.
+ */
+export const sendsAsItself = (type: SessionMessage.Info["type"]) =>
+  type !== "assistant" && type !== "compaction" && type !== "system"
+
+/** Where the messages no request carried start: the first after the last assistant message that `sendsAsItself`. */
+export const unsent = (messages: ReadonlyArray<SessionMessage.Info>) => {
+  const last = messages.findLastIndex((message) => message.type === "assistant")
+  return messages.findIndex((message, index) => index > last && sendsAsItself(message.type))
+}
+
+/** The recent part's text from the messages it kept, cut as `compaction` records it was written to. */
+export const rebuild = (
+  kept: ReadonlyArray<SessionMessage.Info | SessionStored.User>,
+  compaction: SessionMessage.CompactionCompleted,
+): string => {
+  const cut = cutsInputs(compaction)
+  const unread = kept.findIndex((message) => message.id === compaction.metadata?.[UNREAD])
+  const chars = compaction.metadata?.[UNREAD_CHARS]
+  const cap =
+    unread < 0
+      ? TOOL_OUTPUT_MAX_CHARS
+      : outputCap(kept.slice(unread).flatMap(outputs), typeof chars === "number" ? chars : 0)
+  return kept
+    .map((message, index) => messageToText(message, cut, unread < 0 || index < unread ? TOOL_OUTPUT_MAX_CHARS : cap))
+    .filter(Boolean)
+    .join("\n\n")
+}
+
+/**
+ * One message as the recent, verbatim part of a summary shows it. Empty for messages that part leaves out. `cutInputs`
+ * cuts a tool call's input to the length a tool's output is cut to by default; outputs are cut to `outputMax`.
+ */
+export const messageToText = (
+  message: SessionMessage.Info | SessionStored.User,
+  cutInputs: boolean,
+  outputMax = TOOL_OUTPUT_MAX_CHARS,
+): string => {
+  const output = (value: string) => truncateToolOutput(value, outputMax)
   switch (message.type) {
     // Earlier summaries and instruction updates are handled outside the recent part.
     case "compaction":
@@ -58,7 +126,7 @@ export const messageToText = (message: SessionMessage.Info | SessionStored.User,
           const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
           const call = `[Assistant tool call]: ${part.name}(${cutInputs ? truncateToolOutput(input) : input})`
           if (part.state.status === "completed") {
-            return [call, `[Tool result]: ${truncateToolOutput(serializeToolContent(part.state.content))}`]
+            return [call, `[Tool result]: ${output(serializeToolContent(part.state.content))}`]
           }
           if (part.state.status === "error") return [call, `[Tool error]: ${part.state.error.message}`]
           return [call]
@@ -73,21 +141,46 @@ export const messageToText = (message: SessionMessage.Info | SessionStored.User,
 
     case "shell":
       if (message.metadata?.background === true) return ""
-      return `[Shell]: ${message.command}\n${truncateToolOutput(message.output?.output ?? "")}`
+      return `[Shell]: ${message.command}\n${output(message.output?.output ?? "")}`
 
     default:
       return ""
   }
 }
 
-export const truncateToolOutput = (value: string) => {
-  if (value.length <= TOOL_OUTPUT_MAX_CHARS) return value
+/**
+ * The most characters each of `values` keeps so that together they fit `budget`: the shorter ones whole, the longer ones
+ * an equal share of what those leave, but never fewer than any other output in the recent part keeps.
+ */
+const outputCap = (values: ReadonlyArray<string>, budget: number) => {
+  const sizes = values.map((value) => value.length).sort((a, b) => a - b)
+  let left = budget
+  for (const [index, size] of sizes.entries()) {
+    const share = Math.floor(left / (sizes.length - index))
+    if (size > share) return Math.max(TOOL_OUTPUT_MAX_CHARS, share)
+    left -= size
+  }
+  return Number.POSITIVE_INFINITY
+}
+
+/** The tool and shell outputs `messageToText` shows of one message, before they are cut. */
+const outputs = (message: SessionMessage.Info | SessionStored.User): string[] => {
+  if (message.type === "assistant")
+    return message.content.flatMap((part) =>
+      part.type === "tool" && part.state.status === "completed" ? [serializeToolContent(part.state.content)] : [],
+    )
+  if (message.type === "shell" && message.metadata?.background !== true) return [message.output?.output ?? ""]
+  return []
+}
+
+export const truncateToolOutput = (value: string, max = TOOL_OUTPUT_MAX_CHARS) => {
+  if (value.length <= max) return value
 
   // Count code points so a surrogate pair is never split.
   let end = 0
   let kept = 0
   for (const char of value) {
-    if (kept === TOOL_OUTPUT_MAX_CHARS) break
+    if (kept === max) break
     end += char.length
     kept++
   }

@@ -118,7 +118,12 @@ const testLLM = Layer.unwrap(
     }).pipe(Layer.merge(Layer.succeed(LLMRequests, requests)))
   }),
 )
-type ModelLimit = { readonly context: number; readonly input?: number; readonly output: number }
+type ModelLimit = {
+  readonly context: number
+  readonly input?: number
+  readonly output: number
+  readonly compact?: number
+}
 const defaultModelLimit = { context: 200_000, output: 32_000 }
 const modelLimits = new Map<string, ModelLimit>()
 const testModel = (id: string, limit: ModelLimit = defaultModelLimit) => {
@@ -3527,6 +3532,40 @@ describe("SessionRunnerLLM", () => {
       summary: "## Objective\n- Preserve the updated task",
       metadata: { recent: `[User]: ${"Newest exact request ".repeat(180)}` },
     })
+  })
+
+  // Workspace spec compaction-threshold-per-client, section 3. The point moves as a capabilities change moves it: the
+  // model resolved at each step carries the catalog's limits then.
+  scenario("compacts a chat once its prompt reaches its model's compaction point, which may move", function* (s) {
+    const limit = { context: 200_000, output: 32_000 }
+    s.currentModel = testModel("pointed", { ...limit, compact: 30_000 })
+    yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "pointed-first", 29_000))
+    yield* s.runPrompt("Earlier question")
+    // Below the point, far below the window's own ceiling: no compaction.
+    yield* s.llm.push(TestLLM.textWithUsage("Second answer", "pointed-second", 30_500))
+    yield* s.runPrompt("Second question")
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+
+    // Past the old point, below the new one.
+    modelLimits.set("pointed", { ...limit, compact: 40_000 })
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.textWithUsage("Third answer", "pointed-third", 31_000))
+    yield* s.runPrompt("Third question")
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).not.toContainEqual(expect.objectContaining({ type: "compaction" }))
+
+    // At the point as it is now, with no reserve taken off it: compacted before the next step.
+    modelLimits.set("pointed", { ...limit, compact: 31_000 })
+    s.requests.length = 0
+    yield* s.llm.push(
+      TestLLM.text("## Objective\n- Preserve the task", "pointed-summary"),
+      TestLLM.textWithUsage("Continued", "pointed-final", 1_000),
+    )
+    yield* s.runPrompt("Fourth question")
+    expect(s.requests).toHaveLength(2)
+    expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
+    expect(userTexts(s.requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
+    expect((yield* s.context)[0]).toMatchObject({ type: "compaction", status: "completed", reason: "auto" })
   })
 
   scenario("automatically persists native windows, retains earlier users, and waits for fresh usage", function* (s) {

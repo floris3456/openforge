@@ -1439,3 +1439,117 @@ it.effect("compaction summarizes as usual when the background summary no longer 
     expect(yield* compactAfterPrecompute(history.due, switched)).toContain("Third answer")
   }),
 )
+
+// Workspace spec `docs/specs/compaction-threshold-per-client.md`, section 3: a model's compaction point.
+const pointed = (limit: Partial<SessionRunnerModel.Resolved["limit"]>) => ({
+  ...resolved,
+  limit: { ...resolved.limit, ...limit },
+})
+
+it.effect("a compaction point is a ceiling as it is; the lower of it and the window less the reserve wins", () =>
+  Effect.gen(function* () {
+    const compaction = yield* SessionCompaction.Service
+    const session = yield* insertSession(Session.ID.make("ses_compaction_point"))
+    // Whether an automatic compaction of a prompt of `tokens` on a model of `limit` is due rather than skipped.
+    const due = (limit: Partial<SessionRunnerModel.Resolved["limit"]>, tokens: number) =>
+      compaction
+        .compact({
+          reason: "auto",
+          context: { ...loaded(session, []), model: pointed(limit) },
+          estimate: { measured: tokens, estimated: 0 },
+        })
+        .pipe(Effect.map((outcome) => outcome.status !== "skipped"))
+
+    // On a 200k window, a point of 100k compacts at 100k, not at 100k less a reserve.
+    expect(yield* due({ compact: 100_000 }, 99_999)).toBe(false)
+    expect(yield* due({ compact: 100_000 }, 100_000)).toBe(true)
+    // A point above the window less the reserve, 170k, leaves that ceiling.
+    expect(yield* due({ compact: 190_000 }, 169_999)).toBe(false)
+    expect(yield* due({ compact: 190_000 }, 170_000)).toBe(true)
+    // The window is the smaller of the context and input limits: 85% of 272k is 231.2k.
+    const inputLimited = { context: 400_000, input: 272_000, output: 128_000 }
+    expect(yield* due({ ...inputLimited, compact: 250_000 }, 231_199)).toBe(false)
+    expect(yield* due({ ...inputLimited, compact: 250_000 }, 231_200)).toBe(true)
+    expect(yield* due({ ...inputLimited, compact: 200_000 }, 199_999)).toBe(false)
+    expect(yield* due({ ...inputLimited, compact: 200_000 }, 200_000)).toBe(true)
+    // With no window known, the point alone limits the prompt.
+    expect(yield* due({ context: 0, output: 0, compact: 50_000 }, 49_999)).toBe(false)
+    expect(yield* due({ context: 0, output: 0, compact: 50_000 }, 50_000)).toBe(true)
+    expect(yield* due({ context: 0, output: 0 }, 1_000_000)).toBe(false)
+    // A model without a point compacts as before.
+    expect(yield* due({}, 169_999)).toBe(false)
+    expect(yield* due({}, 170_000)).toBe(true)
+
+    // The `compaction.buffer` reserve applies to the window only.
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* compaction.transform((editor) => editor.configure({ buffer: 50_000 }))
+        expect(yield* due({ compact: 160_000 }, 149_999)).toBe(false)
+        expect(yield* due({ compact: 160_000 }, 150_000)).toBe(true)
+        expect(yield* due({ compact: 120_000 }, 119_999)).toBe(false)
+        expect(yield* due({ compact: 120_000 }, 120_000)).toBe(true)
+      }),
+    )
+  }),
+)
+
+it.effect("a chat compacted at its point still goes out whole while the model's own window fits the summary", () =>
+  Effect.gen(function* () {
+    requests = []
+    const session = yield* insertSession(Session.ID.make("ses_compaction_point_room"))
+    // About 150k estimated tokens: past the 100k point, within the 184k the 200k window leaves for the summary.
+    const messages = ["first", "second"].map((label) => textUser(`${label} ${"x".repeat(300_000)}`))
+
+    expect(
+      yield* SessionCompaction.Service.use((compaction) =>
+        compaction.compact({
+          reason: "auto",
+          context: { ...loaded(session, messages), model: pointed({ compact: 100_000 }) },
+        }),
+      ),
+    ).toEqual({ status: "completed" })
+    expect(requests).toHaveLength(1)
+    expect(requests[0].messages).toHaveLength(3)
+    expect(requests[0].messages[0].content).toEqual([{ type: "text", text: messages[0].text }])
+  }),
+)
+
+it.effect("a background summary starts as the context nears the model's point, and compaction swaps it in there", () =>
+  Effect.gen(function* () {
+    const compaction = yield* enablePrecompute
+    // 85% of a 100k point is 85k; the 200k window alone would wait for 144.5k and compact at 170k.
+    const history = (early: number) => {
+      const near = [textUser("First question"), measured("First answer", 40_000), textUser("Second question")]
+      const anchor = measured("Second answer", early)
+      return {
+        near: [...near, anchor],
+        due: [...near, anchor, textUser("Third question"), measured("Third answer", 100_000)],
+      }
+    }
+    const compactAt = (id: string, early: number) =>
+      Effect.gen(function* () {
+        requests = []
+        const sessionID = Session.ID.make(id)
+        const session = yield* insertSession(sessionID)
+        const messages = history(early)
+        yield* storeMessages(sessionID, messages.due)
+        const at = (list: readonly SessionMessage.Info[]) => ({
+          ...loaded(session, list),
+          model: pointed({ compact: 100_000 }),
+        })
+        yield* compaction.precompute(Effect.succeed(at(messages.near)))
+        expect(yield* compaction.compact({ reason: "auto", context: at(messages.due) })).toEqual({
+          status: "completed",
+        })
+        expect(requests).toHaveLength(1)
+        return JSON.stringify(requests[0].messages)
+      })
+
+    // Below 85% of the point no background summary starts, so compaction summarizes the whole conversation.
+    expect(yield* compactAt("ses_precompute_point_early", 80_000)).toContain("Third answer")
+    // Past it, one does, from the prefix the latest response was written from, and compaction takes it.
+    const swapped = yield* compactAt("ses_precompute_point_near", 90_000)
+    expect(swapped).toContain("Second question")
+    expect(swapped).not.toContain("Second answer")
+  }),
+)

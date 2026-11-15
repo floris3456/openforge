@@ -344,7 +344,8 @@ export const layer = Layer.effect(
       const agent = native || picks ? undefined : yield* agents.get(Agent.ID.make("compaction"))
       const model = picked ?? (agent?.model && (yield* resolveModel(context, agent.model))) ?? context.model
       const ceiling = calculateCeiling(model.limit, buffer)
-      // An unknown window never triggers auto compaction, but the compaction request still needs a size to aim for.
+      // An unknown window without a compaction point never triggers auto compaction, but the compaction request still
+      // needs a size to aim for.
       const cap = Number.isFinite(ceiling)
         ? ceiling
         : calculateCeiling({ ...model.limit, context: UNKNOWN_WINDOW }, buffer)
@@ -1357,21 +1358,26 @@ export const estimatePrompt = (context: SessionContext.Loaded): Estimate => {
 /**
  * The largest request the model takes while leaving room for its reply: `RESERVE_SHARE` of the window, or
  * `RESERVE_MIN` when that is more. A summary request that must be shrunk is aimed at the same size. A window too small
- * to give up `RESERVE_MIN` keeps `RESERVE_SHARE`.
+ * to give up `RESERVE_MIN` keeps `RESERVE_SHARE`. The model's compaction point (`limit.compact`, a CLIProxyPacer
+ * client's threshold) is a ceiling as it is, with no reserve taken off it; the lower of the two wins.
  */
 const calculateCeiling = (limit: SessionContext.Loaded["model"]["limit"], buffer: Settings["buffer"]) => {
-  // With no window at all, only a provider rejection can limit the request.
+  const point = limit.compact ?? Number.POSITIVE_INFINITY
+  // With no window at all, only the compaction point or a provider rejection can limit the request.
   const window = inputWindow(limit)
-  if (window <= 0) return Number.POSITIVE_INFINITY
+  if (window <= 0) return point
   const tokens = typeof buffer === "string" ? Math.round((window * Number.parseFloat(buffer)) / 100) : buffer
   // A buffer that leaves no room, such as one set for a larger model, is ignored.
-  if (tokens !== undefined && tokens < window) return window - tokens
-  return window - Math.max(Math.floor(window * RESERVE_SHARE), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0)
+  if (tokens !== undefined && tokens < window) return Math.min(point, window - tokens)
+  return Math.min(
+    point,
+    window - Math.max(Math.floor(window * RESERVE_SHARE), window >= 2 * RESERVE_MIN ? RESERVE_MIN : 0),
+  )
 }
 
 /**
  * The largest summary request that leaves `RESERVE_MIN` of the window for the summary, or less when the request
- * cannot generate that much. Zero for an unknown window.
+ * cannot generate that much. Zero for an unknown window. The model's own window, whatever its compaction point.
  */
 const summaryRoom = (limit: SessionContext.Loaded["model"]["limit"], output = RESERVE_MIN) =>
   Math.max(0, inputWindow(limit) - Math.min(RESERVE_MIN, output))

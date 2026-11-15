@@ -414,6 +414,25 @@ describe("CLIProxyPacerPlugin", () => {
     }),
   )
 
+  // Workspace spec compaction-threshold-per-client, section 3: the session's compaction and the clients read it there.
+  it.live("gives a model the client's compaction point as its limit, and follows it as the catalog changes", () =>
+    Effect.gen(function* () {
+      const claude = (compact?: number): PacerModels.Model => ({
+        ...required(catalog.models[0]),
+        ...(compact ? { compact } : {}),
+      })
+      const cpp = yield* fakeCPP(configKey, { ...catalog, models: [claude(150_000)] })
+      yield* addPlugin(cpp)
+      const limit = listed.pipe(Effect.map((models) => models[0]?.limit))
+      expect(yield* limit).toEqual({ context: 200_000, output: 64_000, compact: 150_000 })
+      yield* cpp.setCatalog({ ...catalog, at: 2, models: [claude(120_000)] })
+      yield* eventually(limit, (value) => value?.compact === 120_000)
+      yield* cpp.setCatalog({ ...catalog, at: 3, models: [claude()] })
+      yield* eventually(limit, (value) => value !== undefined && !("compact" in value))
+      expect(yield* limit).toEqual({ context: 200_000, output: 64_000 })
+    }),
+  )
+
   it.live("follows CPP's address and catalog", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCPP(configKey, catalog)

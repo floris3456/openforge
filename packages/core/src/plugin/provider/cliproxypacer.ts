@@ -152,7 +152,12 @@ function info(model: PacerModels.Model, endpoint: PacerEndpoint.Endpoint): Model
     cost: cost(model.price),
     status: "active",
     enabled: true,
-    limit: { context: model.context ?? 0, output: model.maxOutput ?? 0 },
+    limit: {
+      context: model.context ?? 0,
+      output: model.maxOutput ?? 0,
+      // The client's compaction threshold for the model, from its capabilities.
+      ...(model.compact ? { compact: model.compact } : {}),
+    },
   }
   return [{ ...base, variants: Variant.resolve({ ...base, package: claude ? MESSAGES : RESPONSES }, supports(model)) }]
 }

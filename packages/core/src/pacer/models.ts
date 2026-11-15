@@ -101,6 +101,12 @@ export interface Model {
    */
   readonly context?: number
   readonly maxOutput?: number
+  /**
+   * The prompt size a chat on it compacts at (workspace spec `docs/specs/compaction-threshold-per-client.md`):
+   * capabilities' `compaction_limits.max_input_tokens`, the key's entry for the model, when it is below `context`.
+   * Undefined otherwise: without an entry CPP answers the context itself.
+   */
+  readonly compact?: number
   readonly input?: ReadonlyArray<string>
   readonly output?: ReadonlyArray<string>
   readonly reasoning?: Reasoning
@@ -188,7 +194,10 @@ const Capable = Schema.Struct({
   id: Schema.String,
   display_name: maybe(Schema.String),
   routes: Items,
+  // Read on its own (`decodeLimits`), so a shape this version does not understand leaves the model alone.
+  compaction_limits: Schema.optional(Schema.Unknown),
 })
+const decodeLimits = Schema.decodeUnknownOption(Schema.Struct({ max_input_tokens: maybe(Schema.Number) }))
 /** One kind of login of a provider, with how many accounts the key has of it (capabilities' `providers[]`). */
 const Login = Schema.Struct({ provider: Schema.String, login: maybe(Schema.String), accounts: maybe(Schema.Number) })
 type Login = typeof Login.Type
@@ -462,6 +471,10 @@ function model(
     text(listed.display_name)
   const context = facts.context ?? positive(listed.context_length)
   const maxOutput = facts.maxOutput ?? positive(setting?.max_output) ?? positive(listed.max_completion_tokens)
+  // CPP answers a model's context when the key has no entry for it, and null when it knows none: a number with no
+  // context known here is an entry.
+  const point = positive(Option.getOrUndefined(decodeLimits((exact ?? base)?.compaction_limits))?.max_input_tokens)
+  const compact = point !== undefined && (context === undefined || point < context) ? point : undefined
   const price = prices && lookup(prices, lower, pinned, routes[0]?.provider.toLowerCase())
   const summaries = routes.some(
     (route) => typeof route.server_writes === "boolean" || typeof route.remote_compaction === "string",
@@ -476,6 +489,7 @@ function model(
     ...(name ? { name } : {}),
     ...(context ? { context } : {}),
     ...(maxOutput ? { maxOutput } : {}),
+    ...(compact ? { compact } : {}),
     ...(facts.input ? { input: facts.input } : {}),
     ...(facts.output ? { output: facts.output } : {}),
     ...(facts.reasoning ? { reasoning: facts.reasoning } : {}),

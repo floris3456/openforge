@@ -83,6 +83,8 @@ const testLLM = Layer.unwrap(
   }),
 )
 
+/** The model's compaction point, as CLIProxyPacer's capabilities give it; a test moves it between steps. */
+const point: { compact?: number } = {}
 // The chat's own model, as `switchModel` sets it.
 const models = Layer.mock(SessionRunnerModel.Service)({
   resolve: (session) =>
@@ -96,7 +98,7 @@ const models = Layer.mock(SessionRunnerModel.Service)({
         {
           capabilities: { tools: true, input: ["text"], output: ["text"] },
           cost: [],
-          limit: { context: 200_000, output: 32_000 },
+          limit: { context: 200_000, output: 32_000, ...point },
         },
       ),
     ),
@@ -341,6 +343,25 @@ describe("SessionPromptStart: a warm chat's start between two steps", () => {
       expect(texts(second)).toEqual(["one", "two", sent])
       expect(texts(third)).toEqual(["one", "two", sent, "three"])
     }),
+  )
+
+  // Workspace spec compaction-threshold-per-client, section 3: the point says when to compact, nothing a step sends.
+  it.live("stays byte for byte when the model's compaction point moves, with no reminder", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("one")
+      point.compact = 150_000
+      yield* h.prompt("two")
+      point.compact = 120_000
+      yield* h.prompt("three")
+      const [first, second, third] = h.requests()
+      expect(startOf(second)).toBe(startOf(first))
+      expect(startOf(third)).toBe(startOf(first))
+      expect(second?.generation).toEqual(first?.generation)
+      expect(third?.generation).toEqual(first?.generation)
+      expect(texts(third)).toEqual(["one", "two", "three"])
+      expect(yield* h.reminders()).toEqual([])
+    }).pipe(Effect.ensuring(Effect.sync(() => delete point.compact))),
   )
 
   it.live("gives the whole new prompt when that is shorter than the changes", () =>

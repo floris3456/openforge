@@ -1,7 +1,7 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, jest, test } from "bun:test"
 import type { OpenCodeEvent } from "@opencode/client"
 import type { AttentionRequest } from "../src/attention"
-import { createAttentionEvents } from "../src/attention-events"
+import { createAttentionEvents, PERMISSION_GRACE } from "../src/attention-events"
 import { resolve, type Info } from "../src/config"
 
 // openforge (notifications step 2, "Events and their settings"): which event a TUI raises when, with which
@@ -233,64 +233,62 @@ describe("Subagent done", () => {
 })
 
 describe("Question", () => {
-  test("a form or a permission that waits, at any depth, with its notification and bip-bop-03", async () => {
+  afterEach(() => jest.useRealTimers())
+  const asked = (id: string, sessionID: string, action = "shell") => ({
+    id,
+    sessionID,
+    action,
+    resources: [],
+    metadata: {},
+    save: [],
+  })
+
+  test("a form at once; a permission at any depth once it is unanswered after its grace, with bip-bop-03", async () => {
+    jest.useFakeTimers()
     const tui = setup()
     tui.emit("form.created", { form: { id: "frm_1", sessionID: "great", title: "Pick one", fields: [] } })
-    tui.emit("permission.asked", {
-      id: "per_1",
-      sessionID: "grand",
-      action: "shell",
-      resources: [],
-      metadata: {},
-      save: [],
-    })
+    tui.emit("permission.asked", asked("per_1", "grand"))
     // Raised once while it waits; again after it was answered and asked again.
-    tui.emit("permission.asked", {
-      id: "per_1",
-      sessionID: "grand",
-      action: "shell",
-      resources: [],
-      metadata: {},
-      save: [],
-    })
+    tui.emit("permission.asked", asked("per_1", "grand"))
+    expect(tui.seen()).toEqual(["question:great notify bip-bop-03"])
+    jest.advanceTimersByTime(PERMISSION_GRACE)
     tui.emit("permission.replied", { sessionID: "grand", requestID: "per_1", reply: "once" })
-    tui.emit("permission.asked", {
-      id: "per_1",
-      sessionID: "grand",
-      action: "shell",
-      resources: [],
-      metadata: {},
-      save: [],
-    })
+    tui.emit("permission.asked", asked("per_1", "grand"))
+    jest.advanceTimersByTime(PERMISSION_GRACE)
     expect(tui.seen()).toEqual([
       "question:great notify bip-bop-03",
       "permission:grand notify bip-bop-03",
       "permission:grand notify bip-bop-03",
     ])
     expect(tui.raised[0]).toMatchObject({ title: "Pick one", message: "Input needs response" })
+    expect(tui.raised[1]).toMatchObject({ title: "Its subagent", message: "Permission needs input" })
+  })
+
+  test("a permission answered within its grace raises nothing, nor one that waits when the TUI goes", async () => {
+    jest.useFakeTimers()
+    const tui = setup()
+    // Another TUI on the chat, or this one's auto-reply once it knows the subagent, accepts it.
+    tui.emit("permission.asked", asked("per_1", "child"))
+    jest.advanceTimersByTime(PERMISSION_GRACE - 1)
+    tui.emit("permission.replied", { sessionID: "child", requestID: "per_1", reply: "once" })
+    jest.advanceTimersByTime(PERMISSION_GRACE * 5)
+    expect(tui.seen()).toEqual([])
+    tui.emit("permission.asked", asked("per_2", "chat"))
+    tui.dispose()
+    jest.advanceTimersByTime(PERMISSION_GRACE * 5)
+    expect(tui.seen()).toEqual([])
   })
 
   test("its sound and switch apply to both; Question off raises neither", async () => {
+    jest.useFakeTimers()
     const tui = setup({ events: { question: { notification: false, sound: "alert-04" } } })
     tui.emit("form.created", { form: { id: "frm_1", sessionID: "chat", title: "Pick one", fields: [] } })
-    tui.emit("permission.asked", {
-      id: "per_1",
-      sessionID: "chat",
-      action: "edit",
-      resources: [],
-      metadata: {},
-      save: [],
-    })
+    tui.emit("permission.asked", asked("per_1", "chat", "edit"))
+    jest.advanceTimersByTime(PERMISSION_GRACE)
     expect(tui.seen()).toEqual(["question:chat - alert-04", "permission:chat - alert-04"])
     const off = setup({ events: { question: { notification: false, sound: "off" } } })
-    off.emit("permission.asked", {
-      id: "per_1",
-      sessionID: "chat",
-      action: "edit",
-      resources: [],
-      metadata: {},
-      save: [],
-    })
+    off.emit("permission.asked", asked("per_1", "chat", "edit"))
+    jest.advanceTimersByTime(PERMISSION_GRACE)
     expect(off.seen()).toEqual([])
   })
 })
@@ -341,6 +339,7 @@ describe("sounds", () => {
       events: { error: { notification: true } },
     })
     await tui.turn("chat")
+    jest.useFakeTimers()
     tui.emit("form.created", { form: { id: "frm_1", sessionID: "chat", title: "Pick one", fields: [] } })
     tui.emit("permission.asked", {
       id: "per_1",
@@ -350,6 +349,8 @@ describe("sounds", () => {
       metadata: {},
       save: [],
     })
+    jest.advanceTimersByTime(PERMISSION_GRACE)
+    jest.useRealTimers()
     expect(tui.seen()).toEqual([
       "done:chat notify /old/done.wav",
       "question:chat notify /old/question.wav",
@@ -360,6 +361,7 @@ describe("sounds", () => {
       events: { done: { sound: "alert-01" }, question: { sound: "nope-01" } },
     })
     await set.turn("chat")
+    jest.useFakeTimers()
     set.emit("permission.asked", {
       id: "per_1",
       sessionID: "chat",
@@ -368,6 +370,8 @@ describe("sounds", () => {
       metadata: {},
       save: [],
     })
+    jest.advanceTimersByTime(PERMISSION_GRACE)
+    jest.useRealTimers()
     expect(set.seen()).toEqual(["done:chat notify alert-01", "permission:chat notify nope-01"])
   })
 })

@@ -12,10 +12,18 @@ import type { AttentionEventSound, Resolved, ResolvedAttentionEvent } from "./co
 // - Reply: a top-level chat's turn succeeded while such work runs. A reply that is Done raises only Done; with Done
 //   off, it raises Reply.
 // - Subagent done: a subagent's turn succeeded, at most `levels` below its chat, by the same rule as Done.
-// - Question: a question, form or permission that waits, at any depth.
+// - Question: a question, form or permission that waits, at any depth; a permission once it is still unanswered after
+//   PERMISSION_GRACE.
 // - Error: a failed turn of a top-level chat, or of a subagent within `levels` while Subagent done is on.
 //
 // An interrupted turn raises nothing.
+
+/**
+ * How long a permission waits before it raises anything. Most asks need no one: another TUI on the chat, or this one
+ * once it knows a new subagent, accepts them by itself within moments (the owner, 2026-11-15: "permission required"
+ * and its sound "while not a single session requires my input").
+ */
+export const PERMISSION_GRACE = 2_000
 
 type Shell = { readonly status: string; readonly metadata: Readonly<Record<string, unknown>> }
 type Location = { readonly directory: string }
@@ -39,6 +47,8 @@ export function createAttentionEvents(input: {
   const turns = new Map<string, number>()
   const forms = new Set<string>()
   const permissions = new Set<string>()
+  // A permission's notification, until its grace ends or someone answers it.
+  const waiting = new Map<string, ReturnType<typeof setTimeout>>()
 
   const raise = (
     event: ResolvedAttentionEvent,
@@ -109,17 +119,30 @@ export function createAttentionEvents(input: {
     input.data.on("form.replied", (event) => forms.delete(event.data.id)),
     input.data.on("form.cancelled", (event) => forms.delete(event.data.id)),
     input.data.on("permission.asked", (event) => {
-      if (permissions.has(event.data.id)) return
-      permissions.add(event.data.id)
-      const question = input.settings().events.question
-      raise(question, question.permission, {
-        kind: "permission",
-        sessionID: event.data.sessionID,
-        title: session.get(event.data.sessionID)?.title,
-        message: "Permission needs input",
-      })
+      const id = event.data.id
+      if (permissions.has(id)) return
+      permissions.add(id)
+      waiting.set(
+        id,
+        setTimeout(() => {
+          waiting.delete(id)
+          if (!permissions.has(id)) return
+          const question = input.settings().events.question
+          raise(question, question.permission, {
+            kind: "permission",
+            sessionID: event.data.sessionID,
+            title: session.get(event.data.sessionID)?.title,
+            message: "Permission needs input",
+          })
+        }, PERMISSION_GRACE),
+      )
     }),
-    input.data.on("permission.replied", (event) => permissions.delete(event.data.requestID)),
+    input.data.on("permission.replied", (event) => {
+      permissions.delete(event.data.requestID)
+      clearTimeout(waiting.get(event.data.requestID))
+      waiting.delete(event.data.requestID)
+    }),
+    () => waiting.forEach((timer) => clearTimeout(timer)),
     input.data.on("session.execution.started", (event) => {
       ended.delete(event.data.sessionID)
       turns.set(event.data.sessionID, (turns.get(event.data.sessionID) ?? 0) + 1)

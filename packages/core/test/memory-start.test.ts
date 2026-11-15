@@ -478,7 +478,7 @@ const opening =
 const states =
   "If it cannot be done as written, set it blocked with what is wrong (the task tool) and stop. When the work is there, set it review."
 const planStates =
-  "With the task tool: when a subtask of your own plan is done, set it done, and the next one of your plan starts; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
+  "With the task tool: when a subtask of your own plan is done, set it done: the next one of your plan becomes current, which you need not start now; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note, and a new title when it names them) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
 const keep =
   "Keep it true as you work: replace an entry you find wrong, or an unverified one you have now checked (remember with supersedes), and remember only what a later chat could not get from the project's files, such as a trap you ran into or a rule the person gives; what you changed is in the files."
 
@@ -2230,7 +2230,7 @@ describe("MemoryStart with task plans", () => {
             opening,
             counts("build"),
             keep,
-            "This chat is in no task: before changing anything, make one with the task tool.",
+            "This chat is in no task: before changing anything, make one with the task tool, or set an existing one active.",
           ].join("\n"),
         ),
       )
@@ -2245,7 +2245,7 @@ describe("MemoryStart with task plans", () => {
             opening,
             counts("explore"),
             keep,
-            "This chat is in no task: before changing anything, make one with the task tool.",
+            "This chat is in no task: before changing anything, make one with the task tool, or set an existing one active.",
           ].join("\n"),
         ),
       )

@@ -138,10 +138,11 @@ const recorded = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.I
 
 /** What an edit, a write or a patch answers in a chat in no task, a lead or a child: nothing was changed. */
 export const refused =
-  "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), then make the change."
+  "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), or set an existing task active to work on it, then make the change."
 
 /** The start block's line for a chat in no task. */
-export const outside = "This chat is in no task: before changing anything, make one with the task tool."
+export const outside =
+  "This chat is in no task: before changing anything, make one with the task tool, or set an existing one active."
 
 /**
  * The check at the end of a turn that changed something without a task call: one line, after who may finish `item`.
@@ -154,7 +155,7 @@ export function check(item: MemoryClient.Task, chat: { readonly id: string; read
   const line =
     item.parent && item.by.chat !== chat.id
       ? `${head} Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`
-      : `${head} Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`
+      : `${head} Mark what is now true with the task tool (done records it and makes the next subtask current, which you need not start now; plan replaces those not started; blocked says what is wrong), or answer that it goes on.`
   return chat.parentID === undefined
     ? line
     : `${line} Then give your answer again: your lead reads only your last message.`

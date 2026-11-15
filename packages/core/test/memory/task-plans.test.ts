@@ -460,7 +460,7 @@ describe("an edit outside a task", () => {
       expect(written.read()).toBeUndefined()
       expect(patched.read()).toBe("before\n")
       expect(refused).toBe(
-        "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), then make the change.",
+        "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), or set an existing task active to work on it, then make the change.",
       )
       // Outside a task there is no check.
       expect(yield* h.checks()).toEqual([])
@@ -583,7 +583,7 @@ describe("an edit outside a task", () => {
 describe("the check at the end of a turn", () => {
   /** The line for what the chat may set done: its task, or a subtask it made. */
   const line = (item: { readonly id: string; readonly title: string }) =>
-    `Task check: [${item.id}] ${item.title} is still active. Mark what is now true with the task tool (done starts the next subtask, plan replaces those not started, blocked says what is wrong), or answer that it goes on.`
+    `Task check: [${item.id}] ${item.title} is still active. Mark what is now true with the task tool (done records it and makes the next subtask current, which you need not start now; plan replaces those not started; blocked says what is wrong), or answer that it goes on.`
   /** The line for a subtask another chat made, which that chat sets done. */
   const review = (item: { readonly id: string; readonly title: string }) =>
     `Task check: [${item.id}] ${item.title} is still active. Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`

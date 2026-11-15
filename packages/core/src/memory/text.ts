@@ -115,7 +115,7 @@ export const states =
  * that finishes its current subtask itself.
  */
 export const planStates =
-  "With the task tool: when a subtask of your own plan is done, set it done, and the next one of your plan starts; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
+  "With the task tool: when a subtask of your own plan is done, set it done: the next one of your plan becomes current, which you need not start now; after the last, the task goes to review (without subtasks, set the task review when the work is there). When the ones still to do no longer fit, replace them (plan, with a note, and a new title when it names them) before working on them. If it cannot be done as written, set it blocked with what is wrong and stop."
 
 /** On a server whose tasks are plans: the chat the task part is for, and whether it is a lead. */
 export interface Plans {

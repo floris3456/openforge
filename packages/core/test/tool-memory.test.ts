@@ -303,13 +303,13 @@ describe("MemoryTools offering", () => {
         description:
           "Optional: what is to be done and when it is done; recommended for a bigger task. With an id, empty clears it",
         subtasks: "For a new task: the steps you now believe in, in order, 1 to 20; the next one or two concrete",
-        plan: "With id and note: the subtasks that replace every one of the task's not yet started, in order, 1 to 20",
+        plan: "With id and note: the subtasks that replace every one of the task's not yet started, in order, 1 to 20; a title or description given too is edited with them",
         state: "The state to set: todo, active, blocked, review, done or dropped",
         note: "Why, in a few words; needed for blocked, dropped and plan",
       })
       // The workspace's spec `docs/specs/task-plans.md`, sections 1 to 4.
       expect(description("task")).toBe(
-        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first: its title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done: the next one starts and the answer gives it; after the last, the task goes to review. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
+        "Tasks are this project's work, seen by every lead, child and person. Work inside a task before you change anything: files, commits, merges, releases, deploys, settings or data on servers; reading and checks need none. Outside one, make it first: its title is its summary, one line that also names the steps you now believe in, very summarized; a description is optional, recommended for a bigger task; subtasks are those steps in order, one line each, the next one or two concrete. You are then inside it, on its first subtask; for other work while inside a task, make a new one with its subtasks and you move into it. When a subtask is done, set it done: the next one starts and the answer gives it; after the last, the task goes to review. Before you start a subtask, check it against what you now know; when it no longer fits, replace it and every later one that falls with it (plan, with a note, and a new title when it names them) before working on it. Ask the person only when a change alters what they accepted (the task's goal, a spec or their decision); when they said to work on your own, decide within their conditions and say so in the note. Without fields it lists the open tasks; with an id it reads one; with id and state it sets that state (todo, active, blocked, review, done, dropped; blocked and dropped need a note); with id and title or description it edits them. A subagent started with a task's id as taskID works inside that task.",
       )
       expect(fields("recall").task).toBe(
         "Another task's id, of a task and not of a subtask: search only what was noted in that task and its subtasks",
@@ -1047,7 +1047,7 @@ describe("MemoryTools words", () => {
 
 describe("MemoryTools task", () => {
   const forms =
-    "error: Call task with no fields to list the open tasks; with title (and description, subtasks) to make one; with id to read one; with id and state (and note) to set its state; with id, plan and note to replace its subtasks not yet started; or with id and title or description (and note) to edit them."
+    "error: Call task with no fields to list the open tasks; with title (and description, subtasks) to make one; with id to read one; with id and state (and note) to set its state; with id, plan and note (and title or description) to replace its subtasks not yet started; or with id and title or description (and note) to edit them."
   const day = (at: number) => new Date(at).toISOString().slice(0, 10)
   const made = (text: string) => text.match(/^Made (?:sub)?task ([0-9a-z]{12})/)?.[1] ?? "none"
   const saved = (text: string) => text.match(/^Saved as ([0-9a-z]{12})/)?.[1] ?? "none"
@@ -1344,6 +1344,64 @@ describe("MemoryTools task", () => {
     }),
   )
 
+  // The behaviour set of 2026-11-15 (workspace run/evidence/task-plans/behaviour): opus gave a new plan its new title
+  // in the same call, and was refused with the forms; models that joined a seeded task were left on the task itself.
+  it.live("a plan with a new title edits the title with the same note, in one call", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const task = made(yield* h.read("task", { title: "Docs: A, B", subtasks: steps("A", "B") }))
+      const answer = yield* h.read("task", {
+        id: task,
+        plan: steps("C"),
+        note: "B was already done",
+        title: "Docs: A, C",
+      })
+      expect(answer).toContain("Its title now: Docs: A, C")
+      const read = yield* h.started.client.task(projectID, task)
+      expect(read.task.title).toBe("Docs: A, C")
+      expect(read.subtasks.map((sub) => [sub.title, sub.state])).toEqual([
+        // The plan drops the caller's own active step too, and its first new one takes its place.
+        ["A", "dropped"],
+        ["B", "dropped"],
+        ["C", "active"],
+      ])
+      expect(read.changes[0]).toMatchObject({ note: "B was already done", title: "Docs: A, C" })
+    }),
+  )
+
+  it.live(
+    "setting a task active joins its plan: the chat's own step, else the first not started while none is active",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const task = made(yield* h.read("task", { title: "Seeded: A, B", subtasks: steps("A", "B") }))
+        const [first, second] = (yield* h.started.client.task(projectID, task)).subtasks.map((sub) => sub.id)
+        // The lead works on A; a child that joins stays on the task itself and takes nobody's step.
+        h.place(child, { task })
+        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
+          `Task ${task} is now active; you are inside it.\n`,
+        )
+        expect(h.metadata(child)).toEqual({ memory: { task } })
+        // The lead, back on the task itself, joins again and lands on its own step.
+        h.place(lead, { task })
+        expect(yield* h.read("task", { id: task, state: "active" })).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${first}.`,
+        )
+        expect(h.metadata(lead)).toEqual({ memory: { task, subtask: first } })
+        // With A done and B back to todo, nobody is on a step: the child that joins is put on B, in its name.
+        yield* h.read("task", { id: first!, state: "done" })
+        yield* h.read("task", { id: second!, state: "todo" })
+        expect(yield* h.read("task", { id: task, state: "active" }, child, "general")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${second}.`,
+        )
+        expect(h.metadata(child)).toEqual({ memory: { task, subtask: second } })
+        expect((yield* h.started.client.task(projectID, second!)).task).toMatchObject({
+          state: "active",
+          worker: { chat: child },
+        })
+      }),
+  )
+
   it.live("a plan keeps the done and others' active subtasks, drops the rest with its note and moves the chat", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -1389,7 +1447,7 @@ describe("MemoryTools task", () => {
       ])
       // The server's refusal of a title a subtask kept open has.
       expect(yield* h.read("task", { id: task, plan: steps("C"), note: "again" })).toBe(
-        `error: plan: subtask ${c} keeps the title "C" and stays open`,
+        `error: plan[0].title: subtask ${c} has that title and stays open`,
       )
     }),
   )
@@ -1633,15 +1691,17 @@ describe("MemoryTools task", () => {
         expect(yield* set(task, "blocked")).toBe(
           `Task ${task} is blocked. Stop here and say in your answer what is wrong with it.`,
         )
-        expect(yield* set(task, "active")).toStartWith(`Task ${task} is now active; you are inside it.`)
+        // A task whose plan has a step not started, while none is active, puts the chat on that step: here the
+        // lead's todo subtask, which becomes the child's.
+        expect(yield* set(task, "active")).toStartWith(
+          `Task ${task} is now active; you are inside it, on its subtask ${elsewhere}.`,
+        )
+        expect(h.metadata(child)).toEqual({ memory: { task, subtask: elsewhere } })
         const before = states(h.server).length
         for (const state of ["done", "todo"])
           expect(yield* set(task, state)).toBe(
             `error: Only a lead chat or the chat that made it sets ${state} on ${task}.`,
           )
-        expect(yield* set(elsewhere, "active")).toBe(
-          `error: Only a lead chat or the chat that made it sets active on ${elsewhere}.`,
-        )
         expect(states(h.server).length).toBe(before)
         // Its own subtask: any state, though it is not inside it.
         const own = made(yield* h.read("task", { title: "My part" }, child, "general"))
@@ -1732,7 +1792,6 @@ describe("MemoryTools task", () => {
         { id: "k3f9x2m7q4tz", subtasks: [{ title: "s" }] },
         { id: "k3f9x2m7q4tz", plan: [{ title: "s" }], state: "done" },
         { id: "k3f9x2m7q4tz", title: "t", state: "done" },
-        { id: "k3f9x2m7q4tz", title: "t", plan: [{ title: "s" }], note: "n" },
       ])
         expect(yield* h.read("task", input)).toBe(forms)
       expect(h.server.calls()).toEqual([])

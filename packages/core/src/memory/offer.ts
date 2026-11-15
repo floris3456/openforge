@@ -8,33 +8,12 @@ import type { SessionMessage } from "../session/message.js"
 import type { SessionSchema } from "../session/schema.js"
 import { SessionMessageTable } from "../session/sql.js"
 
-// What memory a chat is offered: what its start block in view says, which goes in at its first step and at the first
-// step after each compaction (`MemoryStart`); the block's metadata records it (the workspace's spec
-// `docs/specs/memory.md`, sections 3 and 4). It is read where a chat's start is recorded, at its cold points; between
-// them the chat keeps the tools recorded with its start (`SessionPromptStart`), whatever the server says meanwhile.
+// Where a chat's memory stands in its history: its newest start block and whether the model sees it, whether it
+// stepped since its latest compaction, and the entries it has in view (the workspace's spec `docs/specs/memory.md`,
+// section 3). Which memory tools a chat has is its tool list's (`PacerOffer`), recorded with its start at its cold
+// points (`SessionPromptStart`).
 
 type Db = Database.Interface["db"]
-
-/** The memory tools, which a chat has only while its start block is in view. */
-export const tools = new Set(["remember", "recall", "forget", "task"])
-
-export interface Offered {
-  /** `remember`, `recall` and `forget`. */
-  readonly memory: boolean
-  /** The `task` tool. */
-  readonly tasks: boolean
-}
-
-const none: Offered = { memory: false, tasks: false }
-
-/**
- * What the chat's start block in view offers it. One lookup on the session's type index for a chat without a block,
- * two with one, decoding no message.
- */
-export const offered = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
-  const block = yield* newestBlock(db, sessionID)
-  return block?.visible ? ({ memory: true, tasks: block.tasks } satisfies Offered) : none
-})
 
 /**
  * The chat's newest start block, and whether it is in the model's view: after the latest completed compaction, which
@@ -46,8 +25,6 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
     .select({
       seq: SessionMessageTable.seq,
       text: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.text')`,
-      tasks: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.tasks')`,
-      plans: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.plans')`,
       unavailable: sql<unknown>`json_extract(${SessionMessageTable.data}, '$.metadata.memory.unavailable')`,
     })
     .from(SessionMessageTable)
@@ -71,11 +48,7 @@ export const newestBlock = Effect.fnUntraced(function* (db: Db, sessionID: Sessi
   return {
     visible: compaction === undefined || block.seq > compaction || (unsent !== undefined && block.seq >= unsent),
     text: typeof block.text === "string" ? block.text : undefined,
-    // SQLite's JSON true; a block written before tasks were recorded offers none.
-    tasks: block.tasks === 1 || block.tasks === true,
-    /** Built on a server with task plans (`MemoryPlans`). */
-    plans: block.plans === 1 || block.plans === true,
-    /** Built while memory could not be reached. */
+    /** Built while memory could not be reached; SQLite's JSON true. */
     unavailable: block.unavailable === 1 || block.unavailable === true,
   }
 })
@@ -201,10 +174,3 @@ function strings(value: unknown) {
   const list = parsed(value)
   return Array.isArray(list) ? list.filter((item): item is string => typeof item === "string") : []
 }
-
-/** The definitions without the memory tools this chat is not offered. */
-export const apply = <T extends { readonly name: string }>(definitions: ReadonlyArray<T>, offer: Offered) =>
-  definitions.filter(
-    (definition) =>
-      !tools.has(definition.name) || (definition.name === "task" ? offer.memory && offer.tasks : offer.memory),
-  )

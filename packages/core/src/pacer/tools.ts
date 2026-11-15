@@ -2,24 +2,54 @@ export * as PacerTools from "./tools.js"
 
 import { ToolDefinition } from "@opencode/ai/effect"
 import type { SessionID } from "@opencode/schema/session-id"
-import { Clock, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schema, Scope, Stream } from "effect"
+import {
+  Clock,
+  Context,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Schema,
+  Scope,
+  Stream,
+  SubscriptionRef,
+} from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Bus } from "../bus.js"
+import { KV } from "../kv.js"
 import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHeaders } from "./headers.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 
-// CPP's web tools as a client of its API (CLIENT-GUIDE §4.3): each chat's own list of their definitions, and their
-// calls. CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
+// CPP's tools as a client of its API (CLIENT-GUIDE §4.3; the workspace's reference `docs/reference/cpp-tools-api.md`):
+// each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
+// CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
 // anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
 // model changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
 // is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
 // warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
 
-/** CPP's four web tools (WEB-TOOLS.md, "The tools' parameters"). */
-export const names = ["web_search", "web_extract", "web_crawl", "web_research"] as const
+/** What a client needs to run one of CPP's tools: the list's `meta` of it. */
+export const Meta = PacerModels.ToolMeta
+export type Meta = PacerModels.ToolMeta
+
+/**
+ * The tools of an endpoint and their meta, from every capabilities read (`pacer.tools`) and list read there, kept
+ * across restarts: the first chat after an upgrade, and a step resumed right after a restart, have their executors
+ * before any chat's list is read. Keyed by the set-up address's root, as each address of a pair is the same CPP.
+ */
+export type Known = ReadonlyMap<string, Meta>
+
+const KnownValue = Schema.Record(Schema.String, Meta)
+const decodeKnown = Schema.decodeUnknownOption(KnownValue)
+export const knownKey = (endpoint: PacerEndpoint.Endpoint) => `pacer:tools:${endpoint.home ?? endpoint.root}`
+
+/** A tool CPP names without meta, as one before it did: asked as its own name, on `*`. */
+export const fallback = (name: string): Meta => ({ title: name, permission: name, subject: [], read_only: false })
 
 /** Chats whose list is held; past it the least recently used one goes, and is read again at its next request. */
 export const CHATS = 1_000
@@ -44,6 +74,8 @@ export interface List {
   /** The definitions in CPP's order, from its `claude` shape: name, description and input schema as written. */
   readonly definitions: ReadonlyArray<ToolDefinition>
   readonly byName: ReadonlyMap<string, ToolDefinition>
+  /** Each listed tool's meta, or {@link fallback}'s. */
+  readonly meta: Known
 }
 
 export interface ListInput {
@@ -71,15 +103,28 @@ export interface CallInput {
   /** The chat's project headers (`PacerProject`). */
   readonly project?: Readonly<Record<string, string>>
   readonly name: string
+  /** The agent the chat runs as: who asks (`X-Pacer-Agent`, with the chat's own id). */
+  readonly agent?: string
   /** The model's arguments, sent as the body as they are. */
   readonly args: unknown
 }
 
-/** A call's answer: `{text, data, error}`. A failed call is an answer too, with `error` and a `text` for the model. */
+/** The task a chat is inside and its subtask, as CPP keeps them; null for none. */
+export interface Place {
+  readonly task: string
+  readonly subtask: string | null
+}
+
+/**
+ * A call's answer: `{text, data, error, metadata, place}`. A failed call is an answer too, with `error` and a `text`
+ * for the model. `place` is the chat's place after the call, for the memory tools only: undefined when CPP sent none.
+ */
 export interface Answer {
   readonly text: string
   readonly data: unknown
   readonly error?: { readonly code: string; readonly message: string }
+  readonly metadata: Readonly<Record<string, unknown>>
+  readonly place?: Place | null
 }
 
 /** A call CPP did not answer with `{text, data, error}`. */
@@ -95,6 +140,9 @@ export interface Interface {
   /** A model answer's `X-Pacer-Tools`: another version than the held one is read at the chat's next step. */
   readonly seen: (sessionID: SessionID, version: string | undefined) => void
   readonly call: (input: CallInput) => Effect.Effect<Answer, CallError>
+  /** The tools the current endpoint's lists named, with their meta; empty without an endpoint. */
+  readonly known: () => Effect.Effect<Known>
+  readonly knownChanges: () => Stream.Stream<Known>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerTools") {}
@@ -108,11 +156,19 @@ const decodeDefinition = Schema.decodeUnknownOption(Definition)
 const ListAnswer = Schema.Struct({
   version: Schema.String,
   tools: Schema.Struct({ claude: Schema.Array(Schema.Unknown) }),
+  meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 })
+const decodeMeta = Schema.decodeUnknownOption(Meta)
+const PlaceAnswer = Schema.NullOr(
+  Schema.Struct({ task: Schema.String, subtask: Schema.optional(Schema.NullOr(Schema.String)) }),
+)
+const decodePlace = Schema.decodeUnknownOption(PlaceAnswer)
 const CallAnswer = Schema.Struct({
   text: Schema.optional(Schema.NullOr(Schema.String)),
   data: Schema.optional(Schema.Unknown),
   error: Schema.optional(Schema.Unknown),
+  metadata: Schema.optional(Schema.Unknown),
+  place: Schema.optional(Schema.Unknown),
 })
 const Failure = Schema.Struct({ code: Schema.String, message: Schema.optional(Schema.NullOr(Schema.String)) })
 const decodeFailure = Schema.decodeUnknownOption(Failure)
@@ -144,7 +200,31 @@ export const layer = Layer.effect(
     const endpoints = yield* PacerEndpoint.Service
     const catalogs = yield* PacerModels.Service
     const bus = yield* Bus.Service
+    const kv = yield* KV.Service
     const scope = yield* Scope.Scope
+
+    const load = (endpoint: PacerEndpoint.Endpoint | undefined) =>
+      endpoint === undefined
+        ? Effect.succeed<Known>(new Map())
+        : kv
+            .get(knownKey(endpoint))
+            .pipe(
+              Effect.map((value): Known => new Map(Object.entries(Option.getOrElse(decodeKnown(value), () => ({}))))),
+            )
+    const known = yield* SubscriptionRef.make<Known>(yield* load(yield* endpoints.get()))
+    /** Adds what a list or capabilities read from the current endpoint names; kept only when it changed something. */
+    const learn = (endpoint: PacerEndpoint.Endpoint | undefined, meta: Known) =>
+      Effect.gen(function* () {
+        const current = yield* SubscriptionRef.get(known)
+        const fresh = [...meta].filter(([name, meta]) => {
+          const held = current.get(name)
+          return held === undefined || JSON.stringify(held) !== JSON.stringify(meta)
+        })
+        if (fresh.length === 0 || endpoint === undefined) return
+        const next: Known = new Map([...current, ...fresh])
+        yield* SubscriptionRef.set(known, next)
+        yield* kv.set(knownKey(endpoint), Object.fromEntries(next))
+      })
 
     // In use order, the least recently used first.
     const chats = new Map<SessionID, Chat>()
@@ -182,9 +262,10 @@ export const layer = Layer.effect(
       chat.stale = true
       chat.generation++
     }
-    const hold = (chat: Chat, version: string, entries: ReadonlyArray<unknown>) => {
+    const hold = (chat: Chat, answer: typeof ListAnswer.Type) => {
+      const version = answer.version
       if (chat.list?.version === version) return chat.list
-      const held = versions.get(version) ?? { list: parse(version, entries), holders: 0 }
+      const held = versions.get(version) ?? { list: parse(answer), holders: 0 }
       versions.set(version, held)
       held.holders++
       release(chat.list)
@@ -208,7 +289,7 @@ export const layer = Layer.effect(
           })
         // Shared by the chat's requests that wait for it, so it outlives the one that started it.
         yield* http
-          .get(`/pacer/v1/tools?model=${encodeURIComponent(input.model)}`, ListAnswer, {
+          .get(`/pacer/v1/tools?model=${encodeURIComponent(input.model)}&include=memory`, ListAnswer, {
             timeout: READ_TIMEOUT,
             headers: PacerHeaders.chat({ sessionID: input.sessionID, parentID: chat.parentID, project: input.project }),
           })
@@ -219,15 +300,18 @@ export const layer = Layer.effect(
                 // A chat deleted or pushed out meanwhile holds nothing; this request still gets the list.
                 if (chats.get(input.sessionID) !== chat)
                   return {
-                    list:
-                      versions.get(answer.body.version)?.list ?? parse(answer.body.version, answer.body.tools.claude),
+                    list: versions.get(answer.body.version)?.list ?? parse(answer.body),
                     answered: true,
                   }
-                const list = hold(chat, answer.body.version, answer.body.tools.claude)
+                const list = hold(chat, answer.body)
                 chat.model = input.model
                 if (chat.generation === generation) chat.stale = false
                 return { list, answered: true }
-              }),
+              }).pipe(
+                Effect.tap((read) =>
+                  read.list && epoch === state.epoch ? learn(state.endpoint, read.list.meta) : Effect.void,
+                ),
+              ),
             ),
             Effect.catch((error) =>
               Effect.gen(function* () {
@@ -248,8 +332,7 @@ export const layer = Layer.effect(
                 }
                 if (error._tag !== "PacerHttp.NotSetUp")
                   state.pausedUntil = (yield* Clock.currentTimeMillis) + Duration.toMillis(PAUSE)
-                if (!quiet)
-                  yield* Effect.logWarning("could not read CLIProxyPacer's web tools", { reason: error.message })
+                if (!quiet) yield* Effect.logWarning("could not read CLIProxyPacer's tools", { reason: error.message })
                 // A refused key or no CPP set up is an answer; nothing else from it is.
                 const answered = error._tag === "PacerHttp.Refused" || error._tag === "PacerHttp.NotSetUp"
                 return { list: chat.list, answered, reason: error.message }
@@ -266,7 +349,7 @@ export const layer = Layer.effect(
       if (!(yield* endpoints.get())) return false
       // A catalog not read yet reads anyway: a step resumed right after a restart gets the tools it had.
       const catalog = yield* catalogs.get()
-      if (catalog && !catalog.pacer?.webTools) return false
+      if (catalog && !catalog.pacer?.webTools && !catalog.pacer?.memory?.tools) return false
       return !state.absent
     })
 
@@ -291,7 +374,7 @@ export const layer = Layer.effect(
         if (result.answered || result.list) return result.list
         const now = yield* Clock.currentTimeMillis
         if (now + Duration.toMillis(retry) > begun + Duration.toMillis(WAIT)) {
-          yield* Effect.logWarning("went on without CLIProxyPacer's web tools: no answer to their list", {
+          yield* Effect.logWarning("went on without CLIProxyPacer's tools: no answer to their list", {
             sessionID: input.sessionID,
             waited: Duration.format(Duration.millis(now - begun)),
             reason: result.reason,
@@ -321,16 +404,20 @@ export const layer = Layer.effect(
         )
       const error = answer.body.error ?? undefined
       const failure = Option.getOrUndefined(decodeFailure(error))
+      const metadata = answer.body.metadata
+      const place = answer.body.place === undefined ? undefined : Option.getOrUndefined(decodePlace(answer.body.place))
       return {
         text: answer.body.text ?? "",
         data: answer.body.data,
         ...(error === undefined ? {} : { error: { code: failure?.code ?? "error", message: failure?.message ?? "" } }),
+        metadata: typeof metadata === "object" && metadata !== null && !Array.isArray(metadata) ? { ...metadata } : {},
+        ...(place === undefined ? {} : { place: place && { task: place.task, subtask: place.subtask ?? null } }),
       } satisfies Answer
     })
 
     yield* endpoints.changes().pipe(
       Stream.runForEach((endpoint) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (PacerEndpoint.same(endpoint, state.endpoint)) return
           const previous = state.endpoint
           state.endpoint = endpoint
@@ -348,12 +435,21 @@ export const layer = Layer.effect(
           versions.clear()
           Deferred.doneUnsafe(state.changed, Exit.void)
           state.changed = Deferred.makeUnsafe<void>()
+          const loaded = yield* load(endpoint)
+          if (PacerEndpoint.same(endpoint, state.endpoint)) yield* SubscriptionRef.set(known, loaded)
         }),
       ),
       Effect.forkScoped({ startImmediately: true }),
     )
+    // The catalog is the current endpoint's: another endpoint's is dropped before its first read there.
     yield* catalogs.changes().pipe(
-      Stream.runForEach(() => Effect.sync(() => void (state.absent = false))),
+      Stream.runForEach((catalog) =>
+        Effect.gen(function* () {
+          state.absent = false
+          const tools = catalog?.pacer?.tools
+          if (tools) yield* learn(yield* endpoints.get(), tools)
+        }),
+      ),
       Effect.forkScoped({ startImmediately: true }),
     )
     yield* bus.subscribe([SessionEvent.Compaction.Ended, SessionEvent.Deleted]).pipe(
@@ -375,6 +471,8 @@ export const layer = Layer.effect(
         if (chat?.list && chat.list.version !== version) stale(chat)
       },
       call,
+      known: () => SubscriptionRef.get(known),
+      knownChanges: () => SubscriptionRef.changes(known),
     })
   }),
 )
@@ -383,17 +481,30 @@ export const node = makeGlobalNode({
   service: Service,
   layer,
   // Not Session: it imports, through the session context, the model request that uses this.
-  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node],
+  deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, KV.node],
 })
 
-/** A version's definitions, each one on its own: an entry this version does not understand drops only itself. */
-function parse(version: string, entries: ReadonlyArray<unknown>): List {
-  const definitions = entries.flatMap((entry) =>
+/**
+ * A version's definitions and their meta, each one on its own: an entry this version does not understand drops only
+ * itself, and a tool without meta it understands is asked as {@link fallback} says.
+ */
+function parse(answer: typeof ListAnswer.Type): List {
+  const definitions = answer.tools.claude.flatMap((entry) =>
     Option.toArray(decodeDefinition(entry)).map(
       (item) => new ToolDefinition({ name: item.name, description: item.description, inputSchema: item.input_schema }),
     ),
   )
-  return { version, definitions, byName: new Map(definitions.map((item) => [item.name, item])) }
+  return {
+    version: answer.version,
+    definitions,
+    byName: new Map(definitions.map((item) => [item.name, item])),
+    meta: new Map(
+      definitions.map((item) => [
+        item.name,
+        Option.getOrElse(decodeMeta(answer.meta?.[item.name]), () => fallback(item.name)),
+      ]),
+    ),
+  }
 }
 
 function failed(name: string, error: PacerHttp.Error) {

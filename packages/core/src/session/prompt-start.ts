@@ -26,8 +26,8 @@ import { SessionMessageTable, SessionTable } from "./sql.js"
 // byte for byte until the next one: its first step, the first step after a completed compaction, after its cache went
 // cold, and after a switch of its model or agent. Whatever changed meanwhile waits for the next, and the chat is told
 // of it at its next step by a reminder: a stored message after its history, as a changed instruction file or a new
-// date arrives, so the cache is read up to it. The memory tools a chat is offered (`MemoryOffer`) and CPP's web tools
-// (`PacerOffer`) are decided with the rest. Off (CPP's `pacer.freeze_prompt` for a chat on it, else openforge's
+// date arrives, so the cache is read up to it. CPP's tools a chat is offered, its memory tools among
+// them (`PacerOffer`), are decided with the rest. Off (CPP's `pacer.freeze_prompt` for a chat on it, else openforge's
 // `freeze_prompt`), each request takes what is current, as before, and the record goes: turned on again, the start of
 // that moment is recorded.
 

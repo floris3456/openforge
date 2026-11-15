@@ -970,7 +970,7 @@ describe("SubagentTool", () => {
         method,
         headers: { authorization: "Bearer memory-client-key-f1", "content-type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      }).then((response) => response.json() as Promise<{ task: MemoryClient.Task }>)
+      }).then((response) => response.json() as Promise<{ task: { id: string; state: string; worker: unknown } }>)
 
     const prepare = Effect.fnUntraced(function* (dir: { readonly path: string }) {
       const project = `subagent-tasks-${crypto.randomUUID().slice(0, 8)}`
@@ -990,17 +990,15 @@ describe("SubagentTool", () => {
         )
       const read = (id: string) =>
         Effect.promise(() => store("GET", `${base}/tasks/${id}`)).pipe(Effect.map((answer) => answer.task))
-      /** What the child does with its task while it runs: the state set right after openforge set it active. */
+      /** What the child does with its task while it runs: the state set right after CPP set it active. */
       const meanwhile = (next: { readonly state: string; readonly note?: string } | undefined) => {
         tasksServer.control.answer = async (request) => {
-          const answer = await fetch(`${tasksServer.store.url}${request.path}`, {
-            method: request.method,
-            headers: { authorization: "Bearer memory-client-key-f1", "content-type": "application/json" },
-            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-          })
-          const body = request.body as { state?: string; by?: { chat?: string } } | undefined
-          if (next && request.path.endsWith("/state") && body?.state === "active")
-            await store("POST", request.path, { ...next, by: body.by })
+          const answer = await tasksServer.pass(request)
+          if (next && request.path.endsWith("/start"))
+            await store("POST", request.path.replace(/\/start$/, "/state"), {
+              ...next,
+              by: { role: request.pacer["x-pacer-agent"], chat: request.pacer["x-pacer-chat"] },
+            })
           return answer
         }
       }
@@ -1046,8 +1044,8 @@ describe("SubagentTool", () => {
                 before.push(
                   ...tasksServer
                     .calls()
-                    .filter((call) => call.path === `${h.base}/tasks/${task.id}/state`)
-                    .map((call) => (call.body as { state: string }).state),
+                    .filter((call) => call.path.startsWith(`${h.base}/tasks/${task.id}/`))
+                    .map((call) => call.path.slice(`${h.base}/tasks/${task.id}/`.length)),
                 )
               }),
             )
@@ -1056,7 +1054,8 @@ describe("SubagentTool", () => {
             const child = yield* h.sessions.get(outputSessionID(settled.metadata))
             expect(settled.content).toEqual([{ type: "text", text: completedOutput(child.id) }])
             expect(child.metadata).toEqual({ memory: { task: task.id } })
-            expect(before).toEqual(["active"])
+            // Asked as the lead, then started as the child.
+            expect(before).toEqual(["assign", "start"])
             expect(yield* h.read(task.id)).toMatchObject({
               state: "active",
               worker: { person: "floris", role: "reviewer", chat: child.id },
@@ -1085,13 +1084,17 @@ describe("SubagentTool", () => {
               Object.fromEntries(Object.entries(call.pacer).filter(([name]) => name.endsWith("session"))),
             ]),
           ).toEqual([
-            ["GET", `/tasks/${task.id}`, chats(h.parent.id)],
-            ["POST", `/tasks/${task.id}/state`, chats(child.id, h.parent.id)],
-            ["GET", `/tasks/${task.id}`, chats(h.parent.id)],
+            ["POST", `/tasks/${task.id}/assign`, chats(h.parent.id)],
+            ["POST", `/tasks/${task.id}/start`, chats(child.id, h.parent.id)],
+            ["GET", `/tasks/${task.id}/ended`, chats(h.parent.id)],
           ])
           expect(calls.every((call) => call.pacer["x-pacer-project"] !== undefined)).toBe(true)
-          // `by.chat` stays the child's own ID.
-          expect((calls[1]?.body as { by: { chat: string } }).by.chat).toBe(child.id)
+          // Who asks: the lead, then the child as its role and by its own ID.
+          expect(calls.map((call) => [call.pacer["x-pacer-agent"], call.pacer["x-pacer-chat"]])).toEqual([
+            ["build", h.parent.id],
+            ["reviewer", child.id],
+            ["build", h.parent.id],
+          ])
         }),
       ),
     )
@@ -1132,9 +1135,8 @@ describe("SubagentTool", () => {
             h.meanwhile(undefined)
             const settled = yield* h.run({ agent: "reviewer", description: "part", prompt: "do it", taskID: task.id })
             expect(settled.status).toBe("error")
-            expect(settled.error?.message).toBe(
-              `You are on step [${sub.id}] A part of task ${task.id}: give taskID the id of the step the subagent is to do, not the task's. Its open steps: [${sub.id}] A part (yours); [${other.id}] Another part (todo). No subagent was started.`,
-            )
+            // CPP's refusal, in its words.
+            expect(settled.error?.message).toBe(`You are on step ${sub.id} of ${task.id} (fake): name the step.`)
             expect(yield* h.children).toEqual([])
             expect(yield* h.read(sub.id)).toMatchObject({ state: "active", worker: { chat: h.parent.id } })
             expect((yield* h.read(other.id)).state).toBe("todo")
@@ -1152,7 +1154,7 @@ describe("SubagentTool", () => {
           const h = yield* prepare(dir)
           const settled = yield* h.run({ agent: "reviewer", description: "x", prompt: "x", taskID: "000000000000" })
           expect(settled.status).toBe("error")
-          expect(settled.error?.message).toBe("There is no task 000000000000 in this project's memory.")
+          expect(settled.error?.message).toBe("No task 000000000000 (fake).")
           expect(yield* h.children).toEqual([])
         }),
       ),
@@ -1165,12 +1167,9 @@ describe("SubagentTool", () => {
           Effect.gen(function* () {
             const h = yield* prepare(dir)
             for (const [next, line] of [
-              [
-                { state: "blocked", note: "the file is not there" },
-                (id: string) => `Task ${id} is now blocked: the file is not there.`,
-              ],
-              [{ state: "review" }, (id: string) => `Task ${id} is now review.`],
-              [{ state: "done", note: "merged" }, (id: string) => `Task ${id} is now done: merged.`],
+              [{ state: "blocked", note: "the file is not there" }, (id: string) => `Task ${id} is blocked (fake).`],
+              [{ state: "review" }, (id: string) => `Task ${id} is review (fake).`],
+              [{ state: "done", note: "merged" }, (id: string) => `Task ${id} is done (fake).`],
               [undefined, undefined],
             ] as const) {
               const task = yield* h.make(`Ends ${next?.state ?? "active"}`)
@@ -1217,7 +1216,7 @@ describe("SubagentTool", () => {
           const admission = Array.from(yield* Fiber.join(admitted))[0]
           if (admission?.data.item.type !== "synthetic") return yield* Effect.die("Expected synthetic inbox item")
           expect(admission.data.item.payload.text).toBe(
-            `<subagent sessionID="${childID}" state="completed" description="background work">\n${childText}\nTask ${task.id} is now review: ready.\n</subagent>`,
+            `<subagent sessionID="${childID}" state="completed" description="background work">\n${childText}\nTask ${task.id} is review (fake).\n</subagent>`,
           )
         }),
       ),

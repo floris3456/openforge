@@ -85,9 +85,8 @@ import { GrepTool } from "../tool/plugin/grep.js"
 import { ImageGenerateTool } from "../tool/plugin/image-generate.js"
 import { ImageTool } from "../tool/plugin/image.js"
 import { McpResourceTools } from "../tool/plugin/mcp-resource.js"
-import { MemoryTools } from "../tool/plugin/memory.js"
 import { OpenCodeTools } from "../tool/plugin/opencode.js"
-import { PacerWebTools } from "../tool/plugin/pacer-web.js"
+import { PacerToolsPlugin } from "../tool/plugin/pacer-tools.js"
 import { QuestionTool } from "../tool/plugin/question.js"
 import { ReadToolFileSystem } from "../tool/read-filesystem.js"
 import { ReadTool } from "../tool/plugin/read.js"
@@ -291,8 +290,7 @@ const pre = [
   TodoTool.Plugin,
   WebFetchTool.Plugin,
   WebSearchTool.Plugin,
-  PacerWebTools.Plugin,
-  MemoryTools.Plugin,
+  PacerToolsPlugin.Plugin,
   TaskPlansPlugin.Plugin,
   WriteTool.Plugin,
   WarmingPlugin.Plugin,

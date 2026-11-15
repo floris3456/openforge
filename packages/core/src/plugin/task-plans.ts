@@ -14,7 +14,7 @@ import { WriteTool } from "../tool/plugin/write.js"
 
 // Where task plans are enforced (the workspace's spec `docs/specs/task-plans.md`, sections 6 and 8), in a chat that
 // works under them (`MemoryPlans.planned`): an edit, write or patch in no task is refused before it runs, and a turn
-// inside a task that changed something without a task call ends with one check. A shell command cannot be told apart
+// inside a task that changed something without a task call ends with one check, both in CPP's words. A shell command cannot be told apart
 // as reading or changing, so it is never refused; it counts for the check.
 
 /** The tools that change files, refused in a chat in no task. */
@@ -41,8 +41,7 @@ export const Plugin = {
       if (MemoryTask.inside(session.metadata)) return undefined
       if (!(yield* plans.planned(session))) return undefined
       // A chat that cannot make a task now is not kept from editing.
-      if (!(yield* plans.reachable(session))) return undefined
-      return MemoryPlans.refused
+      return yield* plans.refusal(session)
     })
 
     yield* ctx.tool.hook("execute.before", (event) =>
@@ -75,8 +74,7 @@ export const Plugin = {
       if (changed.get(sessionID) === false) return
       changed.set(sessionID, false)
       const session = yield* ctx.session.get({ sessionID })
-      const inside = MemoryTask.inside(session.metadata)
-      if (!inside) return
+      if (!MemoryTask.inside(session.metadata)) return
       if (!(yield* plans.planned(session))) return
       // The turn: everything since the chat's newest prompt, or all it has in view when a compaction took that out.
       const messages = yield* ctx.session.context({ sessionID })
@@ -88,21 +86,12 @@ export const Plugin = {
           : [],
       )
       if (calls.includes("task") || !calls.some((name) => worked.has(name))) return
-      const item = yield* plans.current(session, inside)
-      if (item?.state !== "active") return
-      // A child asks only for what the task tool lets it set: the task or step it is inside, or a step it made. A step
-      // of its lead's that it is not on is its lead's to set (the overnight tests of 2026-11-15: the check asked for a
-      // review the tool refused, in 2 of 3 subagent runs).
-      if (
-        session.parentID !== undefined &&
-        item.id !== inside.task &&
-        item.id !== inside.subtask &&
-        !(item.parent && item.by.chat === session.id)
-      )
-        return
+      // Which task it names, and whether one, is CPP's to say.
+      const text = yield* plans.check(session)
+      if (text === null) return
       yield* ctx.session.synthetic({
         sessionID,
-        text: MemoryPlans.check(item, session),
+        text,
         description: "Task check",
         metadata: { source: SOURCE },
       })

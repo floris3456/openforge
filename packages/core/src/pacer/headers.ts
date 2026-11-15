@@ -42,17 +42,20 @@ export function make(input: Input): Readonly<Record<string, string>> {
 
 /**
  * The chat a request belongs to, its parent for a subagent, and its project: on model requests, tool list reads, tool
- * calls and memory calls.
+ * calls and memory calls. With `agent`, as a tool call and memory's texts name who asks (workspace reference
+ * `docs/reference/cpp-tools-api.md`, "Who is asking"): the agent as its role, and the chat by its own id.
  */
 export function chat(input: {
   readonly sessionID: SessionID
   readonly parentID?: SessionID
   readonly project?: Readonly<Record<string, string>>
+  readonly agent?: string
 }) {
   return {
     "X-Pacer-Session": PacerSessionID.make(input.sessionID),
     ...(input.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(input.parentID) } : {}),
     ...input.project,
+    ...(input.agent === undefined ? {} : { "X-Pacer-Agent": input.agent, "X-Pacer-Chat": input.sessionID }),
   }
 }
 

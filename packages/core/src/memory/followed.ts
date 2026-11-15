@@ -15,14 +15,14 @@ import { SessionMessageTable, SessionPartTable } from "../session/sql.js"
 import { SessionStore } from "../session/store.js"
 import { MemoryClient } from "./client.js"
 import { MemoryPromptTable } from "./prompt.sql.js"
-import { MemorySecrets } from "./secrets.js"
 
 // What followed a search (the workspace's spec `docs/specs/memory.md`, section 9): openforge adds to a search's row of
 // the recall log the step that followed it and the person's next message. The ledger is the chat itself: a start
 // block's message, a prompt's message of close entries and a `recall` call's result keep their search in their metadata
 // (`project`, `recall`, `entries`), a prompt that got none in its `memory_prompt` row (`MemoryPrompt`), and
 // which step followed which search, or which message of the person, is read from the order of the chat's messages. It
-// runs only while capabilities say `recalls`, beside the chat and never in its way: each row gets one try in the
+// runs only while capabilities say `recalls`, beside the chat and never in its way; CPP takes out what looks like a
+// secret before it keeps them (workspace reference `docs/reference/cpp-tools-api.md`, "Calls"): each row gets one try in the
 // background, dropped on failure; a restart may lose some.
 
 /** How long one call may take. */
@@ -110,18 +110,16 @@ const layer = Layer.effect(
       ]
       if (!searches.length) return
       const step = cut(
-        MemorySecrets.redact(
-          [
-            ...message.content.flatMap((part) => (part.type === "text" && part.text ? [part.text] : [])),
-            ...message.content.flatMap((part) =>
-              part.type === "tool"
-                ? [
-                    `${part.name} ${typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)}`,
-                  ]
-                : [],
-            ),
-          ].join("\n"),
-        ),
+        [
+          ...message.content.flatMap((part) => (part.type === "text" && part.text ? [part.text] : [])),
+          ...message.content.flatMap((part) =>
+            part.type === "tool"
+              ? [
+                  `${part.name} ${typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)}`,
+                ]
+              : [],
+          ),
+        ].join("\n"),
         STEP,
       )
       if (!step) return
@@ -162,7 +160,7 @@ const layer = Layer.effect(
         .pipe(Effect.orDie)
       // Only a message the person typed: an inbox's synthetic message or control is not theirs.
       if (row?.type !== "user" || typeof row.text !== "string") return
-      const person = cut(MemorySecrets.redact(row.text), PERSON)
+      const person = cut(row.text, PERSON)
       if (!person.trim()) return
       const newest = (type: "user" | "assistant") =>
         db

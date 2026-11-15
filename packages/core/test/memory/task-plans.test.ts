@@ -25,11 +25,13 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryPlans } from "@opencode/core/memory/plans"
+import { MemoryTexts } from "@opencode/core/memory/texts"
 import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
-import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
+import { PacerTools } from "@opencode/core/pacer/tools"
 import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
@@ -53,7 +55,6 @@ import { SkillInstructions } from "@opencode/core/skill/instructions"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
 import { EditTool } from "@opencode/core/tool/plugin/edit"
-import { MemoryTools } from "@opencode/core/tool/plugin/memory"
 import { PatchTool } from "@opencode/core/tool/plugin/patch"
 import { WriteTool } from "@opencode/core/tool/plugin/write"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -66,7 +67,8 @@ import { promptLocationNode } from "../fixture/prompt-location"
 import { testEffect } from "../lib/effect"
 import { permissionLayer } from "../lib/permission"
 import { registerToolPlugin } from "../lib/tool"
-import { catalogOf, endpointAt, key, startProxied } from "./fixture"
+import { texts } from "../pacer/memory-harness"
+import { catalogOf, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied } from "./fixture"
 
 // Task plans' enforcement through the real runner (the workspace's spec `docs/specs/task-plans.md`, sections 6, 8 and
 // 10): an edit, write or patch in a chat in no task changes nothing, and a turn inside a task that changed something
@@ -163,45 +165,8 @@ const files = makeLocationNode({
     Location.node,
   ],
 })
-// Memory's own tools as in openforge; their calls read only the chat, which the store answers.
-const memoryTools = makeLocationNode({
-  name: "test/task-plans-memory-tools",
-  layer: Layer.effectDiscard(
-    Effect.gen(function* () {
-      const store = yield* SessionStore.Service
-      yield* registerToolPlugin(MemoryTools.Plugin).pipe(
-        Effect.provide(
-          Layer.mock(Session.Service, {
-            get: (sessionID) =>
-              store
-                .get(sessionID)
-                .pipe(
-                  Effect.flatMap((found) =>
-                    found ? Effect.succeed(found) : Effect.fail(new Session.NotFoundError({ sessionID })),
-                  ),
-                ),
-            revert: {
-              stage: () => Effect.die("unused"),
-              clear: () => Effect.die("unused"),
-              commit: () => Effect.die("unused"),
-            },
-          }),
-        ),
-      )
-    }),
-  ),
-  deps: [
-    Tool.node,
-    Permission.node,
-    PacerEndpoint.node,
-    PacerModels.node,
-    MemoryClient.node,
-    PacerProject.node,
-    SessionStore.node,
-    Config.node,
-    KV.node,
-  ],
-})
+// CPP's tools as openforge registers them, the memory tools among them.
+const memoryTools = pacerToolsNode("test/task-plans-pacer-tools")
 const replacements: LayerNode.Replacements = [
   Snapshot.node.replace(Snapshot.noopLayer),
   LayerNodePlatform.llmClient.replace(testLLM),
@@ -253,6 +218,8 @@ const layer = AppNodeBuilder.build(
     shell,
     files,
     memoryTools,
+    PacerTools.node,
+    MemoryTexts.node,
     MemoryPlans.node,
     Config.node,
     Snapshot.node,
@@ -277,7 +244,6 @@ const layer = AppNodeBuilder.build(
 ).pipe(Layer.provideMerge(testLLM))
 const it = testEffect(layer)
 
-const memory = Effect.provide(MemoryClient.Service, client)
 /** The services of each test, built for it, that the task-plans plugin is registered with. */
 const registered = new WeakSet<PluginHooks.Interface>()
 /** The chats the plugin read, one entry a read. */
@@ -324,22 +290,26 @@ const setup = Effect.fnUntraced(function* (
     .pipe(Effect.orDie)
   const lead = Session.ID.make(`ses_plans_${project.slice(0, 12)}`)
   const sessionID = input.child ? Session.ID.make(`${lead}_child`) : lead
-  const tasks = yield* memory
   const make = (title: string, parent?: string, maker = by) =>
-    tasks.make(project, { title, ...(parent ? { parent } : {}), by: maker }).pipe(
-      Effect.map((made) => made.task),
-      Effect.orDie,
-    )
-  const activate = (id: string) => tasks.change(project, id, { state: "active", by }).pipe(Effect.orDie)
+    Effect.promise(() =>
+      fetch(`${server.store.url}/pacer/v1/memory/${project}/tasks`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ title, ...(parent ? { parent } : {}), by: maker }),
+      }).then((answer) => answer.json() as Promise<{ task: { id: string; title: string } }>),
+    ).pipe(Effect.map((made) => made.task))
   const task = input.inside ? yield* make("Fix the typo") : undefined
-  if (task) yield* activate(task.id)
+  if (task) yield* activate(server, project, task.id)
   const maker =
     input.subtaskBy === undefined ? by : { role: "build", chat: input.subtaskBy === "self" ? sessionID : lead }
   const subtask = task && input.inside !== "task" ? yield* make("The first file", task.id, maker) : undefined
-  if (subtask && input.inside === "active subtask") yield* activate(subtask.id)
+  if (subtask && input.inside === "active subtask") yield* activate(server, project, subtask.id)
   const inside = task
     ? { task: task.id, ...(input.inside === "subtask" && subtask ? { subtask: subtask.id } : {}) }
     : undefined
+  // CPP keeps the chat's place; openforge's metadata says the same, as after the call that put it there.
+  if (inside)
+    server.store.place(key, PacerSessionID.make(sessionID), { task: inside.task, subtask: inside.subtask ?? null })
   const insert = (id: Session.ID, parent?: Session.ID, agent?: string) =>
     db
       .insert(SessionTable)
@@ -359,6 +329,10 @@ const setup = Effect.fnUntraced(function* (
   yield* insert(lead)
   if (input.child) yield* insert(sessionID, lead, input.agent)
 
+  yield* primeTools(project)
+  // memory's texts, read once the server's catalog said it serves them.
+  const memoryTexts = yield* MemoryTexts.Service
+  yield* poll("memory's texts are kept", () => Effect.runSync(memoryTexts.get()) !== undefined)
   const session = yield* Session.Service
   const hooks = yield* PluginHooks.Service
   // As openforge registers it, once for the test's services: its hooks are the runner's.
@@ -426,6 +400,16 @@ const setup = Effect.fnUntraced(function* (
   }
 })
 
+/** Sets a task active as a chat of 0.0.42 did, through the memory API. */
+const activate = (served: typeof server, project: string, id: string, maker = by) =>
+  Effect.promise(() =>
+    fetch(`${served.store.url}/pacer/v1/memory/${project}/tasks/${id}/state`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({ state: "active", by: maker }),
+    }),
+  )
+
 /** A file of the test's own under the chat's directory, with its text. */
 const file = (name: string, text?: string) => {
   const target = path.join(root, `${crypto.randomUUID().slice(0, 8)}-${name}`)
@@ -436,7 +420,7 @@ const file = (name: string, text?: string) => {
   }
 }
 
-const refused = MemoryPlans.refused
+const refused = texts.refused
 
 describe("an edit outside a task", () => {
   it.live("an edit, a write and a patch in a chat in no task change nothing and say to make the task first", () =>
@@ -462,9 +446,6 @@ describe("an edit outside a task", () => {
       expect(edited.read()).toBe("before\n")
       expect(written.read()).toBeUndefined()
       expect(patched.read()).toBe("before\n")
-      expect(refused).toBe(
-        "This chat is in no task, so nothing was changed. Make the task first with the task tool (its summary and the subtasks you now believe in), or set an existing task active to work on it, then make the change.",
-      )
       // Outside a task there is no check.
       expect(yield* h.checks()).toEqual([])
     }),
@@ -473,15 +454,11 @@ describe("an edit outside a task", () => {
   it.live("goes ahead while memory cannot be reached, as no task could be made then", () =>
     Effect.gen(function* () {
       const h = yield* setup()
-      // The start block goes in as on a server with plans; memory is gone by the time of the edit.
+      // The start block goes in; memory is gone by the time of the edit.
       server.control.answer = (request) =>
-        request.method === "GET" && request.path === `/pacer/v1/memory/${h.project}/tasks`
+        request.method === "GET" && request.path === `/pacer/v1/memory/${h.project}/chat`
           ? Response.json({ error: { type: "internal", message: "down" } }, { status: 503 })
-          : fetch(`${server.store.url}${request.path}`, {
-              method: request.method,
-              headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-              ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-            })
+          : server.pass(request)
       const edited = file("unreached.txt", "before\n")
       yield* h.llm.push(
         TestLLM.toolCall("call-edit", "edit", { path: edited.name, oldString: "before", newString: "after" }),
@@ -490,10 +467,10 @@ describe("an edit outside a task", () => {
       yield* h.prompt("fix the typo")
       expect(yield* h.results()).toEqual([{ name: "edit", status: "completed", error: undefined }])
       expect(edited.read()).toBe("after\n")
-      // The lead's start block reads the list, and so does the edit, to know whether a task could be made.
+      // The edit asks CPP for the chat's place, to know whether a task could be made.
       expect(
-        server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/tasks`),
-      ).toHaveLength(2)
+        server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/chat`),
+      ).toHaveLength(1)
     }),
   )
 
@@ -521,11 +498,11 @@ describe("an edit outside a task", () => {
     }),
   )
 
-  it.live("runs inside a task, on a server without plans, and for a chat without the task tool", () =>
+  it.live("runs inside a task, on a server that serves no memory tools, and for a chat without the task tool", () =>
     Effect.gen(function* () {
       for (const input of [
         { inside: "task" },
-        { catalog: catalogOf(true, { prompt: false, plans: false }) },
+        { catalog: catalogOf(true, { prompt: false, tools: false }) },
         { child: true, agent: "untasked" },
       ] as const) {
         const h = yield* setup(input)
@@ -584,13 +561,9 @@ describe("an edit outside a task", () => {
 })
 
 describe("the check at the end of a turn", () => {
-  /** The line for what the chat may set done: its task, or a subtask it made. */
+  /** CPP's check for what the chat is on, as the small server words it. */
   const line = (item: { readonly id: string; readonly title: string }) =>
-    `Task check: [${item.id}] ${item.title} is still active. If it is done, set it done with the task tool now, even if you stop here: the next subtask only becomes current. If the ones still to do no longer fit, replace them with plan; if something is wrong, set it blocked; only while work on it remains, answer that it goes on.`
-  /** The line for a subtask another chat made, which that chat sets done. */
-  const review = (item: { readonly id: string; readonly title: string }) =>
-    `Task check: [${item.id}] ${item.title} is still active. Set it review with the task tool when the work is there (or blocked with what is wrong), or answer that it goes on.`
-  const again = " Then give your answer again: your lead reads only your last message."
+    `Task check (fake): [${item.id}] ${item.title}.`
 
   it.live("comes once after a turn that edited without a task call, as the last message, and the model goes on", () =>
     Effect.gen(function* () {
@@ -611,7 +584,7 @@ describe("the check at the end of a turn", () => {
       // The step after it got it at the end of the chat, after what came before as it was sent.
       const [, second, third] = h.requests()
       expect(h.requests()).toHaveLength(4)
-      expect(JSON.stringify(third?.messages.at(-1))).toContain("Task check:")
+      expect(JSON.stringify(third?.messages.at(-1))).toContain("Task check (fake):")
       expect(JSON.stringify(third?.messages.slice(0, second?.messages.length))).toBe(JSON.stringify(second?.messages))
       expect(written.read()).toBe("newer")
     }),
@@ -671,88 +644,52 @@ describe("the check at the end of a turn", () => {
     }),
   )
 
-  it.live(
-    "names the chat's subtask, or else the task's active one, and asks for review on a subtask another chat made",
-    () =>
-      Effect.gen(function* () {
-        const cases = [
-          // A subtask it made itself: it sets it done.
-          { input: { inside: "subtask", subtaskBy: "self" }, expected: line },
-          // The task's active subtask, made by another chat: that chat sets it done.
-          { input: { inside: "active subtask" }, expected: review },
-          // A child on the subtask its lead made, told to answer again.
-          {
-            input: { inside: "subtask", subtaskBy: "lead", child: true, agent: "explore" },
-            expected: (item: MemoryClient.Task) => review(item) + again,
-          },
-        ] as const
-        for (const { input, expected } of cases) {
-          const h = yield* setup(input)
-          // Its own subtask is active once it works on it.
-          if (input.inside === "subtask")
-            yield* memory.pipe(
-              Effect.flatMap((tasks) => tasks.change(h.project, h.subtask!.id, { state: "active", by })),
-              Effect.orDie,
-            )
-          yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-          yield* h.prompt("go on")
-          expect({
-            input,
-            checks: (yield* h.checks()).map((message) => message.type === "synthetic" && message.text),
-          }).toEqual({ input, checks: [expected(h.subtask!)] })
-        }
-
-        // A child inside the task itself, whose active subtask its lead made, gets none: the tool would refuse it that
-        // step's state (the overnight tests of 2026-11-15).
-        const handed = yield* setup({ inside: "active subtask", subtaskBy: "lead", child: true, agent: "explore" })
-        yield* handed.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-        yield* handed.prompt("go on")
-        expect(yield* handed.checks()).toEqual([])
-
-        // A child inside the task itself sets it done, and is told to answer again.
-        const child = yield* setup({ inside: "task", child: true, agent: "explore" })
-        yield* child.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-        yield* child.prompt("go on")
-        expect((yield* child.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
-          line(child.task!) + again,
-        ])
-      }),
+  it.live("names what CPP names: the chat's subtask once it is active, in CPP's words", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "subtask", subtaskBy: "self" })
+      yield* activate(server, h.project, h.subtask!.id)
+      yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+      yield* h.prompt("go on")
+      expect((yield* h.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
+        line(h.subtask!),
+      ])
+      expect(
+        server.calls().filter((call) => call.method === "GET" && call.path === `/pacer/v1/memory/${h.project}/chat`)[0]
+          ?.pacer,
+      ).toMatchObject({ "x-pacer-agent": "build", "x-pacer-chat": h.sessionID })
+    }),
   )
 
-  it.live("none while the task is not active, on a server without plans, or for a chat without the task tool", () =>
-    Effect.gen(function* () {
-      for (const input of [
-        // Its subtask, the one it is on, is still todo.
-        { inside: "subtask" },
-        { inside: "task", catalog: catalogOf(true, { prompt: false, plans: false }) },
-        { inside: "task", child: true, agent: "untasked" },
-      ] as const) {
-        const h = yield* setup(input)
-        yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
-        yield* h.prompt("go on")
-        expect({ input, checks: yield* h.checks() }).toEqual({ input, checks: [] })
-      }
-    }),
+  it.live(
+    "none while CPP names none, on a server that serves no memory tools, or for a chat without the task tool",
+    () =>
+      Effect.gen(function* () {
+        for (const input of [
+          // Its subtask, the one it is on, is still todo: CPP answers no check.
+          { inside: "subtask" },
+          { inside: "task", catalog: catalogOf(true, { prompt: false, tools: false }) },
+          { inside: "task", child: true, agent: "untasked" },
+        ] as const) {
+          const h = yield* setup(input)
+          yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
+          yield* h.prompt("go on")
+          expect({ input, checks: yield* h.checks() }).toEqual({ input, checks: [] })
+        }
+      }),
   )
 
   it.live("a read that fails gives none, and the chat goes idle as before", () =>
     Effect.gen(function* () {
       const h = yield* setup({ inside: "task" })
       server.control.answer = (request) =>
-        request.method === "GET" && request.path.includes("/tasks/")
+        request.method === "GET" && request.path.endsWith("/chat")
           ? Response.json({ error: { type: "internal", message: "boom" } }, { status: 500 })
-          : fetch(`${server.store.url}${request.path}`, {
-              method: request.method,
-              headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-              ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-            })
+          : server.pass(request)
       yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "ls" }), TestLLM.text("Ran.", "ran"))
       yield* h.prompt("go on")
       expect(yield* h.checks()).toEqual([])
       expect(h.requests()).toHaveLength(2)
-      expect(
-        server.calls().filter((call) => call.path === `/pacer/v1/memory/${h.project}/tasks/${h.task!.id}`),
-      ).toHaveLength(1)
+      expect(server.calls().filter((call) => call.path === `/pacer/v1/memory/${h.project}/chat`)).toHaveLength(1)
     }),
   )
 

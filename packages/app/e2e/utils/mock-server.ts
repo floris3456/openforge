@@ -872,6 +872,9 @@ function mockHandlers(
         websearchProviders: () => Effect.succeed({ location: location(config), data: [] }),
         // No scenario signs in to an OpenCode Console workspace, so none has usage limits.
         usageLimits: () => Effect.succeed({ location: location(config), data: null }),
+        // Each connection reads whether a release switch is under way; none is.
+        serviceStatus: () =>
+          Effect.succeed({ data: { state: "running", startedPaused: false, waiting: [], rested: [], active: [] } }),
         worktreeList: () =>
           Effect.sync(() => {
             if (config.worktrees) return resolve(config.worktrees)

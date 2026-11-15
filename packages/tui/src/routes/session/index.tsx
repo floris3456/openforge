@@ -44,6 +44,7 @@ import {
   canonicalToolName,
   executeCalls,
   executeCallSummary,
+  goalCallLabel,
   finiteNumber,
   primitiveInputSummary,
   toolDisplayContent,
@@ -2775,6 +2776,8 @@ function GenericTool(props: ToolProps) {
 }
 
 export function genericToolSummary(tool: string, input: Record<string, unknown>) {
+  const goal = goalCallLabel(tool, input)
+  if (goal) return goal
   const args = primitiveInputSummary(input).replace(/\s+/g, " ")
   return `${tool}${args ? ` ${args}` : ""}`
 }

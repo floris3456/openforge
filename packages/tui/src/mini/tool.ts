@@ -20,6 +20,7 @@ import { Locale } from "../util/locale"
 import {
   canonicalToolName,
   finiteNumber,
+  goalCallLabel,
   primitiveInputSummary,
   toolDisplayContent,
   toolDisplayMetadata,
@@ -301,6 +302,8 @@ function toolError(ctx: ToolFrame): string {
 }
 
 function fallbackStart(ctx: ToolFrame): string {
+  const goal = goalCallLabel(ctx.name, ctx.input)
+  if (goal) return `⚙ ${goal}`
   const extra = primitiveInputSummary(ctx.input)
   if (!extra) {
     return `⚙ ${ctx.name}`
@@ -339,6 +342,8 @@ function displayPath(p: ToolProps, input?: string, opts: { home?: boolean } = {}
 }
 
 function fallbackInline(ctx: ToolFrame): ToolInline {
+  const goal = goalCallLabel(ctx.name, ctx.input)
+  if (goal) return { icon: "⚙", title: goal }
   const title = Object.keys(ctx.input).length > 0 ? JSON.stringify(ctx.input) : "Unknown"
 
   return {

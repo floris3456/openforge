@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import {
   canonicalToolName,
+  executeCallSummary,
   finiteNumber,
+  goalCallLabel,
   primitiveInputSummary,
   toolDisplayMetadata,
   webSearchProviderLabel,
@@ -17,6 +19,22 @@ test("normalizes shared tool primitives", () => {
   expect([finiteNumber(-1.5), finiteNumber(Number.NaN), finiteNumber("1")]).toEqual([-1.5, undefined, undefined])
   expect(primitiveInputSummary({ command: "pwd", count: 2, nested: {} })).toBe("[command=pwd, count=2]")
   expect(primitiveInputSummary({ path: "src/a.ts", line: 2 }, ["path"])).toBe("[line=2]")
+})
+
+test("labels a task call that makes a goal, and no other call", () => {
+  expect(goalCallLabel("task", { kind: "goal", title: " Board\n UI " })).toBe("Goal: Board UI")
+  expect(goalCallLabel("task", { kind: "goal" })).toBe("Goal")
+  expect(goalCallLabel("task", { title: "Board UI", goal: "g1" })).toBeUndefined()
+  expect(goalCallLabel("task", { id: "t1", goal: "g1" })).toBeUndefined()
+  expect(goalCallLabel("remember", { kind: "goal", title: "x" })).toBeUndefined()
+  expect(goalCallLabel("task", undefined)).toBeUndefined()
+  // Called from a Code Mode program, it shows the same.
+  expect(executeCallSummary({ tool: "task", status: "completed", input: { kind: "goal", title: "Board" } })).toBe(
+    "Goal: Board",
+  )
+  expect(executeCallSummary({ tool: "task", status: "completed", input: { id: "t1", goal: "g1" } })).toBe(
+    "task [id=t1, goal=g1]",
+  )
 })
 
 describe("webSearchProviderLabel", () => {

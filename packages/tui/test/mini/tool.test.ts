@@ -91,6 +91,34 @@ describe("Mini tool presentation", () => {
     expect(tool.state.input).toEqual({ id: "kyk5w018z544", state: "active" })
   })
 
+  // The goals board: a task call that makes a goal shows as the goal; the other task calls keep their rows.
+  test("shows a task call that makes a goal as the goal", () => {
+    const task = (input: Record<string, string>) =>
+      canonicalToolPart(
+        "task",
+        { status: "completed", input, metadata: {}, content: [{ type: "text", text: "" }] },
+        "call-task",
+      )
+    const frame = (input: Record<string, string>) => ({
+      directory: "/work/project",
+      raw: "",
+      name: "task",
+      input,
+      meta: {},
+      state: {},
+      status: "running",
+      error: "",
+      output: "",
+      time: {},
+    })
+    const goal = { kind: "goal", title: "Task tool improvements" }
+    expect(toolInlineInfo(task(goal))).toEqual({ icon: "⚙", title: "Goal: Task tool improvements" })
+    expect(toolScroll("start", frame(goal))).toBe("⚙ Goal: Task tool improvements")
+    const move = { id: "t8n2k4m7q9xz", goal: "g4k2m8q1z7xa" }
+    expect(toolInlineInfo(task(move)).title).toBe(`task ${JSON.stringify(move)}`)
+    expect(toolScroll("start", frame(move))).toBe("⚙ task [id=t8n2k4m7q9xz, goal=g4k2m8q1z7xa]")
+  })
+
   test("renders the skill name from tool metadata with the input id as fallback", () => {
     const skill = (metadata: { name?: string }) =>
       canonicalToolPart(

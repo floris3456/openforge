@@ -6,6 +6,16 @@ export function canonicalToolName(name: string) {
   return name
 }
 
+/**
+ * The row of a call of CLIProxyPacer's `task` tool that makes a goal (`kind: "goal"`), as "Goal: <title>"; undefined
+ * for every other call, which shows as before.
+ */
+export function goalCallLabel(tool: string, input: Record<string, unknown> | undefined) {
+  if (tool !== "task" || input?.kind !== "goal") return
+  const title = typeof input.title === "string" ? input.title.replace(/\s+/g, " ").trim() : ""
+  return title ? `Goal: ${title}` : "Goal"
+}
+
 export function finiteNumber(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return
   return value
@@ -47,6 +57,8 @@ export function executeCalls(value: unknown): ExecuteCall[] {
 }
 
 export function executeCallSummary(call: ExecuteCall) {
+  const goal = goalCallLabel(call.tool, call.input)
+  if (goal) return goal
   const args = primitiveInputSummary(call.input ?? {}).replace(/\s+/g, " ")
   return `${call.tool}${args ? ` ${args}` : ""}`
 }

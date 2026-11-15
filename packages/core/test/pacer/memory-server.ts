@@ -901,8 +901,10 @@ function storeOf(
             (sub) => sub.state === "todo" || (sub.state === "active" && workerOf(sub) === by.chat),
           )
           const kept = subtasks.filter((sub) => !CLOSED.includes(sub.state) && !dropped.includes(sub))
-          const clash = kept.find((sub) => steps.some((step) => step.title === sub.title))
-          if (clash) refuse(`plan: subtask ${clash.id} keeps the title "${clash.title}" and stays open`)
+          // As CLIProxyPacer words it: the item's field, and the subtask that keeps its title.
+          const index = steps.findIndex((step) => kept.some((sub) => sub.title === step.title))
+          const clash = kept.find((sub) => sub.title === steps[index]?.title)
+          if (clash) refuse(`plan[${index}].title: subtask ${clash.id} has that title and stays open`)
           dropped.forEach((sub) => setState(sub, "dropped", note, caller))
           const made = steps.map((step) => insertTask(project, row.id, step, caller))
           const own = dropped.some((sub) => sub.state === "active")

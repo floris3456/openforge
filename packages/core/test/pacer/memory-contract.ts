@@ -3228,7 +3228,11 @@ export function memoryContract(target: Target) {
           await answered(tasks.set(made.subtasks[0]!.id, { state: "active", by: worker }))
           const plan = { plan: [{ title: "X" }], note: "why" }
           expectTaskInvalid(await tasks.plan(made.subtasks[1]!.id, plan), "subtask")
-          expectTaskInvalid(await tasks.plan(made.task.id, { plan: [{ title: "A" }], note: "why" }), "A")
+          expectTaskInvalid(
+            await tasks.plan(made.task.id, { plan: [{ title: "X" }, { title: "A" }], note: "why" }),
+            "plan[1].title",
+            made.subtasks[0]!.id,
+          )
           // The title of one it drops is free.
           expect((await tasks.plan(made.task.id, { plan: [{ title: "B" }], note: "again" })).status).toBe(200)
           for (const state of ["done", "dropped"]) {

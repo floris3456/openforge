@@ -36,7 +36,7 @@ import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionPromptStart } from "@opencode/core/session/prompt-start"
-import { PromptStartTable } from "@opencode/core/session/prompt-start.sql"
+import { PromptStartTable, PromptToolsTable } from "@opencode/core/session/prompt-start.sql"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
@@ -856,32 +856,6 @@ describe("SessionPromptStart: the start as sent, after every transform and hook"
 })
 
 describe("SessionPromptStart: a cold point records the start as it is then, after every hook", () => {
-  // A record made before the parts were: the release that ships them reads it as none.
-  it.live("after a release that records the parts, for a chat whose record holds none", () =>
-    Effect.gen(function* () {
-      const h = yield* setup()
-      const release = { line: "Line of release one." }
-      yield* h.hook((event) => {
-        event.system.push(SystemPart.make(release.line))
-      })
-      yield* h.prompt("one")
-      const { db } = yield* Database.Service
-      yield* db
-        .update(PromptStartTable)
-        .set({ parts: null, told_parts: null, system: BASE, told_system: BASE })
-        .where(eq(PromptStartTable.session_id, h.sessionID))
-        .run()
-        .pipe(Effect.orDie)
-      release.line = "Line of release two."
-      yield* h.prompt("two")
-      yield* h.prompt("three")
-      const [, two, three] = h.requests()
-      expect(two?.system.map((part) => part.text)).toContain("Line of release two.")
-      expect(startOf(three)).toBe(startOf(two))
-      expect(yield* h.reminders()).toEqual([])
-    }),
-  )
-
   const coldPoints: ReadonlyArray<{
     readonly name: string
     readonly model?: Model.Ref
@@ -1016,3 +990,86 @@ function refusal(body: unknown) {
     }),
   })
 }
+
+describe("SessionPromptStart: a record from before the system parts", () => {
+  // 0.0.50 recorded the agent's prompt and the definitions before the hooks, and sent
+  // `[recorded system[0], ...current system[1..]]` through the current hooks with the recorded definitions. The release
+  // that records the parts builds such a chat's first step the same way, so the upgrade misses nothing.
+  it.live(
+    "sends the start as 0.0.50 built it from the record, records it, and tells what differs in one reminder",
+    () =>
+      Effect.gen(function* () {
+        const appended = "Rules a hook appends for Claude."
+        const shape = (event: ContextEvent) => {
+          const first = event.system[0]
+          if (first) event.system[0] = { ...first, text: `${first.text}\n\n${appended}` }
+          event.system.push(SystemPart.make("A line a hook adds."))
+        }
+        // Another chat's request gives the definitions as the registry has them now.
+        const other = yield* setup()
+        yield* other.prompt("one")
+        const tools = (other.requests()[0]?.tools ?? []).map((tool) =>
+          tool.type === "tool" && tool.name === "echo"
+            ? { ...tool, description: "Echo text, as 0.0.50 recorded it" }
+            : tool,
+        )
+        const h = yield* setup()
+        yield* h.hook(shape)
+        const old = "You are the build agent, as 0.0.50 recorded it."
+        const { db } = yield* Database.Service
+        yield* db
+          .insert(PromptToolsTable)
+          .values({ hash: `legacy-${h.sessionID}`, value: JSON.stringify(tools) })
+          .run()
+          .pipe(Effect.orDie)
+        yield* db
+          .insert(PromptStartTable)
+          .values({
+            session_id: h.sessionID,
+            agent: "build",
+            provider_id: "fake",
+            model_id: "fake-model",
+            system: old,
+            tools: `legacy-${h.sessionID}`,
+            told_system: old,
+            told_tools: `legacy-${h.sessionID}`,
+            compaction: null,
+            time_created: Date.now(),
+          })
+          .run()
+          .pipe(Effect.orDie)
+        yield* h.prompt("one")
+        yield* h.prompt("two")
+        const [one, two] = h.requests()
+        // 0.0.50's path: the recorded prompt first, through the hooks; the parts after it as they are.
+        expect(one?.system.map((part) => part.text)).toEqual([
+          `${old}\n\n${appended}`,
+          ...(other
+            .requests()[0]
+            ?.system.slice(1)
+            .map((part) => part.text) ?? []),
+          "A line a hook adds.",
+        ])
+        expect(one?.tools.find((tool) => tool.type === "tool" && tool.name === "echo")).toMatchObject({
+          description: "Echo text, as 0.0.50 recorded it",
+        })
+        // Recorded as sent: the next step sends the same.
+        expect(startOf(two)).toBe(startOf(one))
+        const row = yield* db
+          .select()
+          .from(PromptStartTable)
+          .where(eq(PromptStartTable.session_id, h.sessionID))
+          .get()
+          .pipe(Effect.orDie)
+        expect(row?.parts).not.toBeNull()
+        const reminders = yield* h.reminders()
+        expect(reminders).toHaveLength(1)
+        expect(reminders[0]).toContain("The agent's prompt changed")
+        expect(reminders[0]).toContain("You are the build agent.")
+        expect(reminders[0]).toContain(
+          "The tool echo changed; its calls follow this from now on:\nDescription: Echo text\n",
+        )
+        expect(texts(one).at(-1)).toBe(`<system-reminder>\n${reminders[0]}\n</system-reminder>`)
+      }),
+  )
+})

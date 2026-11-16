@@ -66,6 +66,18 @@ export interface Input {
    * its catalog gets it at the next cold point, so its reminder doesn't call it gone.
    */
   readonly moved?: ReadonlySet<string>
+  /**
+   * Given for a record from before the system parts were recorded (`legacy`): `system` and `definitions` are then the
+   * start as 0.0.50 built it, which the step sends and records, and `now` the start as it is, which its reminder
+   * compares.
+   */
+  readonly now?: Pick<Start, "system" | "definitions">
+}
+
+/** A record from before the system parts were: the agent's prompt and the definitions before the hooks. */
+export interface Legacy {
+  readonly system: string | undefined
+  readonly definitions: ReadonlyArray<ToolDefinition>
 }
 
 /** What tells whether a chat's record holds for its next step. */
@@ -83,6 +95,13 @@ export interface Interface {
    * at a cold point or with nothing recorded. Code Mode's catalog follows them (`SessionContext`).
    */
   readonly recorded: (input: Chat) => Effect.Effect<ReadonlyArray<ToolDefinition> | undefined>
+  /**
+   * The chat's record when it is from before the system parts were recorded and still holds: its step builds the start
+   * from it as 0.0.50 did (the agent's prompt as the first part, the definitions the hooks reshape), so the bytes match
+   * what 0.0.50 sent, and `resolve` records that with `now`. Undefined otherwise, at no cost once the chat's record is
+   * known to hold parts.
+   */
+  readonly legacy: (input: Chat & Pick<Input, "kind">) => Effect.Effect<Legacy | undefined>
   /**
    * The provider refused the chat's prompt itself (`PacerAnswers.refused`): its record goes, and its next step records
    * the start as it is then. A refused prompt is in no cache, so nothing is lost.
@@ -115,6 +134,8 @@ export const layer = Layer.effect(
     const definitionsOf = (db: Db, hash: string | null) =>
       heldOrRead(db, tools, PromptToolsTable, decodeTools, hash ?? "")
     const partsOf = (db: Db, hash: string | null) => heldOrRead(db, parts, PromptSystemTable, decodeParts, hash ?? "")
+    // Chats whose record is known to be no `legacy` one: it holds parts, or will when it is first made.
+    const modern = new Set<SessionSchema.ID>()
 
     const enabled = Effect.fnUntraced(function* (providerID: string) {
       if (providerID === PACER) return (yield* catalogs.get())?.pacer?.freezePrompt !== false
@@ -215,6 +236,7 @@ export const layer = Layer.effect(
         compaction,
         time_created: yield* Clock.currentTimeMillis,
       }
+      modern.add(input.sessionID)
       yield* store(db, parts, PromptSystemTable, systemHash, systemValue, input.system)
       yield* store(db, tools, PromptToolsTable, toolsHash, toolsValue, input.definitions)
       yield* db
@@ -223,6 +245,7 @@ export const layer = Layer.effect(
         .onConflictDoUpdate({ target: PromptStartTable.session_id, set: values })
         .run()
         .pipe(Effect.orDie)
+      return { parts: systemHash, tools: toolsHash }
     })
 
     // Untraced: it runs on every request, and its span would cost more than its work on a warm step.
@@ -233,6 +256,14 @@ export const layer = Layer.effect(
       const row = yield* read(db, input.sessionID)
       // A chat that isn't stored has nothing to keep its record with.
       if (!row) return now
+      if (input.now !== undefined) {
+        // The step of a `legacy` record sends 0.0.50's start and records it; the reminder tells what differs now.
+        if (input.kind !== "primary") return now
+        const hashes = yield* record(db, input, row.latest)
+        const recorded = { ...row, ...hashes, toldParts: hashes.parts, toldTools: hashes.tools }
+        const told = yield* remind(db, { ...input, ...input.now }, recorded, now)
+        return told ? { ...now, reminder: told } : now
+      }
       // A record from before the system parts were recorded holds no start as sent: the chat's next step records one.
       const kept = row.tools === null || row.parts === null ? undefined : row
       if (!(yield* enabled(input.model.providerID))) {
@@ -262,10 +293,26 @@ export const layer = Layer.effect(
       return yield* definitionsOf(db, row.tools)
     })
 
+    const legacy = Effect.fnUntraced(function* (input: Chat & Pick<Input, "kind">) {
+      if (Option.isNone(database) || input.kind === "title" || modern.has(input.sessionID)) return undefined
+      const db = database.value.db
+      const row = yield* read(db, input.sessionID)
+      if (!row) return undefined
+      if (row.tools === null || row.parts !== null) {
+        modern.add(input.sessionID)
+        return undefined
+      }
+      if (!(yield* enabled(input.model.providerID))) return undefined
+      const holds = input.kind === "primary" ? yield* warm(input, row) : row.agent === input.agent
+      if (!holds) return undefined
+      const definitions = yield* definitionsOf(db, row.tools)
+      return definitions && ({ system: row.system ?? undefined, definitions } satisfies Legacy)
+    })
+
     const refused = (sessionID: SessionSchema.ID) =>
       Option.isNone(database) ? Effect.void : forget(database.value.db, sessionID)
 
-    return Service.of({ resolve, recorded, refused })
+    return Service.of({ resolve, recorded, legacy, refused })
   }),
 )
 
@@ -299,6 +346,8 @@ function statement(db: Db) {
       model: PromptStartTable.model_id,
       parts: PromptStartTable.parts,
       tools: PromptStartTable.tools,
+      // A `legacy` record's agent prompt.
+      system: PromptStartTable.system,
       toldParts: PromptStartTable.told_parts,
       toldTools: PromptStartTable.told_tools,
       compaction: PromptStartTable.compaction,

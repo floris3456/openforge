@@ -281,6 +281,32 @@ function sent(tool: ToolDefinition, name: string, hooked: Definitions[string]) {
   return made
 }
 
+/**
+ * One run of the request's hooks over `draft` and `definitions`: what they shaped, and each definition they kept, as
+ * sent under its key (`sent`) beside the tool it runs (`t`). Definitions are shared across steps and sessions, and
+ * hooks may edit schemas in place, so each hook gets a deep copy; hooks rename a tool by moving its definition to a
+ * new key, so after the hook the tool is found by the copy's identity first, then by key. Entries matching neither
+ * were invented by a hook and are dropped.
+ */
+const hooked = Effect.fnUntraced(function* <S extends SessionRequest & { tools?: Definitions }>(
+  shape: (draft: SessionRequest, tools: Definitions) => Effect.Effect<S>,
+  draft: SessionRequest,
+  definitions: ReadonlyArray<ToolDefinition>,
+) {
+  const given = new Map(
+    definitions.map(
+      (t) => [{ description: t.description, input: JSON.parse(JSON.stringify(t.inputSchema)) }, t] as const,
+    ),
+  )
+  const shaped = yield* shape(draft, Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])))
+  const byName = new Map(definitions.map((t) => [t.name, t]))
+  const reshaped = Object.entries(shaped.tools ?? {}).flatMap(([name, d]) => {
+    const t = given.get(d) ?? byName.get(name)
+    return t ? [{ t, sent: sent(t, name, d) }] : []
+  })
+  return { shaped, reshaped, sent: reshaped.map((entry) => entry.sent) }
+})
+
 /** Builds the model request for each session flow. Each entry runs its own plugin hook. */
 export interface Interface {
   readonly primary: (input: Input) => Effect.Effect<Prepared<SessionContext>>
@@ -355,59 +381,78 @@ export const layer = Layer.effect(
         )
       })
       const definitions = yield* now
-      // Definitions are shared across steps and sessions, and hooks may edit schemas in place, so each hook gets a deep
-      // copy. Remember which tool each copy came from: hooks rename a tool by moving its definition to a new key, so
-      // after the hook we find the tool by object identity.
-      const given = new Map(
-        definitions.map(
-          (t) => [{ description: t.description, input: JSON.parse(JSON.stringify(t.inputSchema)) }, t] as const,
-        ),
-      )
+      const chat = {
+        sessionID: session.id,
+        agent: input.agent,
+        model: model.ref,
+        ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
+      }
+      // A chat recorded before the system parts were builds this step's start as 0.0.50 did, from its record: the
+      // bytes 0.0.50 sent, so the upgrade costs no cache (`SessionPromptStart.legacy`).
+      const legacy = Option.isSome(starts) ? yield* starts.value.legacy({ ...chat, kind }) : undefined
+      // Hooks change the parts list in place; the start as it is now takes it as it came.
+      const parts = legacy === undefined ? input.system : [...input.system]
       // Hooks see the default output limit and may change or remove it. Titles and generate keep the provider default,
       // because their reasoning is hard to budget.
-      const shaped = yield* shape(
+      const options =
+        kind === "primary"
+          ? { maxTokens: outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM) }
+          : kind === "compaction"
+            ? { maxTokens: outputLimit(model.limit, input.inputTokens) }
+            : {}
+      const sending = yield* hooked(
+        shape,
         {
           sessionID: session.id,
           model: model.ref,
-          system: input.system,
+          system:
+            legacy !== undefined &&
+            input.start !== undefined &&
+            legacy.system !== undefined &&
+            legacy.system !== input.start
+              ? [SystemPart.make(legacy.system), ...parts.slice(1)]
+              : input.system,
           messages: input.messages,
-          options:
-            kind === "primary"
-              ? { maxTokens: outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM) }
-              : kind === "compaction"
-                ? { maxTokens: outputLimit(model.limit, input.inputTokens) }
-                : {},
+          options,
         },
-        Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
+        legacy?.definitions ?? definitions,
       )
-      // Match by identity first, then by key. Entries matching neither were invented by a hook and are dropped. Each
-      // goes to the provider under its key (`sent`) and runs as the tool it came from (`hooked`, by the key).
-      const byName = new Map(definitions.map((t) => [t.name, t]))
-      const reshaped = Object.entries(shaped.tools ?? {}).flatMap(([name, d]) => {
-        const t = given.get(d) ?? byName.get(name)
-        return t ? [{ t, sent: sent(t, name, d) }] : []
-      })
-      const current = reshaped.map((entry) => entry.sent)
+      const shaped = sending.shaped
+      // The start as it is now, which the reminder compares: its hooks see the messages as the step sends them, so
+      // what a hook adds to them it finds there and adds no second time.
+      const current =
+        legacy === undefined
+          ? undefined
+          : yield* hooked(
+              shape,
+              {
+                sessionID: session.id,
+                model: model.ref,
+                system: parts,
+                messages: [...shaped.messages],
+                options: { ...options },
+              },
+              definitions,
+            )
       // A warm chat sends its start as recorded at its latest cold point, every system part and tool definition as
       // they were sent then, whatever changed since (`SessionPromptStart`).
       const start = Option.isSome(starts)
         ? yield* starts.value.resolve({
             kind,
-            sessionID: session.id,
-            agent: input.agent,
-            model: model.ref,
-            ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
+            ...chat,
             system: shaped.system,
-            definitions: current,
+            definitions: sending.sent,
             prompt: input.start !== undefined,
             moved: PacerOffer.codemode(yield* pacerTools.known()),
+            ...(current ? { now: { system: current.shaped.system, definitions: current.sent } } : {}),
           })
-        : { system: shaped.system, definitions: current }
+        : { system: shaped.system, definitions: sending.sent }
+      const reshaped = current?.reshaped ?? sending.reshaped
       // Calls run the current tools; a recorded one no longer offered is kept, so its call answers that it is
       // unavailable, or runs from Code Mode when it moved there.
-      const hooked = new Map(reshaped.map((entry) => [entry.sent.name, entry.t] as const))
-      if (start.definitions !== current)
-        for (const t of start.definitions) if (!hooked.has(t.name)) hooked.set(t.name, t)
+      const runs = new Map(reshaped.map((entry) => [entry.sent.name, entry.t] as const))
+      if (start.definitions !== (current ?? sending).sent)
+        for (const t of start.definitions) if (!runs.has(t.name)) runs.set(t.name, t)
       // A reminder stored for this step goes after the history, where the next step's history holds it; before the
       // closing assistant message a step at its limit adds, which is not stored.
       const reminder = "reminder" in start ? start.reminder : undefined
@@ -559,7 +604,7 @@ export const layer = Layer.effect(
         // including declines a tool rethrew and its wrapper attached to a Tool.Error, as Promise
         // plugin tools do.
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
-          tools.execute({ ...call, definitions: hooked }).pipe(
+          tools.execute({ ...call, definitions: runs }).pipe(
             (execution) => (input.images ? bankImages(execution, session.id, input.images, call.call.name) : execution),
             Effect.catchCauseFilter(
               (cause) => {

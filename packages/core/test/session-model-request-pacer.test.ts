@@ -21,6 +21,7 @@ import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerOffer } from "@opencode/core/pacer/offer"
 import { PacerTools } from "@opencode/core/pacer/tools"
+import { PacerWhere } from "@opencode/core/pacer/where"
 import { PacerWarmth } from "@opencode/core/pacer/warmth"
 import { Permission } from "@opencode/core/permission"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
@@ -119,6 +120,8 @@ const setup = Effect.fnUntraced(function* (
     readonly catalog?: PacerModels.Catalog
     /** What an earlier start kept of the endpoint's tools: the web tools by default; `{}` for none. */
     readonly known?: Readonly<Record<string, PacerTools.Meta>>
+    /** Where chats work (`PacerWhere`); none by default. */
+    readonly where?: PacerWhere.Interface
   } = {},
 ) {
   const cpp = yield* fakeCpp
@@ -133,6 +136,7 @@ const setup = Effect.fnUntraced(function* (
     Effect.provideService(SessionModelTransport.Service, transport),
     Effect.provideService(PacerTools.Service, started.tools),
     Effect.provide(placedAt(options.remote)),
+    (effect) => (options.where ? Effect.provideService(effect, PacerWhere.Service, options.where) : effect),
   )
   const input = (tools: Tool.Snapshot, model: string | LanguageModel = "claude-haiku-5-5") => ({
     session: options.session ?? session,
@@ -913,5 +917,41 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
         expect(read(h.cpp)[0]).toMatchObject({ "x-pacer-project": identity })
       }
     }),
+  )
+})
+
+describe("SessionModelRequest saying where the chat works", () => {
+  const asked: string[] = []
+  const where = PacerWhere.Service.of({
+    folder: (directory) => Effect.sync(() => (asked.push(directory), "~/repos/openforge@adj-of")),
+    chat: () => Effect.die("unused"),
+  })
+
+  it.effect(
+    "on a turn, a title, a generation and a compaction to CPP, from the chat's folder; none to another provider",
+    () =>
+      Effect.gen(function* () {
+        asked.length = 0
+        const h = yield* setup(true, { where })
+        const input = h.input(snapshot(all))
+        const prepared = [
+          yield* h.requests.primary(input),
+          yield* h.requests.title(input),
+          yield* h.requests.generate(input),
+          yield* h.requests.compaction(input),
+        ]
+        expect(prepared.map((item) => item.request.http?.headers?.["X-Pacer-Where"])).toEqual([
+          "~/repos/openforge@adj-of",
+          "~/repos/openforge@adj-of",
+          "~/repos/openforge@adj-of",
+          "~/repos/openforge@adj-of",
+        ])
+        expect(asked).toEqual(["/project", "/project", "/project", "/project"])
+        for (const other of others) {
+          const plain = yield* h.requests.primary(h.input(snapshot(all), other.model))
+          expect({ model: other.label, pacer: pacerHeaders(plain) }).toEqual({ model: other.label, pacer: [] })
+        }
+        expect(asked).toHaveLength(4)
+      }),
   )
 })

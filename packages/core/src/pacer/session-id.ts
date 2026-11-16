@@ -14,6 +14,34 @@ const namespaceBytes = Buffer.from(namespace.replaceAll("-", ""), "hex")
  * session without a lookup, and nothing new is stored.
  */
 export function make(sessionID: SessionID) {
+  const known = uuids.get(sessionID)
+  if (known) {
+    sessions.delete(known)
+    sessions.set(known, sessionID)
+    return known
+  }
+  const made = uuid(sessionID)
+  uuids.set(sessionID, made)
+  sessions.set(made, sessionID)
+  if (sessions.size > KEPT) {
+    const oldest = sessions.keys().next().value!
+    uuids.delete(sessions.get(oldest)!)
+    sessions.delete(oldest)
+  }
+  return made
+}
+
+/** The chats this process named lately; past it the oldest goes. */
+export const KEPT = 1_000
+const uuids = new Map<SessionID, string>()
+const sessions = new Map<string, SessionID>()
+
+/** The session a UUID {@link make} gave lately names; none for one it has not, or no longer keeps. */
+export function session(uuid: string) {
+  return sessions.get(uuid)
+}
+
+function uuid(sessionID: SessionID) {
   // node:crypto rather than Bun.randomUUIDv5: core also runs on Node and workerd.
   const hash = createHash("sha1").update(namespaceBytes).update(sessionID, "utf8").digest()
   hash.writeUInt8((hash.readUInt8(6) & 0x0f) | 0x50, 6)

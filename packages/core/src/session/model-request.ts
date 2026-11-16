@@ -33,6 +33,8 @@ import { ImageBank } from "../image/bank.js"
 import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
 import { PacerHeaders } from "../pacer/headers.js"
+import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerWhere } from "../pacer/where.js"
 import { PacerOffer } from "../pacer/offer.js"
 import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
@@ -265,6 +267,7 @@ export const layer = Layer.effect(
     const pacerProject = yield* PacerProject.Service
     const database = yield* Effect.serviceOption(Database.Service)
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
+    const where = yield* Effect.serviceOption(PacerWhere.Service)
     // openforge: the tool's images arrive whole in its result and are fitted once, here (ImageBank).
     const bankImages = (
       execution: Effect.Effect<Tool.NormalizedResult, Tool.Error>,
@@ -289,6 +292,10 @@ export const layer = Layer.effect(
       const model = input.model
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
       const project = (yield* pacerProject.chat(session.projectID)).headers
+      const place =
+        String(model.ref.providerID) === PacerEndpoint.id && Option.isSome(where)
+          ? yield* where.value.folder(session.location.directory)
+          : undefined
       const tools = input.tools ?? {
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
@@ -405,6 +412,7 @@ export const layer = Layer.effect(
               parentID: session.parentID,
               auto: input.autoCompaction === true,
               project,
+              where: place,
             }),
           },
         },
@@ -557,5 +565,6 @@ export const node = makeLocationNode({
     PacerProject.node,
     Database.node,
     SessionPromptStart.node,
+    PacerWhere.node,
   ],
 })

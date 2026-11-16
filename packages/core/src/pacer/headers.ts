@@ -22,6 +22,8 @@ export interface Input {
   readonly auto: boolean
   /** The chat's project headers ({@link project}); none for a chat outside any project. */
   readonly project?: Readonly<Record<string, string>>
+  /** Where the chat works (`PacerWhere`). */
+  readonly where?: string
 }
 
 /**
@@ -50,13 +52,25 @@ export function chat(input: {
   readonly parentID?: SessionID
   readonly project?: Readonly<Record<string, string>>
   readonly agent?: string
+  readonly where?: string
 }) {
   return {
     "X-Pacer-Session": PacerSessionID.make(input.sessionID),
     ...(input.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(input.parentID) } : {}),
     ...input.project,
     ...(input.agent === undefined ? {} : { "X-Pacer-Agent": input.agent, "X-Pacer-Chat": input.sessionID }),
+    ...where(input.where),
   }
+}
+
+export const WHERE = "X-Pacer-Where"
+
+/**
+ * Where the chat works (`PacerWhere`): on every request for a chat. The model request passes it to {@link make};
+ * `PacerHttp` adds it to each request that names a chat by `X-Pacer-Session`.
+ */
+export function where(value: string | undefined): Readonly<Record<string, string>> {
+  return value === undefined || value === "" ? {} : { [WHERE]: value }
 }
 
 /** What CPP shows a project as: its name, and its normalised remote when it has one. */

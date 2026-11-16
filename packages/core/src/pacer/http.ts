@@ -5,6 +5,8 @@ import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, type H
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { PacerEndpoint } from "./endpoint.js"
+import { PacerHeaders } from "./headers.js"
+import { PacerWhere } from "./where.js"
 
 /** No CPP is set up: no base URL or no key. */
 export class NotSetUp extends Schema.TaggedError<NotSetUp>()("PacerHttp.NotSetUp", {}) {
@@ -162,6 +164,13 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
     const endpoints = yield* PacerEndpoint.Service
+    const where = yield* Effect.serviceOption(PacerWhere.Service)
+    /** The request's headers, with where its chat works when they name one. */
+    const headers = Effect.fnUntraced(function* (given: Readonly<Record<string, string>> | undefined) {
+      const uuid = given?.["X-Pacer-Session"]
+      if (!given || uuid === undefined || Option.isNone(where) || given[PacerHeaders.WHERE] !== undefined) return given
+      return { ...given, ...PacerHeaders.where(yield* where.value.chat(uuid)) }
+    })
 
     const send = Effect.fn("PacerHttp.send")(function* (
       request: (url: string) => HttpClientRequest.HttpClientRequest,
@@ -174,13 +183,11 @@ export const layer = Layer.effect(
       const url = target(endpoint, path)
       // A path that leaves the endpoint's origin would send the key elsewhere: a bug, not an answer.
       if (!url) return yield* Effect.die(new Error(`Not a path under CLIProxyPacer's root: ${path}`))
+      const given = yield* headers(options?.headers)
       const sent = yield* Clock.currentTimeMillis
       const response = yield* http
         .execute(
-          request(url).pipe(
-            HttpClientRequest.setHeaders(options?.headers ?? {}),
-            HttpClientRequest.bearerToken(endpoint.key),
-          ),
+          request(url).pipe(HttpClientRequest.setHeaders(given ?? {}), HttpClientRequest.bearerToken(endpoint.key)),
         )
         .pipe(
           // Never follow a redirect: the key would go with it to wherever it points.
@@ -262,7 +269,11 @@ export const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [PacerEndpoint.node, httpClient] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer,
+  deps: [PacerEndpoint.node, httpClient, PacerWhere.node],
+})
 
 /** The request URL for a path under the endpoint's root, when it stays on the endpoint's origin. */
 function target(endpoint: PacerEndpoint.Endpoint, path: string) {

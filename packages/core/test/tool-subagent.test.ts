@@ -1238,5 +1238,34 @@ describe("SubagentTool", () => {
         }),
       ),
     )
+
+    tasksIt.live("a child continued with a taskID moves into that task, active in its name, as a new child does", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const first = yield* h.make("The first job")
+          const second = yield* h.make("The next job")
+          h.meanwhile(undefined)
+          const started = yield* h.run({ agent: "reviewer", description: "job", prompt: "do it", taskID: first.id })
+          const id = outputSessionID(started.metadata)
+          const settled = yield* h.run(
+            { agent: "reviewer", description: "job", prompt: "now this", sessionID: id, taskID: second.id },
+            "call-task-subagent-2",
+          )
+          expect(outputSessionID(settled.metadata)).toBe(id)
+          expect((yield* h.sessions.get(id)).metadata).toEqual({ memory: { task: second.id } })
+          expect(
+            tasksServer
+              .calls()
+              .filter((call) => call.path.startsWith(`${h.base}/tasks/${second.id}/`))
+              .map((call) => call.path.slice(`${h.base}/tasks/${second.id}/`.length)),
+          ).toEqual(["assign", "start", "ended"])
+          expect(yield* h.read(second.id)).toMatchObject({
+            state: "active",
+            worker: { person: "floris", role: "reviewer", chat: id },
+          })
+        }),
+      ),
+    )
   })
 })

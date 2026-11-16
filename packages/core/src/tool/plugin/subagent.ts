@@ -160,9 +160,10 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              // A new child started on a task: its maker gets the task's state when it ends.
+              // A child started or continued on a task: it moves into the task as a new one does, and its maker gets
+              // the task's state when it ends.
               const ended =
-                input.taskID === undefined || input.sessionID !== undefined
+                input.taskID === undefined
                   ? undefined
                   : (output: string) =>
                       sessions.get(context.sessionID).pipe(

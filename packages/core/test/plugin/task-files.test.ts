@@ -32,6 +32,8 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { DateTime, Effect, Layer, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Git } from "@opencode/core/git"
 import { location } from "../fixture/location"
 import { testEffect } from "../lib/effect"
 import { permissionLayer } from "../lib/permission"
@@ -41,10 +43,38 @@ import { catalogOf, endpointAt } from "../memory/fixture"
 // The files report (workspace reference `docs/reference/task-system-later-api.md`, "Edited files and the clash
 // notice"): after each successful edit, write or patch of a chat whose latest step went through CLIProxyPacer, on a
 // server with memory `later`, while the chat is inside a task, openforge posts the call's paths and appends CPP's notice
-// to the tool's result; it waits at most 500 ms, and a timeout or failure adds nothing. The real file tools run in a
-// folder of the file's own, through the real tool registry and its hooks; CPP is a small server of the test's own.
+// to the tool's result; it waits at most 500 ms, and a timeout or failure adds nothing. A file in git is named by its
+// repository (the folder holding its common git directory) and its path inside it, whichever worktree it is in; one
+// outside git by its absolute path. The real file tools run in a folder of the file's own, through the real tool
+// registry and its hooks, with real git; CPP is a small server of the test's own.
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "task-files-")))
+/**
+ * A repository at `repos/openforge` with two more worktrees, as the workspace keeps them (one in a folder of another
+ * name, so that only the repository names a file); the rest of `root` is no git.
+ */
+const git = (cwd: string, ...args: string[]) => {
+  const done = Bun.spawnSync(["git", "-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd })
+  if (done.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${done.stderr.toString()}`)
+}
+const repository = path.join(root, "repos", "openforge")
+fs.mkdirSync(path.join(repository, "packages"), { recursive: true })
+fs.writeFileSync(path.join(repository, "packages", "x.ts"), "before\n")
+git(repository, "init", "-q", "-b", "main")
+git(repository, "add", ".")
+git(repository, "commit", "-q", "-m", "first")
+for (const name of ["a", "b"])
+  git(
+    repository,
+    "worktree",
+    "add",
+    "-q",
+    "-b",
+    name,
+    path.join(root, "worktrees", name, name === "a" ? "openforge" : "checkout"),
+  )
+/** How often the plugin asked git for a folder's repository. */
+let discovered = 0
 const PROJECT = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 
 type Received = { path: string; body: { paths: string[]; at: number }; session: string | null; agent: string | null }
@@ -123,11 +153,28 @@ const tools = makeLocationNode({
   layer: Layer.effectDiscard(
     Effect.gen(function* () {
       const hooks = yield* PluginHooks.Service
+      const real = yield* Git.Service
+      const counted = Git.Service.of({
+        ...real,
+        repo: {
+          ...real.repo,
+          discover: (input) => Effect.sync(() => discovered++).pipe(Effect.andThen(real.repo.discover(input))),
+        },
+      })
+      const files = yield* FSUtil.Service
       // As openforge registers them: their hooks are the registry's.
       const register = <R>(plugin: Parameters<typeof registerToolPlugin<R>>[0]) =>
         registerToolPlugin(
           plugin,
           {
+            location: new Location.Info({
+              directory: AbsolutePath.make(root),
+              project: {
+                id: Project.ID.global,
+                directory: AbsolutePath.make(root),
+                canonical: AbsolutePath.make(root),
+              },
+            }),
             session: {
               get: (input) => Effect.succeed(sessions.get(input.sessionID)!),
               hook: (name, callback, options) => hooks.register("session", name, callback, options),
@@ -141,13 +188,19 @@ const tools = makeLocationNode({
       yield* register({
         id: TaskFilesPlugin.Plugin.id,
         effect: (ctx) =>
-          TaskFilesPlugin.Plugin.effect(ctx).pipe(Effect.provide(Layer.mergeAll(catalogs, client, projects))),
+          TaskFilesPlugin.Plugin.effect(ctx).pipe(
+            Effect.provide(Layer.mergeAll(catalogs, client, projects)),
+            Effect.provideService(Git.Service, counted),
+            Effect.provideService(FSUtil.Service, files),
+          ),
       })
     }),
   ),
   deps: [
     Tool.node,
     PluginHooks.node,
+    Git.node,
+    FSUtil.node,
     FileAccess.node,
     FileMutation.node,
     Environment.node,
@@ -156,7 +209,7 @@ const tools = makeLocationNode({
     Permission.node,
   ],
 })
-const layer = AppNodeBuilder.build(LayerNode.group([Tool.node, PluginHooks.node, tools]), [
+const layer = AppNodeBuilder.build(LayerNode.group([Tool.node, PluginHooks.node, Git.node, FSUtil.node, tools]), [
   Location.node.replace(
     Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(root) }))),
   ),
@@ -167,6 +220,7 @@ const it = testEffect(layer)
 
 beforeEach(() => {
   received.length = 0
+  discovered = 0
   cpp.answer = "notice"
   Effect.runSync(SubscriptionRef.set(catalogRef, catalogOf(true, { goals: true, later: true })))
 })
@@ -196,12 +250,14 @@ const run = (sessionID: Session.ID, name: string, input: Record<string, unknown>
     })
   })
 
-/** A file of the test's own in the chat's folder, its name relative to it. */
-const file = (name: string, text?: string) => {
-  const relative = `${crypto.randomUUID().slice(0, 8)}-${name}`
+/** A file of the test's own in the chat's folder (or one below it), its name relative to the chat's folder. */
+const file = (name: string, text?: string, folder = "") => {
+  const relative = path.join(folder, `${crypto.randomUUID().slice(0, 8)}-${name}`)
   if (text !== undefined) fs.writeFileSync(path.join(root, relative), text)
   return relative
 }
+/** A file outside git as the report names it: its absolute path. */
+const outside = (relative: string) => path.join(root, relative)
 
 const texts = (result: { readonly content?: ReadonlyArray<Tool.Content> }) =>
   (result.content ?? []).flatMap((item) => (item.type === "text" ? [item.text] : []))
@@ -231,7 +287,11 @@ describe("the files report", () => {
       expect(texts(patch).at(-1)?.endsWith(`\n\n${cpp.notice}`)).toBe(true)
 
       expect(received.map((item) => item.path)).toEqual(Array(3).fill(`/pacer/v1/memory/${PROJECT}/files`) as string[])
-      expect(received.map((item) => item.body.paths)).toEqual([[edited], [written], [added, updated, removed]])
+      expect(received.map((item) => item.body.paths)).toEqual([
+        [outside(edited)],
+        [outside(written)],
+        [outside(added), outside(updated), outside(removed)],
+      ])
       expect(received.every((item) => typeof item.body.at === "number" && item.body.at > 0)).toBe(true)
       expect(received.every((item) => item.session === PacerSessionID.make(sessionID))).toBe(true)
       expect(received.every((item) => item.agent === "build")).toBe(true)
@@ -313,27 +373,109 @@ describe("the files report", () => {
   )
 })
 
+describe("the names of files", () => {
+  it.live("one file in two worktrees of a repository, and in its main checkout, is named alike", () =>
+    Effect.gen(function* () {
+      cpp.answer = "none"
+      const sessionID = chat("ses_files_worktrees", { task: "t4" })
+      yield* step(sessionID)
+      const inA = path.join("worktrees", "a", "openforge", "packages", "x.ts")
+      const inB = path.join("worktrees", "b", "checkout", "packages", "x.ts")
+      expect((yield* run(sessionID, EditTool.name, { path: inA, oldString: "before", newString: "a" })).status).toBe(
+        "completed",
+      )
+      yield* run(sessionID, WriteTool.name, { path: inB, content: "b\n" })
+      yield* run(sessionID, PatchTool.name, {
+        patchText: "*** Begin Patch\n*** Update File: repos/openforge/packages/x.ts\n@@\n-before\n+main\n*** End Patch",
+      })
+      // Absolute, as a lead in another folder writes it.
+      yield* run(sessionID, WriteTool.name, { path: path.join(root, inB), content: "c\n" })
+      expect(received.map((item) => item.body.paths)).toEqual(Array.from({ length: 4 }, () => ["openforge/packages/x.ts"]))
+    }),
+  )
+
+  it.live("a file outside git is named by its absolute path", () =>
+    Effect.gen(function* () {
+      cpp.answer = "none"
+      const sessionID = chat("ses_files_plain", { task: "t4" })
+      yield* step(sessionID)
+      fs.mkdirSync(path.join(root, "plain"), { recursive: true })
+      const written = file("plain.ts", undefined, "plain")
+      yield* run(sessionID, WriteTool.name, { path: written, content: "x\n" })
+      expect(received.map((item) => item.body.paths)).toEqual([[path.join(root, "plain", path.basename(written))]])
+    }),
+  )
+
+  it.live("git is asked once a folder: later edits in it cost no git call", () =>
+    Effect.gen(function* () {
+      cpp.answer = "none"
+      const sessionID = chat("ses_files_cache", { task: "t4" })
+      yield* step(sessionID)
+      const folder = path.join("worktrees", "a", "openforge", "packages", "cached")
+      fs.mkdirSync(path.join(root, folder), { recursive: true })
+      const first = file("one.ts", undefined, folder)
+      yield* run(sessionID, WriteTool.name, { path: first, content: "1\n" })
+      expect(discovered).toBe(1)
+      yield* run(sessionID, WriteTool.name, { path: file("two.ts", undefined, folder), content: "2\n" })
+      yield* run(sessionID, EditTool.name, { path: first, oldString: "1", newString: "3" })
+      expect(discovered).toBe(1)
+      // Another folder is asked once too.
+      fs.mkdirSync(path.join(root, folder, "deeper"), { recursive: true })
+      yield* run(sessionID, WriteTool.name, {
+        path: file("three.ts", undefined, path.join(folder, "deeper")),
+        content: "4\n",
+      })
+      expect(discovered).toBe(2)
+      expect(received.map((item) => item.body.paths[0]!.split("/").slice(0, 3).join("/"))).toEqual(
+        Array(4).fill("openforge/packages/cached") as string[],
+      )
+    }),
+  )
+})
+
 describe("paths", () => {
-  it.effect("each tool's output names its paths: deduplicated, at most 50, none too long", () =>
-    Effect.sync(() => {
-      expect(TaskFilesPlugin.paths("edit", { files: [{ file: "a.ts" }], replacements: 1 })).toEqual(["a.ts"])
-      expect(TaskFilesPlugin.paths("write", { resource: "b.ts" })).toEqual(["b.ts"])
-      expect(
-        TaskFilesPlugin.paths("patch", {
-          applied: [
-            { type: "add", resource: "c.ts" },
-            { type: "update", resource: "c.ts" },
-            { type: "delete", resource: "x".repeat(501) },
-          ],
-        }),
-      ).toEqual(["c.ts"])
-      expect(
-        TaskFilesPlugin.paths("patch", {
-          applied: Array.from({ length: 60 }, (_, index) => ({ type: "add", resource: `f${index}.ts` })),
-        }),
-      ).toHaveLength(50)
-      expect(TaskFilesPlugin.paths("read", { resource: "b.ts" })).toEqual([])
-      expect(TaskFilesPlugin.paths("write", undefined)).toEqual([])
+  it.effect(
+    "each tool's output names its files, absolute, each once; a name is a repository's or the absolute path",
+    () =>
+      Effect.sync(() => {
+        expect(TaskFilesPlugin.paths("edit", { files: [{ file: "a.ts" }], replacements: 1 }, "/w")).toEqual(["/w/a.ts"])
+        expect(TaskFilesPlugin.paths("edit", { files: [{ file: "/x/a.ts" }], replacements: 1 }, "/w")).toEqual([
+          "/x/a.ts",
+        ])
+        expect(TaskFilesPlugin.paths("write", { resource: "b.ts", target: "/w/b.ts" }, "/w")).toEqual(["/w/b.ts"])
+        expect(
+          TaskFilesPlugin.paths(
+            "patch",
+            {
+              applied: [
+                { type: "add", resource: "c.ts", target: "/w/c.ts" },
+                { type: "update", resource: "c.ts", target: "/w/c.ts" },
+              ],
+            },
+            "/w",
+          ),
+        ).toEqual(["/w/c.ts"])
+        expect(TaskFilesPlugin.paths("read", { target: "/w/b.ts" }, "/w")).toEqual([])
+        expect(TaskFilesPlugin.paths("write", undefined, "/w")).toEqual([])
+        expect(TaskFilesPlugin.repositoryName("/r/repos/openforge/.git")).toBe("openforge")
+        const repository = { name: "openforge", worktree: "/r/worktrees/a/openforge" }
+        expect(TaskFilesPlugin.named("/r/worktrees/a/openforge/src/x.ts", repository)).toBe("openforge/src/x.ts")
+        expect(TaskFilesPlugin.named("/elsewhere/x.ts", repository)).toBe("/elsewhere/x.ts")
+        expect(TaskFilesPlugin.named("/elsewhere/x.ts", undefined)).toBe("/elsewhere/x.ts")
+      }),
+  )
+
+  it.live("a report holds at most 50 names, none longer than 500 characters", () =>
+    Effect.gen(function* () {
+      cpp.answer = "none"
+      const sessionID = chat("ses_files_many", { task: "t4" })
+      yield* step(sessionID)
+      const many = Array.from(
+        { length: 60 },
+        (_, index) => `*** Add File: many-${index}-${crypto.randomUUID().slice(0, 6)}.ts\n+x`,
+      )
+      yield* run(sessionID, PatchTool.name, { patchText: `*** Begin Patch\n${many.join("\n")}\n*** End Patch` })
+      expect(received[0]!.body.paths).toHaveLength(50)
     }),
   )
 })

@@ -1136,6 +1136,24 @@ describe("SessionPromptStart: a cold point takes the instructions as they are th
     }).pipe(reset),
   )
 
+  it.live("after the provider refused the prompt for the instructions: a compaction sends AGENTS.md as it is", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ model: cpp })
+      const file = { text: "Marker: refuse-me-e8b3e6fc097c" }
+      sources.discovery = agentsFile(file)
+      yield* h.prompt("one")
+      file.text = "No marker."
+      yield* h.llm.push(promptRefused())
+      yield* h.prompt("two").pipe(Effect.ignore)
+      yield* h.compact
+      yield* h.prompt("three")
+      const [, , compaction, three] = h.requests()
+      expect(startOf(compaction)).not.toContain("refuse-me-e8b3e6fc097c")
+      expect(startOf(compaction)).toContain(inJson("Instructions from AGENTS.md:\nNo marker."))
+      expect(startOf(three)).not.toContain("refuse-me-e8b3e6fc097c")
+    }).pipe(reset),
+  )
+
   const points: ReadonlyArray<{
     readonly name: string
     readonly model?: Model.Ref
@@ -1196,13 +1214,16 @@ describe("SessionPromptStart: a cold point takes the instructions as they are th
           const three = h.requests().at(-1)
           expect(startOf(three)).not.toContain("refuse-me-ed6fee50ca28")
           expect(startOf(three)).toContain(inJson("Instructions from AGENTS.md:\nFolded in at the cold point."))
-          // What the system part holds is told by no update.
-          expect(notices(three).join("\n")).not.toContain("Folded in at the cold point.")
+          // The system part holds every change, so no update goes with it: not the new one, nor one told before,
+          // which would read as later than it.
+          expect(notices(three)).toEqual([])
           const record = yield* recorded(h.sessionID)
           expect(record).toContain(inJson("Instructions from AGENTS.md:\nFolded in at the cold point."))
           yield* h.prompt("four")
           const four = h.requests().at(-1)
           expect(startOf(four)).toBe(startOf(three))
+          // The history the cold step sent is the warm one's start too.
+          expect(JSON.stringify(four?.messages.slice(0, three?.messages.length))).toBe(JSON.stringify(three?.messages))
           expect(notices(four)).toEqual(notices(three))
           expect(yield* h.reminders()).toEqual([])
           file.text = "Changed after it."

@@ -169,6 +169,11 @@ const layer = Layer.effect(
                     yield* plugins.awaitActivation
                     const selected = yield* context.select(sessionID)
                     const model = yield* context.resolveModel(selected.session)
+                    // openforge: at a cold point the instructions as they are become the baseline, as the next step
+                    // would make them, so a compaction with no record to send, as after a refused prompt, sends them.
+                    // A new baseline renders no update after the marker.
+                    if (yield* context.cold(selected))
+                      yield* InstructionState.rebase(db, bus, selected.instructions, sessionID)
                     // Preview updates without admitting them after the already-delivered compaction marker.
                     const history = yield* SessionHistory.preview(db, sessionID, selected.instructions, model.ref)
                     return yield* compaction.compact({
@@ -264,7 +269,9 @@ const layer = Layer.effect(
       yield* plugins.awaitActivation
       const selected = yield* context.select(sessionID)
       // A blocked initial instruction baseline must leave admitted input pending.
-      yield* InstructionState.prepare(db, bus, selected.instructions, sessionID)
+      // openforge: at a cold point the instructions as they are become the baseline (`InstructionState.rebase`).
+      const cold = yield* context.cold(selected)
+      yield* (cold ? InstructionState.rebase : InstructionState.prepare)(db, bus, selected.instructions, sessionID)
       return selected
     })
 

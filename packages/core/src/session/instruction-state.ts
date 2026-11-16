@@ -86,6 +86,36 @@ export const prepare = Effect.fn("InstructionState.prepare")(function* (
   yield* commit(db, bus, instructions, yield* observe(db, instructions, sessionID))
 })
 
+/**
+ * openforge: `prepare` at a cold point, where the chat's start is recorded anew (`SessionPromptStart.cold`). The
+ * instructions as they are now become its baseline, as a completed compaction makes them, so this step's system prompt
+ * holds them and the steps after it send them unchanged. The new epoch supersedes the updates before it, which the
+ * history no longer sends (`SessionHistory`), and a change since the chat's last step renders none; nothing is
+ * published when the baseline holds them already.
+ */
+export const rebase = Effect.fn("InstructionState.rebase")(function* (
+  db: DatabaseService,
+  bus: Bus.Interface,
+  instructions: Instructions.List,
+  sessionID: SessionSchema.ID,
+) {
+  const observation = yield* observe(db, instructions, sessionID)
+  if (observation.initial) return yield* commit(db, bus, instructions, observation)
+  const baseline = (yield* find(db, sessionID))?.initial_values ?? {}
+  const keys = Object.keys(observation.current)
+  if (
+    Object.keys(observation.delta).length === 0 &&
+    keys.length === Object.keys(baseline).length &&
+    keys.every((key) => baseline[key] === observation.current[key])
+  )
+    return
+  yield* bus.publish(
+    SessionEvent.InstructionsUpdated,
+    { sessionID, delta: observation.delta, baseline: true },
+    { commit: () => insertBlobs(db, observation.blobs) },
+  )
+})
+
 export const apply = Effect.fn("InstructionState.apply")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
@@ -179,6 +209,14 @@ export const initial = Effect.fn("InstructionState.initial")(function* (
   if (!state) return yield* Effect.die(new Error(`Instruction state not found during assembly: ${sessionID}`))
   const blobs = yield* loadBlobs(db, Object.values(state.initial_values))
   return Instructions.renderInitial(instructions, dereference(state.initial_values, blobs))
+})
+
+/** openforge: the `seq` the chat's epoch starts at; the updates before it are in its baseline. */
+export const epochStart = Effect.fn("InstructionState.epochStart")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  return (yield* find(db, sessionID))?.epoch_start
 })
 
 /** The current instruction values, used to seed a fork's baseline. */

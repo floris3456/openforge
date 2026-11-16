@@ -822,6 +822,8 @@ const layer = Layer.effectDiscard(
       Effect.gen(function* () {
         yield* run(db, event)
         yield* InstructionState.apply(db, event.data.sessionID, event.durable.seq, event.data.delta)
+        // openforge: a cold point's update starts a new epoch, as a completed compaction does (`InstructionState.rebase`).
+        if (event.data.baseline) yield* InstructionState.advanceEpoch(db, event.data.sessionID, event.durable.seq)
       }),
     )
     yield* bus.project(SessionEvent.Synthetic, (event) => run(db, event))

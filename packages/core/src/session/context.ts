@@ -61,6 +61,11 @@ export interface Interface {
   readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
   /** Resolves the model and active history for that selection. */
   readonly load: (selection: Selection) => Effect.Effect<Loaded, SessionRunnerModel.Error>
+  /**
+   * openforge: whether the selection's step is at a cold point, where its start is recorded anew
+   * (`SessionPromptStart.cold`), so that its instructions take their current values (`InstructionState.rebase`).
+   */
+  readonly cold: (selection: Selection) => Effect.Effect<boolean>
   readonly resolveModel: (
     session: SessionSchema.Info,
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
@@ -207,8 +212,24 @@ const layer = Layer.effect(
       }
     })
 
+    // openforge: a selection's model, resolved once for its step's `cold` and `load`.
+    const resolvedFor = new WeakMap<Selection, SessionRunnerModel.Resolved>()
+
+    const cold = Effect.fn("SessionContext.cold")(function* (selection: Selection) {
+      if (Option.isNone(starts)) return false
+      const resolved = yield* resolveModel(selection.session).pipe(Effect.option)
+      if (Option.isNone(resolved)) return false
+      resolvedFor.set(selection, resolved.value)
+      return yield* starts.value.cold({
+        sessionID: selection.session.id,
+        agent: selection.agent.id,
+        model: resolved.value.ref,
+        ...(resolved.value.cache?.ttl === undefined ? {} : { ttl: resolved.value.cache.ttl }),
+      })
+    })
+
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
-      const model = yield* resolveModel(selection.session)
+      const model = resolvedFor.get(selection) ?? (yield* resolveModel(selection.session))
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,
@@ -226,7 +247,7 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ select, load, resolveModel, images, selectTitle, request })
+    return Service.of({ select, load, cold, resolveModel, images, selectTitle, request })
   }),
 )
 

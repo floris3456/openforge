@@ -1832,6 +1832,9 @@ describe("SessionRunnerLLM", () => {
       const checkpoint = (yield* s.messages).find((message) => message.type === "compaction")
       if (!checkpoint) throw new Error("Expected checkpoint")
 
+      // openforge: the step after it is a cold point, which takes the instructions as they are (workspace spec
+      // `docs/specs/frozen-prefix.md`); the changes after that step are narrated.
+      yield* s.runPrompt("At checkpoint")
       s.systemBaseline = "Newest instructions"
       const after = yield* s.runPrompt("After checkpoint")
       const continued = s.requests.at(-1)
@@ -2203,11 +2206,12 @@ describe("SessionRunnerLLM", () => {
     })
     yield* s.runPrompt("Second")
 
+    // openforge: an agent switch is a cold point, whose step takes the instructions as they are.
     expect(s.requests.map((request) => request.system.map((part) => part.text))).toEqual([
       [defaultSystem, fakeIdentity, "Build skills\n\nInitial context"],
-      [defaultSystem, fakeIdentity, "Build skills\n\nInitial context"],
+      [defaultSystem, fakeIdentity, "Reviewer skills\n\nInitial context"],
     ])
-    expect(systemTexts(s.requests[1])).toContainEqual(expect.stringContaining("Reviewer skills"))
+    expect(systemTexts(s.requests[1])).not.toContainEqual(expect.stringContaining("Reviewer skills"))
   })
 
   scenario("keeps the sampled agent when selection changes during observation", function* (s) {
@@ -2355,7 +2359,9 @@ describe("SessionRunnerLLM", () => {
     expect(yield* entries.list(sessionID)).toEqual([])
   })
 
-  scenario("keeps initial instructions and chronological updates after a model switch", function* (s) {
+  // openforge: a model switch is a cold point, whose step takes the instructions as they are (workspace spec
+  // `docs/specs/frozen-prefix.md`); the updates before it stay in the transcript and are no longer sent.
+  scenario("takes current instructions at a model switch, superseding earlier updates", function* (s) {
     yield* s.runPrompt("First")
     s.systemBaseline = "Changed context"
     yield* s.runPrompt("Second")
@@ -2369,21 +2375,20 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests.map((request) => request.system.map((part) => part.text))).toEqual([
       [defaultSystem, fakeIdentity, "Initial context"],
       [defaultSystem, fakeIdentity, "Initial context"],
-      [defaultSystem, replacementIdentity, "Initial context"],
+      [defaultSystem, replacementIdentity, "Replacement context"],
     ])
     expect(messageRoles(s.requests[1])).toEqual(["user", "system", "user"])
-    expect(s.requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
-    expect((yield* s.context).map((message) => message.type)).toEqual([
-      "user",
-      "system",
-      "user",
-      "model-switched",
-      "system",
-      "user",
-    ])
+    expect(s.requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(0)
+    expect((yield* s.messages).filter((message) => message.type === "system")).toHaveLength(1)
+    expect((yield* s.context).map((message) => message.type)).toEqual(["user", "user", "model-switched", "user"])
     yield* replaySessionProjection(sessionID)
-    expect(yield* s.messages).toHaveLength(6)
+    expect(yield* s.messages).toHaveLength(5)
+    // The new baseline is durable: replayed, the state holds it.
+    expect(
+      yield* s.db.select().from(InstructionStateTable).where(eq(InstructionStateTable.session_id, sessionID)).get(),
+    ).toMatchObject({ initial_values: { "test/context": Instructions.hash("Replacement context") } })
     yield* s.runPrompt("Fourth")
+    expect(s.requests[3]?.system).toEqual(s.requests[2]?.system)
   })
 
   scenario("records a same-model effort switch as a cache-preserving effort update", function* (s) {
@@ -2446,19 +2451,24 @@ describe("SessionRunnerLLM", () => {
     yield* s.resume
     expect(systemTexts(s.requests[1])).toEqual([])
     expect((yield* s.context).some((message) => message.type === "system")).toBe(false)
+    // openforge: the step after it is a cold point, which takes the instructions as they are (workspace spec
+    // `docs/specs/frozen-prefix.md`); the changes after that step are narrated.
+    yield* s.runPrompt("After compaction")
     s.systemBaseline = "Replacement context"
     yield* s.runPrompt("Second")
 
     expect(s.requests.map((request) => request.system.map((part) => part.text))).toEqual([
       [defaultSystem, fakeIdentity, "Initial context"],
       [defaultSystem, fakeIdentity, "Initial context"],
-      [defaultSystem, fakeIdentity, "Initial context"],
+      [defaultSystem, fakeIdentity, "Changed before compaction"],
+      [defaultSystem, fakeIdentity, "Changed before compaction"],
     ])
-    expect(messageRoles(s.requests[2])).toEqual(["user", "system", "user"])
-    expect(s.requests[2]?.messages.at(1)?.content).toEqual([Expected.text("Replacement context")])
+    expect(systemTexts(s.requests[2])).toEqual([])
+    expect(messageRoles(s.requests[3])).toEqual(["user", "user", "system", "user"])
+    expect(s.requests[3]?.messages.at(2)?.content).toEqual([Expected.text("Replacement context")])
     yield* replaySessionProjection(sessionID)
     const latest = yield* s.runPrompt("Third")
-    expect(systemTexts(s.requests[3])).toEqual(["Replacement context"])
+    expect(systemTexts(s.requests[4])).toEqual(["Replacement context"])
     const fork = yield* s.session.fork({ sessionID, before: latest.id })
     expect(
       (yield* s.session.context(fork.id)).flatMap((message) => (message.type === "system" ? [message.text] : [])),
@@ -4317,12 +4327,13 @@ describe("SessionRunnerLLM", () => {
     expect(resolutions).toBe(2)
     expect(s.requests).toHaveLength(3)
     expect(s.requests[2]?.model).toBe(replacementModel)
+    // openforge: the step after a compaction is a cold point, whose step takes the instructions as they are.
     expect(s.requests[2]?.system.map((part) => part.text)).toEqual([
       defaultSystem,
       replacementIdentity,
-      "Initial context",
+      "Changed during compaction",
     ])
-    expect(systemTexts(s.requests[2])).toContain("Changed during compaction")
+    expect(systemTexts(s.requests[2])).not.toContain("Changed during compaction")
     expect(userTexts(s.requests[2])[0]).toContain("<summary>\n## Objective\n- Overflow summary\n</summary>")
     expect(userTexts(s.requests[2]).join("\n")).not.toContain("Queued during compaction")
     expect(userTexts(s.requests[2]).join("\n")).not.toContain("Steered during compaction")
@@ -4707,11 +4718,13 @@ describe("SessionRunnerLLM", () => {
     yield* Fiber.join(run)
 
     expect(s.requests.map((request) => request.model)).toEqual([model, replacementModel])
+    // openforge: a model switch is a cold point, whose step takes the instructions as they are (workspace spec
+    // `docs/specs/frozen-prefix.md`).
     expect(s.requests.map((request) => request.system.map((part) => part.text))).toEqual([
       [defaultSystem, fakeIdentity, "Initial context"],
-      [defaultSystem, replacementIdentity, "Initial context"],
+      [defaultSystem, replacementIdentity, "Replacement context"],
     ])
-    expect(systemTexts(s.requests[1])).toContain("Replacement context")
+    expect(systemTexts(s.requests[1])).not.toContain("Replacement context")
   })
 
   scenario("consumes the full provider stream before recording its boundary and settling local tools", function* (s) {

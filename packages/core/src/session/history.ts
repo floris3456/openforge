@@ -216,10 +216,14 @@ const messageEntries = Effect.fnUntraced(function* (
   // epoch: the baseline supersedes the chronological updates before it. Forks seed their baseline
   // at sequence 0 but retain parent sequences, so the copied checkpoint still retires them.
   const native = entries.findLast((entry) => isNativeCompaction(entry.message))
+  // openforge: so does the baseline of every epoch, a cold point's (`InstructionState.rebase`) among them: the updates
+  // before its start are in it.
+  const epoch = (yield* InstructionState.epochStart(db, sessionID)) ?? 0
   // Skipped native checkpoints are not textual summaries. Their original transcript remains available.
   return entries.filter(
     (entry) =>
-      !(entry.message.type === "system" && native && entry.seq < native.seq) && replayable(entry.message, boundary),
+      !(entry.message.type === "system" && ((native && entry.seq < native.seq) || entry.seq < epoch)) &&
+      replayable(entry.message, boundary),
   )
 })
 

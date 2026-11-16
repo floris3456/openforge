@@ -96,6 +96,12 @@ export interface Interface {
    */
   readonly recorded: (input: Chat) => Effect.Effect<ReadonlyArray<ToolDefinition> | undefined>
   /**
+   * Whether the chat's next step is at a cold point, where its start is recorded anew: nothing recorded, or a record
+   * that no longer holds. False with the switch off, where nothing is kept. Its instructions take their current values
+   * there (`InstructionState.rebase`), before the step builds its system parts.
+   */
+  readonly cold: (input: Chat) => Effect.Effect<boolean>
+  /**
    * The chat's record when it is from before the system parts were recorded and still holds: its step builds the start
    * from it as 0.0.50 did (the agent's prompt as the first part, the definitions the hooks reshape), so the bytes match
    * what 0.0.50 sent, and `resolve` records that with `now`. Undefined otherwise, at no cost once the chat's record is
@@ -144,7 +150,7 @@ export const layer = Layer.effect(
     })
 
     /** Whether the chat's cache went cold since its last request, as far as it can be known. */
-    const cold = Effect.fnUntraced(function* (input: Chat, row: Row) {
+    const cooled = Effect.fnUntraced(function* (input: Chat, row: Row) {
       const now = yield* Clock.currentTimeMillis
       const last = Math.max(row.recorded ?? 0, row.stepped ?? 0)
       if (input.model.providerID !== PACER) return now - last >= ttl(input.ttl)
@@ -159,7 +165,7 @@ export const layer = Layer.effect(
       if (row.agent !== input.agent || row.provider !== input.model.providerID || row.model !== input.model.id)
         return false
       if (row.compaction !== row.latest) return false
-      return !(yield* cold(input, row))
+      return !(yield* cooled(input, row))
     })
 
     /** The recorded start, its lists decoded once per process; undefined when they can't be read. */
@@ -293,6 +299,13 @@ export const layer = Layer.effect(
       return yield* definitionsOf(db, row.tools)
     })
 
+    const cold = Effect.fnUntraced(function* (input: Chat) {
+      if (Option.isNone(database)) return false
+      const row = yield* read(database.value.db, input.sessionID)
+      if (!row || !(yield* enabled(input.model.providerID))) return false
+      return row.tools === null || !(yield* warm(input, row))
+    })
+
     const legacy = Effect.fnUntraced(function* (input: Chat & Pick<Input, "kind">) {
       if (Option.isNone(database) || input.kind === "title" || modern.has(input.sessionID)) return undefined
       const db = database.value.db
@@ -312,7 +325,7 @@ export const layer = Layer.effect(
     const refused = (sessionID: SessionSchema.ID) =>
       Option.isNone(database) ? Effect.void : forget(database.value.db, sessionID)
 
-    return Service.of({ resolve, recorded, legacy, refused })
+    return Service.of({ resolve, recorded, cold, legacy, refused })
   }),
 )
 

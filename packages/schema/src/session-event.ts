@@ -274,9 +274,14 @@ export const InstructionsUpdated = Event.durable({
     delta: Instruction.Delta,
     /**
      * The rendered chronological update shown to the model, frozen at emit time.
-     * Absent for the initial baseline observation and for deltas that render empty.
+     * Absent for the initial baseline observation, for deltas that render empty and for a new baseline.
      */
     text: Schema.String.pipe(optional),
+    /**
+     * openforge: set at a cold point, where the chat's start is recorded anew. The instructions as they are then
+     * become the chat's baseline, as a completed compaction makes them.
+     */
+    baseline: Schema.Boolean.pipe(optional),
   },
 })
 export type InstructionsUpdated = typeof InstructionsUpdated.Type

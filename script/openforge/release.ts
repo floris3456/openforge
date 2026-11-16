@@ -28,7 +28,7 @@ const usage = `Usage: bun script/openforge/release.ts --version <x.y.z> [--out <
        bun script/openforge/release.ts --version <x.y.z> [--out <dir>] --publish [--notes-file <file>] [--dry-run]
 
 Without --publish, builds ${targets.join(" and ")} with packages/cli/script/build.ts (channel latest) and
-writes the release assets to <dir>, by default ~/OpenForge/releases/<x.y.z>.
+writes the release assets to <dir>, by default ~/QuettaForge/releases/<x.y.z>.
 
 --publish   uploads the assets already in <dir> as release v<x.y.z> of ${Product.repository}, marked Latest
 --dry-run   checks the assets and prints the gh command --publish would run, without running it`
@@ -55,7 +55,7 @@ if (values.help || version === undefined || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?
   if (!values.help) console.error(usage)
   process.exit(values.help ? 0 : 1)
 }
-const out = path.resolve(values.out ?? path.join(os.homedir(), "OpenForge", "releases", version))
+const out = path.resolve(values.out ?? path.join(os.homedir(), "QuettaForge", "releases", version))
 
 if (values.publish || values["dry-run"]) await publish(version)
 else await build(version)

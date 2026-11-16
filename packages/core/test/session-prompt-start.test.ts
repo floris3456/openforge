@@ -36,7 +36,7 @@ import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionPromptStart } from "@opencode/core/session/prompt-start"
-import { PromptStartTable, PromptToolsTable } from "@opencode/core/session/prompt-start.sql"
+import { PromptStartTable, PromptSystemTable, PromptToolsTable } from "@opencode/core/session/prompt-start.sql"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
@@ -1072,4 +1072,146 @@ describe("SessionPromptStart: a record from before the system parts", () => {
         expect(texts(one).at(-1)).toBe(`<system-reminder>\n${reminders[0]}\n</system-reminder>`)
       }),
   )
+})
+
+// 2026-11-16 (`run/evidence/cold-points/live-refused/`): the instructions part (Code Mode's catalog, skills, AGENTS.md
+// and the other instruction files, the date, the environment) is rendered from the chat's instruction baseline, which
+// only a completed compaction moved. Every other cold point recorded the old instructions again, so a chat the provider
+// refused for a text in them was refused at every step.
+describe("SessionPromptStart: a cold point takes the instructions as they are then", () => {
+  /** An AGENTS.md as instruction discovery gives it, its text as the test sets it. */
+  const agentsFile = (file: { text: string }) =>
+    Instructions.make({
+      key: Instructions.Key.make("project/agents.md"),
+      codec: Schema.toCodecJson(Schema.String),
+      read: Effect.sync(() => file.text),
+      render: {
+        initial: (text) => `Instructions from AGENTS.md:\n${text}`,
+        changed: (_previous, text) => `Instructions from AGENTS.md are now:\n${text}`,
+      },
+    })
+  const promptRefused = () =>
+    Stream.fail(
+      refusal({
+        error: { code: "prompt_refused", message: "The provider refused this prompt.", type: "invalid_request_error" },
+      }),
+    )
+  /** The system parts of the chat's record, as stored. */
+  const recorded = Effect.fnUntraced(function* (sessionID: Session.ID) {
+    const { db } = yield* Database.Service
+    const row = yield* db
+      .select({ value: PromptSystemTable.value })
+      .from(PromptStartTable)
+      .innerJoin(PromptSystemTable, eq(PromptSystemTable.hash, PromptStartTable.parts))
+      .where(eq(PromptStartTable.session_id, sessionID))
+      .get()
+      .pipe(Effect.orDie)
+    return row?.value ?? ""
+  })
+  /** The instruction updates a request carries after the history ("The instructions changed"). */
+  const notices = (request: LLMRequest | undefined) =>
+    (request?.messages ?? []).flatMap((message) =>
+      message.role === "system" ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])) : [],
+    )
+  const reset = Effect.ensuring(Effect.sync(() => (sources.discovery = Instructions.empty)))
+
+  it.live("after the provider refused the prompt for the instructions: the next step sends AGENTS.md as it is", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ model: cpp })
+      const file = { text: "Marker: refuse-me-e8b3e6fc097c" }
+      sources.discovery = agentsFile(file)
+      yield* h.prompt("one")
+      file.text = "No marker."
+      yield* h.llm.push(promptRefused())
+      yield* h.prompt("two").pipe(Effect.ignore)
+      yield* h.prompt("three")
+      const [one, two, three] = h.requests()
+      expect(startOf(one)).toContain("refuse-me-e8b3e6fc097c")
+      // The refused step sent the recorded start; the step after it is a cold point.
+      expect(startOf(two)).toBe(startOf(one))
+      expect(startOf(three)).not.toContain("refuse-me-e8b3e6fc097c")
+      expect(startOf(three)).toContain(inJson("Instructions from AGENTS.md:\nNo marker."))
+      expect(yield* recorded(h.sessionID)).toContain(inJson("Instructions from AGENTS.md:\nNo marker."))
+      expect(yield* recorded(h.sessionID)).not.toContain("refuse-me-e8b3e6fc097c")
+    }).pipe(reset),
+  )
+
+  const points: ReadonlyArray<{
+    readonly name: string
+    readonly model?: Model.Ref
+    /** Whether the test moves the clock (`it.effect`) rather than running on the real one. */
+    readonly clock?: boolean
+    readonly cool: (h: Effect.Success<ReturnType<typeof setup>>) => Effect.Effect<void, unknown>
+  }> = [
+    {
+      name: "the provider refused the prompt",
+      model: cpp,
+      cool: (h) => h.llm.push(promptRefused()).pipe(Effect.andThen(h.prompt("refused").pipe(Effect.ignore))),
+    },
+    {
+      name: "a model switch",
+      cool: (h) =>
+        h.session
+          .switchModel({
+            sessionID: h.sessionID,
+            model: Model.Ref.make({ providerID: Provider.ID.make("fake"), id: Model.ID.make("other-model") }),
+          })
+          .pipe(Effect.asVoid),
+    },
+    {
+      name: "an agent switch",
+      cool: (h) => h.session.switchAgent({ sessionID: h.sessionID, agent: Agent.ID.make("plan") }).pipe(Effect.asVoid),
+    },
+    {
+      name: "the provider's cache time",
+      clock: true,
+      cool: () => TestClock.adjust("5 minutes"),
+    },
+    {
+      name: "CLIProxyPacer reporting the chat cold",
+      model: cpp,
+      cool: (h) => warmth.set({ sessionID: h.sessionID, warm: false, asOf: Date.now() + 1 }),
+    },
+    { name: "a compaction", cool: (h) => h.compact },
+  ]
+  for (const point of points)
+    (point.clock ? it.effect : it.live)(
+      `after ${point.name}: the instructions as they are, recorded, sent unchanged after it; a later change is told`,
+      () =>
+        Effect.gen(function* () {
+          const h = yield* setup(point.model ? { model: point.model } : {})
+          const file = { text: "Marker: refuse-me-ed6fee50ca28" }
+          sources.discovery = agentsFile(file)
+          yield* h.prompt("one")
+          file.text = "Told while warm."
+          // An answer to compact.
+          yield* h.llm.push(TestLLM.text("Two.", "two"))
+          yield* h.prompt("two")
+          const [one, two] = h.requests()
+          expect(startOf(two)).toBe(startOf(one))
+          expect(notices(two)).toContain("Instructions from AGENTS.md are now:\nTold while warm.")
+          yield* point.cool(h)
+          file.text = "Folded in at the cold point."
+          yield* h.prompt("three")
+          const three = h.requests().at(-1)
+          expect(startOf(three)).not.toContain("refuse-me-ed6fee50ca28")
+          expect(startOf(three)).toContain(inJson("Instructions from AGENTS.md:\nFolded in at the cold point."))
+          // What the system part holds is told by no update.
+          expect(notices(three).join("\n")).not.toContain("Folded in at the cold point.")
+          const record = yield* recorded(h.sessionID)
+          expect(record).toContain(inJson("Instructions from AGENTS.md:\nFolded in at the cold point."))
+          yield* h.prompt("four")
+          const four = h.requests().at(-1)
+          expect(startOf(four)).toBe(startOf(three))
+          expect(notices(four)).toEqual(notices(three))
+          expect(yield* h.reminders()).toEqual([])
+          file.text = "Changed after it."
+          yield* h.prompt("five")
+          const five = h.requests().at(-1)
+          expect(startOf(five)).toBe(startOf(three))
+          expect(notices(five)).toEqual([...notices(three), "Instructions from AGENTS.md are now:\nChanged after it."])
+          expect(yield* recorded(h.sessionID)).toBe(record)
+          expect(yield* h.reminders()).toEqual([])
+        }).pipe(reset),
+    )
 })

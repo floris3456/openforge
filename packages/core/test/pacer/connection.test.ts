@@ -2322,7 +2322,7 @@ describe("PacerConnection chats", () => {
           input: { id: 3, zoom: { x: 0, y: 0, width: 800, height: 600 } },
         }
         const fetched = { tool: "fetch", status: "error", input: { url: "https://example.com", method: "GET" } }
-        const running = { tool: "opencode.models", status: "running" }
+        const running = { tool: "openforge.models", status: "running" }
 
         // While the first goes out, two more end: each is told, in the order they ended.
         h.cpp.holds.add(`${viewPath(id)}/events`)

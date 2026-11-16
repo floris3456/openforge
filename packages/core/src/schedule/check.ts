@@ -29,14 +29,14 @@ const CODE_LIMITS: CodeMode.ExecutionLimits = {
 }
 
 const FORBIDDEN_CODE_TOOLS = new Set([
-  "opencode.schedule_create",
-  "opencode.schedule_pause",
-  "opencode.schedule_resume",
-  "opencode.schedule_delete",
-  "opencode.session_move",
-  "opencode.session_rename",
-  "opencode.worktree_create",
-  "opencode.worktree_remove",
+  "openforge.schedule_create",
+  "openforge.schedule_pause",
+  "openforge.schedule_resume",
+  "openforge.schedule_delete",
+  "openforge.session_move",
+  "openforge.session_rename",
+  "openforge.worktree_create",
+  "openforge.worktree_remove",
 ])
 
 const decodeCodeObjectResult = Schema.decodeUnknownResult(

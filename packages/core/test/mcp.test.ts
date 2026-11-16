@@ -1525,7 +1525,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
         })
 
       // The SDK walks every page, so one call returns the full catalog.
-      const listed = yield* run('return await tools.opencode.list_mcp_resources({ server: "resources" })')
+      const listed = yield* run('return await tools.openforge.list_mcp_resources({ server: "resources" })')
       expect(JSON.parse(listed.output.output)).toEqual({
         resources: [
           { server: "resources", name: "Guide", uri: "docs://guide" },
@@ -1540,9 +1540,9 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
 
       // Omitting the server lists every server, so the model can find which one owns a URI.
       assertion = yield* Deferred.make<Permission.AssertInput>()
-      const everywhere = yield* run("return await tools.opencode.list_mcp_resources({})")
+      const everywhere = yield* run("return await tools.openforge.list_mcp_resources({})")
       expect(yield* Deferred.await(assertion)).toMatchObject({
-        action: "opencode_list_mcp_resources",
+        action: "openforge_list_mcp_resources",
         resources: ["resources"],
         save: ["resources"],
       })
@@ -1559,7 +1559,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
 
       // A server may declare resources without implementing template listing.
       server.state.templatesUnsupported = true
-      const untemplated = yield* run('return await tools.opencode.list_mcp_resources({ server: "resources" })')
+      const untemplated = yield* run('return await tools.openforge.list_mcp_resources({ server: "resources" })')
       expect(JSON.parse(untemplated.output.output)).toEqual({
         resources: [
           { server: "resources", name: "Guide", uri: "docs://guide" },
@@ -1571,7 +1571,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
 
       assertion = yield* Deferred.make<Permission.AssertInput>()
       const read = yield* run(
-        'const resource = await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://readme" }); return resource.contents.filter(part => part.type === "text").map(part => part.text).join("\\n")',
+        'const resource = await tools.openforge.read_mcp_resource({ server: "resources", uri: "docs://readme" }); return resource.contents.filter(part => part.type === "text").map(part => part.text).join("\\n")',
       )
       expect(read.content).toEqual([
         { type: "text", text: "hello" },
@@ -1579,14 +1579,14 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
       ])
       expect(read.metadata?.toolCalls).toMatchObject([
         {
-          tool: "opencode.read_mcp_resource",
+          tool: "openforge.read_mcp_resource",
           status: "completed",
           input: { server: "resources", uri: "docs://readme" },
         },
       ])
       expect(server.state.resourceReads).toEqual(["docs://readme"])
       expect(yield* Deferred.await(assertion)).toEqual({
-        action: "opencode_read_mcp_resource",
+        action: "openforge_read_mcp_resource",
         resources: ["resources:docs://readme"],
         save: ["resources:*"],
         metadata: { server: "resources", uri: "docs://readme" },
@@ -1597,7 +1597,7 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
 
       server.state.contents = [{ uri: "docs://readme", text: "line\n".repeat(20_000), mimeType: "text/plain" }]
       const large = yield* run(
-        'const resource = await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://readme" }); return resource.contents[0].text',
+        'const resource = await tools.openforge.read_mcp_resource({ server: "resources", uri: "docs://readme" }); return resource.contents[0].text',
       )
       const bounded = yield* ToolOutput.Service.use((output) => output.truncate(large)).pipe(
         Effect.provide(AppNodeBuilder.build(ToolOutput.node)),
@@ -1612,28 +1612,28 @@ it.live("discovers and reads MCP resources through Code Mode", () =>
       // An empty contents array means the resource exists without content, not that it is missing.
       server.state.contents = []
       const empty = yield* run(
-        'return await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://empty" })',
+        'return await tools.openforge.read_mcp_resource({ server: "resources", uri: "docs://empty" })',
       )
       expect(empty.metadata?.error).toBeUndefined()
       expect(JSON.parse(empty.output.output)).toEqual({ server: "resources", uri: "docs://empty", contents: [] })
       server.state.missing = ["docs://gone"]
       const gone = yield* run(
-        'return await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://gone" })',
+        'return await tools.openforge.read_mcp_resource({ server: "resources", uri: "docs://gone" })',
       )
       expect(gone.metadata?.error).toBe(true)
       expect(gone.output.output).toContain("Resource not found")
       const missing = yield* run(
-        'return await tools.opencode.read_mcp_resource({ server: "missing", uri: "docs://readme" })',
+        'return await tools.openforge.read_mcp_resource({ server: "missing", uri: "docs://readme" })',
       )
       expect(missing.metadata?.error).toBe(true)
       expect(missing.output.output).toContain("MCP server not found: missing")
 
       const reads = server.state.resourceReads.length
       decision = Effect.fail(
-        new Permission.BlockedError({ rules: [], permission: "opencode_read_mcp_resource", resources: ["*"] }),
+        new Permission.BlockedError({ rules: [], permission: "openforge_read_mcp_resource", resources: ["*"] }),
       )
       const denied = yield* run(
-        'return await tools.opencode.read_mcp_resource({ server: "resources", uri: "docs://denied" })',
+        'return await tools.openforge.read_mcp_resource({ server: "resources", uri: "docs://denied" })',
       )
       expect(denied.metadata?.error).toBe(true)
       expect(server.state.resourceReads).toHaveLength(reads)

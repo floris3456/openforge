@@ -20,7 +20,7 @@ const sessionID = Session.ID.make("ses_schedule_tool_test")
 const otherSessionID = Session.ID.make("ses_schedule_tool_other")
 const now = DateTime.makeUnsafe("2026-10-27T13:00:00Z")
 const names = ["schedule_create", "schedule_list", "schedule_pause", "schedule_resume", "schedule_delete"].map(
-  (name) => `opencode.${name}`,
+  (name) => `openforge.${name}`,
 )
 
 const it = testEffect(
@@ -109,7 +109,7 @@ const call = (registry: Tool.Interface, name: string, input: unknown, session = 
       type: "tool-call",
       id: `call-${name}`,
       name: "execute",
-      input: { code: `return await tools.opencode.${name}(${JSON.stringify(input)})` },
+      input: { code: `return await tools.openforge.${name}(${JSON.stringify(input)})` },
     },
   })
 const run = (registry: Tool.Interface, name: string, input: unknown, session = sessionID) =>
@@ -124,7 +124,7 @@ const direct = (registry: Tool.Interface, name: string, input: unknown) =>
       tools.execute({
         sessionID,
         ...toolIdentity,
-        call: { type: "tool-call", id: `call-direct-${name}`, name: `opencode_${name}`, input },
+        call: { type: "tool-call", id: `call-direct-${name}`, name: `openforge_${name}`, input },
       }),
     ),
     Effect.map((result) => result.content?.map((part) => (part.type === "text" ? part.text : "")).join("")),

@@ -73,7 +73,7 @@ export const Plugin = {
           description: promptSnapshot.text,
           input: CreateToolInput,
           output: Artifact.Info,
-          options: { namespace: "opencode", codemode: true },
+          options: { namespace: "openforge", codemode: true },
           execute: (input, context) =>
             artifacts
               .create({
@@ -97,7 +97,7 @@ export const Plugin = {
           description: "Read an artifact's metadata and file contents so you can inspect or update it.",
           input: ReadToolInput,
           output: Artifact.Content,
-          options: { namespace: "opencode", codemode: true },
+          options: { namespace: "openforge", codemode: true },
           execute: (input) =>
             artifacts.get(input.id).pipe(
               Effect.map((content) => ({
@@ -113,7 +113,7 @@ export const Plugin = {
           description: "Replace an existing artifact's files at the same ID and URL.",
           input: UpdateToolInput,
           output: Artifact.Info,
-          options: { namespace: "opencode", codemode: true },
+          options: { namespace: "openforge", codemode: true },
           execute: (input, context) =>
             artifacts
               .update(input.id, {
@@ -136,7 +136,7 @@ export const Plugin = {
           description: "Delete an artifact and remove its stored copy.",
           input: DeleteToolInput,
           output: DeleteToolOutput,
-          options: { namespace: "opencode", codemode: true },
+          options: { namespace: "openforge", codemode: true },
           execute: (input) =>
             artifacts.remove(input.id).pipe(
               Effect.map(() => ({

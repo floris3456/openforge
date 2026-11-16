@@ -22,6 +22,7 @@ import sessionInboxMigration from "@opencode/core/database/migration/20260812181
 import sessionViewedStateMigration from "@opencode/core/database/migration/20260819222447_session_viewed_state"
 import azureCliCredentialMigration from "@opencode/core/database/migration/20261007190000_azure_cli_external_credential"
 import dropSessionPendingMigration from "@opencode/core/database/migration/20261025154125_drop_session_pending"
+import openforgeNamespaceMigration from "@opencode/core/database/migration/20261116120000_openforge_namespace"
 import { Global } from "@opencode/util/global"
 
 const run = <A, E>(
@@ -228,6 +229,38 @@ describe("DatabaseMigration", () => {
         yield* DatabaseMigration.applyOnly(db, [dropSessionPendingMigration])
 
         expect(yield* db.all(sql`SELECT name FROM sqlite_master WHERE name LIKE 'session_pending%'`)).toEqual([])
+      }),
+    )
+  })
+
+  test("moves stored schedule checks from the opencode Code Mode namespace to openforge", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`CREATE TABLE schedule (id text PRIMARY KEY, \`check\` text)`)
+        const old = {
+          mode: "until",
+          condition: { type: "code", code: "return (await tools.opencode.models({})).total > 0" },
+        }
+        const shell = { mode: "if", condition: { type: "shell", run: "echo opencode" } }
+        yield* db.run(sql`
+          INSERT INTO schedule (id, \`check\`) VALUES
+            ('old', ${JSON.stringify(old)}), ('shell', ${JSON.stringify(shell)}), ('none', NULL)
+        `)
+
+        yield* DatabaseMigration.applyOnly(db, [openforgeNamespaceMigration])
+
+        expect(yield* db.all(sql`SELECT id, \`check\` FROM schedule ORDER BY id`)).toEqual([
+          { id: "none", check: null },
+          {
+            id: "old",
+            check: JSON.stringify({
+              mode: "until",
+              condition: { type: "code", code: "return (await tools.openforge.models({})).total > 0" },
+            }),
+          },
+          { id: "shell", check: JSON.stringify(shell) },
+        ])
       }),
     )
   })

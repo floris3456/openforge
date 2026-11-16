@@ -8,7 +8,7 @@ import { Session } from "@opencode/schema/session"
 import { Context, DateTime, Effect, Fiber, Layer, SubscriptionRef } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
-import { Message } from "@opencode/ai/effect"
+import { Message, SystemPart } from "@opencode/ai/effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
@@ -500,6 +500,37 @@ describe("SessionModelRequest with CPP's web tools, for a chat whose start is re
       yield* h.store(other.id)
       const fresh = yield* h.requests.primary({ ...h.input(snapshot(all)), session: other })
       expect(names(fresh)).toEqual(["read", "webfetch", "websearch"])
+    }),
+  )
+  // 2026-11-16: 0.0.50 changed the line tool/plugin/opencode.ts's context hook pushes after the agent's prompt
+  // (`tools.opencode.session_move` became `tools.openforge.session_move`). Every warm chat's first step on 0.0.50 sent
+  // the new line and missed CPP's cache (partial, prefix-changed, messages[0]) with its record kept: only the first
+  // system part is frozen (model-request.ts, `system`), the hooks' parts are the running release's.
+  it.effect("keeps a warm chat's system parts byte for byte when a context hook's part changes", () =>
+    Effect.gen(function* () {
+      const h = yield* recorded()
+      const hooks = yield* PluginHooks.Service
+      const release = { line: "call `tools.opencode.session_move`" }
+      yield* hooks.register("session", "context", (event) =>
+        Effect.sync(() => {
+          event.system.push(SystemPart.make(release.line))
+        }),
+      )
+      const step = (messages: ReadonlyArray<Message>) =>
+        h.requests.primary({
+          ...h.input(snapshot(all)),
+          system: [SystemPart.make("The agent's prompt.")],
+          start: "The agent's prompt.",
+          messages: [...messages],
+        })
+      const first = yield* step([Message.user("hello")])
+      expect(first.request.system.map((part) => part.text)).toEqual([
+        "The agent's prompt.",
+        "call `tools.opencode.session_move`",
+      ])
+      release.line = "call `tools.openforge.session_move`"
+      const second = yield* step([Message.user("hello"), Message.assistant("hi"), Message.user("go on")])
+      expect(JSON.stringify(second.request.system)).toBe(JSON.stringify(first.request.system))
     }),
   )
   // Web tools in Code Mode (workspace spec `docs/specs/web-tools-code-mode.md`): a chat warm at the upgrade, recorded

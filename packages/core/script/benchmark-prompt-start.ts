@@ -1,11 +1,12 @@
 // What `SessionPromptStart.resolve` costs a warm step with nothing changed, over the default tool registry as the
 // service builds it for a location (its plugins activated, Code Mode's `execute` included), in a database of its own.
-// Each round takes a fresh snapshot as a step does; only `resolve` is timed. Fails over the budget.
+// Each round takes a fresh snapshot and builds its system parts anew as a step does; only `resolve` is timed. Fails over the budget.
 //   bun run script/benchmark-prompt-start.ts [--rounds 5000] [--budget-us 15]
 import { mkdtemp, rm } from "fs/promises"
 import os from "os"
 import path from "path"
 import { Context, Effect, Layer, Logger } from "effect"
+import { SystemPart } from "@opencode/ai/effect"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Agent } from "../src/agent"
@@ -24,6 +25,7 @@ import { AbsolutePath } from "../src/schema"
 import { SessionSchema } from "../src/session/schema"
 import { SessionPromptStart } from "../src/session/prompt-start"
 import { SessionTable } from "../src/session/sql"
+import { SessionSystemPrompt } from "../src/session/system-prompt"
 import { Tool } from "../src/tool"
 
 const args = process.argv.slice(2)
@@ -91,6 +93,16 @@ const program = Effect.gen(function* () {
     )
     const agents = yield* Agent.Service
     const agent = yield* agents.get(Agent.ID.make("build"))
+    const first = yield* registry.snapshot()
+    const prompt = agent?.system ?? SessionSystemPrompt.make(first.definitions.map((tool) => tool.name))
+    const instructions = "# Instructions\n" + "Keep to the project's conventions.\n".repeat(200)
+    // The system parts as a step sends them after its hooks, each built anew as the hooks build theirs.
+    const system = () => [
+      SystemPart.make([prompt, "Follow the style of the code around you.\n".repeat(100)].join("\n\n")),
+      SystemPart.make(["# Your Model", "- Name: Bench", "- Provider ID: bench", "- Model ID: bench-model"].join("\n")),
+      { ...SystemPart.make([instructions].join("")), metadata: { experimental: { instructions: [] } } },
+      SystemPart.make(["When you create a worktree,", "call `tools.openforge.session_move`."].join(" ")),
+    ]
     const input = (definitions: Tool.Snapshot["definitions"]) => ({
       kind: "primary" as const,
       sessionID,
@@ -98,10 +110,10 @@ const program = Effect.gen(function* () {
       // A cache time long enough that the chat stays warm through the run.
       model: { providerID: "bench", id: "bench-model" },
       ttl: "1d",
-      system: agent?.system,
-      definitions: Effect.succeed(definitions),
+      system: system(),
+      definitions,
+      prompt: true,
     })
-    const first = yield* registry.snapshot()
     const bytes = JSON.stringify(first.definitions).length
     const again = yield* registry.snapshot()
     const shared = again.definitions.every((definition, index) => definition === first.definitions[index])
@@ -109,8 +121,9 @@ const program = Effect.gen(function* () {
     yield* starts.resolve(input(first.definitions))
     const round = Effect.gen(function* () {
       const snapshot = yield* registry.snapshot()
+      const given = input(snapshot.definitions)
       const begun = performance.now()
-      const start = yield* starts.resolve(input(snapshot.definitions))
+      const start = yield* starts.resolve(given)
       const spent = performance.now() - begun
       if ("reminder" in start && start.reminder) return yield* Effect.die(new Error("a reminder on an unchanged step"))
       return spent

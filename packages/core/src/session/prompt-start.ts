@@ -1,10 +1,10 @@
 export * as SessionPromptStart from "./prompt-start.js"
 
 import { createHash } from "node:crypto"
-import { ToolDefinition } from "@opencode/ai/effect"
+import { SystemPart, ToolDefinition } from "@opencode/ai/effect"
 import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import type { Agent } from "@opencode/schema/agent"
-import { createPatch } from "diff"
+import { createPatch, diffArrays } from "diff"
 import { eq, sql } from "drizzle-orm"
 import { Clock, Context, Effect, Layer, Option, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -18,27 +18,28 @@ import { PacerWarmth } from "../pacer/warmth.js"
 import { SessionEvent } from "./event.js"
 import { SessionMessage } from "./message.js"
 import type { SessionSchema } from "./schema.js"
-import { PromptStartTable, PromptToolsTable } from "./prompt-start.sql.js"
+import { PromptStartTable, PromptSystemTable, PromptToolsTable } from "./prompt-start.sql.js"
 import { SessionMessageTable, SessionTable } from "./sql.js"
 
 // A warm chat's prompt never changes (the workspace's spec `docs/specs/frozen-prefix.md`). What a request sends before
-// the chat's messages (the agent's prompt and the tool definitions) is recorded at the chat's cold points and sent
-// byte for byte until the next one: its first step, the first step after a completed compaction, after its cache went
-// cold, and after a switch of its model or agent. Whatever changed meanwhile waits for the next, and the chat is told
+// the chat's messages (every system part and the tool definitions, as finally given to the provider after every
+// transform and hook) is recorded at the chat's cold points and sent byte for byte until the next one: its first
+// step, the first step after a completed compaction, after its cache went cold, after a switch of its model or agent,
+// and after the provider refused the prompt itself. Whatever changed meanwhile waits for the next, and the chat is told
 // of it at its next step by a reminder: a stored message after its history, as a changed instruction file or a new
-// date arrives, so the cache is read up to it. CPP's tools a chat is offered, its memory tools among
-// them (`PacerOffer`), are decided with the rest. Off (CPP's `pacer.freeze_prompt` for a chat on it, else openforge's
+// date arrives, so the cache is read up to it. CPP's tools a chat is offered, its memory tools among them
+// (`PacerOffer`), are decided with the rest. Off (CPP's `pacer.freeze_prompt` for a chat on it, else openforge's
 // `freeze_prompt`), each request takes what is current, as before, and the record goes: turned on again, the start of
 // that moment is recorded.
 
 /** A provider's prompt cache lasts this long after a request unless its route says otherwise. */
 export const CACHE_TTL = 5 * 60_000
-/** Definition lists held decoded, by hash; past it the one used longest ago goes. */
+/** Definition and system part lists held decoded, by hash, each kind; past it the one used longest ago goes. */
 export const HELD = 256
 
 export interface Start {
-  /** The agent's prompt, the request's first system part; undefined when the request carries none. */
-  readonly system: string | undefined
+  /** The system parts the request sends. */
+  readonly system: ReadonlyArray<SystemPart>
   readonly definitions: ReadonlyArray<ToolDefinition>
   /** The reminder stored for this step, which its request carries after the history. */
   readonly reminder?: { readonly id: SessionMessage.ID; readonly text: string }
@@ -51,9 +52,15 @@ export interface Input {
   readonly model: { readonly providerID: string; readonly id: string }
   /** The route's cache time (`5m`, `1h`), when it sets one. */
   readonly ttl?: string
-  /** The start as it is now: the agent's prompt, and the definitions, which are worked out only when needed. */
-  readonly system: string | undefined
-  readonly definitions: Effect.Effect<ReadonlyArray<ToolDefinition>>
+  /**
+   * The start as it is now, as the request would send it: every system part and the tool definitions after all
+   * transforms and hooks, each definition under the name it is sent by. A list unchanged since the step before should
+   * hold the same definition objects, which an unchanged step compares by identity.
+   */
+  readonly system: ReadonlyArray<SystemPart>
+  readonly definitions: ReadonlyArray<ToolDefinition>
+  /** Whether the first system part is the agent's prompt, which the reminder calls so. */
+  readonly prompt?: boolean
   /**
    * Tools that leave the direct list for Code Mode: a warm chat that has one as a direct tool keeps calling it so, and
    * its catalog gets it at the next cold point, so its reminder doesn't call it gone.
@@ -76,6 +83,11 @@ export interface Interface {
    * at a cold point or with nothing recorded. Code Mode's catalog follows them (`SessionContext`).
    */
   readonly recorded: (input: Chat) => Effect.Effect<ReadonlyArray<ToolDefinition> | undefined>
+  /**
+   * The provider refused the chat's prompt itself (`PacerAnswers.refused`): its record goes, and its next step records
+   * the start as it is then. A refused prompt is in no cache, so nothing is lost.
+   */
+  readonly refused: (sessionID: SessionSchema.ID) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPromptStart") {}
@@ -84,10 +96,10 @@ type Db = Database.Interface["db"]
 type Row = NonNullable<Effect.Success<ReturnType<typeof read>>>
 
 const PACER: string = PacerEndpoint.id
-const Definitions = Schema.Array(ToolDefinition)
-// Stored as JSON; decoded back into `ToolDefinition`s, whose JSON is the same.
-const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Definitions))
-type Held = Map<string, ReadonlyArray<ToolDefinition>>
+// Stored as JSON; decoded back into `ToolDefinition`s and `SystemPart`s, whose JSON is the same.
+const decodeTools = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(ToolDefinition)))
+const decodeParts = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(SystemPart)))
+type Held<A> = Map<string, ReadonlyArray<A>>
 
 export const layer = Layer.effect(
   Service,
@@ -97,8 +109,12 @@ export const layer = Layer.effect(
     const catalogs = yield* PacerModels.Service
     const warmth = yield* PacerWarmth.Service
     const bus = yield* Bus.Service
-    // Definition lists decoded this run, by hash: a warm step decodes none.
-    const held: Held = new Map()
+    // Lists decoded this run, by hash: a warm step decodes none.
+    const tools: Held<ToolDefinition> = new Map()
+    const parts: Held<SystemPart> = new Map()
+    const definitionsOf = (db: Db, hash: string | null) =>
+      heldOrRead(db, tools, PromptToolsTable, decodeTools, hash ?? "")
+    const partsOf = (db: Db, hash: string | null) => heldOrRead(db, parts, PromptSystemTable, decodeParts, hash ?? "")
 
     const enabled = Effect.fnUntraced(function* (providerID: string) {
       if (providerID === PACER) return (yield* catalogs.get())?.pacer?.freezePrompt !== false
@@ -125,32 +141,42 @@ export const layer = Layer.effect(
       return !(yield* cold(input, row))
     })
 
+    /** The recorded start, its lists decoded once per process; undefined when they can't be read. */
+    const recall = Effect.fnUntraced(function* (db: Db, row: Row) {
+      const system = yield* partsOf(db, row.parts)
+      const definitions = system && (yield* definitionsOf(db, row.tools))
+      return definitions && ({ system, definitions } satisfies Start)
+    })
+
     /** Stores a reminder of what changed since the chat was last told, and what it was told; none when nothing did. */
-    const remind = Effect.fnUntraced(function* (db: Db, input: Input, row: Row) {
-      const now = yield* current(input)
-      const system = now.system ?? row.toldSystem
-      // The registry hands the same definition objects step after step, so an unchanged step is told apart by
-      // identity, before anything is serialised or hashed.
-      if (system === row.toldSystem && same(held.get(row.toldTools ?? ""), now.definitions)) return undefined
-      const value = json(now.definitions)
-      const hash = digest(value)
-      if (hash === row.toldTools && system === row.toldSystem) {
-        hold(held, hash, now.definitions)
-        return undefined
+    const remind = Effect.fnUntraced(function* (db: Db, input: Input, row: Row, recorded: Start) {
+      // Told what was recorded, as a chat is until its first reminder, it has the lists already.
+      const toldTools = row.toldTools === row.tools ? recorded.definitions : yield* definitionsOf(db, row.toldTools)
+      const toldParts = row.toldParts === row.parts ? recorded.system : yield* partsOf(db, row.toldParts)
+      // An unchanged step hands the same definition objects as the step before (`SessionModelRequest` keeps them),
+      // and system parts built anew that read the same: compared by identity, then by their strings, before anything
+      // is serialised or hashed.
+      if (toldTools && toldParts && equalList(toldParts, input.system)) {
+        if (sameObjects(toldTools, input.definitions)) return undefined
+        if (equalList(toldTools, input.definitions)) {
+          // Equal field for field and in the same key order, so the same JSON: held, a later step tells by identity.
+          hold(tools, row.toldTools ?? "", input.definitions)
+          return undefined
+        }
       }
-      const told =
-        hash === row.toldTools
-          ? now.definitions
-          : ((yield* definitionsOf(db, held, row.toldTools ?? "")) ?? now.definitions)
-      const text = reminder(
-        row.toldSystem,
-        system,
-        told.filter(
-          (tool) =>
-            input.moved?.has(tool.name) !== true || now.definitions.some((current) => current.name === tool.name),
+      const systemValue = JSON.stringify(input.system)
+      const systemHash = digest(systemValue)
+      const toolsValue = json(input.definitions)
+      const toolsHash = digest(toolsValue)
+      const text = reminder({
+        before: toldParts ?? input.system,
+        after: input.system,
+        prompt: input.prompt === true,
+        told: (toldTools ?? input.definitions).filter(
+          (tool) => input.moved?.has(tool.name) !== true || input.definitions.some((now) => now.name === tool.name),
         ),
-        now.definitions,
-      )
+        now: input.definitions,
+      })
       const published =
         text === undefined
           ? undefined
@@ -160,52 +186,86 @@ export const layer = Layer.effect(
               description: "What changed in the chat's prompt, from its next cold point",
               metadata: { promptStart: true },
             })
-      yield* store(db, held, hash, value, now.definitions)
+      yield* store(db, parts, PromptSystemTable, systemHash, systemValue, input.system)
+      yield* store(db, tools, PromptToolsTable, toolsHash, toolsValue, input.definitions)
       yield* db
         .update(PromptStartTable)
-        .set({ told_system: system ?? null, told_tools: hash })
+        .set({ told_parts: systemHash, told_tools: toolsHash })
         .where(eq(PromptStartTable.session_id, input.sessionID))
         .run()
         .pipe(Effect.orDie)
       return published && text !== undefined ? { id: SessionMessage.ID.fromEvent(published.id), text } : undefined
     })
 
+    const record = Effect.fnUntraced(function* (db: Db, input: Input, compaction: number | null) {
+      const systemValue = JSON.stringify(input.system)
+      const systemHash = digest(systemValue)
+      const toolsValue = json(input.definitions)
+      const toolsHash = digest(toolsValue)
+      const values = {
+        agent: input.agent,
+        provider_id: input.model.providerID,
+        model_id: input.model.id,
+        system: null,
+        tools: toolsHash,
+        told_system: null,
+        told_tools: toolsHash,
+        parts: systemHash,
+        told_parts: systemHash,
+        compaction,
+        time_created: yield* Clock.currentTimeMillis,
+      }
+      yield* store(db, parts, PromptSystemTable, systemHash, systemValue, input.system)
+      yield* store(db, tools, PromptToolsTable, toolsHash, toolsValue, input.definitions)
+      yield* db
+        .insert(PromptStartTable)
+        .values({ session_id: input.sessionID, ...values })
+        .onConflictDoUpdate({ target: PromptStartTable.session_id, set: values })
+        .run()
+        .pipe(Effect.orDie)
+    })
+
     // Untraced: it runs on every request, and its span would cost more than its work on a warm step.
     const resolve = Effect.fnUntraced(function* (input: Input) {
-      if (Option.isNone(database) || input.kind === "title") return yield* current(input)
+      const now: Start = { system: input.system, definitions: input.definitions }
+      if (Option.isNone(database) || input.kind === "title") return now
       const db = database.value.db
       const row = yield* read(db, input.sessionID)
       // A chat that isn't stored has nothing to keep its record with.
-      if (!row) return yield* current(input)
-      const kept = row.tools === null ? undefined : row
+      if (!row) return now
+      // A record from before the system parts were recorded holds no start as sent: the chat's next step records one.
+      const kept = row.tools === null || row.parts === null ? undefined : row
       if (!(yield* enabled(input.model.providerID))) {
-        if (kept && input.kind === "primary") yield* forget(db, input.sessionID)
-        return yield* current(input)
+        if (row.tools !== null && input.kind === "primary") yield* forget(db, input.sessionID)
+        return now
       }
       if (input.kind !== "primary") {
-        const recorded = kept?.agent === input.agent ? yield* recall(db, held, kept, input) : undefined
-        return recorded ?? (yield* current(input))
+        const recorded = kept?.agent === input.agent ? yield* recall(db, kept) : undefined
+        return recorded ?? now
       }
-      const recorded = kept && (yield* warm(input, kept)) ? yield* recall(db, held, kept, input) : undefined
+      const recorded = kept && (yield* warm(input, kept)) ? yield* recall(db, kept) : undefined
       if (kept && recorded) {
-        const told = yield* remind(db, input, kept)
+        const told = yield* remind(db, input, kept, recorded)
         return told ? { ...recorded, reminder: told } : recorded
       }
-      const start = yield* current(input)
-      yield* record(db, held, input, start, row.latest)
-      return start
+      yield* record(db, input, row.latest)
+      return now
     })
 
     const recorded = Effect.fnUntraced(function* (input: Chat) {
       if (Option.isNone(database)) return undefined
       const db = database.value.db
       const row = yield* read(db, input.sessionID)
-      if (!row || row.tools === null || !(yield* enabled(input.model.providerID))) return undefined
+      if (!row || row.tools === null || row.parts === null || !(yield* enabled(input.model.providerID)))
+        return undefined
       if (!(yield* warm(input, row))) return undefined
-      return yield* definitionsOf(db, held, row.tools)
+      return yield* definitionsOf(db, row.tools)
     })
 
-    return Service.of({ resolve, recorded })
+    const refused = (sessionID: SessionSchema.ID) =>
+      Option.isNone(database) ? Effect.void : forget(database.value.db, sessionID)
+
+    return Service.of({ resolve, recorded, refused })
   }),
 )
 
@@ -214,9 +274,6 @@ export const node = makeLocationNode({
   layer,
   deps: [Database.node, Config.node, PacerModels.node, PacerWarmth.node, Bus.node],
 })
-
-const current = (input: Input) =>
-  Effect.map(input.definitions, (definitions): Start => ({ system: input.system, definitions }))
 
 /**
  * The chat's record with, beside it, the `seq` of its latest completed compaction and the time of its latest step:
@@ -240,9 +297,9 @@ function statement(db: Db) {
       agent: PromptStartTable.agent,
       provider: PromptStartTable.provider_id,
       model: PromptStartTable.model_id,
-      system: PromptStartTable.system,
+      parts: PromptStartTable.parts,
       tools: PromptStartTable.tools,
-      toldSystem: PromptStartTable.told_system,
+      toldParts: PromptStartTable.told_parts,
       toldTools: PromptStartTable.told_tools,
       compaction: PromptStartTable.compaction,
       recorded: PromptStartTable.time_created,
@@ -259,81 +316,75 @@ function statement(db: Db) {
     .prepare()
 }
 
-/** The recorded start, its definitions decoded once per process; undefined when they can't be read. */
-const recall = (db: Db, held: Held, row: Row, input: Input) =>
-  Effect.map(
-    definitionsOf(db, held, row.tools ?? ""),
-    (definitions): Start | undefined => definitions && { system: row.system ?? input.system, definitions },
-  )
-
-const definitionsOf = Effect.fnUntraced(function* (db: Db, held: Held, hash: string) {
-  const found =
-    held.get(hash) ??
-    (yield* db
-      .select({ value: PromptToolsTable.value })
-      .from(PromptToolsTable)
-      .where(eq(PromptToolsTable.hash, hash))
-      .get()
-      .pipe(
-        Effect.orDie,
-        Effect.map((stored) => stored && Option.getOrUndefined(decode(stored.value))),
-      ))
-  if (found) hold(held, hash, found)
-  return found
-})
-
-const store = (db: Db, held: Held, hash: string, value: string, definitions: ReadonlyArray<ToolDefinition>) => {
-  hold(held, hash, definitions)
-  return db.insert(PromptToolsTable).values({ hash, value }).onConflictDoNothing().run().pipe(Effect.orDie)
+/** The list by its hash: held, or read and decoded once; undefined when it can't be read. */
+function heldOrRead<A>(
+  db: Db,
+  held: Held<A>,
+  table: typeof PromptToolsTable | typeof PromptSystemTable,
+  decode: (value: string) => Option.Option<ReadonlyArray<A>>,
+  hash: string,
+): Effect.Effect<ReadonlyArray<A> | undefined> {
+  const found = held.get(hash)
+  if (found) {
+    hold(held, hash, found)
+    return Effect.succeed(found)
+  }
+  return db
+    .select({ value: table.value })
+    .from(table)
+    .where(eq(table.hash, hash))
+    .get()
+    .pipe(
+      Effect.orDie,
+      Effect.map((stored) => {
+        const decoded = stored && Option.getOrUndefined(decode(stored.value))
+        if (decoded) hold(held, hash, decoded)
+        return decoded
+      }),
+    )
 }
 
-const record = Effect.fnUntraced(function* (db: Db, held: Held, input: Input, start: Start, compaction: number | null) {
-  const value = json(start.definitions)
-  const hash = digest(value)
-  const values = {
-    agent: input.agent,
-    provider_id: input.model.providerID,
-    model_id: input.model.id,
-    system: start.system ?? null,
-    tools: hash,
-    told_system: start.system ?? null,
-    told_tools: hash,
-    compaction,
-    time_created: yield* Clock.currentTimeMillis,
-  }
-  yield* store(db, held, hash, value, start.definitions)
-  yield* db
-    .insert(PromptStartTable)
-    .values({ session_id: input.sessionID, ...values })
-    .onConflictDoUpdate({ target: PromptStartTable.session_id, set: values })
-    .run()
-    .pipe(Effect.orDie)
-})
+const store = <A>(
+  db: Db,
+  held: Held<A>,
+  table: typeof PromptToolsTable | typeof PromptSystemTable,
+  hash: string,
+  value: string,
+  list: ReadonlyArray<A>,
+) => {
+  hold(held, hash, list)
+  return db.insert(table).values({ hash, value }).onConflictDoNothing().run().pipe(Effect.orDie)
+}
 
 const forget = (db: Db, sessionID: SessionSchema.ID) =>
   db.delete(PromptStartTable).where(eq(PromptStartTable.session_id, sessionID)).run().pipe(Effect.orDie, Effect.asVoid)
 
+const HEADER =
+  "While this chat's prompt cache is warm, its system prompt and tool list stay as they were sent; these changes apply from now on, and come into them at its next cold point:"
+
 /**
- * The reminder's text: the agent's prompt as a diff of the passages that changed, or the whole new prompt when that
- * is shorter; each tool whose description or input changed, with both; each that went; each that comes. Undefined
- * when none of that changed (only the tools' order, say).
+ * The reminder's text: each system part that changed as a diff of the passages that changed, or its whole new text
+ * when that is shorter, each that came and each that went; each tool whose description or input changed, with both;
+ * each that went; each that comes. Undefined when none of that changed (only the tools' order, say).
  */
-export function reminder(
-  before: string | null | undefined,
-  after: string | null | undefined,
-  told: ReadonlyArray<ToolDefinition>,
-  now: ReadonlyArray<ToolDefinition>,
-) {
+export function reminder(input: {
+  readonly before: ReadonlyArray<SystemPart>
+  readonly after: ReadonlyArray<SystemPart>
+  /** Whether the first part is the agent's prompt. */
+  readonly prompt: boolean
+  readonly told: ReadonlyArray<ToolDefinition>
+  readonly now: ReadonlyArray<ToolDefinition>
+}) {
   const tools = Instructions.diffByKey(
-    told,
-    now,
+    input.told,
+    input.now,
     (tool) => tool.name,
     (previous, current) =>
       previous.description !== current.description ||
       JSON.stringify(previous.inputSchema) !== JSON.stringify(current.inputSchema),
   )
   const parts = [
-    ...(before && after && before !== after ? [prompt(before, after)] : []),
+    ...systemChanges(input.before, input.after, input.prompt),
     ...tools.changed.map(({ current }) =>
       [
         `The tool ${current.name} changed; its calls follow this from now on:`,
@@ -348,28 +399,93 @@ export function reminder(
     ),
   ]
   if (parts.length === 0) return undefined
-  return [
-    "While this chat's prompt cache is warm, its system prompt and tool list stay as they were sent; these changes apply from now on, and come into them at its next cold point:",
-    ...parts,
-  ].join("\n\n")
+  return [HEADER, ...parts].join("\n\n")
 }
 
-function prompt(before: string, after: string) {
+/**
+ * What changed in the system parts, matched by their texts: a part replaced where it stood changed, and is shown as
+ * the diff or its whole new text, whichever is shorter; one only added came; one only removed went. Each is named by
+ * its place, the first the agent's prompt when it is one.
+ */
+function systemChanges(before: ReadonlyArray<SystemPart>, after: ReadonlyArray<SystemPart>, prompt: boolean) {
+  const label = (index: number) =>
+    index === 0 && prompt ? "The agent's prompt" : `Part ${index + 1} of the system prompt`
+  const changes = diffArrays(
+    before.map((part) => part.text),
+    after.map((part) => part.text),
+  )
+  const texts: string[] = []
+  const at = { before: 0, after: 0 }
+  changes.forEach((change, index) => {
+    const previous = changes[index - 1]
+    if (!change.added && !change.removed) {
+      at.before += change.value.length
+      at.after += change.value.length
+      return
+    }
+    // A removal followed by an addition is a replacement: paired one by one, read with the removal.
+    if (change.added && previous?.removed) return
+    const removed = change.removed ? change.value : []
+    const next = changes[index + 1]
+    const added = change.added ? change.value : next?.added ? next.value : []
+    removed.forEach((text, offset) =>
+      texts.push(
+        offset < added.length
+          ? changed(label(at.after + offset), text, added[offset]!)
+          : `${label(at.before + offset)} no longer applies. It was:\n${text}`,
+      ),
+    )
+    added
+      .slice(removed.length)
+      .forEach((text, offset) =>
+        texts.push(`${label(at.after + removed.length + offset)} is new, and applies from now on:\n${text}`),
+      )
+    at.before += removed.length
+    at.after += added.length
+  })
+  return texts
+}
+
+function changed(label: string, before: string, after: string) {
   const patch = createPatch("prompt", before, after, "", "", { context: 3 })
   const diff = [
-    "The agent's prompt changed; the new passages apply from now on. Here's the diff:",
+    `${label} changed; the new passages apply from now on. Here's the diff:`,
     "```diff",
     patch.slice(patch.indexOf("@@")).trimEnd(),
     "```",
   ].join("\n")
-  const whole = `The agent's prompt changed; from now on it is:\n${after}`
+  const whole = `${label} changed; from now on it is:\n${after}`
   return diff.length < whole.length ? diff : whole
 }
 
-/** Whether two definition lists hold the same objects in the same order. */
-function same(left: ReadonlyArray<ToolDefinition> | undefined, right: ReadonlyArray<ToolDefinition>) {
+/** Whether two lists hold the same objects in the same order. */
+function sameObjects<A>(left: ReadonlyArray<A>, right: ReadonlyArray<A>) {
+  return left.length === right.length && left.every((item, index) => item === right[index])
+}
+
+/** Whether two lists read the same, item by item (`equal`). */
+function equalList(left: ReadonlyArray<unknown>, right: ReadonlyArray<unknown>) {
+  return left.length === right.length && left.every((item, index) => equal(item, right[index]))
+}
+
+/**
+ * Whether two JSON values are equal: by identity first, then field by field with their keys in the same order, so
+ * that equal values serialise the same. Nothing is serialised.
+ */
+export function equal(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) return false
+  if (Array.isArray(left) !== Array.isArray(right)) return false
+  if (Array.isArray(left) && Array.isArray(right)) return equalList(left, right)
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
   return (
-    left !== undefined && left.length === right.length && left.every((definition, index) => definition === right[index])
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] &&
+        equal((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]),
+    )
   )
 }
 
@@ -393,9 +509,9 @@ function digest(value: string) {
   return createHash("sha256").update(value).digest("hex")
 }
 
-function hold(held: Held, hash: string, definitions: ReadonlyArray<ToolDefinition>) {
+function hold<A>(held: Held<A>, hash: string, list: ReadonlyArray<A>) {
   held.delete(hash)
-  held.set(hash, definitions)
+  held.set(hash, list)
   if (held.size > HELD) held.delete(held.keys().next().value!)
 }
 

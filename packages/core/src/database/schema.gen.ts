@@ -25,9 +25,17 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`tools\` text NOT NULL,
           \`told_system\` text,
           \`told_tools\` text NOT NULL,
+          \`parts\` text,
+          \`told_parts\` text,
           \`compaction\` integer,
           \`time_created\` integer NOT NULL,
           CONSTRAINT \`fk_session_prompt_start_session_id_session_v2_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
+        CREATE TABLE \`prompt_system\` (
+          \`hash\` text PRIMARY KEY,
+          \`value\` text NOT NULL
         );
       `)
       yield* tx.run(`

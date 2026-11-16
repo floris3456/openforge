@@ -298,6 +298,9 @@ export const make = Effect.gen(function* () {
               })
             : undefined
         const llmFailure = streamFailure instanceof AIError ? streamFailure : unknownFinish
+        // A refused prompt is a cold point: the next step records the start as it is then.
+        if (input.prepared.refused && PacerAnswers.refused(input.model.ref, streamFailure))
+          yield* input.prepared.refused
         const llmError = llmFailure && !recorded.providerFailed ? toSessionError(llmFailure) : undefined
         if (
           input.recoverContinuation &&

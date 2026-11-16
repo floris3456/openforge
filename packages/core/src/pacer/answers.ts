@@ -47,6 +47,31 @@ export function compactAsk(model: Model.Ref, failure: unknown): CompactAsk | und
   })
 }
 
+// CPP's answer when the provider refused the prompt itself: `code: "prompt_refused"`; before it had the code, only the
+// message of Antigravity's said so.
+const PromptRefused = Schema.fromJsonString(
+  Schema.Struct({
+    error: Schema.Union([
+      Schema.Struct({ code: Schema.Literal("prompt_refused") }),
+      Schema.Struct({
+        message: Schema.String.check(Schema.isPattern(/^Antigravity refused this request without using quota/)),
+      }),
+    ]),
+  }),
+)
+const decodePromptRefused = Schema.decodeUnknownOption(PromptRefused)
+
+/**
+ * Whether a request to the CLIProxyPacer provider was answered with CPP's 400 for a prompt the provider refused itself
+ * (Antigravity's fake `429 RESOURCE_EXHAUSTED` for a system instruction it takes for another coding tool's): a step
+ * answered so is a cold point (`SessionPromptStart.refused`).
+ */
+export function refused(model: Model.Ref, failure: unknown) {
+  if (model.providerID !== provider || !(failure instanceof AIError)) return false
+  if (failure.reason.http?.status !== 400 || failure.reason.body === undefined) return false
+  return Option.isSome(decodePromptRefused(failure.reason.body))
+}
+
 /**
  * A 502 on a request to the CLIProxyPacer provider. CPP's own comes from a pair's standby that retried its forward to
  * the active every 250 ms for 10 s (`pair_forward.rs`, `route`): "CPP is down"'s answer with the status changed, so it

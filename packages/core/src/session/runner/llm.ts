@@ -377,6 +377,7 @@ const layer = Layer.effect(
               options: prepared.options,
               retry: prepared.retry,
               proxyRequestID: prepared.proxyRequestID,
+              refused: prepared.refused,
               executeTool: prepared.executeTool,
             })),
           )

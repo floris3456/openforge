@@ -158,3 +158,38 @@ describe("PacerAnswers.outage", () => {
     expect(PacerAnswers.outage(other, transport({ operation: "request", code: "ECONNREFUSED" }))).toBe(false)
   })
 })
+
+describe("PacerAnswers.refused", () => {
+  const antigravity =
+    "Antigravity refused this request without using quota: the upstream answered 429 RESOURCE_EXHAUSTED"
+  test("is CPP's 400 with code prompt_refused, or, from a server before the code, Antigravity's refusal", () => {
+    expect(
+      PacerAnswers.refused(
+        chat,
+        answer(400, {
+          error: {
+            code: "prompt_refused",
+            message: "The provider refused this prompt.",
+            type: "invalid_request_error",
+          },
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      PacerAnswers.refused(chat, answer(400, { error: { message: antigravity, type: "invalid_request_error" } })),
+    ).toBe(true)
+  })
+
+  test("is not another 400, the same answer with another status, or another provider's", () => {
+    expect(
+      PacerAnswers.refused(
+        chat,
+        answer(400, { error: { message: "max_tokens is too large", type: "invalid_request_error" } }),
+      ),
+    ).toBe(false)
+    expect(PacerAnswers.refused(chat, answer(400, { error: { message: `upstream: ${antigravity}` } }))).toBe(false)
+    expect(PacerAnswers.refused(chat, answer(429, { error: { code: "prompt_refused" } }))).toBe(false)
+    expect(PacerAnswers.refused(other, answer(400, { error: { code: "prompt_refused" } }))).toBe(false)
+    expect(PacerAnswers.refused(chat, new Error("prompt_refused"))).toBe(false)
+  })
+})

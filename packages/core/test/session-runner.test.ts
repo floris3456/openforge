@@ -2049,7 +2049,13 @@ describe("SessionRunnerLLM", () => {
     yield* s.bus.publish(SessionEvent.RevertEvent.Committed, { sessionID, to: second.id })
     yield* s.runPrompt("Fourth")
 
-    expect(s.requests.at(-1)?.system.map((part) => part.text)).toEqual([defaultSystem, fakeIdentity, "Latest context"])
+    // A revert is no cold point (workspace spec `docs/specs/frozen-prefix.md`): the warm chat's system parts stay as
+    // recorded, and the resynced baseline reaches it as the reminder after its history.
+    const fourth = s.requests.at(-1)
+    expect(fourth?.system.map((part) => part.text)).toEqual(s.requests[0]?.system.map((part) => part.text))
+    expect(fourth?.system.map((part) => part.text)).toEqual([defaultSystem, fakeIdentity, "Initial context"])
+    const reminder = fourth?.messages.at(-1)?.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
+    expect(reminder?.join("")).toMatch(/Part 3 of the system prompt changed; [^]*Latest context/)
   })
 
   scenario("uses the selected model family prompt when the agent does not override it", function* (s) {

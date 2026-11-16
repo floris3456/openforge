@@ -11,6 +11,7 @@ import {
   type Media,
   Message,
   SystemPart,
+  ToolDefinition,
 } from "@opencode/ai/effect"
 import type { StreamOptions } from "@opencode/ai/route"
 import type {
@@ -81,6 +82,11 @@ export interface Prepared<Event = SessionRequest> {
   readonly retry: (event: PluginHooks.Domains["session"]["retry"]) => Effect.Effect<void>
   /** The proxy's ID of this request, once its answer arrived; undefined for other providers (`proxyRequestID`). */
   readonly proxyRequestID?: () => string | undefined
+  /**
+   * The provider refused this prompt itself (`PacerAnswers.refused`): the chat's recorded start goes, so that its next
+   * step records the start as it is then (`SessionPromptStart`).
+   */
+  readonly refused?: Effect.Effect<void>
   /** Runs a tool call against the tools this request advertised. */
   readonly executeTool: (
     input: Parameters<Tool.Snapshot["execute"]>[0],
@@ -94,8 +100,8 @@ export interface Input {
   readonly tools?: Tool.Snapshot
   readonly system: Array<SystemPart>
   /**
-   * The text of `system`'s first part when it is the agent's prompt (`baseTranscript`'s `start`), which a warm chat
-   * sends as recorded (`SessionPromptStart`).
+   * The text of `system`'s first part when it is the agent's prompt (`baseTranscript`'s `start`), which a reminder of a
+   * warm chat's changes calls so (`SessionPromptStart`).
    */
   readonly start?: string
   readonly messages: Array<Message>
@@ -247,6 +253,34 @@ export const boundImages = (messages: LLMRequest["messages"]) => {
 
 type Definitions = PluginHooks.Domains["session"]["context"]["tools"]
 
+/** The definition a tool reshaped like this on the step before was sent as, so an unchanged step sends the same object. */
+const reshapedBefore = new WeakMap<ToolDefinition, ToolDefinition>()
+
+/**
+ * The definition sent for `tool` under `name`, as the hooks left its copy `hooked`: the registry's own object when
+ * they changed nothing, the step before's when they changed it the same way, and a new one otherwise. Compared field
+ * by field, nothing serialised, so a warm step with nothing changed tells it by identity (`SessionPromptStart`).
+ */
+function sent(tool: ToolDefinition, name: string, hooked: Definitions[string]) {
+  if (
+    name === tool.name &&
+    hooked.description === tool.description &&
+    SessionPromptStart.equal(hooked.input, tool.inputSchema)
+  )
+    return tool
+  const before = reshapedBefore.get(tool)
+  if (
+    before !== undefined &&
+    before.name === name &&
+    before.description === hooked.description &&
+    SessionPromptStart.equal(before.inputSchema, hooked.input)
+  )
+    return before
+  const made = new ToolDefinition({ ...tool, name, description: hooked.description, inputSchema: hooked.input })
+  reshapedBefore.set(tool, made)
+  return made
+}
+
 /** Builds the model request for each session flow. Each entry runs its own plugin hook. */
 export interface Interface {
   readonly primary: (input: Input) => Effect.Effect<Prepared<SessionContext>>
@@ -320,40 +354,10 @@ export const layer = Layer.effect(
           known,
         )
       })
-      // A warm chat sends its start as recorded at its latest cold point, whatever changed since (`SessionPromptStart`).
-      const start = Option.isSome(starts)
-        ? yield* starts.value.resolve({
-            kind,
-            sessionID: session.id,
-            agent: input.agent,
-            model: model.ref,
-            ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
-            system: input.start,
-            definitions: now,
-            moved: PacerOffer.codemode(yield* pacerTools.known()),
-          })
-        : { system: input.start, definitions: yield* now }
-      const definitions = start.definitions
-      // A reminder stored for this step goes after the history, where the next step's history holds it; before the
-      // closing assistant message a step at its limit adds, which is not stored.
-      const reminder = "reminder" in start ? start.reminder : undefined
-      const end = input.messages.at(-1)?.role === "assistant" ? input.messages.length - 1 : input.messages.length
-      const messages = reminder
-        ? [
-            ...input.messages.slice(0, end),
-            // As the next step's history sends it: a synthetic message, marked (spec checkpoint, section 1).
-            Message.make({ id: reminder.id, role: "user", content: systemReminder(reminder.text) }),
-            ...input.messages.slice(end),
-          ]
-        : input.messages
-      const system =
-        input.start !== undefined && start.system !== undefined && start.system !== input.start
-          ? [SystemPart.make(start.system), ...input.system.slice(1)]
-          : input.system
-      // Remember which tool each definition object came from. Hooks rename a tool by moving
-      // its definition to a new key, so after the hook we find the tool by object identity.
-      // Definitions are shared across steps and sessions, and hooks may edit schemas in place,
-      // so each hook gets a deep copy.
+      const definitions = yield* now
+      // Definitions are shared across steps and sessions, and hooks may edit schemas in place, so each hook gets a deep
+      // copy. Remember which tool each copy came from: hooks rename a tool by moving its definition to a new key, so
+      // after the hook we find the tool by object identity.
       const given = new Map(
         definitions.map(
           (t) => [{ description: t.description, input: JSON.parse(JSON.stringify(t.inputSchema)) }, t] as const,
@@ -365,8 +369,8 @@ export const layer = Layer.effect(
         {
           sessionID: session.id,
           model: model.ref,
-          system,
-          messages,
+          system: input.system,
+          messages: input.messages,
           options:
             kind === "primary"
               ? { maxTokens: outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM) }
@@ -376,20 +380,51 @@ export const layer = Layer.effect(
         },
         Object.fromEntries(Array.from(given, ([d, t]) => [t.name, d])),
       )
-      // Match by identity first, then by key. Entries matching neither were invented by a
-      // hook and are dropped. `t.name` stays the real name so execution can map renames back.
+      // Match by identity first, then by key. Entries matching neither were invented by a hook and are dropped. Each
+      // goes to the provider under its key (`sent`) and runs as the tool it came from (`hooked`, by the key).
       const byName = new Map(definitions.map((t) => [t.name, t]))
-      const hooked = new Map(
-        Object.entries(shaped.tools ?? {}).flatMap(([name, d]) => {
-          const t = given.get(d) ?? byName.get(name)
-          return t ? [[name, { ...t, description: d.description, inputSchema: d.input }] as const] : []
-        }),
-      )
+      const reshaped = Object.entries(shaped.tools ?? {}).flatMap(([name, d]) => {
+        const t = given.get(d) ?? byName.get(name)
+        return t ? [{ t, sent: sent(t, name, d) }] : []
+      })
+      const current = reshaped.map((entry) => entry.sent)
+      // A warm chat sends its start as recorded at its latest cold point, every system part and tool definition as
+      // they were sent then, whatever changed since (`SessionPromptStart`).
+      const start = Option.isSome(starts)
+        ? yield* starts.value.resolve({
+            kind,
+            sessionID: session.id,
+            agent: input.agent,
+            model: model.ref,
+            ...(model.cache?.ttl === undefined ? {} : { ttl: model.cache.ttl }),
+            system: shaped.system,
+            definitions: current,
+            prompt: input.start !== undefined,
+            moved: PacerOffer.codemode(yield* pacerTools.known()),
+          })
+        : { system: shaped.system, definitions: current }
+      // Calls run the current tools; a recorded one no longer offered is kept, so its call answers that it is
+      // unavailable, or runs from Code Mode when it moved there.
+      const hooked = new Map(reshaped.map((entry) => [entry.sent.name, entry.t] as const))
+      if (start.definitions !== current)
+        for (const t of start.definitions) if (!hooked.has(t.name)) hooked.set(t.name, t)
+      // A reminder stored for this step goes after the history, where the next step's history holds it; before the
+      // closing assistant message a step at its limit adds, which is not stored.
+      const reminder = "reminder" in start ? start.reminder : undefined
+      const end = shaped.messages.at(-1)?.role === "assistant" ? shaped.messages.length - 1 : shaped.messages.length
+      const messages = reminder
+        ? [
+            ...shaped.messages.slice(0, end),
+            // As the next step's history sends it: a synthetic message, marked (spec checkpoint, section 1).
+            Message.make({ id: reminder.id, role: "user", content: systemReminder(reminder.text) }),
+            ...shaped.messages.slice(end),
+          ]
+        : shaped.messages
       const entries = Object.entries(shaped.options)
       const generation = Object.fromEntries(entries.filter(([k]) => GENERATION_KEYS.has(k))) as GenerationOptionsFields
       const providerOptions = Object.fromEntries(entries.filter(([k]) => !GENERATION_KEYS.has(k)))
       const affinity = SessionAffinity.get(session)
-      const supported = unsupportedParts(shaped.messages, model.capabilities, model.model.provider)
+      const supported = unsupportedParts(messages, model.capabilities, model.model.provider)
       // openforge: optimized images are never cut (ImageBudget).
       const images = input.images
       const base = ai.request({
@@ -419,9 +454,9 @@ export const layer = Layer.effect(
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.
         promptCacheKey: /^ses_[0-9a-f]{64}$/.test(affinity) ? affinity.slice(4) : affinity,
         cache: model.cache?.ttl === undefined ? undefined : { ttl: model.cache.ttl },
-        system: shaped.system,
+        system: [...start.system],
         messages: images ? ImageBudget.bound(supported, ImageFit.requestLimits(images)) : boundImages(supported),
-        tools: Array.from(hooked, ([name, t]) => ({ ...t, name })),
+        tools: [...start.definitions],
         toolChoice: input.toolChoice,
         generation: Object.keys(generation).length === 0 ? undefined : generation,
         providerOptions: Object.keys(providerOptions).length === 0 ? undefined : providerOptions,
@@ -516,6 +551,7 @@ export const layer = Layer.effect(
         request,
         options: { ...(http ? { http } : {}), ...(webSocket ? { webSocket } : {}) },
         ...(proxy ? { proxyRequestID: proxy.current } : {}),
+        ...(kind === "primary" && Option.isSome(starts) ? { refused: starts.value.refused(session.id) } : {}),
         retry: (event: Parameters<Prepared["retry"]>[0]) =>
           hooks.trigger("session", "retry", event).pipe(Effect.asVoid),
         // Permission.assert and the question tool throw declines as defects so tools cannot

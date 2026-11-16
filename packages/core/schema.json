@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "063c005d-4e4c-4bd5-be28-45bba5878e66",
-  "prevIds": ["a33c3edb-02a0-4d12-873b-66a7b31439ed"],
+  "id": "1a453d2b-f66e-4a2e-91f4-02dc3d0f4515",
+  "prevIds": ["063c005d-4e4c-4bd5-be28-45bba5878e66"],
   "ddl": [
     {
       "name": "memory_prompt",
@@ -10,6 +10,10 @@
     },
     {
       "name": "session_prompt_start",
+      "entityType": "tables"
+    },
+    {
+      "name": "prompt_system",
       "entityType": "tables"
     },
     {
@@ -251,6 +255,26 @@
       "table": "session_prompt_start"
     },
     {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "parts",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "told_parts",
+      "entityType": "columns",
+      "table": "session_prompt_start"
+    },
+    {
       "type": "integer",
       "notNull": false,
       "autoincrement": false,
@@ -269,6 +293,26 @@
       "name": "time_created",
       "entityType": "columns",
       "table": "session_prompt_start"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hash",
+      "entityType": "columns",
+      "table": "prompt_system"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "value",
+      "entityType": "columns",
+      "table": "prompt_system"
     },
     {
       "type": "text",
@@ -2749,6 +2793,13 @@
       "nameExplicit": false,
       "name": "session_prompt_start_pk",
       "table": "session_prompt_start",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["hash"],
+      "nameExplicit": false,
+      "name": "prompt_system_pk",
+      "table": "prompt_system",
       "entityType": "pks"
     },
     {

@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
-import { LanguageModel, type LLMRequest } from "@opencode/ai/effect"
+import { AIError, HttpContext, LanguageModel, type LLMRequest, SystemPart } from "@opencode/ai/effect"
+import { classifyProviderFailure } from "@opencode/ai/route"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
@@ -25,6 +26,8 @@ import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
+import { IdentityPlugin } from "@opencode/core/plugin/identity"
+import PROMPT_ANTHROPIC from "../src/plugin/system-prompt/anthropic.txt"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { ReferenceInstructions } from "@opencode/core/reference/instructions"
@@ -33,6 +36,7 @@ import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionPromptStart } from "@opencode/core/session/prompt-start"
+import { PromptStartTable } from "@opencode/core/session/prompt-start.sql"
 import { SessionRunCoordinator } from "@opencode/core/session/run-coordinator"
 import { SessionRunner } from "@opencode/core/session/runner/index"
 import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
@@ -47,7 +51,8 @@ import { Provider } from "@opencode/schema/provider"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Context, Effect, Layer, Schema, SubscriptionRef } from "effect"
+import { eq } from "drizzle-orm"
+import { Context, Effect, Layer, Schema, Stream, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { testEffect } from "./lib/effect"
@@ -104,6 +109,11 @@ const models = Layer.mock(SessionRunnerModel.Service)({
     ),
 })
 const none = { load: () => Effect.succeed(Instructions.empty) }
+/** What the instruction sources give, which a test sets for itself and puts back. */
+const sources: { discovery: Instructions.List; builtins: Instructions.List } = {
+  discovery: Instructions.empty,
+  builtins: Instructions.empty,
+}
 const endpoints = Layer.succeed(
   PacerEndpoint.Service,
   PacerEndpoint.Service.of({
@@ -140,8 +150,16 @@ const replacements: LayerNode.Replacements = [
   Snapshot.node.replace(Snapshot.noopLayer),
   LayerNodePlatform.llmClient.replace(testLLM),
   SessionRunnerModel.node.replace(models),
-  InstructionBuiltIns.node.replace(Layer.mock(InstructionBuiltIns.Service, none)),
-  InstructionDiscovery.node.replace(Layer.mock(InstructionDiscovery.Service, { project: true, global: true, ...none })),
+  InstructionBuiltIns.node.replace(
+    Layer.mock(InstructionBuiltIns.Service, { load: () => Effect.sync(() => sources.builtins) }),
+  ),
+  InstructionDiscovery.node.replace(
+    Layer.mock(InstructionDiscovery.Service, {
+      project: true,
+      global: true,
+      load: () => Effect.sync(() => sources.discovery),
+    }),
+  ),
   SkillInstructions.node.replace(Layer.mock(SkillInstructions.Service, none)),
   ReferenceInstructions.node.replace(Layer.mock(ReferenceInstructions.Service, none)),
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),
@@ -220,6 +238,7 @@ const setup = Effect.fnUntraced(function* (input: { readonly parent?: Session.ID
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   const tools = yield* Tool.Service
+  const hooks = yield* PluginHooks.Service
   yield* config.setEntries([])
   yield* agents.transform((editor) => {
     editor.update(Agent.ID.make("build"), (agent) => {
@@ -284,6 +303,9 @@ const setup = Effect.fnUntraced(function* (input: { readonly parent?: Session.ID
         }),
       ),
     tools: (edit: (editor: Tool.Editor) => void) => tools.transform(edit),
+    /** A context hook, as a plugin of the running release registers one. */
+    hook: (edit: (event: PluginHooks.Domains["session"]["context"]) => void) =>
+      hooks.register("session", "context", (event) => Effect.sync(() => edit(event))),
     /** The reminders the chat holds, in order. */
     reminders: () =>
       session
@@ -644,11 +666,353 @@ describe("SessionPromptStart's record", () => {
         sessionID: h.sessionID,
         agent: Agent.ID.make("build"),
         model: { providerID: "fake", id: "fake-model" },
-        system: "Something else.",
-        definitions: Effect.succeed([]),
+        system: [SystemPart.make("Something else.")],
+        definitions: [],
       })
-      expect(resolved.system).toBe(BASE)
+      expect(JSON.stringify(resolved.system)).toBe(JSON.stringify(first?.system))
       expect(JSON.stringify(resolved.definitions)).toBe(JSON.stringify(first?.tools))
     }),
   )
 })
+
+// 2026-11-16: only the agent's prompt and the definitions before the hooks were recorded, so whatever the running
+// release's hooks and transforms put after them reached every warm chat at its next step (0.0.50's line in
+// tool/plugin/opencode.ts missed every warm chat's cache). Each change here is one a release or a setting makes.
+type ContextEvent = PluginHooks.Domains["session"]["context"]
+const changes: ReadonlyArray<{
+  readonly name: string
+  readonly before: string
+  readonly after: string
+  readonly edit: (event: ContextEvent, value: string) => void
+  /** What the reminder says of it. */
+  readonly told: string
+}> = [
+  {
+    name: "a part a context hook adds",
+    before: "consider using `execute` to call `tools.opencode.session_move`",
+    after: "consider using `execute` to call `tools.openforge.session_move`",
+    edit: (event, value) => {
+      event.system.push(SystemPart.make(value))
+    },
+    told: "of the system prompt changed",
+  },
+  {
+    name: "the model's name in # Your Model",
+    before: "Claude Opus 5",
+    after: "Claude Opus 5.5",
+    edit: (event, value) => {
+      event.system.splice(1, 0, SystemPart.make(IdentityPlugin.identity({ name: value, ref: event.model })))
+    },
+    told: "Part 2 of the system prompt changed",
+  },
+  {
+    name: "the prompt appended to the agent's for Claude (anthropic.txt)",
+    before: PROMPT_ANTHROPIC,
+    after: `${PROMPT_ANTHROPIC}\nOne more rule of the new release.`,
+    edit: (event, value) => {
+      const first = event.system[0]
+      if (first) event.system[0] = { ...first, text: `${first.text}\n\n${value}` }
+    },
+    told: "The agent's prompt changed",
+  },
+  {
+    name: "a tool a hook reshapes",
+    before: "Echo text, in the shell bash",
+    after: "Echo text, in the shell zsh",
+    edit: (event, value) => {
+      const tool = event.tools.echo
+      if (tool) tool.description = value
+    },
+    told: "The tool echo changed",
+  },
+]
+/** A text as it reads inside a request's JSON. */
+const inJson = (text: string) => JSON.stringify(text).slice(1, -1)
+
+describe("SessionPromptStart: the start as sent, after every transform and hook", () => {
+  for (const change of changes)
+    it.live(`stays byte for byte when ${change.name} changes, with one reminder; the next cold point holds it`, () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const release = { value: change.before }
+        yield* h.hook((event) => change.edit(event, release.value))
+        yield* h.prompt("one")
+        release.value = change.after
+        yield* h.llm.push(TestLLM.text("Two.", "two"))
+        yield* h.prompt("two")
+        yield* h.prompt("three")
+        const [one, two, three] = h.requests()
+        expect(startOf(one)).toContain(inJson(change.before))
+        expect(startOf(two)).toBe(startOf(one))
+        expect(startOf(three)).toBe(startOf(one))
+        const reminders = yield* h.reminders()
+        expect(reminders).toHaveLength(1)
+        expect(reminders[0]).toStartWith(header)
+        expect(reminders[0]).toContain(change.told)
+        yield* h.compact
+        // The compaction sends the recorded start too, though its own hooks don't run this one.
+        expect(startOf(h.requests()[3])).toBe(startOf(one))
+        yield* h.prompt("four")
+        yield* h.prompt("five")
+        const [four, five] = h.requests().slice(-2)
+        expect(startOf(four)).toContain(inJson(change.after))
+        expect(startOf(four)).not.toBe(startOf(one))
+        expect(startOf(five)).toBe(startOf(four))
+        expect(yield* h.reminders()).toHaveLength(1)
+      }),
+    )
+
+  it.live("gives a part a hook adds meanwhile, and one it no longer adds, in one reminder each", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const release = { parts: ["Rule A of the release."] }
+      yield* h.hook((event) => {
+        for (const text of release.parts) event.system.push(SystemPart.make(text))
+      })
+      yield* h.prompt("one")
+      release.parts = ["Rule A of the release.", "Rule B of the release."]
+      yield* h.prompt("two")
+      release.parts = ["Rule B of the release."]
+      yield* h.prompt("three")
+      for (const request of h.requests().slice(1)) expect(startOf(request)).toBe(startOf(h.requests()[0]))
+      const reminders = yield* h.reminders()
+      expect(reminders).toHaveLength(2)
+      expect(reminders[0]).toMatch(
+        /Part \d of the system prompt is new, and applies from now on:\nRule B of the release\./,
+      )
+      expect(reminders[1]).toMatch(/Part \d of the system prompt no longer applies\. It was:\nRule A of the release\./)
+    }),
+  )
+
+  it.live("stays when an instruction file changes, which its own reminder tells, as before", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const file = { text: "Use tabs." }
+      sources.discovery = Instructions.make({
+        key: Instructions.Key.make("project/agents.md"),
+        codec: Schema.toCodecJson(Schema.String),
+        read: Effect.sync(() => file.text),
+        render: {
+          initial: (text) => `Instructions from AGENTS.md:\n${text}`,
+          changed: (_previous, text) => `Instructions from AGENTS.md are now:\n${text}`,
+        },
+      })
+      yield* h.prompt("one")
+      file.text = "Use spaces."
+      yield* h.prompt("two")
+      yield* h.prompt("three")
+      const [one, two, three] = h.requests()
+      expect(startOf(one)).toContain("Use tabs.")
+      expect(startOf(two)).toBe(startOf(one))
+      expect(startOf(three)).toBe(startOf(one))
+      expect(JSON.stringify(two?.messages)).toContain("Instructions from AGENTS.md are now:\\nUse spaces.")
+      expect(yield* h.reminders()).toEqual([])
+    }).pipe(Effect.ensuring(Effect.sync(() => (sources.discovery = Instructions.empty)))),
+  )
+
+  it.effect("stays when the date changes, which its own reminder tells, as before", () =>
+    Effect.gen(function* () {
+      const builtins = Context.get(
+        yield* Layer.build(
+          AppNodeBuilder.build(InstructionBuiltIns.node, [
+            Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+            Global.node.replace(Global.layerWith({})),
+          ]),
+        ),
+        InstructionBuiltIns.Service,
+      )
+      sources.builtins = yield* builtins.load()
+      // On CLIProxyPacer, whose view alone says a chat went cold: a day passes, and the chat is warm still.
+      const h = yield* setup({ model: cpp })
+      yield* h.prompt("one")
+      yield* TestClock.adjust("1 day")
+      yield* h.prompt("two")
+      const [one, two] = h.requests()
+      expect(startOf(one)).toContain("Today's date: Thu Jan 01 1970")
+      expect(startOf(two)).toBe(startOf(one))
+      expect(JSON.stringify(two?.messages)).toContain("Today's date is now: Fri Jan 02 1970")
+      expect(yield* h.reminders()).toEqual([])
+    }).pipe(Effect.ensuring(Effect.sync(() => (sources.builtins = Instructions.empty)))),
+  )
+
+  it.live("runs a tool's current implementation when its recorded definition differs", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      yield* h.prompt("one")
+      yield* h.tools((editor) =>
+        editor.update("echo", (tool) => {
+          tool.description = "Echo text, loudly"
+          tool.execute = ({ text }) => Effect.succeed({ output: { text }, content: `${text.toUpperCase()}!` })
+        }),
+      )
+      yield* h.llm.push(TestLLM.toolCall("call-1", "echo", { text: "hi" }), TestLLM.text("done", "text-done"))
+      yield* h.prompt("two")
+      const requests = h.requests()
+      expect(startOf(requests[1])).toBe(startOf(requests[0]))
+      expect(startOf(requests[2])).toBe(startOf(requests[0]))
+      expect(JSON.stringify(requests[2]?.messages)).toContain("HI!")
+    }),
+  )
+})
+
+describe("SessionPromptStart: a cold point records the start as it is then, after every hook", () => {
+  // A record made before the parts were: the release that ships them reads it as none.
+  it.live("after a release that records the parts, for a chat whose record holds none", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const release = { line: "Line of release one." }
+      yield* h.hook((event) => {
+        event.system.push(SystemPart.make(release.line))
+      })
+      yield* h.prompt("one")
+      const { db } = yield* Database.Service
+      yield* db
+        .update(PromptStartTable)
+        .set({ parts: null, told_parts: null, system: BASE, told_system: BASE })
+        .where(eq(PromptStartTable.session_id, h.sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      release.line = "Line of release two."
+      yield* h.prompt("two")
+      yield* h.prompt("three")
+      const [, two, three] = h.requests()
+      expect(two?.system.map((part) => part.text)).toContain("Line of release two.")
+      expect(startOf(three)).toBe(startOf(two))
+      expect(yield* h.reminders()).toEqual([])
+    }),
+  )
+
+  const coldPoints: ReadonlyArray<{
+    readonly name: string
+    readonly model?: Model.Ref
+    readonly cool: (h: Effect.Success<ReturnType<typeof setup>>) => Effect.Effect<void, unknown>
+  }> = [
+    { name: "a compaction", cool: (h) => h.compact },
+    {
+      name: "a model switch",
+      cool: (h) =>
+        h.session
+          .switchModel({
+            sessionID: h.sessionID,
+            model: Model.Ref.make({ providerID: Provider.ID.make("fake"), id: Model.ID.make("other-model") }),
+          })
+          .pipe(Effect.asVoid),
+    },
+    {
+      name: "an agent switch",
+      cool: (h) => h.session.switchAgent({ sessionID: h.sessionID, agent: Agent.ID.make("plan") }).pipe(Effect.asVoid),
+    },
+    {
+      name: "CLIProxyPacer reporting the chat cold",
+      model: cpp,
+      cool: (h) => warmth.set({ sessionID: h.sessionID, warm: false, asOf: Date.now() + 1 }),
+    },
+  ]
+  for (const point of coldPoints)
+    it.live(`after ${point.name}`, () =>
+      Effect.gen(function* () {
+        const h = yield* setup(point.model ? { model: point.model } : {})
+        const release = { line: "Line of release one." }
+        yield* h.hook((event) => {
+          event.system.push(SystemPart.make(release.line))
+        })
+        yield* h.prompt("one")
+        release.line = "Line of release two."
+        // An answer to compact.
+        yield* h.llm.push(TestLLM.text("Two.", "two"))
+        yield* h.prompt("two")
+        expect(startOf(h.requests()[1])).toBe(startOf(h.requests()[0]))
+        yield* point.cool(h)
+        yield* h.prompt("three")
+        const three = h.requests().at(-1)
+        expect(three?.system.map((part) => part.text)).toContain("Line of release two.")
+        expect(three?.system.map((part) => part.text)).not.toContain("Line of release one.")
+        // Told once, at the warm step; the cold one holds the change.
+        expect(yield* h.reminders()).toHaveLength(1)
+      }),
+    )
+
+  it.live("in a new chat, with no reminder", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const release = { line: "Line of release one." }
+      yield* h.hook((event) => {
+        event.system.push(SystemPart.make(release.line))
+      })
+      yield* h.prompt("one")
+      release.line = "Line of release two."
+      const k = yield* setup()
+      yield* k.prompt("one")
+      expect(k.requests()[0]?.system.map((part) => part.text)).toContain("Line of release two.")
+      expect(yield* k.reminders()).toEqual([])
+    }),
+  )
+
+  for (const body of [
+    {
+      error: {
+        code: "prompt_refused",
+        message: "The provider refused this prompt.",
+        type: "invalid_request_error",
+      },
+    },
+    {
+      error: {
+        message: "Antigravity refused this request without using quota: RESOURCE_EXHAUSTED",
+        type: "invalid_request_error",
+      },
+    },
+  ])
+    it.live(`after CLIProxyPacer answers that the provider refused the prompt (${body.error.message})`, () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ model: cpp })
+        const release = { line: "call `tools.opencode.session_move`" }
+        yield* h.hook((event) => {
+          event.system.push(SystemPart.make(release.line))
+        })
+        yield* h.prompt("one")
+        release.line = "call `tools.openforge.session_move`"
+        yield* h.llm.push(Stream.fail(refusal(body)))
+        yield* h.prompt("two").pipe(Effect.ignore)
+        yield* h.prompt("three")
+        const [one, two, three] = h.requests()
+        // The refused step still sent the recorded start; the next records the current one.
+        expect(startOf(two)).toBe(startOf(one))
+        expect(three?.system.map((part) => part.text)).toContain("call `tools.openforge.session_move`")
+        expect(startOf(three)).not.toContain("tools.opencode.")
+      }),
+    )
+
+  it.live("but not after another 400", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ model: cpp })
+      const release = { line: "Line of release one." }
+      yield* h.hook((event) => {
+        event.system.push(SystemPart.make(release.line))
+      })
+      yield* h.prompt("one")
+      release.line = "Line of release two."
+      yield* h.llm.push(
+        Stream.fail(refusal({ error: { message: "max_tokens is too large", type: "invalid_request_error" } })),
+      )
+      yield* h.prompt("two").pipe(Effect.ignore)
+      yield* h.prompt("three")
+      const [one, two, three] = h.requests()
+      expect(startOf(two)).toBe(startOf(one))
+      expect(startOf(three)).toBe(startOf(one))
+    }),
+  )
+})
+
+/** CPP's 400, as the route's executor turns it into a failure. */
+function refusal(body: unknown) {
+  const rawBody = JSON.stringify(body)
+  return new AIError({
+    reason: classifyProviderFailure({
+      message: `HTTP 400: ${rawBody}`,
+      status: 400,
+      rawBody,
+      http: new HttpContext({ url: "https://cpp.test/v1/chat/completions", status: 400, headers: {} }),
+    }),
+  })
+}

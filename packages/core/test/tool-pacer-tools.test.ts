@@ -814,4 +814,16 @@ describe("PacerToolsPlugin files", () => {
       expect(h.cpp.uploads).toHaveLength(0)
     }),
   )
+
+  it.effect("answers a picture CPP did not take, without calling the tool", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() => Bun.write(`${tmp.path}/after.png`, png))
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      yield* Effect.promise(() => h.cpp.server.stop(true))
+      const failed = yield* h.failure("task", { id: "t1", pictures: ["after.png"] })
+      expect(failed.message).toStartWith("Not sent: after.png could not be uploaded (")
+      expect(h.cpp.calls()).toHaveLength(0)
+    }),
+  )
 })

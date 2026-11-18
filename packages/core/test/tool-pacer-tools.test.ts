@@ -646,28 +646,30 @@ describe("PacerToolsPlugin files", () => {
     }),
   )
 
-  it.effect("asks again whether CPP holds a picture an hour after it learnt so, and sends it only when it does not", () =>
-    Effect.gen(function* () {
-      const tmp = yield* tmpdirScoped()
-      yield* Effect.promise(() => Bun.write(`${tmp.path}/after.png`, png))
-      const h = yield* setup({ list: taskList, directory: tmp.path })
-      yield* h.run("task", { id: "t1", pictures: ["after.png"] })
-      yield* TestClock.adjust("59 minutes")
-      yield* h.run("task", { id: "t1", pictures: ["after.png"] })
-      expect(h.cpp.heads()).toHaveLength(1)
-      yield* TestClock.adjust("1 minute")
-      yield* h.run("task", { id: "t1", pictures: ["after.png"] })
-      // held still: asked, not sent
-      expect(h.cpp.heads()).toHaveLength(2)
-      expect(h.cpp.puts()).toHaveLength(1)
-      // CPP dropped it (a week with no round naming it): asked, and sent again
-      h.cpp.files.delete(sha(png))
-      yield* TestClock.adjust("1 hour")
-      yield* h.run("task", { id: "t1", pictures: ["after.png"] })
-      expect(h.cpp.heads()).toHaveLength(3)
-      expect(h.cpp.puts()).toHaveLength(2)
-      expect(sent(h, 3)).toEqual({ id: "t1", pictures: [{ sha256: sha(png), name: "after.png" }] })
-    }),
+  it.effect(
+    "asks again whether CPP holds a picture an hour after it learnt so, and sends it only when it does not",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        yield* Effect.promise(() => Bun.write(`${tmp.path}/after.png`, png))
+        const h = yield* setup({ list: taskList, directory: tmp.path })
+        yield* h.run("task", { id: "t1", pictures: ["after.png"] })
+        yield* TestClock.adjust("59 minutes")
+        yield* h.run("task", { id: "t1", pictures: ["after.png"] })
+        expect(h.cpp.heads()).toHaveLength(1)
+        yield* TestClock.adjust("1 minute")
+        yield* h.run("task", { id: "t1", pictures: ["after.png"] })
+        // held still: asked, not sent
+        expect(h.cpp.heads()).toHaveLength(2)
+        expect(h.cpp.puts()).toHaveLength(1)
+        // CPP dropped it (a week with no round naming it): asked, and sent again
+        h.cpp.files.delete(sha(png))
+        yield* TestClock.adjust("1 hour")
+        yield* h.run("task", { id: "t1", pictures: ["after.png"] })
+        expect(h.cpp.heads()).toHaveLength(3)
+        expect(h.cpp.puts()).toHaveLength(2)
+        expect(sent(h, 3)).toEqual({ id: "t1", pictures: [{ sha256: sha(png), name: "after.png" }] })
+      }),
   )
 
   it.effect("replaces both files of a [picture, comparison, caption] item, and keeps the caption", () =>

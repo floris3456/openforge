@@ -854,3 +854,128 @@ describe("PacerToolsPlugin files", () => {
     }),
   )
 })
+
+// The picture review end to end against a real CLIProxyPacer (the workspace's docs/reference/review-api.md), run by
+// hand: CPP_LIVE=<origin> CPP_LIVE_KEY=<client key> [CPP_LIVE_PICTURES=<folder with after.png, before.png, more.png>]
+// [CPP_LIVE_TASK=<a task denied in review: read it, then give its next round>]. The plugin and PacerTools are the real
+// ones over HTTP; only the model is left out: these are the calls a model writes.
+const LIVE = process.env.CPP_LIVE
+describe.skipIf(!LIVE)("PacerToolsPlugin files, live", () => {
+  const lead = SessionInfo.Info.make({ ...info, id: SessionInfo.ID.make("ses_pacer_review_live"), parentID: undefined })
+  // the chat's project as a real step names it (PacerProject's headers for the session's project)
+  const liveStep = {
+    sessionID: lead.id,
+    model: "claude-haiku-5-5",
+    step: true,
+    continues: false,
+    project: { "X-Pacer-Project": String(lead.projectID) },
+  }
+  const liveSetup = Effect.fnUntraced(function* (directory: string) {
+    const started = yield* startTools(endpointOf(LIVE!, process.env.CPP_LIVE_KEY), catalogOf(true), undefined, {})
+    const chat = { current: lead }
+    const context = yield* Layer.build(
+      AppNodeBuilder.build(LayerNode.group([Tool.node, pluginNode]), [
+        Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
+        PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
+        Session.node.replace(sessionsOf(chat)),
+        Image.node.replace(imagePassthrough),
+        locationNode(directory),
+      ]),
+    )
+    const registry = Context.get(context, Tool.Service)
+    yield* started.tools.list(liveStep)
+    yield* until("task registered", () => Effect.runSync(names(registry)).includes("task"))
+    const call = { sessionID: lead.id, ...toolIdentity }
+    const run = (input: unknown) =>
+      registry.snapshot().pipe(
+        Effect.flatMap((tools) =>
+          tools.execute({ ...call, call: { type: "tool-call", id: "call-task", name: "task", input } }),
+        ),
+        Effect.map((done) => ({
+          ok: true as const,
+          text: textOf(done),
+        })),
+        Effect.catch((error) =>
+          Effect.succeed({ ok: false as const, text: String((error as { message?: unknown }).message ?? error) }),
+        ),
+      )
+    return { run }
+  })
+  /** A tool result's text, whatever shape its content has (a string, a part, or parts). */
+  const textOf = (done: unknown): string => {
+    const content = (done as { content?: unknown }).content ?? (done as { output?: unknown }).output ?? done
+    if (typeof content === "string") return content
+    if (Array.isArray(content)) return content.map(textOf).join("\n")
+    if (content && typeof content === "object" && "text" in content) return String((content as { text: unknown }).text)
+    if (content && typeof content === "object" && "value" in content)
+      return textOf((content as { value: unknown }).value)
+    return JSON.stringify(content)
+  }
+  const pictures = async (dir: string) => {
+    const from = process.env.CPP_LIVE_PICTURES
+    const tiny = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+      "base64",
+    )
+    for (const [name, extra] of [
+      ["after.png", 0],
+      ["before.png", 1],
+      ["more.png", 2],
+    ] as const)
+      await Bun.write(
+        `${dir}/${name}`,
+        from ? Bun.file(`${from}/${name}`) : Buffer.concat([tiny, Buffer.from([extra])]),
+      )
+  }
+
+  // it.effect, not it.live: the helpers wait with the test clock; the HTTP is real
+  it.effect(
+    "a task with pictures reaches CPP: uploaded, in review, refused done for an agent",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        yield* Effect.promise(() => pictures(tmp.path))
+        const h = yield* liveSetup(tmp.path)
+        const said = (label: string, a: { ok: boolean; text: string }) =>
+          console.log(`--- ${label} (${a.ok ? "ok" : "refused"})\n${a.text}`)
+        const task = process.env.CPP_LIVE_TASK
+        if (task) {
+          const read = yield* h.run({ id: task })
+          said("read after the verdict", read)
+          expect(read.text).toContain("Review round 1")
+          const next = yield* h.run({
+            id: task,
+            state: "review",
+            pictures: [["after.png", "before.png", "Round 2: the notes taken"], "more.png"],
+          })
+          said("round 2", next)
+          expect(next.ok).toBe(true)
+          return
+        }
+        const made = yield* h.run({
+          // a title of its own each run: CPP refuses a second task of the same title
+          title: `Live picture review check ${new Date().toISOString().slice(11, 19)}`,
+          subtasks: [{ title: "Make the pictures" }],
+        })
+        said("made", made)
+        const id = /task ([a-z0-9]{12})/.exec(made.text)?.[1]
+        const step = /subtask ([a-z0-9]{12})/.exec(made.text)?.[1]
+        expect(id && step).toBeTruthy()
+        said("step done", yield* h.run({ id: step, state: "done" }))
+        const given = yield* h.run({
+          id,
+          pictures: [["after.png", "before.png", "Overview: the port beside the mockup"], "more.png"],
+        })
+        said("pictures", given)
+        expect(given.ok).toBe(true)
+        const missing = yield* h.run({ id, pictures: ["nothing-here.png"] })
+        said("a missing file", missing)
+        expect(missing.text).toStartWith("Not sent: nothing-here.png")
+        const done = yield* h.run({ id, state: "done" })
+        said("an agent's done", done)
+        expect(done.ok).toBe(false)
+        console.log(`LIVE_TASK=${id}`)
+      }),
+    120_000,
+  )
+})

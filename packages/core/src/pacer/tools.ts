@@ -68,6 +68,12 @@ export const WAIT = Duration.minutes(1)
 export const CALL_TIMEOUT = Duration.minutes(2)
 /** A file's ask and its sending wait this long: 20 MB may take a while, and the model waits for the call. */
 export const UPLOAD_TIMEOUT = Duration.seconds(60)
+/**
+ * How long a file CPP was found to hold is taken as held without asking again. CPP drops a file no review round names
+ * after 7 days (a call that failed after its upload), so a process that runs for weeks asks again, one HEAD, rather
+ * than send a hash CPP no longer has.
+ */
+export const HELD = Duration.hours(1)
 
 /** A chat's list as CPP answered it. One object per version, shared by every chat that holds it. */
 export interface List {
@@ -243,8 +249,9 @@ export const layer = Layer.effect(
         yield* kv.set(knownKey(endpoint), Object.fromEntries(next))
       })
 
-    // The files this process knows CPP holds, so a picture given again is not asked after nor sent again.
-    const files = new Set<string>()
+    // The files this process knows CPP holds, with when it learnt so: a picture given again within HELD is neither asked
+    // after nor sent again.
+    const files = new Map<string, number>()
 
     // In use order, the least recently used first.
     const chats = new Map<SessionID, Chat>()
@@ -494,14 +501,16 @@ export const layer = Layer.effect(
       call,
       upload: (bytes, mime, sha256) =>
         Effect.gen(function* () {
-          if (files.has(sha256)) return
+          const now = yield* Clock.currentTimeMillis
+          const known = files.get(sha256)
+          if (known !== undefined && now - known < Duration.toMillis(HELD)) return
           const path = `/pacer/v1/files/${sha256}`
           const status = yield* http.head(path, { timeout: UPLOAD_TIMEOUT })
           // CPP's files route answers 200 or 404: anything else means it is not there to keep them.
           if (status !== 200 && status !== 404)
             return yield* new PacerHttp.Unexpected({ status, reason: `HEAD of ${path} answered ${status}` })
           if (status === 404) yield* http.put(path, bytes, mime, { timeout: UPLOAD_TIMEOUT })
-          files.add(sha256)
+          files.set(sha256, now)
         }),
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),

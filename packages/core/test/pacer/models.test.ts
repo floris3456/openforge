@@ -428,6 +428,11 @@ describe("PacerModels", () => {
         },
         remember: { ...search, codemode: false },
       })
+      // The arguments whose strings are local files, as the task tool's pictures: kept, and a tool whose field is not a
+      // list of names drops on its own.
+      const task = { title: "Task", permission: "memory", subject: ["id"], read_only: false, files: ["pictures"] }
+      const filed = yield* told({ web_search: search, task, remember: { ...search, files: "pictures" } })
+      expect(filed && Object.fromEntries(filed)).toEqual({ web_search: search, task })
     }),
   )
 

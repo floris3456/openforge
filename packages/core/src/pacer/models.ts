@@ -44,6 +44,11 @@ export const ToolMeta = Schema.Struct({
   /** The arguments whose values the permission is asked on: the first one a call holds; none, `*`. */
   subject: Schema.Array(Schema.String),
   read_only: Schema.Boolean,
+  /**
+   * The arguments whose strings are local files (the workspace reference's `meta.files`, as `task`'s `pictures`): a
+   * call reads each one and sends it to CPP first, by its hash.
+   */
+  files: Schema.optional(Schema.Array(Schema.String)),
   /** In the code-execution tool (Code Mode) rather than on the direct list; a server without the field: direct. */
   codemode: Schema.optional(Schema.Boolean),
   /**

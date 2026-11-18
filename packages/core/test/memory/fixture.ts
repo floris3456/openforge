@@ -2,6 +2,8 @@ import { Context, Effect, Layer, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SessionID } from "@opencode/schema/session-id"
 import { Bus } from "@opencode/core/bus"
+import { Environment } from "@opencode/core/environment/index"
+import { FileAccess } from "@opencode/core/file-access"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHeaders } from "@opencode/core/pacer/headers"
@@ -253,7 +255,16 @@ export const pacerToolsNode = (name: string) =>
         )
       }),
     ),
-    deps: [Tool.node, Permission.node, PacerTools.node, PacerProject.node, SessionStore.node, Bus.node],
+    deps: [
+      Tool.node,
+      Permission.node,
+      PacerTools.node,
+      PacerProject.node,
+      FileAccess.node,
+      Environment.node,
+      SessionStore.node,
+      Bus.node,
+    ],
   })
 
 /**

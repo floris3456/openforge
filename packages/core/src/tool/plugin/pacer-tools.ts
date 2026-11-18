@@ -1,14 +1,21 @@
 export * as PacerToolsPlugin from "./pacer-tools.js"
 
+import path from "path"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { isRecord } from "@opencode/util/record"
 import { Effect, Stream } from "effect"
+import { Environment } from "../../environment/index.js"
+import { FileAccess } from "../../file-access.js"
+import { ImageBank } from "../../image/bank.js"
 import { MemoryTask } from "../../memory/task.js"
+import { Mime } from "../../mime.js"
+import { PacerHttp } from "../../pacer/http.js"
 import { PacerProject } from "../../pacer/project.js"
 import { PacerTools } from "../../pacer/tools.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
+import { SessionBlob } from "../../session/blob.js"
 
 // Every tool CPP lists, as built-in tools: one per name its lists and capabilities named at the current endpoint
 // (`PacerTools.known`, kept across restarts, so a step resumed right after one sends the tools it had), each asking
@@ -28,6 +35,73 @@ export const Plugin = {
     const calls = yield* PacerTools.Service
     const sessions = yield* Session.Service
     const projects = yield* PacerProject.Service
+    const access = yield* FileAccess.Service
+    const environment = yield* Environment.Service
+
+    /** What the model wrote, when the call does not go: `Not sent:` and why, and nothing reaches CPP. */
+    const notSent = (reason: string) => new ToolFailure({ message: `Not sent: ${reason}` })
+
+    /** Image `number` of the chat, as `image.show` numbers them: its original's hash, and its name `image N`. */
+    const fromChat = Effect.fnUntraced(function* (written: string, number: number) {
+      const chat = yield* ImageBank.Current
+      if (!chat) return yield* notSent(`${written} is not an image of this chat`)
+      const found = yield* ImageBank.get(chat.db, chat.sessionID, number)
+      if (!found) return yield* notSent(`${written} is not an image of this chat`)
+      yield* calls
+        .upload(found.original.data, found.original.mime, found.image.hash)
+        .pipe(Effect.mapError((error) => notSent(`${written} could not be uploaded (${uploadReason(error)})`)))
+      return { sha256: found.image.hash, name: `image ${number}` }
+    })
+
+    /** One picture the model wrote (`#N`, or a path the chat may read): read, hashed, sent to CPP once, and named. */
+    const picture = Effect.fnUntraced(function* (written: string, context: FileAccess.Invocation) {
+      const number = /^#(\d+)$/.exec(written)?.[1]
+      if (number !== undefined) return yield* fromChat(written, Number(number))
+      const target = yield* access
+        .authorizeRead(written, context)
+        .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message, error })))
+      // A file that cannot be described or read is answered as one that is not there: the model wrote a wrong path.
+      const unreadable = () => notSent(`${written} does not exist`)
+      const info = yield* environment.files.stat(target.absolute).pipe(Effect.catch(unreadable))
+      if (info.size > MAX_PICTURE_BYTES)
+        return yield* notSent(`${written} is ${Math.ceil(info.size / MEGABYTE)} MB, over 20 MB`)
+      const bytes = (yield* environment.files.read(target.absolute).pipe(Effect.catch(unreadable))).bytes
+      const mime = pictureMime(bytes, written)
+      if (mime === undefined) return yield* notSent(`${written} is not a PNG, JPEG, WebP, GIF or SVG`)
+      const sha256 = SessionBlob.hashBytes(bytes)
+      yield* calls
+        .upload(bytes, mime, sha256)
+        .pipe(Effect.mapError((error) => notSent(`${written} could not be uploaded (${uploadReason(error)})`)))
+      return { sha256, name: path.basename(written) }
+    })
+
+    /**
+     * A call's arguments that hold local files (CPP's `meta.files`): each string of those is a picture, replaced by its
+     * hash and name once CPP holds its bytes, so the model writes only the paths. Anything else keeps its shape.
+     */
+    const withFiles = Effect.fn("PacerToolsPlugin.withFiles")(function* (
+      input: Readonly<Record<string, unknown>>,
+      named: ReadonlyArray<string> | undefined,
+      context: FileAccess.Invocation,
+    ) {
+      const fields = (named ?? []).filter((name) => input[name] !== undefined)
+      if (fields.length === 0) return input
+      const sent = { ...input }
+      for (const name of fields) {
+        const value = input[name]
+        if (!Array.isArray(value)) continue
+        if (value.length > PICTURE_LIMIT) return yield* notSent(`${name} has more than ${PICTURE_LIMIT} items`)
+        sent[name] = yield* Effect.forEach(value, (item) => {
+          if (typeof item === "string") return picture(item, context)
+          if (!Array.isArray(item)) return Effect.succeed(item)
+          // `[picture, comparison, caption]`: the first two are files, and the caption is text.
+          return Effect.forEach(item, (part, index) =>
+            index < 2 && typeof part === "string" ? picture(part, context) : Effect.succeed(part),
+          )
+        })
+      }
+      return sent
+    })
 
     const state = { known: yield* calls.known() }
     yield* calls.knownChanges().pipe(
@@ -64,6 +138,8 @@ export const Plugin = {
                     source: { type: "tool", messageID: context.messageID, id: context.id },
                   })
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message, error })))
+                // What the model wrote stays the call's own input; only what CPP is sent has the files' hashes.
+                const sent = isRecord(input) ? yield* withFiles(input, meta.files, context) : input
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
                 const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
                 const project = session ? (yield* projects.chat(session.projectID)).headers : undefined
@@ -74,7 +150,7 @@ export const Plugin = {
                     project,
                     agent: String(context.agent),
                     name,
-                    args: input,
+                    args: sent,
                   })
                   // Not as the failure's cause, which would make it an unknown error rather than the tool's.
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message })))
@@ -117,4 +193,28 @@ function subject(args: Readonly<Record<string, unknown>>, names: ReadonlyArray<s
         ? value.filter((item): item is string => typeof item === "string")
         : []
   return values.length > 0 ? values : ["*"]
+}
+
+/** The most pictures one file-bearing argument may hold, and the most one picture may weigh. */
+const PICTURE_LIMIT = 20
+const MAX_PICTURE_BYTES = 20 * 1024 * 1024
+const MEGABYTE = 1024 * 1024
+const PICTURE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"]
+const SVG = "image/svg+xml"
+/** `<svg` at the start, after an optional byte-order mark, XML declaration, comments and whitespace. */
+const SVG_START = /^(?:\uFEFF|\s|<\?xml[^>]*\?>|<!--[\s\S]*?-->)*<svg[\s>]/i
+
+/** A picture's type by its bytes: PNG, JPEG, WebP or GIF, or SVG by its markup (or a `.svg` name holding text). */
+function pictureMime(bytes: Uint8Array, written: string) {
+  const mime = Mime.detect(bytes)
+  if (PICTURE_TYPES.includes(mime)) return mime
+  // `near the start`: an SVG's markup comes first, however many declarations and comments precede it.
+  const start = new TextDecoder().decode(bytes.subarray(0, 4096))
+  if (SVG_START.test(start) || (written.toLowerCase().endsWith(".svg") && mime === "text/plain")) return SVG
+  return undefined
+}
+
+/** Why CPP did not take a file, as the model is told: its answer's status, or what went wrong without one. */
+function uploadReason(error: PacerHttp.Error) {
+  return "status" in error && typeof error.status === "number" ? String(error.status) : error.message
 }

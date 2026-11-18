@@ -66,6 +66,8 @@ export const RETRY = Duration.seconds(5)
 export const WAIT = Duration.minutes(1)
 /** A call waits at most this long; CPP's longest is 3 attempts of 30 s, or a job's 50 s wait. */
 export const CALL_TIMEOUT = Duration.minutes(2)
+/** A file's ask and its sending wait this long: 20 MB may take a while, and the model waits for the call. */
+export const UPLOAD_TIMEOUT = Duration.seconds(60)
 
 /** A chat's list as CPP answered it. One object per version, shared by every chat that holds it. */
 export interface List {
@@ -140,6 +142,11 @@ export interface Interface {
   /** A model answer's `X-Pacer-Tools`: another version than the held one is read at the chat's next step. */
   readonly seen: (sessionID: SessionID, version: string | undefined) => void
   readonly call: (input: CallInput) => Effect.Effect<Answer, CallError>
+  /**
+   * Makes sure CPP holds a file's bytes, by its SHA-256: `HEAD /pacer/v1/files/{sha256}` answers 200 when it does, and
+   * a 404 is followed by a `PUT` of them. A file this process sent once is not asked after again.
+   */
+  readonly upload: (bytes: Uint8Array, mime: string, sha256: string) => Effect.Effect<void, PacerHttp.Error>
   /** The tools the current endpoint's lists named, with their meta; empty without an endpoint. */
   readonly known: () => Effect.Effect<Known>
   readonly knownChanges: () => Stream.Stream<Known>
@@ -235,6 +242,9 @@ export const layer = Layer.effect(
         yield* SubscriptionRef.set(known, next)
         yield* kv.set(knownKey(endpoint), Object.fromEntries(next))
       })
+
+    // The files this process knows CPP holds, so a picture given again is not asked after nor sent again.
+    const files = new Set<string>()
 
     // In use order, the least recently used first.
     const chats = new Map<SessionID, Chat>()
@@ -437,12 +447,13 @@ export const layer = Layer.effect(
             state.pausedUntil = 0
             return
           }
-          // Another address or key is another server: nothing read from the last one holds.
+          // Another address or key is another server: nothing read from the last one holds, and neither do its files.
           state.epoch++
           state.pausedUntil = 0
           state.absent = false
           chats.clear()
           versions.clear()
+          files.clear()
           Deferred.doneUnsafe(state.changed, Exit.void)
           state.changed = Deferred.makeUnsafe<void>()
           const loaded = yield* load(endpoint)
@@ -481,6 +492,17 @@ export const layer = Layer.effect(
         if (chat?.list && chat.list.version !== version) stale(chat)
       },
       call,
+      upload: (bytes, mime, sha256) =>
+        Effect.gen(function* () {
+          if (files.has(sha256)) return
+          const path = `/pacer/v1/files/${sha256}`
+          const status = yield* http.head(path, { timeout: UPLOAD_TIMEOUT })
+          // CPP's files route answers 200 or 404: anything else means it is not there to keep them.
+          if (status !== 200 && status !== 404)
+            return yield* new PacerHttp.Unexpected({ status, reason: `HEAD of ${path} answered ${status}` })
+          if (status === 404) yield* http.put(path, bytes, mime, { timeout: UPLOAD_TIMEOUT })
+          files.add(sha256)
+        }),
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),
       holds: (sessionID, name) => chats.get(sessionID)?.list?.byName.has(name),

@@ -42,16 +42,29 @@ export interface Received {
   readonly body: string
 }
 
+/** A request to CPP's files route, whose body is the file's bytes rather than text. */
+export interface ReceivedFile {
+  readonly method: string
+  readonly path: string
+  readonly sha256: string
+  readonly headers: Headers
+  readonly bytes: Uint8Array
+}
+
 type Answer = (request: Received) => Response | Promise<Response>
 
 /**
  * CPP's tool routes on a local server: `GET /pacer/v1/tools` and `POST /pacer/v1/tools/{name}`, each answered by a
  * function the test may change. It records what it gets, can hold answers until released, and counts the requests the
- * client gave up on.
+ * client gave up on. Its files route (`HEAD` and `PUT /pacer/v1/files/{sha256}`) keeps the bytes it is sent, answered
+ * `200` once held and `404` before.
  */
 export const fakeCpp = Effect.acquireRelease(
   Effect.sync(() => {
     const received: Received[] = []
+    /** The files CPP holds, by their SHA-256. */
+    const files = new Map<string, { readonly bytes: Uint8Array; readonly type: string | null }>()
+    const uploads: ReceivedFile[] = []
     const answers: { list: Answer; call: Answer } = {
       list: () => Response.json(owner),
       call: (request) =>
@@ -81,6 +94,18 @@ export const fakeCpp = Effect.acquireRelease(
       fetch: async (request) => {
         const url = new URL(request.url)
         request.signal.addEventListener("abort", () => void gate.aborted++)
+        const file = /^\/pacer\/v1\/files\/([0-9a-f]{64})$/.exec(url.pathname)
+        if (file) {
+          const sha256 = file[1]!
+          const bytes = request.method === "PUT" ? new Uint8Array(await request.arrayBuffer()) : new Uint8Array()
+          uploads.push({ method: request.method, path: url.pathname, sha256, headers: request.headers, bytes })
+          if (gate.held) await opened
+          if (request.method === "HEAD") return new Response(null, { status: files.has(sha256) ? 200 : 404 })
+          if (request.method !== "PUT") return new Response("405", { status: 405 })
+          const already = files.has(sha256)
+          if (!already) files.set(sha256, { bytes, type: request.headers.get("content-type") })
+          return Response.json({ sha256 }, { status: already ? 200 : 201 })
+        }
         const item = {
           method: request.method,
           path: url.pathname,
@@ -97,7 +122,22 @@ export const fakeCpp = Effect.acquireRelease(
     })
     const lists = () => received.filter((item) => item.path === "/pacer/v1/tools")
     const calls = () => received.filter((item) => item.path.startsWith("/pacer/v1/tools/"))
-    return { origin: `http://127.0.0.1:${server.port}`, server, received, answers, gate, hold, lists, calls }
+    const heads = () => uploads.filter((item) => item.method === "HEAD")
+    const puts = () => uploads.filter((item) => item.method === "PUT")
+    return {
+      origin: `http://127.0.0.1:${server.port}`,
+      server,
+      received,
+      answers,
+      gate,
+      hold,
+      lists,
+      calls,
+      files,
+      uploads,
+      heads,
+      puts,
+    }
   }),
   (cpp) => Effect.promise(() => cpp.server.stop(true)),
 )

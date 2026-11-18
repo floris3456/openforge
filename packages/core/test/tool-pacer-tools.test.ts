@@ -4,7 +4,13 @@ import { Context, DateTime, Effect, Layer, SubscriptionRef } from "effect"
 import { Money } from "@opencode/schema/money"
 import { Session as SessionInfo } from "@opencode/schema/session"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Database } from "@opencode/core/database/database"
+import { Environment } from "@opencode/core/environment/index"
+import { FileAccess } from "@opencode/core/file-access"
 import { Image } from "@opencode/core/image"
+import { ImageBank } from "@opencode/core/image/bank"
+import { ImageFit } from "@opencode/core/image/fit"
+import { ImageTable } from "@opencode/core/image/sql"
 import { Location } from "@opencode/core/location"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -12,14 +18,19 @@ import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Permission } from "@opencode/core/permission"
 import { Project } from "@opencode/core/project"
+import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { SessionBlob } from "@opencode/core/session/blob"
+import { SessionMessage } from "@opencode/core/session/message"
+import { BlobRefTable, BlobTable, SessionTable } from "@opencode/core/session/sql"
 import { Tool } from "@opencode/core/tool"
 import { PacerToolsPlugin } from "@opencode/core/tool/plugin/pacer-tools"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
 import { locationNode } from "./fixture/location"
+import { tmpdirScoped } from "./fixture/tmpdir"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import {
@@ -72,7 +83,15 @@ const sessionsOf = (chat: { current: SessionInfo.Info }) =>
 const pluginNode = makeLocationNode({
   name: "test/pacer-tools-plugin",
   layer: Layer.effectDiscard(registerToolPlugin(PacerToolsPlugin.Plugin)),
-  deps: [Tool.node, Permission.node, PacerTools.node, PacerProject.node, Session.node],
+  deps: [
+    Tool.node,
+    Permission.node,
+    PacerTools.node,
+    PacerProject.node,
+    FileAccess.node,
+    Environment.node,
+    Session.node,
+  ],
 })
 
 const it = testEffect(Layer.empty)
@@ -88,14 +107,41 @@ const listed = {
   ...listOf("7e57000000000001", [...ownerList.tools.claude, made]),
   meta: { ...ownerList.meta, moon_phase: madeMeta },
 }
+/** CPP's `task`, whose `pictures` are local files (`meta.files`): the workspace reference's flow for them. */
+const taskTool = {
+  name: "task",
+  description: "Reads or changes a task.",
+  input_schema: {
+    type: "object",
+    properties: { id: { type: "string" }, pictures: { type: "array" } },
+  },
+}
+const taskMeta = {
+  title: "Task",
+  permission: "memory",
+  subject: ["id"],
+  read_only: false,
+  files: ["pictures"],
+}
+const taskList = {
+  ...listOf("7e57000000000003", [...ownerList.tools.claude, taskTool]),
+  meta: { ...ownerList.meta, task: taskMeta },
+}
 const step = { sessionID, parentID, model: "claude-haiku-5-5", step: true, continues: false }
 
 /** The real registry with the plugin, over a fake CPP whose list the chat has read once. */
 const setup = Effect.fnUntraced(function* (
-  options: { readonly read?: boolean; readonly catalog?: PacerModels.Catalog } = {},
+  options: {
+    readonly read?: boolean
+    readonly catalog?: PacerModels.Catalog
+    /** CPP's list answer, which a test of files replaces; by default the moon phase tool's. */
+    readonly list?: unknown
+    /** The chat's folder: a temp one where a test writes the files it gives. */
+    readonly directory?: string
+  } = {},
 ) {
   const cpp = yield* fakeCpp
-  cpp.answers.list = () => Response.json(listed)
+  cpp.answers.list = () => Response.json(options.list ?? listed)
   const started = yield* startTools(endpointOf(cpp.origin), options.catalog, undefined, {})
   const chat = { current: info }
   const asked: Array<Permission.AssertInput & { readonly calls: number }> = []
@@ -109,7 +155,7 @@ const setup = Effect.fnUntraced(function* (
       PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
       Session.node.replace(sessionsOf(chat)),
       Image.node.replace(imagePassthrough),
-      locationNode("/project"),
+      locationNode(options.directory ?? "/project"),
     ]),
   )
   const registry = Context.get(context, Tool.Service)
@@ -557,6 +603,215 @@ describe("PacerToolsPlugin in Code Mode", () => {
         .execute({ sessionID, ...toolIdentity, call, definitions: new Map() })
         .pipe(Effect.flip)
       expect(refused.message).toContain('No tool named "moon_phase"')
+    }),
+  )
+})
+
+// CPP's `meta.files` (workspace reference `docs/reference/review-api.md`, "openforge" and the task tool): the strings of
+// those arguments are local files or `#N` of the chat, which are uploaded once and sent by their hash. A picture that
+// cannot go answers the model instead of the call, so nothing of it reaches CPP.
+describe("PacerToolsPlugin files", () => {
+  // A real 1x1 PNG; nothing decodes it here, its bytes are hashed and sent. Its comparison differs by a byte.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+    "base64",
+  )
+  const before = Buffer.concat([png, Buffer.from([0])])
+  const sha = (bytes: Uint8Array) => SessionBlob.hashBytes(bytes)
+  /** What CPP got as a call's arguments, which is the model's own input with the files' hashes in their place. */
+  const sent = (h: { readonly cpp: { readonly calls: () => ReadonlyArray<{ readonly body: string }> } }, index = 0) =>
+    JSON.parse(h.cpp.calls()[index]!.body)
+
+  it.effect("uploads a picture written as a path once, sends its hash in its place, and asks a read for it", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() => Bun.write(`${tmp.path}/after.png`, png))
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      expect((yield* h.run("task", { id: "t1", pictures: ["after.png"] })).status).toBe("completed")
+      expect(sent(h)).toEqual({ id: "t1", pictures: [{ sha256: sha(png), name: "after.png" }] })
+      expect(h.cpp.heads().map((one) => one.sha256)).toEqual([sha(png)])
+      expect(h.cpp.puts()).toHaveLength(1)
+      expect(Buffer.from(h.cpp.puts()[0]!.bytes).equals(png)).toBe(true)
+      expect(h.cpp.puts()[0]!.headers.get("content-type")).toBe("image/png")
+      expect(h.cpp.files.get(sha(png))?.type).toBe("image/png")
+      // The call's own input stays what the model wrote: the path, as the permission was asked with it.
+      expect(h.asked[0]).toMatchObject({ action: "memory", metadata: { id: "t1", pictures: ["after.png"] } })
+      expect(h.asked.map((one) => one.action)).toEqual(["memory", "read"])
+      // Given again, the file is known held: neither a HEAD nor a PUT.
+      yield* h.run("task", { id: "t1", pictures: ["after.png"] })
+      expect(h.cpp.calls()).toHaveLength(2)
+      expect(h.cpp.uploads).toHaveLength(2)
+      expect(sent(h, 1)).toEqual({ id: "t1", pictures: [{ sha256: sha(png), name: "after.png" }] })
+    }),
+  )
+
+  it.effect("replaces both files of a [picture, comparison, caption] item, and keeps the caption", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() =>
+        Promise.all([Bun.write(`${tmp.path}/after.png`, png), Bun.write(`${tmp.path}/before.png`, before)]),
+      )
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      yield* h.run("task", { id: "t1", pictures: [["after.png", "before.png", "from the driver's seat"]] })
+      expect(sent(h)).toEqual({
+        id: "t1",
+        pictures: [
+          [
+            { sha256: sha(png), name: "after.png" },
+            { sha256: sha(before), name: "before.png" },
+            "from the driver's seat",
+          ],
+        ],
+      })
+      expect(h.cpp.puts().map((one) => one.sha256)).toEqual([sha(png), sha(before)])
+      // A caption alone is text, and a null comparison no file: neither is touched.
+      yield* h.run("task", { id: "t1", pictures: [["after.png", null, "#1 is a number, not a picture"]] })
+      expect(sent(h, 1)).toEqual({
+        id: "t1",
+        pictures: [[{ sha256: sha(png), name: "after.png" }, null, "#1 is a number, not a picture"]],
+      })
+    }),
+  )
+
+  it.effect("takes #N from the chat's image bank by its original's hash, without reading a path", () =>
+    Effect.gen(function* () {
+      const database = yield* Layer.build(AppNodeBuilder.build(LayerNode.group([Database.node])))
+      const db = Context.get(database, Database.Service).db
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: sessionID,
+          directory: "/project",
+          title: "bank",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const hash = sha(png)
+      yield* db
+        .insert(BlobTable)
+        .values({ hash, mime: "image/png", bytes: png.length, width: 1, height: 1, data: png })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(BlobRefTable)
+        .values({ session_id: sessionID, message_id: SessionMessage.ID.make("msg_image_bank"), hash, seq: 0 })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(ImageTable)
+        .values({
+          session_id: sessionID,
+          number: 1,
+          hash,
+          name: "shot.png",
+          width: 1,
+          height: 1,
+          shown_width: 1,
+          shown_height: 1,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const h = yield* setup({ list: taskList })
+      const call = (input: unknown) => ({
+        sessionID,
+        ...toolIdentity,
+        call: { type: "tool-call" as const, id: "call-task", name: "task", input },
+      })
+      const bank = { db, sessionID, model: ImageFit.MODELS["claude-opus-5-5"]! }
+      const run = (input: unknown) =>
+        h.registry.snapshot().pipe(
+          Effect.flatMap((tools) => tools.execute(call(input))),
+          Effect.provideService(ImageBank.Current, bank),
+        )
+      yield* run({ id: "t1", pictures: ["#1"] })
+      expect(sent(h)).toEqual({ id: "t1", pictures: [{ sha256: hash, name: "image 1" }] })
+      // The original's own bytes, sent as the bank keeps them.
+      expect(Buffer.from(h.cpp.puts()[0]!.bytes).equals(png)).toBe(true)
+      // No path was read for it: only the tool's own permission was asked.
+      expect(h.asked.map((one) => one.action)).toEqual(["memory"])
+      // A number the chat does not hold, and a chat whose images are not numbered at all, answer without a call.
+      expect((yield* run({ id: "t1", pictures: ["#2"] }).pipe(Effect.flip)).message).toBe(
+        "Not sent: #2 is not an image of this chat",
+      )
+      const unnumbered = yield* h.registry.snapshot().pipe(
+        Effect.flatMap((tools) => tools.execute(call({ id: "t1", pictures: ["#1"] }))),
+        Effect.flip,
+      )
+      expect(unnumbered.message).toBe("Not sent: #1 is not an image of this chat")
+      expect(h.cpp.calls()).toHaveLength(1)
+      expect(h.cpp.uploads).toHaveLength(2)
+    }),
+  )
+
+  it.effect("answers a missing file, and one that is not a picture or is too big, without calling the tool", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() => Bun.write(`${tmp.path}/notes.txt`, "plain words"))
+      yield* Effect.promise(() => Bun.write(`${tmp.path}/huge.png`, new Uint8Array(21 * 1024 * 1024)))
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      const asked = (pictures: ReadonlyArray<string>) =>
+        h.failure("task", { id: "t1", pictures }).pipe(Effect.map((error) => error.message))
+      expect(yield* asked(["run/evidence/gone.png"])).toBe("Not sent: run/evidence/gone.png does not exist")
+      expect(yield* asked(["notes.txt"])).toBe("Not sent: notes.txt is not a PNG, JPEG, WebP, GIF or SVG")
+      expect(yield* asked(["huge.png"])).toBe("Not sent: huge.png is 21 MB, over 20 MB")
+      // A missing file after a good one still sends nothing, as the good one is only in the arguments being built.
+      expect(yield* asked(["notes.txt"])).toBe("Not sent: notes.txt is not a PNG, JPEG, WebP, GIF or SVG")
+      expect(h.cpp.calls()).toHaveLength(0)
+      expect(h.cpp.uploads).toHaveLength(0)
+    }),
+  )
+
+  it.effect("refuses more than 20 items before any of them is read", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ list: taskList })
+      const failed = yield* h.failure("task", { id: "t1", pictures: Array.from({ length: 21 }, () => "#1") })
+      expect(failed.message).toBe("Not sent: pictures has more than 20 items")
+      expect(h.cpp.calls()).toHaveLength(0)
+      expect(h.asked.map((one) => one.action)).toEqual(["memory"])
+    }),
+  )
+
+  it.effect("takes an SVG by its markup, after its declaration and comments, or by its name and text", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const svg = new TextEncoder().encode(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!-- drawn by d2 -->\n<svg xmlns="http://www.w3.org/2000/svg"/>',
+      )
+      // A doctype before the markup is not the start a sniff reads: the `.svg` name and its text say what it is.
+      const doctype = new TextEncoder().encode('<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN">\n<svg/>')
+      yield* Effect.promise(() =>
+        Promise.all([Bun.write(`${tmp.path}/chart.svg`, svg), Bun.write(`${tmp.path}/other.svg`, doctype)]),
+      )
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      yield* h.run("task", { id: "t1", pictures: ["chart.svg", "other.svg"] })
+      expect(sent(h)).toEqual({
+        id: "t1",
+        pictures: [
+          { sha256: sha(svg), name: "chart.svg" },
+          { sha256: sha(doctype), name: "other.svg" },
+        ],
+      })
+      expect(h.cpp.files.get(sha(svg))?.type).toBe("image/svg+xml")
+      expect(h.cpp.files.get(sha(doctype))?.type).toBe("image/svg+xml")
+    }),
+  )
+
+  it.effect("leaves the arguments of a tool whose meta names no files untouched", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const input = { day: "#1", places: ["after.png", 3] }
+      yield* h.run("moon_phase", input)
+      expect(sent(h)).toEqual(input)
+      expect(h.cpp.uploads).toHaveLength(0)
     }),
   )
 })

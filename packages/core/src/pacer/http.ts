@@ -136,6 +136,10 @@ export interface Interface {
   ) => Effect.Effect<Answer<A>, Error>
   /** A POST whose answer has no body to read, such as a 204: any 2xx is success. */
   readonly notify: (path: string, body: unknown, options?: Options) => Effect.Effect<void, Error>
+  /** A PUT whose body is bytes, such as a file's: any 2xx is success. */
+  readonly put: (path: string, bytes: Uint8Array, contentType: string, options?: Options) => Effect.Effect<void, Error>
+  /** A HEAD's status, whatever it is: a client asks whether CPP holds something before it sends it. */
+  readonly head: (path: string, options?: Options) => Effect.Effect<number, Error>
   /** A GET whose body is read as it arrives, such as the change stream. */
   readonly stream: (path: string, options?: Options) => Effect.Effect<StreamAnswer, Error>
 }
@@ -247,6 +251,23 @@ export const layer = Layer.effect(
           const text = yield* sent.response.text.pipe(Effect.mapError(unreachable))
           const refused = refusal(sent.response, text)
           if (refused) return yield* refused
+        }).pipe(timeout(options)),
+      put: (path, bytes, contentType, options) =>
+        Effect.gen(function* () {
+          const sent = yield* send(
+            (url) => HttpClientRequest.put(url).pipe(HttpClientRequest.bodyUint8Array(bytes, contentType)),
+            path,
+            options,
+            { redirect: "manual" },
+          )
+          const text = yield* sent.response.text.pipe(Effect.mapError(unreachable))
+          const refused = refusal(sent.response, text)
+          if (refused) return yield* refused
+        }).pipe(timeout(options)),
+      head: (path, options) =>
+        Effect.gen(function* () {
+          const sent = yield* send(HttpClientRequest.head, path, options, { redirect: "manual" })
+          return sent.response.status
         }).pipe(timeout(options)),
       stream: (path, options) =>
         Effect.gen(function* () {

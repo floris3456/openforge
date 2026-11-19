@@ -79,7 +79,7 @@ export const make = Effect.gen(function* () {
         const kept = yield* kv.get(key)
         const next = decide(Schema.is(SeenSchema)(kept) ? kept : undefined, things(items), now)
         yield* kv.set(key, next.seen)
-        const fresh = items.filter((item) => next.fresh.has(item.id))
+        const fresh = items.filter((item) => next.fresh.has(item.id)).map((item) => newMembers(item, next.things))
         if (fresh.length === 0) return
         const batch = `${now}-${++batches}`
         claims.set(batch, false)
@@ -114,9 +114,13 @@ export function things(items: ReadonlyArray<Item>) {
 export function decide(kept: Seen | undefined, now: ReadonlyArray<{ id: string; item: string }>, at: number) {
   const seen: Record<string, { gone?: number }> = {}
   const fresh = new Set<string>()
+  const things = new Set<string>()
   for (const thing of now) {
     const entry = kept?.[thing.id]
-    if (kept && (!entry || (entry.gone !== undefined && at - entry.gone >= GONE_MS))) fresh.add(thing.item)
+    if (kept && (!entry || (entry.gone !== undefined && at - entry.gone >= GONE_MS))) {
+      fresh.add(thing.item)
+      things.add(thing.id)
+    }
     seen[thing.id] = {}
   }
   for (const [id, entry] of Object.entries(kept ?? {})) {
@@ -124,7 +128,21 @@ export function decide(kept: Seen | undefined, now: ReadonlyArray<{ id: string; 
     const gone = entry.gone ?? at
     if (at - gone < GONE_MS) seen[id] = { gone }
   }
-  return { seen, fresh }
+  return { seen, fresh, things }
+}
+
+/**
+ * A grouped item told for some of its members, not all: its line names the new ones ("Claude: no account ready: b
+ * is new"), since the item itself was told before.
+ */
+function newMembers(item: Item, fresh: ReadonlySet<string>): Item {
+  const members = item.members ?? []
+  const added = members.filter((member) => fresh.has(member.id))
+  if (added.length === 0 || added.length === members.length) return item
+  return {
+    ...item,
+    what: `${item.what}: ${added.map((member) => member.what).join(", ")} ${added.length === 1 ? "is" : "are"} new`,
+  }
 }
 
 /** One notification for the new items: one says what it is, several how many and what. */

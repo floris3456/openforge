@@ -235,12 +235,15 @@ function progressHooks(
   } satisfies CodeMode.Hooks
 }
 
-export const catalog = (inventory: Inventory) => {
-  const pinned = new Set(
+export const catalog = (inventory: Inventory, configured: Readonly<Record<string, boolean>> = {}) => {
+  const registered = new Set(
     Array.from(inventory.tools.values())
       .filter((registration) => registration.options?.pinned === true)
       .map(qualifiedName),
   )
+  // The config decides first: the tool's path, else its namespace's `*`; the registration's pin holds otherwise.
+  const isPinned = (path: string) =>
+    configured[path] ?? configured[`${path.split(".", 1)[0] ?? path}.*`] ?? registered.has(path)
   const root: CatalogNode = { children: new Map() }
   for (const namespace of inventory.namespaces?.values() ?? []) getNode(root, namespace.name).namespace = namespace
   for (const tool of runtime(inventory).catalog)
@@ -249,7 +252,7 @@ export const catalog = (inventory: Inventory) => {
       name: tool.path.split(".").at(-1) ?? tool.path,
       description: tool.description,
       signature: tool.signature,
-      pinned: pinned.has(tool.path),
+      pinned: isPinned(tool.path),
     }
   return {
     tools: renderCatalog(root),

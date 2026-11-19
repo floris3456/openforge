@@ -2771,6 +2771,7 @@ export type ConfigEntry =
           }
         }
         tool_output?: { max_lines?: number; max_bytes?: number }
+        codemode?: { pinned?: { [x: string]: boolean } }
         mcp?: {
           timeout?: { startup?: number; catalog?: number; execution?: number }
           servers?: {

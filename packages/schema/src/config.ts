@@ -87,6 +87,16 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   tool_output: ConfigToolOutput.Info.pipe(optional).annotate({
     description: "Tool output truncation thresholds",
   }),
+  codemode: Schema.Struct({
+    pinned: Schema.Record(Schema.String, Schema.Boolean).pipe(optional).annotate({
+      description:
+        "Code Mode tools always listed in the catalog (true) or never pinned (false), by catalog path (`web_search`, `openforge.worktree_list`) or namespace (`context7.*`).",
+    }),
+  })
+    .pipe(optional)
+    .annotate({
+      description: "Code Mode (the `execute` tool) configuration",
+    }),
   mcp: ConfigMCP.Info.pipe(optional).annotate({
     description: "MCP server configuration",
   }),

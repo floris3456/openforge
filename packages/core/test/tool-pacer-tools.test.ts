@@ -129,7 +129,7 @@ const taskList = {
   ...listOf("7e57000000000003", [...ownerList.tools.claude, taskTool]),
   meta: { ...ownerList.meta, task: taskMeta },
 }
-const step = { sessionID, parentID, model: "claude-haiku-5-5", codemode: true, step: true, continues: false }
+const step = { sessionID, parentID, model: "claude-haiku-5-5", agent: "build", codemode: true, step: true, continues: false }
 
 /** The real registry with the plugin, over a fake CPP whose list the chat has read once. */
 const setup = Effect.fnUntraced(function* (
@@ -1014,6 +1014,7 @@ describe.skipIf(!LIVE)("PacerToolsPlugin files, live", () => {
   const liveStep = {
     sessionID: lead.id,
     model: "claude-haiku-5-5",
+    agent: "build",
     codemode: true,
     step: true,
     continues: false,

@@ -8,6 +8,7 @@ import { Config } from "@opencode/core/config"
 import { Directory, Document, Event, Info } from "@opencode/schema/config"
 import { Model } from "@opencode/schema/model"
 import { ConfigAgentPlugin } from "@opencode/core/config/plugin/agent"
+import { CodeModePins } from "@opencode/core/codemode/pins"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -474,6 +475,57 @@ permissions:
             required: true,
           })
           expect((yield* agents.get(Agent.ID.make("tester")))?.sandbox).toEqual({ mode: "off" })
+        }),
+      ),
+    ),
+  )
+
+  it.live("lays an agent's Code Mode pins, from config documents and Markdown, over the config's", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(tmp.path, "agents"), { recursive: true })
+            // A V1 field next to `codemode` still reads as V2, which keeps `codemode`.
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "tester.md"),
+              '---\ntools:\n  shell: true\ncodemode:\n  pinned:\n    "context7.*": false\n---\nRun the tests.',
+            )
+          })
+          const agents = yield* Agent.Service
+          const entries = [
+            new Document({
+              type: "document",
+              info: decode({
+                codemode: { pinned: { web_search: true, "context7.*": true } },
+                agents: { reviewer: { codemode: { pinned: { web_search: false } } }, writer: { description: "Writes" } },
+              }),
+            }),
+            new Document({
+              type: "document",
+              info: decode({ agents: { reviewer: { codemode: { pinned: { "openforge.*": true } } } } }),
+            }),
+            directoryEntry(tmp.path),
+          ]
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provide(Config.testLayer(entries)),
+          )
+
+          const reviewer = yield* agents.get(Agent.ID.make("reviewer"))
+          const tester = yield* agents.get(Agent.ID.make("tester"))
+          const writer = yield* agents.get(Agent.ID.make("writer"))
+          expect(reviewer?.codemode).toEqual({ pinned: { web_search: false, "openforge.*": true } })
+          expect(tester?.codemode).toEqual({ pinned: { "context7.*": false } })
+          expect(writer?.codemode).toBeUndefined()
+          // The agent's value wins per tool; an agent without pins keeps the config's.
+          expect(CodeModePins.forAgent(entries, reviewer!)).toEqual({
+            web_search: false,
+            "context7.*": true,
+            "openforge.*": true,
+          })
+          expect(CodeModePins.forAgent(entries, tester!)).toEqual({ web_search: true, "context7.*": false })
+          expect(CodeModePins.forAgent(entries, writer!)).toEqual({ web_search: true, "context7.*": true })
         }),
       ),
     ),

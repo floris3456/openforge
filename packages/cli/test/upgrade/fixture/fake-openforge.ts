@@ -24,7 +24,8 @@
 import { Database } from "bun:sqlite"
 import { ServiceSwitch } from "@opencode/protocol/service-switch"
 import { randomUUID } from "node:crypto"
-import { appendFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, writeFileSync } from "node:fs"
+import path from "node:path"
 
 type Work = { sessionID?: string; kind: "step" | "tool" | "model"; name: string }
 
@@ -258,12 +259,15 @@ const server = Bun.serve({
   },
 })
 
+const registration = process.env.FAKE_REGISTRATION ?? ""
 writeFileSync(
-  process.env.FAKE_REGISTRATION ?? "",
+  registration,
   JSON.stringify({ id: randomUUID(), version: reported, url: `http://127.0.0.1:${server.port}`, pid: process.pid }),
   { mode: 0o600 },
 )
 record(paused ? "started paused" : "started")
+// Once its test has removed its folder it exits: a test that failed may have left it running unregistered.
+setInterval(() => existsSync(path.dirname(registration)) || process.exit(0), 1_000)
 process.on("SIGTERM", () => {
   record("stopped")
   process.exit(0)

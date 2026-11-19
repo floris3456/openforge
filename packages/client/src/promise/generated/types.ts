@@ -2873,6 +2873,7 @@ export type ConfigEntry =
             disabled?: boolean
             permissions?: PermissionRuleset
             sandbox?: ConfigSandbox
+            codemode?: { pinned?: { [x: string]: boolean } }
           }
         }
         snapshots?: boolean
@@ -3154,6 +3155,7 @@ export type AgentInfo = {
   steps?: number
   permissions: PermissionRuleset
   sandbox?: ConfigSandbox
+  codemode?: { pinned?: { [x: string]: boolean } }
 }
 
 export type SessionsResponse = {

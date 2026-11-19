@@ -30,6 +30,7 @@ const step = (sessionID: SessionID, model = "claude-haiku-5-5", parentID?: Sessi
   sessionID,
   ...(parentID ? { parentID } : {}),
   model,
+  agent: "build",
   codemode: true,
   step: true,
   continues: false,
@@ -157,6 +158,29 @@ describe("PacerTools.list", () => {
     }),
   )
 
+  it.effect("reads it again with the new agent's name when the step's agent changes, not for a compaction", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      const first = yield* tools.list(step(chat))
+      expect(tools.held(chat, "build")).toBe(first!)
+
+      // A compaction run as another agent carries the steps' list.
+      expect(yield* tools.list({ ...compaction(chat), agent: "compaction" })).toBe(first!)
+      expect(cpp.lists()).toHaveLength(1)
+      // What the chat holds was read for build: none for explore until its own read.
+      expect(tools.held(chat, "explore")).toBeUndefined()
+      expect(tools.held(chat)).toBe(first!)
+
+      yield* tools.list({ ...step(chat), agent: "explore" })
+      yield* tools.list({ ...step(chat), agent: "explore" })
+      expect(cpp.lists().map((read) => read.headers.get("x-pacer-agent"))).toEqual(["build", "explore"])
+      expect(tools.held(chat, "explore")).not.toBeUndefined()
+      // Who asks is named only by the agent: the chat is X-Pacer-Session's.
+      expect(cpp.lists()[1]!.headers.get("x-pacer-chat")).toBeNull()
+    }),
+  )
+
   it.effect("reads it for a compaction or generation only when the chat holds none", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
@@ -168,28 +192,32 @@ describe("PacerTools.list", () => {
     }),
   )
 
-  it.effect("reads it again at the step after the chat's compaction ends, also when it ends during that read", () =>
+  it.effect("reads it again at the chat's cold point, once, also when another comes during that read", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
       const { tools, bus } = yield* startTools(endpointOf(cpp.origin))
       yield* tools.list(step(chat))
 
+      // A compaction's end alone reads nothing: the step at the chat's cold point, which `SessionContext` tells, does.
       yield* bus.publish(...ended(chat))
       yield* settle
-      // The compaction's own request still carries the list it summarizes with.
+      yield* tools.list(step(chat))
+      expect(cpp.lists()).toHaveLength(1)
+      tools.cold(chat)
+      // A compaction's own request still carries the list it summarizes with.
       yield* tools.list(compaction(chat))
       expect(cpp.lists()).toHaveLength(1)
+      // The step's read before its instructions reads it; its request's own finds it read.
+      yield* tools.list(step(chat))
       yield* tools.list(step(chat))
       expect(cpp.lists()).toHaveLength(2)
 
-      // A compaction that ends while the list is read: the answer may be CPP's copy from before it.
-      yield* bus.publish(...ended(chat))
-      yield* settle
+      // A cold point that comes while the list is read: the answer may be CPP's copy from before it.
+      tools.cold(chat)
       cpp.hold()
       const reading = yield* tools.list(step(chat)).pipe(Effect.forkChild({ startImmediately: true }))
       yield* until("the third read", () => cpp.lists().length === 3)
-      yield* bus.publish(...ended(chat))
-      yield* settle
+      tools.cold(chat)
       cpp.gate.release()
       expect((yield* Fiber.join(reading))?.version).toBe(ownerList.version)
       yield* tools.list(step(chat))
@@ -345,6 +373,38 @@ describe("PacerTools.list", () => {
         expect(cpp.lists()).toHaveLength(3)
       }),
     ),
+  )
+
+  it.effect("a chat whose wait went without takes that outcome for 30 s, then reads once at a time", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = busy
+      const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => cpp.lists().length === 1)
+      while (waiting.pollUnsafe() === undefined) {
+        yield* TestClock.adjust("1 second")
+        yield* settle
+      }
+      expect(yield* Fiber.join(waiting)).toBeUndefined()
+      const reads = cpp.lists().length
+      // The step's request after its instructions' read, and its retries meanwhile: no read, no wait.
+      const reused = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* settle
+      expect(reused.pollUnsafe()).toBeDefined()
+      expect(yield* Fiber.join(reused)).toBeUndefined()
+      expect(cpp.lists()).toHaveLength(reads)
+      // Then one read at a time, which does not wait when it gets no answer.
+      yield* TestClock.adjust("30 seconds")
+      const once = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the read after 30 s", () => cpp.lists().length === reads + 1)
+      yield* settle
+      expect(once.pollUnsafe()).toBeDefined()
+      expect(yield* Fiber.join(once)).toBeUndefined()
+      cpp.answers.list = () => Response.json(ownerList)
+      expect((yield* tools.list(resumed(chat)))?.version).toBe(ownerList.version)
+      expect(cpp.lists()).toHaveLength(reads + 2)
+    }),
   )
 
   it.effect("a chat without steps reads once and goes without", () =>

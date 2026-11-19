@@ -4,7 +4,7 @@ import { describeWork, type SwitchWork } from "@opencode/client/promise"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
-import { Deferred, Duration, Effect, Fiber } from "effect"
+import { Deferred, Duration, Effect, Exit, Fiber } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { ancestors } from "../../../client/test/fixture/service-fixture"
@@ -14,6 +14,7 @@ import { ReleaseLayout } from "../../src/upgrade/layout"
 import { ReleaseSwitch } from "../../src/upgrade/switch"
 import { SwitchLock } from "../../src/upgrade/switch-lock"
 import {
+  contender,
   fake,
   happened,
   history,
@@ -21,8 +22,11 @@ import {
   layer,
   migrations,
   root,
+  slowToCopy,
+  staleAfter,
   target,
   writeMigrations,
+  type Contender,
   type Serve,
 } from "./fixture/fixture"
 
@@ -121,6 +125,30 @@ describe("switch steps", () => {
       expect(
         yield* ReleaseDatabase.copy(path.join(directory, "missing.db"), copy).pipe(Effect.provide(layer(directory))),
       ).toBe(false)
+    }),
+  )
+
+  it.live("leaves nothing of a copy that failed", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const database = path.join(directory, "opencode.db")
+      const copy = path.join(directory, "releases", "0.1.0", "opencode.db")
+      yield* Effect.sync(() => {
+        using db = new Database(database)
+        db.run("CREATE TABLE note (text BLOB)")
+        db.run(
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200) INSERT INTO note SELECT randomblob(3000) FROM n",
+        )
+      })
+      // A damaged last page: VACUUM INTO has created the copy before it reads that page and fails.
+      yield* Effect.promise(async () => {
+        const file = await fs.open(database, "r+")
+        await file.write(Buffer.alloc(4096, 0xff), 0, 4096, (await file.stat()).size - 4096)
+        await file.close()
+      })
+      const error = yield* ReleaseDatabase.copy(database, copy).pipe(Effect.provide(layer(directory)), Effect.flip)
+      expect(error.message).toBe(`could not use the database ${database}: database disk image is malformed`)
+      expect(yield* Effect.promise(() => fs.readdir(path.dirname(copy)))).toEqual([])
     }),
   )
 
@@ -580,6 +608,52 @@ describe("waiting", () => {
         expect(yield* SwitchLock.held(sealed).pipe(provide)).toBe(false)
       }),
   )
+
+  describe("while the database copy outlasts the lock's stale window", () => {
+    // The switch lock counts as stale once its heartbeat is this old, instead of 60 s, in every process of the test.
+    const staleMs = 400
+
+    // `installed`, with a database whose copy takes about a second (`slowToCopy`).
+    const slow = Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      slowToCopy(test.switching.database)
+      const flock = yield* EffectFlock.Service.pipe(test.provide)
+      const others = (mode: Contender["mode"]) =>
+        contender({ directory: test.directory, mode, staleMs, from: "0.1.0", to: "0.1.1" })
+      const run = ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(
+        Effect.provideService(EffectFlock.Service, staleAfter(flock, staleMs)),
+        test.provide,
+        Effect.exit,
+      )
+      return { ...test, others, run }
+    })
+
+    it.live("the switch keeps its lock throughout", () =>
+      Effect.gen(function* () {
+        const test = yield* slow
+        const watching = yield* test.others("watch")
+        const result = yield* test.run
+        // Another process sees the lock held from the start of the switch until 0.1.1 is in use, never free between.
+        expect((yield* watching).lines).toEqual(["held 0.1.0", "free 0.1.1"])
+        expect(result).toEqual(Exit.succeed({ type: "switched", from: "0.1.0", to: "0.1.1" }))
+      }),
+    )
+
+    it.live("a starting service and a second switch wait until it is done", () =>
+      Effect.gen(function* () {
+        const test = yield* slow
+        const starting = yield* test.others("wait")
+        const second = yield* test.others("switch")
+        const result = yield* test.run
+        // `serve --service` goes on only once 0.1.1 is in use, and the second switch then finds nothing to do.
+        expect((yield* starting).lines).toEqual(["0.1.1"])
+        expect((yield* second).lines).toEqual([JSON.stringify({ type: "unchanged", version: "0.1.1" })])
+        expect(result).toEqual(Exit.succeed({ type: "switched", from: "0.1.0", to: "0.1.1" }))
+        expect(yield* test.happened).toEqual(["0.1.0 paused", "0.1.0 stopped", "0.1.1 started paused", "0.1.1 resumed"])
+        expect(migrations(ReleaseSwitch.copyOf(test.switching, "0.1.0"))).toEqual(["m-0.1.0"])
+      }),
+    )
+  })
 
   it.live("the service a switch starts does not wait for the switch's lock", () =>
     Effect.gen(function* () {

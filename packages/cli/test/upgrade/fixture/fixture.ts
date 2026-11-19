@@ -70,11 +70,17 @@ export function layer(directory: string) {
 
 /** The switch target for an install under `directory`; its services stop at scope end. */
 export const target = Effect.fnUntraced(function* (directory: string) {
+  const switching = switchTarget(directory)
+  yield* Effect.promise(() => fs.mkdir(paths(directory).state, { recursive: true }))
+  yield* Effect.addFinalizer(() => Service.stop({ file: switching.service.file }).pipe(Effect.ignore))
+  return switching
+})
+
+/** The switch target for an install under `directory`, as `target` makes it, for another process of the same test. */
+export function switchTarget(directory: string) {
   const dirs = paths(directory)
   const file = path.join(dirs.state, "service.json")
   const database = path.join(dirs.data, "opencode.db")
-  yield* Effect.promise(() => fs.mkdir(dirs.state, { recursive: true }))
-  yield* Effect.addFinalizer(() => Service.stop({ file }).pipe(Effect.ignore))
   return {
     layout: ReleaseLayout.at(dirs.data),
     database,
@@ -86,6 +92,65 @@ export const target = Effect.fnUntraced(function* (directory: string) {
     log: path.join(dirs.log, "upgrade.log"),
     timeout: Duration.seconds(4),
   } satisfies ReleaseSwitch.Target
+}
+
+/** `flock` with locks that count as stale after `staleMs` instead of 60 s, for every process of a test alike. */
+export function staleAfter(flock: EffectFlock.Interface, staleMs: number): EffectFlock.Interface {
+  return {
+    ...flock,
+    acquire: (key, dir, options) => flock.acquire(key, dir, { ...options, staleMs }),
+    held: (key, dir) => flock.held(key, dir, { staleMs }),
+  }
+}
+
+/**
+ * Adds empty tables to `file` until its copy with VACUUM INTO takes about a second: SQLite copies the tables one by one,
+ * in a time that grows with the square of their number, so a small file makes a long copy.
+ */
+export function slowToCopy(file: string, tables = 8_000) {
+  using db = new Database(file)
+  db.transaction(() => {
+    for (let index = 0; index < tables; index++) db.run(`CREATE TABLE filler_${index} (id INTEGER PRIMARY KEY)`)
+  })()
+}
+
+/** What another process of a test does while the test switches releases (see contender.ts). */
+export type Contender = {
+  readonly directory: string
+  readonly mode: "watch" | "wait" | "switch"
+  /** The switch lock counts as stale after this many milliseconds, as in the test's own process. */
+  readonly staleMs: number
+  readonly from: string
+  readonly to: string
+  /** Written once it runs. */
+  readonly ready: string
+}
+
+const contenderProgram = path.join(import.meta.dir, "contender.ts")
+
+/**
+ * Starts another process of the test (contender.ts) and returns once it runs. The effect it returns waits for it to
+ * end and gives the lines it printed. It is stopped at scope end.
+ */
+export const contender = Effect.fnUntraced(function* (input: Omit<Contender, "ready">) {
+  const ready = path.join(input.directory, `${input.mode}.ready`)
+  const child = yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      Bun.spawn([process.execPath, contenderProgram, JSON.stringify({ ...input, ready } satisfies Contender)], {
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+    ),
+    (child) => Effect.sync(() => child.kill()),
+  )
+  // Bounded by the test's timeout; one that fails to start shows why in its output.
+  yield* Effect.promise(async () => {
+    while (child.exitCode === null && !(await fs.exists(ready))) await Bun.sleep(20)
+  })
+  return Effect.promise(async () => {
+    const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+    return { lines: stdout.split("\n").filter(Boolean), stderr, code: await child.exited }
+  })
 })
 
 /** Where the fake services under `directory` write what happened to them (see fake-openforge.ts). */

@@ -315,7 +315,7 @@ test("a screen told the switch finished does not restart while a write is still 
   expect(restart.relaunches).toEqual([fake.sessionID])
 }, 15_000)
 
-test("the switch notice leaves the first lines of a chat visible", async () => {
+test("the switch notice never covers or pushes down the lines of a chat", async () => {
   const fake = chat({ transcript: true })
   fake.state.up = true
   await using setup = await createAppFixture({
@@ -335,12 +335,12 @@ test("the switch notice leaves the first lines of a chat visible", async () => {
     type: "service.pausing",
     data: { deadline: Date.now() + 120_000, waiting: [{ sessionID: fake.sessionID, kind: "tool", name: "webfetch" }] },
   } as OpenCodeEvent)
-  await shows(setup, (frame) => frame.includes('waiting for webfetch in "Switch writes"'))
+  await shows(setup, (frame) => frame.includes("Updating to a new openforge release · waiting for 1 chat"))
   const lines = setup.captureCharFrame().split("\n")
-  const notice = lines.findIndex((line) => line.includes("Switching to a new openforge release"))
-  const moved = lines.findIndex((line) => line.includes("The first line of this chat"))
-  // The transcript makes room below the notice instead of running under it.
-  expect(moved).toBeGreaterThan(notice)
-  expect(moved).toBeGreaterThanOrEqual(first)
+  const notice = lines.findIndex((line) => line.includes("Updating to"))
+  // The transcript stays where it was; the notice takes a row at the screen's bottom, below it.
+  expect(lines.findIndex((line) => line.includes("The first line of this chat"))).toBe(first)
+  expect(notice).toBeGreaterThan(first)
+  expect(lines.filter((line) => line.includes("Updating to"))).toHaveLength(1)
   expect(lines.join("\n")).toContain("Here is the plan.")
 }, 15_000)

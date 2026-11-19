@@ -827,6 +827,7 @@ describe("SessionModelRequest for a chat on another provider, with a CPP set up"
       expect(pacerHeaders(yield* h.requests.primary(h.input(snapshot(all))))).toEqual([
         "X-Pacer-Session",
         "X-Pacer-Parent-Session",
+        "X-Pacer-Agent",
         "X-Pacer-Compact",
       ])
     }),
@@ -927,6 +928,26 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
       }),
   )
 
+  it.effect("names the chat's agent on each kind of model request and on its tool list read", () =>
+    Effect.gen(function* () {
+      const h = yield* setup(true, { session: child })
+      const input = { ...h.input(snapshot(all)), agent: Agent.ID.make("explore") }
+      const prepared = [
+        yield* h.requests.primary(input),
+        yield* h.requests.title(input),
+        yield* h.requests.generate(input),
+        yield* h.requests.compaction(input),
+      ]
+      expect(prepared.map((item) => item.request.headers?.["X-Pacer-Agent"])).toEqual([
+        "explore",
+        "explore",
+        "explore",
+        "explore",
+      ])
+      expect(h.cpp.lists().map((list) => list.headers.get("x-pacer-agent"))).toEqual(["explore"])
+    }),
+  )
+
   it.effect("names the folder without a remote, and no project for a chat outside any", () =>
     Effect.gen(function* () {
       const h = yield* setup(true, { session: lead })
@@ -938,7 +959,12 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
       const k = yield* setup(true, { remote: "github.com/owner/café" })
       expect(session.projectID).toBe(Project.ID.global)
       const prepared = yield* k.requests.primary(k.input(snapshot(all)))
-      expect(pacerHeaders(prepared)).toEqual(["X-Pacer-Session", "X-Pacer-Parent-Session", "X-Pacer-Compact"])
+      expect(pacerHeaders(prepared)).toEqual([
+        "X-Pacer-Session",
+        "X-Pacer-Parent-Session",
+        "X-Pacer-Agent",
+        "X-Pacer-Compact",
+      ])
       expect(read(k.cpp)).toEqual([{}])
     }),
   )

@@ -6,7 +6,9 @@ export { mediaHashFromUri, withMediaRefs, type MediaRequestOptions } from "./med
 export { createResender, findResendTimeout, type Resender } from "../resend.js"
 export {
   describeWork,
+  describeWorkCount,
   switchingMessage,
+  switchingNotice,
   waitingMessage,
   type SwitchWork,
   type TitleOf,

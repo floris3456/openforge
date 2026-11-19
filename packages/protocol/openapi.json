@@ -17702,6 +17702,18 @@
           },
           "sandbox": {
             "$ref": "#/components/schemas/Config.Sandbox"
+          },
+          "codemode": {
+            "type": "object",
+            "properties": {
+              "pinned": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": ["id", "name", "request", "mode", "hidden", "permissions"],
@@ -18616,6 +18628,18 @@
           },
           "sandbox": {
             "$ref": "#/components/schemas/Config.Sandbox"
+          },
+          "codemode": {
+            "type": "object",
+            "properties": {
+              "pinned": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

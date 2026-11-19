@@ -33,7 +33,7 @@ type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof R
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
 const agentKeys = new Set(["variant", ...Object.keys(ConfigAgent.Info.fields)])
 // Fields only V2 understands. A file that uses any of them is read as V2, whatever else it contains.
-const nativeKeys = ["permissions", "request", "system", "disabled", "sandbox"]
+const nativeKeys = ["permissions", "request", "system", "disabled", "sandbox", "codemode"]
 
 export const Plugin = define({
   id: "opencode.config.agent",
@@ -104,6 +104,8 @@ export const Plugin = define({
               agent.permissions.push(...expandPermissions(item.permissions, global.home))
             }
             if (item.sandbox !== undefined) agent.sandbox = ConfigSandbox.merge(agent.sandbox, item.sandbox)
+            if (item.codemode?.pinned !== undefined)
+              agent.codemode = { pinned: { ...agent.codemode?.pinned, ...item.codemode.pinned } }
           })
         }
       }

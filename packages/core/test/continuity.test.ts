@@ -14,6 +14,7 @@ import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { SessionContinuity } from "@opencode/core/continuity"
+import { ServiceClient } from "@opencode/core/service-client"
 import { SessionRestTable } from "@opencode/core/continuity/sql"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -244,7 +245,7 @@ const start = (
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
         Global.node.replace(Layer.succeed(Global.Service, global)),
-        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
+        LayerNodePlatform.llmClient.replace(ServiceClient.llm(Layer.succeed(LLMClient.Service, llm))),
         SessionContinuity.node.replace(
           wrap
             ? continuityNode.mapLayer((layer) =>

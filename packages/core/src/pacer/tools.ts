@@ -28,10 +28,14 @@ import { PacerModels } from "./models.js"
 // CPP's tools as a client of its API (CLIENT-GUIDE §4.3; the workspace's reference `docs/reference/cpp-tools-api.md`):
 // each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
 // CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
-// anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
-// model changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
-// is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
-// warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
+// anyway, so a list is read again only at those points: the chat's first request, at each of its cold points (after
+// its compaction, once its cache went cold, …: where its start is recorded anew, as `SessionPromptStart.cold` decides
+// them and `SessionContext` tells this module), when its model or agent changes, and when a model answer's
+// `X-Pacer-Tools` names another version. No event of the chat's is listened to for that: this node is built under
+// whichever Location boots first, and the bus hands it only that Location's events (a chat deleted in another one
+// goes as the least recently used). What the model is offered from it is `PacerOffer`'s; this module stays when that
+// changes. With a chat's start recorded (`SessionPromptStart`), its warm steps send the recorded tools: the list then
+// decides only what a cold point records and what a reminder tells.
 
 /** What a client needs to run one of CPP's tools: the list's `meta` of it. */
 export const Meta = PacerModels.ToolMeta
@@ -59,7 +63,9 @@ export const READ_TIMEOUT = Duration.seconds(5)
 export const PAUSE = Duration.seconds(30)
 /**
  * A chat with earlier steps that holds no list waits for CPP's answer: it reads again this long after a read that got
- * none, then `RETRY` after each later one, for up to `WAIT` from its first read.
+ * none, then `RETRY` after each later one, for up to `WAIT` from its first read. It waits once: after a wait that went
+ * without, its reads for `PAUSE` take that outcome (the step's request after its instructions' read, its retries), and
+ * later ones read once.
  */
 export const RETRY_FIRST = Duration.seconds(3)
 export const RETRY = Duration.seconds(5)
@@ -75,7 +81,10 @@ export const UPLOAD_TIMEOUT = Duration.seconds(60)
  */
 export const HELD = Duration.hours(1)
 
-/** A chat's list as CPP answered it. One object per version, shared by every chat that holds it. */
+/**
+ * A chat's list as CPP answered it. One object per version and instructions version, shared by every chat that holds
+ * it: two agents may get the same definitions with different instructions.
+ */
 export interface List {
   /** CPP's `version`: the first 16 hex digits of the definitions' SHA-256. */
   readonly version: string
@@ -95,6 +104,8 @@ export interface ListInput {
   readonly project?: Readonly<Record<string, string>>
   /** The model the request goes to, as CPP's `model`. */
   readonly model: string
+  /** The agent the chat runs as, its role to CPP (`X-Pacer-Agent`): another one is another list. */
+  readonly agent: string
   /** Whether the chat runs Code Mode: its instructions are written for a client that does (`codemode=1`). */
   readonly codemode: boolean
   /**
@@ -112,12 +123,13 @@ export interface ListInput {
 /**
  * A chat's list input from the pieces a request knows, built here by both the step's early read (`SessionContext`,
  * before its instructions, so the first request carries CPP's text) and the request's own (`SessionModelRequest`), so
- * the two cannot drift. A chat that holds a list reads nothing for either.
+ * the two cannot drift. A chat that holds a list reads nothing for either, but at its cold point (`cold`).
  */
 export const listInput = (input: {
   readonly session: { readonly id: SessionID; readonly parentID?: SessionID }
   readonly project?: Readonly<Record<string, string>>
   readonly model: string
+  readonly agent: string
   /** Whether the chat runs Code Mode, as `PacerOffer.executes` answers it for the request's definitions. */
   readonly codemode: boolean
   readonly step: boolean
@@ -127,6 +139,7 @@ export const listInput = (input: {
   ...(input.session.parentID === undefined ? {} : { parentID: input.session.parentID }),
   ...(input.project === undefined ? {} : { project: input.project }),
   model: input.model,
+  agent: input.agent,
   codemode: input.codemode,
   step: input.step,
   continues: input.continues,
@@ -174,6 +187,11 @@ export interface Interface {
   readonly list: (input: ListInput) => Effect.Effect<List | undefined>
   /** A model answer's `X-Pacer-Tools`: another version than the held one is read at the chat's next step. */
   readonly seen: (sessionID: SessionID, version: string | undefined) => void
+  /**
+   * The chat's step is at a cold point, where its start is recorded anew (`SessionPromptStart.cold`): the list it holds
+   * is read again by that step's first read, so what the step records is what CPP offers now.
+   */
+  readonly cold: (sessionID: SessionID) => void
   readonly call: (input: CallInput) => Effect.Effect<Answer, CallError>
   /**
    * Makes sure CPP holds a file's bytes, by its SHA-256: `HEAD /pacer/v1/files/{sha256}` answers 200 when it does, and
@@ -185,8 +203,11 @@ export interface Interface {
   readonly knownChanges: () => Stream.Stream<Known>
   /** Whether the list the chat holds names the tool; undefined while it holds none, as before its first read. */
   readonly holds: (sessionID: SessionID, name: string) => boolean | undefined
-  /** What the chat holds, its instructions among it; undefined while it holds none. Never reads from CPP. */
-  readonly held: (sessionID: SessionID) => List | undefined
+  /**
+   * What the chat holds, its instructions among it; undefined while it holds none, or, with `agent`, none read for
+   * that agent. Never reads from CPP.
+   */
+  readonly held: (sessionID: SessionID, agent?: string) => List | undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerTools") {}
@@ -226,10 +247,14 @@ interface Chat {
   list?: List
   /** The model the held list was read for. */
   model?: string
+  /** The agent the held list was read for. */
+  agent?: string
   stale: boolean
   /** Counts the events that make the list stale, so one during a read leaves it stale. */
   generation: number
   reading?: Deferred.Deferred<Read>
+  /** When the chat's last wait went without a list; cleared once it holds one. */
+  missed?: number
 }
 
 /** A list read's outcome: `answered` is false when CPP gave no definite answer (no answer, a 5xx, a 429, …). */
@@ -300,10 +325,10 @@ export const layer = Layer.effect(
     }
 
     const release = (list: List | undefined) => {
-      const held = list && versions.get(list.version)
+      const held = list && versions.get(keyOf(list))
       if (!held) return
       held.holders--
-      if (held.holders === 0) versions.delete(list.version)
+      if (held.holders === 0) versions.delete(keyOf(list))
     }
     const drop = (sessionID: SessionID) => {
       release(chats.get(sessionID)?.list)
@@ -322,10 +347,12 @@ export const layer = Layer.effect(
       chat.generation++
     }
     const hold = (chat: Chat, answer: typeof ListAnswer.Type) => {
-      const version = answer.version
-      if (chat.list?.version === version) return chat.list
-      const held = versions.get(version) ?? { list: parse(answer), holders: 0 }
-      versions.set(version, held)
+      chat.missed = undefined
+      const list = parse(answer)
+      const key = keyOf(list)
+      if (chat.list && keyOf(chat.list) === key) return chat.list
+      const held = versions.get(key) ?? { list, holders: 0 }
+      versions.set(key, held)
       held.holders++
       release(chat.list)
       chat.list = held.list
@@ -353,11 +380,16 @@ export const layer = Layer.effect(
             ListAnswer,
             {
               timeout: READ_TIMEOUT,
-              headers: PacerHeaders.chat({
-                sessionID: input.sessionID,
-                parentID: chat.parentID,
-                project: input.project,
-              }),
+              // At another of CPP's addresses at once while this one is away: a chat waits only when none answers.
+              failover: true,
+              headers: {
+                ...PacerHeaders.chat({
+                  sessionID: input.sessionID,
+                  parentID: chat.parentID,
+                  project: input.project,
+                }),
+                ...PacerHeaders.agent(input.agent),
+              },
             },
           )
           .pipe(
@@ -365,13 +397,13 @@ export const layer = Layer.effect(
               Effect.sync((): Read => {
                 if (epoch !== state.epoch) return none
                 // A chat deleted or pushed out meanwhile holds nothing; this request still gets the list.
-                if (chats.get(input.sessionID) !== chat)
-                  return {
-                    list: versions.get(answer.body.version)?.list ?? parse(answer.body),
-                    answered: true,
-                  }
+                if (chats.get(input.sessionID) !== chat) {
+                  const list = parse(answer.body)
+                  return { list: versions.get(keyOf(list))?.list ?? list, answered: true }
+                }
                 const list = hold(chat, answer.body)
                 chat.model = input.model
+                chat.agent = input.agent
                 if (chat.generation === generation) chat.stale = false
                 return { list, answered: true }
               }).pipe(
@@ -405,6 +437,7 @@ export const layer = Layer.effect(
                     release(chat.list)
                     chat.list = undefined
                     chat.model = undefined
+                    chat.agent = undefined
                   }
                   return none
                 }
@@ -434,11 +467,15 @@ export const layer = Layer.effect(
     const list = Effect.fn("PacerTools.list")(function* (input: ListInput) {
       if (!(yield* offered)) return undefined
       const chat = touch(input)
-      const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model))
+      const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model || chat.agent !== input.agent))
       // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
       // tools would cost it its prompt cache because another chat's read failed first.
-      if (!due || (chat.list && (yield* Clock.currentTimeMillis) < state.pausedUntil)) return chat.list
-      if (chat.list || !input.continues) return (yield* read(chat, input, false)).list
+      const now = yield* Clock.currentTimeMillis
+      if (!due || (chat.list && now < state.pausedUntil)) return chat.list
+      // Its wait just went without: this request takes that outcome, as the step's request after its instructions'
+      // read does, rather than wait again.
+      if (!chat.list && chat.missed !== undefined && now < chat.missed + Duration.toMillis(PAUSE)) return undefined
+      if (chat.list || !input.continues || chat.missed !== undefined) return (yield* read(chat, input, false)).list
       return yield* wait(chat, input)
     })
 
@@ -457,6 +494,7 @@ export const layer = Layer.effect(
             waited: Duration.format(Duration.millis(now - begun)),
             reason: result.reason,
           })
+          chat.missed = now
           return undefined
         }
         yield* Effect.raceFirst(Effect.sleep(retry), changed)
@@ -531,14 +569,8 @@ export const layer = Layer.effect(
       ),
       Effect.forkScoped({ startImmediately: true }),
     )
-    yield* bus.subscribe([SessionEvent.Compaction.Ended, SessionEvent.Deleted]).pipe(
-      Stream.runForEach((event) =>
-        Effect.sync(() => {
-          if (event.type === "session.deleted") return drop(event.data.sessionID)
-          const chat = chats.get(event.data.sessionID)
-          if (chat) stale(chat)
-        }),
-      ),
+    yield* bus.subscribe(SessionEvent.Deleted).pipe(
+      Stream.runForEach((event) => Effect.sync(() => drop(event.data.sessionID))),
       Effect.forkScoped({ startImmediately: true }),
     )
 
@@ -548,6 +580,10 @@ export const layer = Layer.effect(
         if (version === undefined) return
         const chat = chats.get(sessionID)
         if (chat?.list && chat.list.version !== version) stale(chat)
+      },
+      cold: (sessionID) => {
+        const chat = chats.get(sessionID)
+        if (chat?.list) stale(chat)
       },
       call,
       upload: (bytes, mime, sha256) =>
@@ -566,7 +602,10 @@ export const layer = Layer.effect(
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),
       holds: (sessionID, name) => chats.get(sessionID)?.list?.byName.has(name),
-      held: (sessionID) => chats.get(sessionID)?.list,
+      held: (sessionID, agent) => {
+        const chat = chats.get(sessionID)
+        return agent === undefined || chat?.agent === agent ? chat?.list : undefined
+      },
     })
   }),
 )
@@ -577,6 +616,11 @@ export const node = makeGlobalNode({
   // Not Session: it imports, through the session context, the model request that uses this.
   deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, KV.node],
 })
+
+/** Which list an answer or a held list is: its version and its instructions' version. */
+function keyOf(list: List) {
+  return `${list.version}:${list.instructions?.version ?? ""}`
+}
 
 /**
  * A version's definitions and their meta, each one on its own: an entry this version does not understand drops only

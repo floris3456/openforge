@@ -2,14 +2,15 @@ export * as SessionRunnerModel from "./model.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LanguageModel } from "@opencode/ai/effect"
-import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
 import { Context, Effect, Layer, Schema } from "effect"
 import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { Agent } from "../../agent.js"
+import { Model } from "../../model.js"
 import { ModelResolver } from "../../model-resolver.js"
 import { PluginHooks } from "../../plugin/hooks.js"
 import { SessionSchema } from "../schema.js"
+import { SessionNamedModel } from "./named-model.js"
 
 export class ModelNotSelectedError extends Schema.TaggedError<ModelNotSelectedError>()(
   "SessionRunnerModel.ModelNotSelectedError",
@@ -77,6 +78,8 @@ const layer = Layer.effect(
     const resolver = yield* ModelResolver.Service
     const agents = yield* Agent.Service
     const hooks = yield* PluginHooks.Service
+    const models = yield* Model.Service
+    const named = yield* SessionNamedModel.Service
     // Location plugins populate and filter the catalog asynchronously during layer startup.
     const select = Effect.fn("SessionRunnerModel.select")(function* (
       session: SessionSchema.Info,
@@ -94,7 +97,15 @@ const layer = Layer.effect(
       const agent = (yield* agents.select(session.agent)).info?.model
       const preferred = agent && (yield* find(agent))
       if (preferred) return { info: preferred, variant: agent.variant }
+      // openforge: the model the agent or the default names may still come (`SessionNamedModel`), and a run on
+      // another one says so.
+      const requested = agent ? undefined : yield* models.requested()
+      const asked = agent ?? (requested && { providerID: requested.providerID, id: requested.modelID })
+      const waited = asked && (yield* named.wait(session.id, asked, () => find(asked)))
+      if (waited && agent) return { info: waited, variant: agent.variant }
       const info = yield* resolver.fallback()
+      if (info && asked && (info.providerID !== asked.providerID || info.id !== asked.id))
+        yield* named.dropped(session.id, asked, info)
       if (info) return { info, variant: undefined }
       return yield* new ModelNotSelectedError({ sessionID: session.id })
     })
@@ -126,5 +137,5 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [ModelResolver.node, Agent.node, PluginHooks.node],
+  deps: [ModelResolver.node, Agent.node, PluginHooks.node, Model.node, SessionNamedModel.node],
 })

@@ -181,19 +181,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           : { providerID: configured.providerID, modelID: configured.model, variant: configured.variant }
       })
 
+      // openforge: a model the agent, the CLI or the config names is kept while the catalog lacks it (shown as
+      // unavailable; a prompt waits for it), so that one a provider lists late, as CLIProxyPacer's are, is the one the chat
+      // starts on.
       const fallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parse(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (providerID && modelID) return { providerID, modelID }
         }
 
         const configured = configuredModel()
-        if (configured && isModelValid(configured)) return configured
+        if (configured) return configured
 
         for (const item of preferences.recent) {
           if (isModelValid(item)) {
@@ -211,10 +209,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       const newSessionModel = createMemo(() => {
         const a = agent.current()
-        return getFirstValidModel(
-          () => a && selectionState.newSessionModelByLocationAgent[locationAgentKey(a.id)],
-          () => a?.model && { providerID: a.model.providerID, modelID: a.model.id },
-          fallbackModel,
+        return (
+          getFirstValidModel(() => a && selectionState.newSessionModelByLocationAgent[locationAgentKey(a.id)]) ??
+          (a?.model ? { providerID: a.model.providerID, modelID: a.model.id } : fallbackModel())
         )
       })
 
@@ -362,6 +359,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         },
         available(model = currentModel()) {
           return model ? isModelValid(model) : false
+        },
+        /** Whether the model's provider has listed its models: CLIProxyPacer's come once its catalog is read. */
+        delivered(model = currentModel()) {
+          return !!model && !!models()?.some((item) => item.providerID === model.providerID)
         },
         trackSessionCommit(
           sessionID: string,

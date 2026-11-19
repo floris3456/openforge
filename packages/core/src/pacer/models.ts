@@ -419,7 +419,8 @@ export const layer = Layer.effect(
         if (!endpoint) return
         const result = yield* read(endpoint).pipe(Effect.result)
         // A service started while the address is down reaches CPP at another; the move starts a read of its own.
-        if (Result.isFailure(result) && down(result.failure) && endpoints.failover) yield* endpoints.failover(endpoint)
+        if (Result.isFailure(result) && PacerHttp.down(result.failure) && endpoints.failover)
+          yield* endpoints.failover(endpoint)
         // The endpoint changed during the read; the change starts a read of its own.
         if (!PacerEndpoint.same(endpoint, yield* endpoints.get())) return
         if (Result.isFailure(result))
@@ -498,14 +499,6 @@ function definite(error: PacerHttp.Error) {
 function servesPage(error: PacerHttp.Error) {
   return (
     error._tag === "PacerHttp.Unexpected" && error.status !== undefined && error.status >= 200 && error.status < 300
-  )
-}
-
-/** CPP did not answer at all, or its gateway said it is down: what `PacerAnswers.outage` calls an outage. */
-function down(error: PacerHttp.Error) {
-  return (
-    error._tag === "PacerHttp.Unreachable" &&
-    (error.status === undefined || error.status === 502 || error.status === 504)
   )
 }
 

@@ -8,8 +8,6 @@ import {
   type LLMRequest,
 } from "@opencode/ai/effect"
 import {
-  LLMClient,
-  RequestExecutor,
   type CheckpointRequest,
   type CompactionRequest,
   type EndpointCompactOptions,
@@ -26,7 +24,6 @@ import { Cause, Clock, Context, Deferred, Effect, Exit, Latch, Layer, Option, Sc
 import { Bus } from "./bus.js"
 import { PendingRequestTable, SessionRestTable } from "./continuity/sql.js"
 import { Database } from "./database/database.js"
-import { requestExecutor } from "./effect/app-node-platform.js"
 import { KV } from "./kv.js"
 import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
@@ -774,21 +771,3 @@ export const noopLayer = Layer.sync(Service, () => {
 export const configured = (options: Options = {}) =>
   makeGlobalNode({ service: Service, layer: layer(options), deps: [Database.node, Bus.node, KV.node] })
 export const node = configured()
-
-/**
- * The model client where the service runs, in place of `LayerNodePlatform.llmClient`: `base`, the real client unless
- * a test gives its fake, with every call gated by `client`.
- */
-export const llmClient = (base: Layer.Layer<LLMClientService, never, RequestExecutor.Service> = LLMClient.layer) =>
-  makeGlobalNode({
-    service: LLMClient.Service,
-    layer: Layer.effect(
-      LLMClient.Service,
-      Effect.gen(function* () {
-        const continuity = yield* Service
-        const llm = yield* LLMClient.Service
-        return continuity.client(llm)
-      }),
-    ).pipe(Layer.provide(base)),
-    deps: [node, requestExecutor],
-  })

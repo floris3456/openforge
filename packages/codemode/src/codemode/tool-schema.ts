@@ -109,8 +109,23 @@ const docLines = (schema: JsonSchema, width: number): Array<string> => {
 
 // Neutralize `*\/` so model-provided schema text cannot terminate generated documentation.
 const jsdoc = (schema: JsonSchema, pad: string): string => {
-  const content = docLines(schema, pad.length)
-  const types = typeof schema.type === "string" ? [schema.type] : (schema.type ?? [])
+  // A nullable property keeps its schema and documentation in its one non-null `anyOf`/`oneOf` branch. Document
+  // that branch with the property's own annotations on top (they win), its description falling back to the
+  // branch's. Two or more non-null branches stay undocumented.
+  const branches = (schema.anyOf ?? schema.oneOf)?.filter((member) => member.type !== "null")
+  const branch = branches?.length === 1 ? branches[0] : undefined
+  const documented =
+    branch === undefined
+      ? schema
+      : {
+          ...branch,
+          ...schema,
+          anyOf: undefined,
+          oneOf: undefined,
+          description: schema.description ?? branch.description,
+        }
+  const content = docLines(documented, pad.length)
+  const types = typeof documented.type === "string" ? [documented.type] : (documented.type ?? [])
 
   const append = (label: string, child: JsonSchema) => {
     docLines(child, pad.length + label.length + 2).forEach((line, index) => {
@@ -123,10 +138,10 @@ const jsdoc = (schema: JsonSchema, pad: string): string => {
   }
 
   // Document only the immediate contents; recursive labels obscure which level a constraint belongs to.
-  if (types.includes("array") && schema.items) append("Each item", schema.items)
-  if ((types.includes("object") || schema.properties) && typeof schema.additionalProperties === "object") {
-    const label = Object.keys(schema.properties ?? {}).length > 0 ? "Each additional value" : "Each value"
-    append(label, schema.additionalProperties)
+  if (types.includes("array") && documented.items) append("Each item", documented.items)
+  if ((types.includes("object") || documented.properties) && typeof documented.additionalProperties === "object") {
+    const label = Object.keys(documented.properties ?? {}).length > 0 ? "Each additional value" : "Each value"
+    append(label, documented.additionalProperties)
   }
 
   if (content.length === 0) return ""

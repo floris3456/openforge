@@ -352,7 +352,8 @@ test("the retained 64 KiB tail starts on a whole character", async () => {
   await app.waitForFrame((frame) => frame.includes("Shell output") && frame.includes("😀"))
   // The second page brings the text to 64 KiB + 1 code units, so the tail would start on the emoji's second half.
   const rest = ("x".repeat(1023) + "\n").repeat(63) + "x".repeat(1023)
-  app.state.output += rest
+  // openforge: the server pushes new output to the viewer (shell.watch) instead of it reading pages.
+  app.write(rest)
   await app.waitForFrame((frame) => frame.includes("Earlier output omitted"), { maxPasses: 100 })
   app.mockInput.pressKey("o")
   await app.waitFor(() => app.copied.length > 0)

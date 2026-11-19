@@ -577,14 +577,25 @@ const layer = (options: Options) =>
           (queue) =>
             Effect.gen(function* () {
               const entry = yield* require(id)
-              const decoder = new TextDecoder()
+              let decoder = new TextDecoder()
               let cursor = input?.cursor ?? 0
+              // A watch from a cursor, or one that skipped ahead, may start inside a character: it starts at the next
+              // whole one, as a page does (`ShellPage.whole`), instead of decoding the stray bytes as U+FFFD.
+              let cut = cursor > 0
+              const decode = (data: Buffer, truncated: boolean) => {
+                if (truncated) decoder = new TextDecoder()
+                if (!cut && !truncated) return decoder.decode(data, { stream: true })
+                cut = false
+                let from = 0
+                while (from < Math.min(3, data.length) && (data[from] & 0xc0) === 0x80) from++
+                return decoder.decode(data.subarray(from), { stream: true })
+              }
               const emit = (data: Buffer, offset: number, size: number) => {
                 const truncated = offset > cursor
                 cursor = offset + data.length
                 return Queue.offer(queue, {
                   type: "output" as const,
-                  output: decoder.decode(data, { stream: true }),
+                  output: decode(data, truncated),
                   cursor,
                   size,
                   truncated,
@@ -610,7 +621,7 @@ const layer = (options: Options) =>
                 cursor = read.cursor
                 yield* Queue.offer(queue, {
                   type: "output",
-                  output: decoder.decode(read.data, { stream: true }),
+                  output: decode(read.data, truncated),
                   cursor,
                   size: exit.size,
                   truncated,

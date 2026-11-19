@@ -258,6 +258,44 @@ describe("Shell through the tool runner", () => {
   )
 
   // Upstream d432a06b9c: a page never splits a character, while the command runs and after it ended.
+  for (const workspace of [false, true])
+    it.live(
+      `a watch from a cursor inside a character starts at the next one, live and from the file${workspace ? ", also in a workspace's own environment" : ""}`,
+      () =>
+        Effect.gen(function* () {
+          const host = yield* machine
+          const release = path.join(host.tmp, "release")
+          const source = path.join(host.tmp, "text")
+          fs.writeFileSync(source, "\u{1F600}z")
+          const location = workspace
+            ? Location.Ref.make({ directory: host.ref.directory, workspaceID: Workspace.ID.make("wrk_whole") })
+            : undefined
+          yield* Effect.gen(function* () {
+            const shell = yield* Shell.Service
+            const info = yield* shell.create({
+              shell: "/bin/sh",
+              command: `cat ${source}; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s done`,
+              timeout: 0,
+            })
+            yield* eventually(() => fs.existsSync(info.file) && fs.statSync(info.file).size === 5, "the emoji and z")
+            // A tail kept from a byte count back, as the TUI's, starts one byte into the emoji.
+            const events = yield* Queue.unbounded<ShellSchema.WatchEvent>()
+            yield* shell.watch(info.id, { cursor: 1 }).pipe(
+              Stream.runForEach((event) => Queue.offer(events, event)),
+              Effect.forkScoped({ startImmediately: true }),
+            )
+            expect(yield* read(events, "z")).toBe("z")
+            fs.writeFileSync(release, "")
+            expect(yield* read(events, "done")).toBe("done")
+            yield* shell.wait(info.id).pipe(Effect.timeout("10 seconds"))
+            const again = yield* shell.watch(info.id, { cursor: 2 }).pipe(Stream.runCollect)
+            expect(again.map((event) => (event.type === "output" ? event.output : event.type)).join("")).toBe(
+              "zdoneexited",
+            )
+          }).pipe(Effect.scoped, Effect.provide(host.service({ location })))
+        }),
+    )
+
   it.live("pages output on whole UTF-8 characters, with byte cursors", () =>
     Effect.gen(function* () {
       const host = yield* machine

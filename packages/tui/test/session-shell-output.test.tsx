@@ -4,7 +4,7 @@ import { createTestRenderer } from "@opentui/core/testing"
 import { Effect, FileSystem } from "effect"
 import { Global } from "@opencode/util/global"
 import type { SessionMessageInfo } from "@opencode/client"
-import { createEventStream, createFetch, directory, json } from "./fixture/tui-client"
+import { createEventStream, createFetch, createSseResponse, directory, json } from "./fixture/tui-client"
 import { tmpdir } from "./fixture/fixture"
 
 const session = {
@@ -51,7 +51,7 @@ test("an expanded background shell keeps its 1 MiB tail on a whole character", a
   const setup = await createTestRenderer({ width: 100, height: 40, kittyKeyboard: true })
   await setup.renderer.setupTerminal()
   setup.renderer.start()
-  const calls = createFetch((url) => {
+  const calls = createFetch((url, request) => {
     if (url.pathname === "/api/session") return json({ data: [session], cursor: {} })
     if (url.pathname === `/api/session/${session.id}`) return json({ data: session })
     if (url.pathname === `/api/session/${session.id}/message`) return json({ data: messages.toReversed(), cursor: {} })
@@ -61,6 +61,21 @@ test("an expanded background shell keeps its 1 MiB tail on a whole character", a
       const cursor = Number(url.searchParams.get("cursor"))
       const end = Math.min(bytes.length, cursor + Number(url.searchParams.get("limit")))
       return json({ data: { output: bytes.subarray(cursor, end).toString(), cursor: end, size: bytes.length } })
+    }
+    // openforge: the TUI follows the output the server pushes, which starts at the first whole character from the
+    // cursor on (ShellRunner.watch), and the command still runs.
+    if (url.pathname === "/api/experimental/shell/sh_background/watch") {
+      let from = Number(url.searchParams.get("cursor"))
+      while ((bytes[from]! & 0xc0) === 0x80) from++
+      const stream = createSseResponse(request.signal)
+      stream.send({
+        type: "output",
+        output: bytes.subarray(from).toString(),
+        cursor: bytes.length,
+        size: bytes.length,
+        truncated: false,
+      })
+      return stream.response
     }
   }, createEventStream())
   const server = Bun.serve({ port: 0, idleTimeout: 0, fetch: (request) => calls.fetch(request) })
@@ -86,7 +101,11 @@ test("an expanded background shell keeps its 1 MiB tail on a whole character", a
       .split("\n")
       .findIndex((line) => line.includes("$ render-frames"))
     await setup.mockMouse.click(10, row)
-    const output = await waitForText(setup.renderer.root, (text) => text.startsWith("[earlier output omitted]"))
+    // The note shows as the follow starts; the output arrives batched after it.
+    const output = await waitForText(
+      setup.renderer.root,
+      (text) => text.startsWith("[earlier output omitted]") && text.length > "[earlier output omitted]\n".length,
+    )
     expect(output).toBe(`[earlier output omitted]\n${rest}`)
   } finally {
     setup.renderer.destroy()

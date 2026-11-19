@@ -62,6 +62,8 @@ import { settle, until } from "./pacer/fake-tools"
 import { texts } from "./pacer/memory-harness"
 import {
   catalogOf,
+  codeModeList,
+  codeModeRoots,
   endpointAt,
   key,
   pacerToolsNode,
@@ -265,13 +267,17 @@ const setup = Effect.fnUntraced(function* (
     /** The server the chat's memory is on, and its catalog: the file's one, as before prompts were answered. */
     readonly served?: ReturnType<typeof startProxied>
     readonly catalog?: PacerModels.Catalog
+    /** The server's `tools.task_codemode`: `task` runs in Code Mode, as its capabilities and its list say. */
+    readonly codemode?: boolean
   } = {},
 ) {
   const server = input.served ?? defaultServer
   pacer.endpoint = endpointAt(server.origin)
-  pacer.catalog = input.catalog ?? today()
+  pacer.catalog = input.codemode
+    ? catalogOf(true, { prompt: false, plans: false, codemode: ["task"] })
+    : (input.catalog ?? today())
   server.reset()
-  server.control.answer = undefined
+  server.control.answer = input.codemode ? codeModeList(server, ["task"]) : undefined
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
@@ -755,6 +761,39 @@ describe("MemoryStart through the runner", () => {
       expect(userTexts(request)[1]).toBe(
         sent(fakeBlock("viewer", [own], { recall: true, remember: false, task: true })),
       )
+    }),
+  )
+
+  it.live("has the task tool when it is Code Mode's, and not when only a namespaced one is registered", () =>
+    Effect.gen(function* () {
+      // CLIProxyPacer's `tools.task_codemode`: `task` is registered in Code Mode, so no direct definition holds it.
+      const h = yield* setup({ codemode: true })
+      const registry = yield* Tool.Service
+      expect(codeModeRoots(registry)).toContain("task")
+      yield* h.prompt("make a task")
+      expect(h.starts().at(-1)?.body).toEqual({
+        prompt: "make a task",
+        limit: 5,
+        tools: { recall: true, remember: true, task: true },
+      })
+
+      // A tool named `task` in a namespace is not the task tool: only the catalog's root is.
+      const other = yield* setup({ child: true, agent: "untasked" })
+      yield* registry.transform((editor) =>
+        editor.add({
+          name: "task",
+          description: "A namespaced task tool",
+          options: { codemode: true, namespace: "x" },
+          input: Schema.Struct({ text: Schema.String }),
+          execute: () => Effect.succeed({ content: "namespaced" }),
+        } satisfies Parameters<Tool.Editor["add"]>[0]),
+      )
+      yield* other.prompt("make a task")
+      expect(other.starts().at(-1)?.body).toEqual({
+        prompt: "make a task",
+        limit: 5,
+        tools: { recall: true, remember: true, task: false },
+      })
     }),
   )
 })

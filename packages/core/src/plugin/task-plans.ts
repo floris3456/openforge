@@ -4,9 +4,11 @@ import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionIdleBackground } from "@opencode/plugin/effect/session"
 import type { Session } from "@opencode/schema/session"
-import { Cause, Effect } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
+import { CodeModeTool } from "../codemode/tool.js"
 import { MemoryPlans } from "../memory/plans.js"
 import { MemoryTask } from "../memory/task.js"
+import type { SessionMessage } from "../session/message.js"
 import { EditTool } from "../tool/plugin/edit.js"
 import { PatchTool } from "../tool/plugin/patch.js"
 import { ShellTool } from "../tool/plugin/shell.js"
@@ -23,6 +25,15 @@ const changing: ReadonlySet<string> = new Set([EditTool.name, WriteTool.name, Pa
 const worked: ReadonlySet<string> = new Set([...changing, ShellTool.name])
 /** The check's mark in its message's metadata: one per turn. */
 export const SOURCE = "task-check"
+
+/** The calls a Code Mode script made, as its `execute` part's settled metadata keeps them (`CodeModeTool`'s rows). */
+const InnerCall = Schema.Struct({ tool: Schema.String, input: Schema.optionalKey(Schema.Unknown) })
+const decodeInnerCalls = Schema.decodeUnknownOption(Schema.Array(InnerCall))
+function innerCalls(part: { readonly name: string; readonly state: SessionMessage.ToolState }) {
+  const state = part.state
+  if (part.name !== CodeModeTool.name || (state.status !== "completed" && state.status !== "error")) return []
+  return Option.getOrElse(decodeInnerCalls(state.metadata?.toolCalls), () => [])
+}
 
 export const Plugin = {
   id: "opencode.task-plans",
@@ -83,8 +94,10 @@ export const Plugin = {
       const calls = turn.flatMap((message) =>
         message.type === "assistant" ? message.content.flatMap((part) => (part.type === "tool" ? [part] : [])) : [],
       )
-      // Making a goal is no work on the chat's task.
-      if (calls.some((call) => call.name === "task" && !MemoryTask.goalCall(call.name, call.state.input))) return
+      // Making a goal is no work on the chat's task; a task call in a Code Mode script is a row of its `execute` part.
+      const tasked = (name: string, input: unknown) => name === "task" && !MemoryTask.goalCall(name, input)
+      if (calls.some((call) => tasked(call.name, call.state.input))) return
+      if (calls.some((call) => innerCalls(call).some((row) => tasked(row.tool, row.input)))) return
       if (!calls.some((call) => worked.has(call.name))) return
       // Which task it names, and whether one, is CPP's to say.
       const text = yield* plans.check(session)

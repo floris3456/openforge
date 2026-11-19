@@ -76,8 +76,11 @@ it.live(
       const search = yield* request("POST", "/api/websearch", { query: "opencode" }).pipe(
         Effect.forkScoped,
       )
+      // openforge: the integration list waits too: managed policy filters it, and a new location's integrations
+      // come from its plugins.
+      const integrations = yield* request("GET", "/api/integration").pipe(Effect.forkScoped)
       // Everything else answers with the current snapshot, and clients refresh on the matching *.updated events.
-      for (const route of ["/api/agent", "/api/skill", "/api/integration"]) {
+      for (const route of ["/api/agent", "/api/skill"]) {
         const response = yield* request("GET", route).pipe(Effect.timeout("2 seconds"))
         expect(response.status).toBe(200)
       }
@@ -88,7 +91,9 @@ it.live(
         providerID: "custom",
       })
       const pending = yield* Effect.all(
-        [providers, models, search].map((fiber) => Fiber.await(fiber).pipe(Effect.timeoutOption("500 millis"))),
+        [providers, models, search, integrations].map((fiber) =>
+          Fiber.await(fiber).pipe(Effect.timeoutOption("500 millis")),
+        ),
         { concurrency: "unbounded" },
       )
       expect(pending.every(Option.isNone)).toBeTrue()
@@ -102,6 +107,7 @@ it.live(
       })
       expect((yield* Fiber.join(models)).status).toBe(200)
       expect((yield* Fiber.join(search)).status).toBe(400)
+      expect((yield* Fiber.join(integrations)).status).toBe(200)
     }),
   15_000,
 )

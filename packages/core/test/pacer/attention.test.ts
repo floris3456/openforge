@@ -122,6 +122,8 @@ describe("PacerAttention", () => {
       expect(told(h)).toEqual([])
       yield* read(h, service, [usedup("ann", "bob")])
       expect(told(h)).toEqual(["usedup"])
+      // The line names the new member: the item itself was told before.
+      expect(h.raised[0].message).toBe("usedup needs you: bob is new")
     }),
   )
 

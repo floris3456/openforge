@@ -275,6 +275,8 @@ import type {
   ExperimentalAttentionOccurrenceOutput,
   ExperimentalAttentionFollowInput,
   ExperimentalAttentionFollowOutput,
+  ExperimentalAttentionClaimInput,
+  ExperimentalAttentionClaimOutput,
   ExperimentalAttentionTestInput,
   ExperimentalAttentionTestOutput,
   ExperimentalPacerStatusOutput,
@@ -1789,6 +1791,15 @@ const EndpointExperimentalAttentionFollow =
       ),
     )
 
+const EndpointExperimentalAttentionClaim =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalAttentionClaimInput) =>
+    preserveEffect<ExperimentalAttentionClaimOutput>()(
+      raw["attention.claim"]({ payload: { batch: input["batch"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const EndpointExperimentalAttentionTest =
   (raw: RawClient["server.experimental"]) => (input: ExperimentalAttentionTestInput) =>
     preserveEffect<ExperimentalAttentionTestOutput>()(
@@ -1965,6 +1976,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   attention: {
     occurrence: EndpointExperimentalAttentionOccurrence(raw),
     follow: EndpointExperimentalAttentionFollow(raw),
+    claim: EndpointExperimentalAttentionClaim(raw),
     test: EndpointExperimentalAttentionTest(raw),
   },
   pacer: {

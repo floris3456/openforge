@@ -502,10 +502,28 @@ const RequestsUpdated = ephemeral({
   schema: { sessionID: SessionID.pipe(optional) },
 })
 
+/**
+ * Something new needs the owner's attention on CLIProxyPacer (CPP's `GET /pacer/v1/attention`): one notification for
+ * the new items, told once (`PacerAttention`). `batch` is what a TUI claims (`attention.claim`) before it raises it, so
+ * that one TUI does; `link` opens the dashboard where the first is fixed.
+ */
+export interface AttentionRaised extends Schema.Schema.Type<typeof AttentionRaised> {}
+export const AttentionRaised = Schema.Struct({
+  batch: Schema.String,
+  title: Schema.String,
+  message: Schema.String,
+  link: Schema.String,
+  items: Schema.Array(
+    Schema.Struct({ id: Schema.String, tone: Schema.Literals(["bad", "warn", "info"]), what: Schema.String }),
+  ),
+}).annotate({ identifier: "Pacer.AttentionRaised" })
+
 /** A new cache notice, once per request; `GET /api/experimental/pacer/notices` lists those held. */
 const NoticeAdded = ephemeral({ type: "pacer.notice.added", schema: { notice: Notice } })
 /** A cache notice was dismissed, from any TUI: every TUI drops it. */
 const NoticeDismissed = ephemeral({ type: "pacer.notice.dismissed", schema: { requestID: Schema.String } })
+/** Something new needs the owner's attention on CPP: every TUI may raise it, the first to claim it does. */
+const AttentionRaisedEvent = ephemeral({ type: "pacer.attention.raised", schema: AttentionRaised.fields })
 
 export const Event = {
   StatusChanged,
@@ -516,6 +534,7 @@ export const Event = {
   RequestsUpdated,
   NoticeAdded,
   NoticeDismissed,
+  AttentionRaised: AttentionRaisedEvent,
   Definitions: inventory(
     StatusChanged,
     AccountsUpdated,
@@ -525,5 +544,6 @@ export const Event = {
     RequestsUpdated,
     NoticeAdded,
     NoticeDismissed,
+    AttentionRaisedEvent,
   ),
 }

@@ -15,6 +15,7 @@ import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 import { PacerNotices } from "./notices.js"
+import { PacerAttention } from "./attention.js"
 import { PacerSessionID } from "./session-id.js"
 import { PacerStatus } from "./status.js"
 import { PacerWarmth } from "./warmth.js"
@@ -293,6 +294,7 @@ export const layer = Layer.effect(
     const sessions = yield* Session.Service
     const jobs = yield* Job.Service
     const notices = yield* PacerNotices.Service
+    const attention = yield* PacerAttention.Service
     // Compaction reads the state there: it can't depend on this service.
     const shared = yield* PacerStatus.Service
     // A step reads there whether its chat's cache is still warm: it can't depend on this service either.
@@ -951,6 +953,35 @@ export const layer = Layer.effect(
       if (notice.models.length === 0) readied.any = true
       readModels()
     }
+    // What needs the owner's attention (CPP since 2026-11-19), read on each connect and on its `attention` notice. A
+    // key the owner doesn't allow is refused (403 `not_allowed`), and a CPP before that has no such route: neither is
+    // asked again until a `capabilities` notice (CPP sends the key's streams one when the owner turns its
+    // `notify.attention` on) or the next connect.
+    let attentionOff = false
+    const readAttention = yield* trigger(
+      "what needs attention",
+      Effect.gen(function* () {
+        const endpoint = link.endpoint
+        if (attentionOff || !endpoint) return
+        const answer = yield* get("/pacer/v1/attention", PacerAttention.List).pipe(
+          Effect.catchIf(
+            (error) =>
+              (error._tag === "PacerHttp.Refused" && error.type === "not_allowed") ||
+              error._tag === "PacerHttp.NoPacer" ||
+              error._tag === "PacerHttp.NotFound",
+            () => Effect.sync(() => void (attentionOff = true)),
+          ),
+        )
+        if (answer) yield* attention.read(endpoint, answer.items, yield* dashboard(endpoint))
+      }),
+    )
+    /** The dashboard's address: the endpoint's, else, on a loopback one, the public address CPP named. */
+    const dashboard = Effect.fnUntraced(function* (endpoint: PacerEndpoint.Endpoint) {
+      const host = new URL(endpoint.origin).hostname
+      const loopback = host === "localhost" || host === "[::1]" || host.startsWith("127.")
+      const shared = loopback ? (yield* endpoints.addresses?.() ?? Effect.succeed([])).find((a) => a.public) : undefined
+      return `${shared?.root ?? endpoint.home ?? endpoint.root}/management.html`
+    })
     const askAll = yield* trigger(
       "the chats CLIProxyPacer asks to compact",
       Effect.gen(function* () {
@@ -987,9 +1018,17 @@ export const layer = Layer.effect(
       // The server's and the key's settings change what CPP answers for every chat (and a CPP before 2026-11-06 sends
       // one for a chat's own writes too); capabilities and prices have notices of their own. A stale view costs nothing
       // until a chat is asked for.
+      if (event === "capabilities" && attentionOff) {
+        attentionOff = false
+        readAttention()
+      }
+      if (event === "attention") return readAttention()
       if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
-      if (event === "resync") return everything()
+      if (event === "resync") {
+        readAttention()
+        return everything()
+      }
       // A login may serve again (CPP since 2026-11-19): the catalog is read again, then a step waiting for one tries
       // now (SessionRunnerRetry).
       if (event === "ready") return readyNotice(data)
@@ -1010,6 +1049,7 @@ export const layer = Layer.effect(
 
     const reset = (endpoint: PacerEndpoint.Endpoint | undefined) => {
       link.endpoint = endpoint
+      attentionOff = false
       link.contact = undefined
       // Another CPP has its own clock.
       link.offset = 0
@@ -1056,6 +1096,8 @@ export const layer = Layer.effect(
         yield* setStatus({ state: "on" })
         // The first time the catalog reads itself, on the endpoint's change; after a reconnect it is read again.
         if (!first) capabilities()
+        attentionOff = false
+        readAttention()
         for (const chat of chats.values()) if (pending(chat)) mark(chat)
         const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
         yield* contact(stream.offset)
@@ -1546,6 +1588,7 @@ export const node = makeGlobalNode({
     PacerHttp.node,
     PacerModels.node,
     PacerNotices.node,
+    PacerAttention.node,
     PacerStatus.node,
     PacerWarmth.node,
     Bus.node,

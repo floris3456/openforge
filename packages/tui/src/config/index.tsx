@@ -41,7 +41,7 @@ export const AttentionEventSound = Schema.Union([
   Schema.String.check(Schema.isPattern(/^\//)),
 ]).annotate({ description: "off, a built-in sound (alert-01 … yup-06), or the absolute path of a sound file" })
 export type AttentionEventSound = Schema.Schema.Type<typeof AttentionEventSound>
-export const AttentionEvent = ["done", "reply", "subagent_done", "question", "error"] as const
+export const AttentionEvent = ["done", "reply", "subagent_done", "question", "error", "pacer"] as const
 export type AttentionEvent = (typeof AttentionEvent)[number]
 const eventFields = (what: string) => ({
   notification: Schema.optional(lenient(Schema.Boolean)).annotate({
@@ -66,6 +66,9 @@ export const AttentionEvents = Schema.Struct({
   ),
   question: Schema.optional(lenient(Schema.Struct(eventFields("a question, a form or a permission that waits")))),
   error: Schema.optional(lenient(Schema.Struct(eventFields("a failed turn")))),
+  pacer: Schema.optional(
+    lenient(Schema.Struct(eventFields("something new that needs your attention on CLIProxyPacer"))),
+  ),
 })
 export type ResolvedAttentionEvent = { notification: boolean; sound: AttentionEventSound }
 export type ResolvedAttentionEvents = Record<AttentionEvent, ResolvedAttentionEvent> & {
@@ -79,6 +82,7 @@ export const attentionEventDefaults: Record<AttentionEvent, ResolvedAttentionEve
   subagent_done: { notification: false, sound: "off" },
   question: { notification: true, sound: "bip-bop-03" },
   error: { notification: true, sound: "nope-03" },
+  pacer: { notification: true, sound: "alert-01" },
 }
 
 export const MiniWorkSpinner = Schema.Literals([
@@ -168,7 +172,7 @@ export const Info = Schema.Struct({
       }),
       events: Schema.optional(lenient(AttentionEvents)).annotate({
         description:
-          "Each event's notification and sound: done, reply, subagent_done, question and error. A value that is not valid counts as unset",
+          "Each event's notification and sound: done, reply, subagent_done, question, error and pacer (CLIProxyPacer: something new needs your attention). A value that is not valid counts as unset",
       }),
     }),
   ).annotate({ description: "System notification and sound settings" }),
@@ -450,6 +454,7 @@ function resolveEvents(attention: Info["attention"]): ResolvedAttentionEvents {
       permission: events?.question?.sound ?? legacy.permission ?? attentionEventDefaults.question.sound,
     },
     error: event("error", legacy.error),
+    pacer: event("pacer", undefined),
   }
 }
 

@@ -363,13 +363,14 @@ describe("attention.events", () => {
   const events = (attention: unknown) =>
     resolve(decodeInfo({ attention }), { terminalSuspend: true, environment: {} }).attention.events
 
-  test("defaults: Done, Question and Error on with their sounds; Reply and Subagent done off, levels 1", () => {
+  test("defaults: Done, Question, Error and CLIProxyPacer on with their sounds; Reply and Subagent done off, levels 1", () => {
     expect(events(undefined)).toEqual({
       done: { notification: true, sound: "bip-bop-01" },
       reply: { notification: false, sound: "off" },
       subagent_done: { notification: false, sound: "off", levels: 1 },
       question: { notification: true, sound: "bip-bop-03", permission: "bip-bop-03" },
       error: { notification: true, sound: "nope-03" },
+      pacer: { notification: true, sound: "alert-01" },
     })
   })
 
@@ -413,6 +414,7 @@ describe("attention.events", () => {
       subagent_done: { notification: true, sound: "off", levels: 1 },
       question: { notification: true, sound: "bip-bop-03", permission: "bip-bop-03" },
       error: { notification: true, sound: "nope-03" },
+      pacer: { notification: true, sound: "alert-01" },
     })
     expect(events({ events: "loud" })).toEqual(events(undefined))
     expect(events({ events: { subagent_done: { levels: 2.5 } } }).subagent_done.levels).toBe(1)

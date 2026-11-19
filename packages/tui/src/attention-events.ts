@@ -40,6 +40,10 @@ export function createAttentionEvents(input: {
   readonly ours: (sessionID: string) => Promise<boolean>
   /** A failed turn's toast, as upstream shows it. */
   readonly failed: (sessionID: string, message: string) => void
+  /** Claims a CLIProxyPacer batch: true for the one TUI that raises it. */
+  readonly claim: (batch: string) => Promise<boolean>
+  /** Shows a CLIProxyPacer batch in this TUI, with the link to where it is fixed. */
+  readonly shown: (raised: { readonly title: string; readonly message: string; readonly link: string }) => void
 }) {
   const session = input.data.session
   // A session whose turn ended, until its next one starts: an execution ends once.
@@ -104,6 +108,20 @@ export function createAttentionEvents(input: {
   }
 
   const dispose = [
+    // Something new needs the owner on CLIProxyPacer: the service tells every TUI, the first to claim it raises it. It
+    // goes as a `default` occurrence with the event's sound, which every player reads.
+    input.data.on("pacer.attention.raised", (event) => {
+      const pacer = input.settings().events.pacer
+      if (!on(pacer)) return
+      void input.claim(event.data.batch).then(
+        (mine) => {
+          if (!mine) return
+          input.shown(event.data)
+          raise(pacer, pacer.sound, { kind: "default", title: event.data.title, message: event.data.message })
+        },
+        () => undefined,
+      )
+    }),
     input.data.on("form.created", (event) => {
       const form = event.data.form
       if (forms.has(form.id)) return

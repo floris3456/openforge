@@ -58,6 +58,7 @@ const eventRows = (
     ["subagent_done", "Subagent done", "a subagent's final reply"],
     ["question", "Question", "a question, form or permission that waits for you"],
     ["error", "Error", "a failed turn"],
+    ["pacer", "CLIProxyPacer", "something new that needs your attention on CLIProxyPacer"],
   ] as const
 ).flatMap(([event, title, what]): Setting[] => [
   {
@@ -66,7 +67,9 @@ const eventRows = (
     path: ["attention", "events", event, "notification"],
     description: `Whether ${what} shows a system notification`,
     help: [
-      `A system notification for ${what}. It shows only while the terminal is not focused (a terminal that doesn't report focus counts as not focused), and only for chats open in this TUI: its tabs and the chat it shows, with their subagents.`,
+      event === "pacer"
+        ? `A system notification for ${what}: an account that needs signing in, quota running out, a failing client and the rest of its dashboard's Needs attention, each once when it appears (again only after it was gone 30 minutes). Only one TUI raises it, with a link to the dashboard page where it is fixed; with no TUI open, \`openforge notify\` still gets it. Needs the owner to turn on "Needs attention" for this client key on CLIProxyPacer. It shows only while the terminal is not focused.`
+        : `A system notification for ${what}. It shows only while the terminal is not focused (a terminal that doesn't report focus counts as not focused), and only for chats open in this TUI: its tabs and the chat it shows, with their subagents.`,
       ...(event === "question"
         ? ["A permission this TUI accepts by itself (Permissions: auto accept) raises none."]
         : []),
@@ -604,7 +607,7 @@ export const settings: Setting[] = [
     pacer: "summaryWriter",
     description:
       "For all chats: who writes a chat's summary when it compacts; openforge does whenever CLIProxyPacer can't",
-    help: 'Who writes a chat\'s summary when it compacts. "CLIProxyPacer" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Claude chats follow it too: CLIProxyPacer writes their summary from the chat\'s last request, so it reads the chat\'s cache while it is warm. Where CLIProxyPacer can\'t write one, openforge does. "openforge" always writes it; on a Claude model it sends the chat\'s own request, which also reads the cache. Kept by CLIProxyPacer for all your chats.',
+    help: "Who writes a chat's summary when it compacts. \"CLIProxyPacer\" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Claude chats follow it too: CLIProxyPacer writes their summary from the chat's last request, so it reads the chat's cache while it is warm. Where CLIProxyPacer can't write one, openforge does. \"openforge\" always writes it; on a Claude model it sends the chat's own request, which also reads the cache. Kept by CLIProxyPacer for all your chats.",
     default: "cliproxypacer",
     values: ["cliproxypacer", "openforge"],
     labels: ["CLIProxyPacer", "openforge"],
@@ -719,8 +722,16 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client, serviceConfig, readServiceConfig } =
-    useShownSettings()
+  const {
+    shown,
+    pacerValues,
+    setPacerValues,
+    updateStatus,
+    setUpdateStatus,
+    client,
+    serviceConfig,
+    readServiceConfig,
+  } = useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
@@ -820,7 +831,7 @@ export function DialogConfig(props: { current?: string }) {
   // Through the same report as an event, so a connected player plays it where you sit; never a notification.
   function preview(event: AttentionEvent, id: Attention.SoundID) {
     void attention?.raise({
-      kind: event,
+      kind: event === "pacer" ? "default" : event,
       message: `Sound preview: ${id}`,
       notification: false,
       sound: { when: "always", id },

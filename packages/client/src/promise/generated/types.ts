@@ -2207,6 +2207,21 @@ export type PacerNoticeDismissed = {
   data: { requestID: string }
 }
 
+export type PacerAttentionRaised = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.attention.raised"
+  location?: LocationRef
+  data: {
+    batch: string
+    title: string
+    message: string
+    link: string
+    items: Array<{ id: string; tone: "bad" | "warn" | "info"; what: string }>
+  }
+}
+
 export type SessionStatusUpdated = {
   id: EventID
   created: number
@@ -3295,6 +3310,7 @@ export type V2Event =
   | PacerRequestsUpdated
   | PacerNoticeAdded
   | PacerNoticeDismissed
+  | PacerAttentionRaised
   | SessionStatusUpdated
   | SessionIdle
   | TuiPromptAppend
@@ -4801,6 +4817,7 @@ export type EventSubscribeInput = {
         | "pacer.requests.updated"
         | "pacer.notice.added"
         | "pacer.notice.dismissed"
+        | "pacer.attention.raised"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -5155,6 +5172,10 @@ export type ExperimentalAttentionOccurrenceOutput = { data: AttentionPlayers }["
 export type ExperimentalAttentionFollowInput = { readonly desktop?: boolean | undefined }
 
 export type ExperimentalAttentionFollowOutput = AttentionFollowEvent
+
+export type ExperimentalAttentionClaimInput = { readonly batch: string }
+
+export type ExperimentalAttentionClaimOutput = { data: boolean }["data"]
 
 export type ExperimentalAttentionTestInput = {
   readonly kind: "done" | "reply" | "subagent_done" | "question" | "permission" | "error"

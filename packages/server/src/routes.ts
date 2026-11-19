@@ -39,6 +39,7 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerIdle } from "@opencode/core/pacer/idle"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
+import { PacerAttention } from "@opencode/core/pacer/attention"
 import { AutoUpdate } from "./auto-update"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Schedule } from "@opencode/core/schedule"
@@ -101,6 +102,7 @@ const applicationServiceNodes = [
   PacerHttp.node,
   PacerModels.node,
   PacerNotices.node,
+  PacerAttention.node,
   PacerIdle.node,
   AutoUpdate.node,
 ] as const

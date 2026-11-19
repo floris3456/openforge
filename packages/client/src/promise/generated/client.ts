@@ -277,6 +277,8 @@ import type {
   ExperimentalAttentionOccurrenceOutput,
   ExperimentalAttentionFollowInput,
   ExperimentalAttentionFollowOutput,
+  ExperimentalAttentionClaimInput,
+  ExperimentalAttentionClaimOutput,
   ExperimentalAttentionTestInput,
   ExperimentalAttentionTestOutput,
   ExperimentalPacerStatusOutput,
@@ -1789,6 +1791,18 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ),
+        claim: (input: ExperimentalAttentionClaimInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalAttentionClaimOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/attention/claim`,
+              body: { batch: input["batch"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
         test: (input: ExperimentalAttentionTestInput, requestOptions?: RequestOptions) =>
           request<{ readonly data: ExperimentalAttentionTestOutput }>(
             {

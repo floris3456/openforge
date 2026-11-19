@@ -18,7 +18,7 @@ const sessions: Record<string, { id: string; title: string; parentID?: string; l
 
 type Shell = { status: string; metadata: Record<string, unknown> }
 
-function setup(attention: Info["attention"] = {}, options: { ours?: string[] } = {}) {
+function setup(attention: Info["attention"] = {}, options: { ours?: string[]; claims?: Set<string> } = {}) {
   const handlers = new Map<string, ((event: OpenCodeEvent) => void)[]>()
   const raised: AttentionRequest[] = []
   const toasts: string[] = []
@@ -55,6 +55,14 @@ function setup(attention: Info["attention"] = {}, options: { ours?: string[] } =
     },
     ours: async (id) => (options.ours ?? ["chat"]).includes(root(id)),
     failed: (sessionID, message) => toasts.push(`${sessionID}: ${message}`),
+    // The service's claim: the first TUI to ask for a batch gets it.
+    claim: async (batch) => {
+      const claims = options.claims ?? new Set<string>()
+      if (claims.has(batch)) return false
+      claims.add(batch)
+      return true
+    },
+    shown: (raised) => toasts.push(`${raised.title}: ${raised.message} ${raised.link}`),
   })
   let seq = 0
   const emit = (type: string, data: Record<string, unknown>) =>
@@ -373,6 +381,49 @@ describe("sounds", () => {
     jest.advanceTimersByTime(PERMISSION_GRACE)
     jest.useRealTimers()
     expect(set.seen()).toEqual(["done:chat notify alert-01", "permission:chat notify nope-01"])
+  })
+})
+
+describe("CLIProxyPacer", () => {
+  const raised = {
+    batch: "b1",
+    title: "CLIProxyPacer",
+    message: "Claude: no account ready — the first is back in 12m",
+    link: "https://cpp.example/management.html#/providers?f=provider%3Aclaude",
+    items: [{ id: "noready:claude", tone: "bad", what: "Claude: no account ready" }],
+  }
+
+  test("a batch raises one notification with alert-01, as a default occurrence every player reads, and a toast with the link", async () => {
+    const tui = setup()
+    tui.emit("pacer.attention.raised", raised)
+    await tui.settle()
+    expect(tui.seen()).toEqual(["default:undefined notify alert-01"])
+    expect(tui.raised[0]).toMatchObject({ title: "CLIProxyPacer", message: raised.message })
+    expect(tui.toasts).toEqual([`CLIProxyPacer: ${raised.message} ${raised.link}`])
+  })
+
+  test("of two TUIs only the one that claims the batch raises it", async () => {
+    const claims = new Set<string>()
+    const first = setup({}, { claims })
+    const second = setup({}, { claims })
+    first.emit("pacer.attention.raised", raised)
+    second.emit("pacer.attention.raised", raised)
+    await first.settle()
+    await second.settle()
+    expect([...first.seen(), ...second.seen()]).toEqual(["default:undefined notify alert-01"])
+  })
+
+  test("its own switch and sound; off claims nothing", async () => {
+    const claims = new Set<string>()
+    const tui = setup({ events: { pacer: { notification: false, sound: "off" } } }, { claims })
+    tui.emit("pacer.attention.raised", raised)
+    await tui.settle()
+    expect(tui.seen()).toEqual([])
+    expect(claims.size).toBe(0)
+    const loud = setup({ events: { pacer: { notification: false, sound: "yup-02" } } })
+    loud.emit("pacer.attention.raised", raised)
+    await loud.settle()
+    expect(loud.seen()).toEqual(["default:undefined - yup-02"])
   })
 })
 

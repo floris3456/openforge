@@ -27,6 +27,8 @@ const TestPayload = Schema.Struct({ kind: Schema.Literals(Attention.testKinds) }
   identifier: "Attention.TestPayload",
 })
 
+const ClaimPayload = Schema.Struct({ batch: Schema.String }).annotate({ identifier: "Attention.ClaimPayload" })
+
 /** Lives in the `server.experimental` group (see `groups/experimental.ts`). */
 export const AttentionEndpoints = [
   HttpApiEndpoint.post("attention.occurrence", "/api/experimental/attention/occurrence", {
@@ -47,6 +49,16 @@ export const AttentionEndpoints = [
       "follow",
       "Follow notifications",
       "A player (`openforge notify`) follows the notifications this service's TUIs report. It counts as connected for as long as the stream is open.",
+    ),
+  ),
+  HttpApiEndpoint.post("attention.claim", "/api/experimental/attention/claim", {
+    payload: ClaimPayload,
+    success: Schema.Struct({ data: Schema.Boolean }),
+  }).annotateMerge(
+    annotations(
+      "claim",
+      "Claim a CLIProxyPacer notification",
+      "A TUI that would raise a `pacer.attention.raised` batch claims it first: the first claim answers true and that TUI raises it, every later one false. A batch no TUI claims within 2 s the service delivers to its players itself.",
     ),
   ),
   HttpApiEndpoint.post("attention.test", "/api/experimental/attention/test", {

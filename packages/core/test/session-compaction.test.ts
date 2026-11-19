@@ -2050,7 +2050,8 @@ it.effect("a chat compacted at its point still goes out whole while the model's 
 it.effect("a background summary starts as the context nears the model's point, and compaction swaps it in there", () =>
   Effect.gen(function* () {
     const compaction = yield* SessionCompaction.Service
-    // 85% of a 100k point is 85k; the 200k window alone would wait for 144.5k and compact at 170k.
+    // A background summary starts within upstream's lead of the 100k point: half the 60k the cycle started below it
+    // (its first measured prompt is 40k), so at 70k. The 200k window alone would compact at 170k.
     const history = (early: number) => {
       const near = [textUser("First question"), measured("First answer", 40_000), textUser("Second question")]
       const anchor = measured("Second answer", early)
@@ -2078,8 +2079,8 @@ it.effect("a background summary starts as the context nears the model's point, a
         return JSON.stringify(requests[0].messages)
       })
 
-    // Below 85% of the point no background summary starts, so compaction summarizes the whole conversation.
-    expect(yield* compactAt("ses_precompute_point_early", 80_000)).toContain("Third answer")
+    // Below it no background summary starts, so compaction summarizes the whole conversation.
+    expect(yield* compactAt("ses_precompute_point_early", 65_000)).toContain("Third answer")
     // Past it, one does, from the prefix the latest response was written from, and compaction takes it.
     const swapped = yield* compactAt("ses_precompute_point_near", 90_000)
     expect(swapped).toContain("Second question")

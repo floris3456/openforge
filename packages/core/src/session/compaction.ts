@@ -568,9 +568,6 @@ export const layer = Layer.effect(
       if (!settings.background || !settings.auto) return
       const context = yield* load
       if (context.model.compaction?.type === "native") return
-      // openforge: a chat on CLIProxyPacer compacts at CLIProxyPacer's point, and CLIProxyPacer writes its summary
-      // where its route says so; a summary written ahead in the background would not be used.
-      if (context.model.ref.providerID === PacerSummaries.provider) return
       // An unknown window has an infinite ceiling, which this never reaches. Past the ceiling it still starts: at the
       // end of a turn, the next prompt then swaps it in instead of waiting for a summary.
       const ceiling = calculateCeiling(context.model.limit, settings.buffer)
@@ -604,6 +601,9 @@ export const layer = Layer.effect(
       if (age > cacheLifetime(context.model.cache?.ttl) - CACHE_MARGIN) return
 
       const model = yield* selectModel(context, settings.buffer, false)
+      // openforge: where CLIProxyPacer writes the chat's summary itself (spec cliproxypacer-server-summaries), a summary
+      // written here ahead would never be used.
+      if ((yield* pacerWriter({ reason: "auto", context }, context))?.by === "cliproxypacer") return
       const usage: SessionUsage.Recorded[] = []
       const fiber = yield* summarize({ reason: "auto", context: model.context }, model.cap, settings.keep, {
         messages: context.messages.slice(0, anchorIndex),

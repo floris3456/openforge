@@ -2598,6 +2598,9 @@ describe("SessionRunnerLLM", () => {
     )
 
     yield* register("alpha", 1, 12)
+    // openforge: an answer, so the compaction below has a conversation to summarize; it leaves out what no request
+    // carried, and none of this test's other steps answers.
+    yield* s.llm.push(TestLLM.text("Fourth answer", "catalog-fourth"))
     yield* s.runPrompt("Fourth")
     expect(updates(s.requests.at(-1)).at(-1)).toBe(
       `The Code Mode tool catalog has changed.\n\nNew tools are available in addition to those previously listed:\n${signature("alpha", 12)}`,
@@ -3718,6 +3721,9 @@ describe("SessionRunnerLLM", () => {
   })
 
   scenario("automatically compacts into a completed summary and retained recent turn", function* (s) {
+    // openforge: this covers the summary written when compaction is due, not one written ahead in the background
+    // (on by default since upstream 2.3).
+    yield* (yield* SessionCompaction.Service).transform((editor) => editor.configure({ background: false }))
     const store = yield* SessionStore.Service
     yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "text-first", 3_950))
     yield* s.runPrompt("Earlier question ".repeat(180))
@@ -3789,6 +3795,9 @@ describe("SessionRunnerLLM", () => {
   // Workspace spec compaction-threshold-per-client, section 3. The point moves as a capabilities change moves it: the
   // model resolved at each step carries the catalog's limits then.
   scenario("compacts a chat once its prompt reaches its model's compaction point, which may move", function* (s) {
+    // openforge: this covers the summary written when compaction is due, not one written ahead in the background
+    // (on by default since upstream 2.3).
+    yield* (yield* SessionCompaction.Service).transform((editor) => editor.configure({ background: false }))
     const limit = { context: 200_000, output: 32_000 }
     s.currentModel = testModel("pointed", { ...limit, compact: 30_000 })
     yield* s.llm.push(TestLLM.textWithUsage("Earlier answer", "pointed-first", 29_000))
@@ -4240,14 +4249,18 @@ describe("SessionRunnerLLM", () => {
               }),
             )
           }
-          // 160k of the 170k ceiling is past the 85 % at which everything before the answer is summarized in the
-          // background and held, and short of compacting.
+          // The cycle starts at 100k, so a summary of everything before the latest answer starts in the background
+          // within half the 70k left of the 170k ceiling (upstream's lead), at 135k: 160k is past it, and short of
+          // compacting.
+          yield* s.llm.push(TestLLM.textWithUsage("First answer", "text-first", 100_000))
+          yield* s.runPrompt("First question")
+          s.requests.length = 0
           yield* s.llm.push(
             TestLLM.textWithUsage("Earlier answer", "text-earlier", 160_000),
             TestLLM.text("## Objective\n- Held summary", "text-held-summary"),
           )
           yield* s.runPrompt("Earlier question")
-          yield* s.llm.wait(2)
+          yield* s.llm.wait(3)
           expect(isSummaryRequest(s.requests[1]!)).toBe(true)
           expect(s.requests[1]?.model).toBe(agentModel ? replacementModel : pacedModel)
           s.requests.length = 0

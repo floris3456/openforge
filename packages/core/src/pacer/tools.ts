@@ -109,6 +109,29 @@ export interface ListInput {
   readonly continues: boolean
 }
 
+/**
+ * A chat's list input from the pieces a request knows, built here by both the step's early read (`SessionContext`,
+ * before its instructions, so the first request carries CPP's text) and the request's own (`SessionModelRequest`), so
+ * the two cannot drift. A chat that holds a list reads nothing for either.
+ */
+export const listInput = (input: {
+  readonly session: { readonly id: SessionID; readonly parentID?: SessionID }
+  readonly project?: Readonly<Record<string, string>>
+  readonly model: string
+  /** Whether the chat runs Code Mode, as `PacerOffer.executes` answers it for the request's definitions. */
+  readonly codemode: boolean
+  readonly step: boolean
+  readonly continues: boolean
+}): ListInput => ({
+  sessionID: input.session.id,
+  ...(input.session.parentID === undefined ? {} : { parentID: input.session.parentID }),
+  ...(input.project === undefined ? {} : { project: input.project }),
+  model: input.model,
+  codemode: input.codemode,
+  step: input.step,
+  continues: input.continues,
+})
+
 export interface CallInput {
   readonly sessionID: SessionID
   readonly parentID?: SessionID

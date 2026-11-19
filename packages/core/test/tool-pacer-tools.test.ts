@@ -115,7 +115,7 @@ const taskTool = {
   description: "Reads or changes a task.",
   input_schema: {
     type: "object",
-    properties: { id: { type: "string" }, pictures: { type: "array" } },
+    properties: { id: { type: "string" }, items: { type: "array" }, pictures: { type: "array" } },
   },
 }
 const taskMeta = {
@@ -123,7 +123,7 @@ const taskMeta = {
   permission: "memory",
   subject: ["id"],
   read_only: false,
-  files: ["pictures"],
+  files: ["items", "pictures"],
 }
 const taskList = {
   ...listOf("7e57000000000003", [...ownerList.tools.claude, taskTool]),
@@ -843,18 +843,105 @@ describe("PacerToolsPlugin files", () => {
   it.effect("answers a missing file, and one that is not a picture or is too big, without calling the tool", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
-      yield* Effect.promise(() => Bun.write(`${tmp.path}/notes.txt`, "plain words"))
+      yield* Effect.promise(() => Bun.write(`${tmp.path}/notes.pdf`, "%PDF-1.7 plain words"))
       yield* Effect.promise(() => Bun.write(`${tmp.path}/huge.png`, new Uint8Array(21 * 1024 * 1024)))
       const h = yield* setup({ list: taskList, directory: tmp.path })
       const asked = (pictures: ReadonlyArray<string>) =>
         h.failure("task", { id: "t1", pictures }).pipe(Effect.map((error) => error.message))
       expect(yield* asked(["run/evidence/gone.png"])).toBe("Not sent: run/evidence/gone.png does not exist")
-      expect(yield* asked(["notes.txt"])).toBe("Not sent: notes.txt is not a PNG, JPEG, WebP, GIF or SVG")
+      expect(yield* asked(["notes.pdf"])).toBe("Not sent: notes.pdf is not a picture or a text (.md, .txt)")
       expect(yield* asked(["huge.png"])).toBe("Not sent: huge.png is 21 MB, over 20 MB")
       // A missing file after a good one still sends nothing, as the good one is only in the arguments being built.
-      expect(yield* asked(["notes.txt"])).toBe("Not sent: notes.txt is not a PNG, JPEG, WebP, GIF or SVG")
+      expect(yield* asked(["notes.pdf"])).toBe("Not sent: notes.pdf is not a picture or a text (.md, .txt)")
       expect(h.cpp.calls()).toHaveLength(0)
       expect(h.cpp.uploads).toHaveLength(0)
+    }),
+  )
+
+  // The workspace's spec docs/specs/review-items.md, sections 4 and 8: `items` names its parts, and a text is a file too.
+  it.effect("uploads a .md or .txt path once as text, named by its base name, and sends its hash in its place", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const spec = new TextEncoder().encode("# Spec\n\nThe dock lists two projects: é.\n")
+      yield* Effect.promise(() =>
+        Promise.all([Bun.write(`${tmp.path}/spec.md`, spec), Bun.write(`${tmp.path}/notes.txt`, "plain words")]),
+      )
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      yield* h.run("task", { id: "t1", items: ["spec.md", { text: "notes.txt", comment: "the notes" }] })
+      expect(sent(h)).toEqual({
+        id: "t1",
+        items: [
+          { sha256: sha(spec), name: "spec.md" },
+          { text: { sha256: sha(new TextEncoder().encode("plain words")), name: "notes.txt" }, comment: "the notes" },
+        ],
+      })
+      expect(h.cpp.puts().map((one) => one.headers.get("content-type"))).toEqual(["text/markdown", "text/plain"])
+      expect(Buffer.from(h.cpp.puts()[0]!.bytes).equals(Buffer.from(spec))).toBe(true)
+      // Given again, it is known held: one upload each.
+      yield* h.run("task", { id: "t1", items: ["spec.md"] })
+      expect(h.cpp.puts()).toHaveLength(2)
+    }),
+  )
+
+  it.effect(
+    "answers a text that is not UTF-8 or over 256 KB, and anything else that is no picture, without a call",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        yield* Effect.promise(() =>
+          Promise.all([
+            Bun.write(`${tmp.path}/broken.txt`, new Uint8Array([0x61, 0xff, 0xfe])),
+            Bun.write(`${tmp.path}/long.md`, "a".repeat(256 * 1024 + 1)),
+            Bun.write(`${tmp.path}/paper.pdf`, "%PDF-1.7"),
+          ]),
+        )
+        const h = yield* setup({ list: taskList, directory: tmp.path })
+        const asked = (items: ReadonlyArray<unknown>) =>
+          h.failure("task", { id: "t1", items }).pipe(Effect.map((error) => error.message))
+        expect(yield* asked(["broken.txt"])).toBe("Not sent: broken.txt is not UTF-8 text")
+        expect(yield* asked([{ text: "long.md" }])).toBe("Not sent: long.md is 257 KB, over 256 KB")
+        expect(yield* asked(["paper.pdf"])).toBe("Not sent: paper.pdf is not a picture or a text (.md, .txt)")
+        expect(yield* asked([{ picture: "paper.pdf" }])).toBe(
+          "Not sent: paper.pdf is not a picture or a text (.md, .txt)",
+        )
+        expect(h.cpp.calls()).toHaveLength(0)
+        expect(h.cpp.uploads).toHaveLength(0)
+      }),
+  )
+
+  it.effect("uploads a named entry's picture and compare, and passes a decision on as written", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() =>
+        Promise.all([Bun.write(`${tmp.path}/after.png`, png), Bun.write(`${tmp.path}/before.png`, before)]),
+      )
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      const decision = {
+        decide: "Raise the JS budget to 272,545 B?",
+        options: ["Raise it", "Keep it, cut the page"],
+        comment: "the review page needs it",
+      }
+      yield* h.run("task", {
+        id: "t1",
+        state: "review",
+        items: [{ picture: "after.png", compare: "before.png", comment: "from the seat" }, decision],
+      })
+      expect(sent(h)).toEqual({
+        id: "t1",
+        state: "review",
+        items: [
+          {
+            picture: { sha256: sha(png), name: "after.png" },
+            compare: { sha256: sha(before), name: "before.png" },
+            comment: "from the seat",
+          },
+          decision,
+        ],
+      })
+      expect(h.cpp.puts().map((one) => one.sha256)).toEqual([sha(png), sha(before)])
+      // A warm chat's `pictures` beside it, named in meta.files too, as before.
+      yield* h.run("task", { id: "t1", pictures: [["after.png", null, "seat"]] })
+      expect(sent(h, 1)).toEqual({ id: "t1", pictures: [[{ sha256: sha(png), name: "after.png" }, null, "seat"]] })
     }),
   )
 

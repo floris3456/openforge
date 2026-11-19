@@ -221,7 +221,9 @@ const layer = Layer.effect(
                 // The Session would go idle; a plugin may admit input to keep this execution working.
                 yield* restore(
                   SessionBackground.outstanding(jobs, store, sessionID).pipe(
-                    Effect.flatMap((background) => hooks.trigger("session", "experimental.idle", { sessionID, background })),
+                    Effect.flatMap((background) =>
+                      hooks.trigger("session", "experimental.idle", { sessionID, background }),
+                    ),
                   ),
                 )
                 if (!(yield* SessionInbox.has(db, sessionID, "input"))) return DrainResult.Complete()
@@ -277,16 +279,22 @@ const layer = Layer.effect(
 
     // openforge: memory's start block goes in once the prompt is in and before the request is built, so the first
     // call holds it; after an automatic compaction too, which reloads here without a boundary.
-    const load = (selected: SessionContext.Selection) =>
-      memory
+    const load = (selected: SessionContext.Selection) => {
+      // A chat has a tool when it is a direct definition or a top-level tool of Code Mode's catalog (`task` is one
+      // when CLIProxyPacer's list puts it in Code Mode); a namespaced tool (`foo.task`) is not the tool itself.
+      const holds = (name: string) =>
+        selected.tools.definitions.some((tool) => tool.name === name) ||
+        (selected.tools.codeModeCatalog?.tools ?? []).some((entry) => entry.type === "tool" && entry.name === name)
+      return memory
         .ensure({
           session: selected.session,
           agent: selected.agent.id,
-          recall: selected.tools.definitions.some((tool) => tool.name === "recall"),
-          remember: selected.tools.definitions.some((tool) => tool.name === "remember"),
-          task: selected.tools.definitions.some((tool) => tool.name === "task"),
+          recall: holds("recall"),
+          remember: holds("remember"),
+          task: holds("task"),
         })
         .pipe(Effect.andThen(context.load(selected)))
+    }
 
     /**
      * Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. `resume` continues a

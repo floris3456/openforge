@@ -43,7 +43,8 @@ export const catalogOf = (
   /**
    * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; `plans`: whether its
    * tasks are plans; `tools`: whether it serves the memory tools and memory's texts; as the small server says when
-   * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items.
+   * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items; `codemode`: the
+   * tools its capabilities say run in Code Mode (`tools.task_codemode`), whose list keeps them direct otherwise.
    */
   options: {
     readonly prompt?: boolean
@@ -52,6 +53,7 @@ export const catalogOf = (
     readonly tools?: boolean
     readonly goals?: boolean
     readonly later?: boolean
+    readonly codemode?: ReadonlyArray<string>
   } = {},
 ): PacerModels.Catalog => ({
   at: 0,
@@ -61,6 +63,16 @@ export const catalogOf = (
       : {
           compactTokens: ["auto"],
           webTools: false,
+          ...(options.codemode === undefined
+            ? {}
+            : {
+                tools: new Map(
+                  options.codemode.map((name) => [
+                    name,
+                    { title: name, permission: name, subject: [], read_only: false, codemode: true },
+                  ]),
+                ),
+              }),
           ...(memory
             ? {
                 memory: {
@@ -283,10 +295,50 @@ export const primeTools = (project: string) =>
       step: true,
       continues: false,
     })
-    yield* poll("the memory tools are registered", () =>
-      Effect.runSync(toolDefinitions(registry).pipe(Effect.map((items) => items.some((item) => item.name === "task")))),
+    yield* poll(
+      "the memory tools are registered",
+      () =>
+        Effect.runSync(
+          toolDefinitions(registry).pipe(Effect.map((items) => items.some((item) => item.name === "task"))),
+        ) || codeModeRoots(registry).includes("task"),
     )
   })
+
+/**
+ * The proxy's answers with the list's meta saying the named tools run in Code Mode, as a server with
+ * `tools.task_codemode` does: a list read's meta is learnt too, so a capabilities read alone would be undone.
+ */
+export const codeModeList =
+  (served: ReturnType<typeof startProxied>, names: ReadonlyArray<string>) =>
+  async (request: Received): Promise<Response> => {
+    const response = await served.pass(request)
+    if (request.method !== "GET" || request.path !== "/pacer/v1/tools") return response
+    const body = (await response.json()) as { meta?: Record<string, Record<string, unknown>> }
+    return Response.json({
+      ...body,
+      meta: Object.fromEntries(
+        Object.entries(body.meta ?? {}).map(([name, meta]) => [
+          name,
+          names.includes(name) ? { ...meta, codemode: true } : meta,
+        ]),
+      ),
+    })
+  }
+
+/**
+ * The Code Mode catalog's top-level tools, as the step's snapshot has them: a tool in a namespace (`x.task`) is its
+ * namespace's, not one of these.
+ */
+export const codeModeRoots = (registry: Tool.Interface) =>
+  Effect.runSync(
+    registry
+      .snapshot([])
+      .pipe(
+        Effect.map((set) =>
+          (set.codeModeCatalog?.tools ?? []).flatMap((entry) => (entry.type === "tool" ? [entry.name] : [])),
+        ),
+      ),
+  )
 
 /** Waits, in real time whatever the test's clock and at most 5 s, until `check` holds. */
 export const poll = (label: string, check: () => boolean) =>

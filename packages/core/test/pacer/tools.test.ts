@@ -192,28 +192,32 @@ describe("PacerTools.list", () => {
     }),
   )
 
-  it.effect("reads it again at the step after the chat's compaction ends, also when it ends during that read", () =>
+  it.effect("reads it again at the chat's cold point, once, also when another comes during that read", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
       const { tools, bus } = yield* startTools(endpointOf(cpp.origin))
       yield* tools.list(step(chat))
 
+      // A compaction's end alone reads nothing: the step at the chat's cold point, which `SessionContext` tells, does.
       yield* bus.publish(...ended(chat))
       yield* settle
-      // The compaction's own request still carries the list it summarizes with.
+      yield* tools.list(step(chat))
+      expect(cpp.lists()).toHaveLength(1)
+      tools.cold(chat)
+      // A compaction's own request still carries the list it summarizes with.
       yield* tools.list(compaction(chat))
       expect(cpp.lists()).toHaveLength(1)
+      // The step's read before its instructions reads it; its request's own finds it read.
+      yield* tools.list(step(chat))
       yield* tools.list(step(chat))
       expect(cpp.lists()).toHaveLength(2)
 
-      // A compaction that ends while the list is read: the answer may be CPP's copy from before it.
-      yield* bus.publish(...ended(chat))
-      yield* settle
+      // A cold point that comes while the list is read: the answer may be CPP's copy from before it.
+      tools.cold(chat)
       cpp.hold()
       const reading = yield* tools.list(step(chat)).pipe(Effect.forkChild({ startImmediately: true }))
       yield* until("the third read", () => cpp.lists().length === 3)
-      yield* bus.publish(...ended(chat))
-      yield* settle
+      tools.cold(chat)
       cpp.gate.release()
       expect((yield* Fiber.join(reading))?.version).toBe(ownerList.version)
       yield* tools.list(step(chat))

@@ -326,10 +326,11 @@ describe("CLIProxyPacer's instructions in a chat's first step", () => {
     }),
   )
 
-  it.live("leave a chat that already holds its list reading nothing more", () =>
+  it.live("come from a list read once more at the first step, a cold point, of a chat that held one before it", () =>
     Effect.gen(function* () {
       const h = yield* setup({ model: cppRef })
-      // The chat as one that read its list before this step (a warm chat, or one whose list another request read).
+      // The chat as one whose list another request read before its first step: the step records the chat's start, so
+      // it reads the list again (`PacerTools.cold`), once, before its instructions; its warm step after reads nothing.
       yield* h.pacerTools.list(
         PacerTools.listInput({
           session: { id: h.sessionID },
@@ -342,8 +343,10 @@ describe("CLIProxyPacer's instructions in a chat's first step", () => {
       )
       expect(fake.reads).toBe(1)
       yield* h.prompt("Make a task.")
-      expect(fake.reads).toBe(1)
+      expect(fake.reads).toBe(2)
       expect(section(h.requests()[0])).toContain(text)
+      yield* h.prompt("One more.")
+      expect(fake.reads).toBe(2)
     }),
   )
 

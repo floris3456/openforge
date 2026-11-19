@@ -83,6 +83,7 @@ const pacer = Layer.succeed(
   PacerTools.Service.of({
     list: () => Effect.succeed(undefined),
     seen: () => {},
+    cold: () => {},
     call: () => Effect.die(new Error("unused")),
     upload: () => Effect.void,
     known: () => Effect.succeed(new Map()),

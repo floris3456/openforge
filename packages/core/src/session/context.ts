@@ -69,6 +69,7 @@ export interface Interface {
   /**
    * openforge: whether the selection's step is at a cold point, where its start is recorded anew
    * (`SessionPromptStart.cold`), so that its instructions take their current values (`InstructionState.rebase`).
+   * Decided as it was selected, which read the chat's tool list again there (`PacerTools.cold`).
    */
   readonly cold: (selection: Selection) => Effect.Effect<boolean>
   readonly resolveModel: (
@@ -125,19 +126,20 @@ const layer = Layer.effect(
     const PACER: string = PacerEndpoint.id
 
     /**
-     * openforge: reads the chat's list before its instructions are built, for a chat on CLIProxyPacer that holds none.
-     * The list carries the text CPP writes for agents, and an agent makes its first task in its first request, so the
-     * read must come first for the text to be part of that request's baseline. The request's own read then finds the
-     * list held (`SessionModelRequest`); a chat that holds one, or is on another provider, costs nothing here. The
-     * chat's model ref is taken as `SessionRunnerModel.resolve` picks it, without resolving it.
+     * openforge: reads the chat's list before its instructions are built, for a chat on CLIProxyPacer that holds none
+     * or is at a cold point. The list carries the text CPP writes for agents, and an agent makes its first task in its
+     * first request, so the read must come first for the text to be part of that request's baseline. The request's own
+     * read then finds the list held (`SessionModelRequest`); a warm chat that holds one, or one on another provider,
+     * costs nothing here. The chat's model ref is taken as `SessionRunnerModel.resolve` picks it, without resolving it.
      */
     const primeList = Effect.fnUntraced(function* (
       session: SessionSchema.Info,
       agent: Agent.Info,
       permissions: Permission.Ruleset,
+      cold: boolean,
     ) {
       // A switch of agent, a cold point, reads the new agent's list, so its instructions are that list's.
-      if (pacerTools.held(session.id, agent.id) !== undefined) return
+      if (!cold && pacerTools.held(session.id, agent.id) !== undefined) return
       const ref = session.model ?? agent.model ?? (yield* model.default())
       if (ref === undefined || ref.providerID !== PACER) return
       yield* pacerTools.list(
@@ -215,6 +217,25 @@ const layer = Layer.effect(
       )
     })
 
+    // openforge: a selection's model, and whether its step is at a cold point, worked out once in `select` for its list
+    // read there, its step's `cold` and its `load`.
+    const resolvedFor = new WeakMap<Selection, SessionRunnerModel.Resolved>()
+    const coldFor = new WeakMap<Selection, boolean>()
+
+    /** openforge: the step's model, and whether the step is at a cold point (`SessionPromptStart.cold`). */
+    const coldPoint = Effect.fnUntraced(function* (session: SessionSchema.Info, agent: Agent.ID) {
+      if (Option.isNone(starts)) return { cold: false }
+      const resolved = yield* resolveModel(session, { kind: "primary", agent }).pipe(Effect.option)
+      if (Option.isNone(resolved)) return { cold: false }
+      const cold = yield* starts.value.cold({
+        sessionID: session.id,
+        agent,
+        model: resolved.value.ref,
+        ...(resolved.value.cache?.ttl === undefined ? {} : { ttl: resolved.value.cache.ttl }),
+      })
+      return { resolved: resolved.value, cold }
+    })
+
     const select = Effect.fn("SessionContext.select")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
@@ -226,8 +247,11 @@ const layer = Layer.effect(
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
-      // openforge: CPP's text for agents, which its list carries, comes before the instructions that hold it.
-      yield* primeList(session, agent.info, permissions)
+      // openforge: where the chat's start is recorded anew, its list is read again, so the start holds what CPP offers
+      // now; and before the instructions, so they hold the text CPP writes for that list.
+      const point = yield* coldPoint(session, agent.info.id)
+      if (point.cold) pacerTools.cold(session.id)
+      yield* primeList(session, agent.info, permissions, point.cold)
       // The person's and the project's Code Mode pins, every config document's merged, with the agent's over them.
       const pins = CodeModePins.forAgent(Option.isSome(config) ? yield* config.value.entries() : [], agent.info)
       const loaded = yield* Effect.all(
@@ -242,7 +266,7 @@ const layer = Layer.effect(
         },
         { concurrency: "unbounded" },
       )
-      return {
+      const selection: Selection = {
         session,
         agent: { ...agent, info: agent.info },
         // Ordered from most to least shared across sessions so the baseline stays a reusable
@@ -263,24 +287,17 @@ const layer = Layer.effect(
         ]),
         tools: loaded.tools,
       }
+      coldFor.set(selection, point.cold)
+      if (point.resolved) resolvedFor.set(selection, point.resolved)
+      return selection
     })
 
-    // openforge: a selection's model, resolved once for its step's `cold` and `load`.
-    const resolvedFor = new WeakMap<Selection, SessionRunnerModel.Resolved>()
-
     const cold = Effect.fn("SessionContext.cold")(function* (selection: Selection) {
-      if (Option.isNone(starts)) return false
-      const resolved = yield* resolveModel(selection.session, { kind: "primary", agent: selection.agent.id }).pipe(
-        Effect.option,
-      )
-      if (Option.isNone(resolved)) return false
-      resolvedFor.set(selection, resolved.value)
-      return yield* starts.value.cold({
-        sessionID: selection.session.id,
-        agent: selection.agent.id,
-        model: resolved.value.ref,
-        ...(resolved.value.cache?.ttl === undefined ? {} : { ttl: resolved.value.cache.ttl }),
-      })
+      const known = coldFor.get(selection)
+      if (known !== undefined) return known
+      const point = yield* coldPoint(selection.session, selection.agent.id)
+      if (point.resolved) resolvedFor.set(selection, point.resolved)
+      return point.cold
     })
 
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {

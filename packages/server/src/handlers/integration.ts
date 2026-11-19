@@ -56,6 +56,7 @@ export const IntegrationHandler = HttpApiBuilder.group(Api, "server.integration"
       .handle(
         "integration.list",
         Effect.fn(function* () {
+          yield* Plugin.awaitActivation
           const service = yield* Integration.Service
           const current = yield* statements()
           return yield* response(

@@ -84,6 +84,8 @@ export interface List {
   readonly byName: ReadonlyMap<string, ToolDefinition>
   /** Each listed tool's meta, or {@link fallback}'s. */
   readonly meta: Known
+  /** CPP's instructions for agents, written for what this list holds and whether the client runs Code Mode. */
+  readonly instructions?: { readonly text: string; readonly version: string }
 }
 
 export interface ListInput {
@@ -93,6 +95,8 @@ export interface ListInput {
   readonly project?: Readonly<Record<string, string>>
   /** The model the request goes to, as CPP's `model`. */
   readonly model: string
+  /** Whether the chat runs Code Mode: its instructions are written for a client that does (`codemode=1`). */
+  readonly codemode: boolean
   /**
    * Whether the request is one of the chat's steps. Only a step reads the list again for another model or a stale
    * one; a compaction or one-off generation carries the list the chat's steps hold, whatever its own model.
@@ -168,10 +172,13 @@ const Definition = Schema.Struct({
   input_schema: Schema.Record(Schema.String, Schema.Json),
 })
 const decodeDefinition = Schema.decodeUnknownOption(Definition)
+const InstructionsAnswer = Schema.Struct({ text: Schema.String, version: Schema.String })
+const decodeInstructions = Schema.decodeUnknownOption(InstructionsAnswer)
 const ListAnswer = Schema.Struct({
   version: Schema.String,
   tools: Schema.Struct({ claude: Schema.Array(Schema.Unknown) }),
   meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  instructions: Schema.optional(Schema.Unknown),
 })
 const decodeMeta = Schema.decodeUnknownOption(Meta)
 const PlaceAnswer = Schema.NullOr(
@@ -316,10 +323,18 @@ export const layer = Layer.effect(
           })
         // Shared by the chat's requests that wait for it, so it outlives the one that started it.
         yield* http
-          .get(`/pacer/v1/tools?model=${encodeURIComponent(input.model)}&include=memory`, ListAnswer, {
-            timeout: READ_TIMEOUT,
-            headers: PacerHeaders.chat({ sessionID: input.sessionID, parentID: chat.parentID, project: input.project }),
-          })
+          .get(
+            `/pacer/v1/tools?model=${encodeURIComponent(input.model)}&include=memory${input.codemode ? "&codemode=1" : ""}`,
+            ListAnswer,
+            {
+              timeout: READ_TIMEOUT,
+              headers: PacerHeaders.chat({
+                sessionID: input.sessionID,
+                parentID: chat.parentID,
+                project: input.project,
+              }),
+            },
+          )
           .pipe(
             Effect.flatMap((answer) =>
               Effect.sync((): Read => {
@@ -535,10 +550,12 @@ function parse(answer: typeof ListAnswer.Type): List {
   const definitions = entries.map(
     (item) => new ToolDefinition({ name: item.name, description: item.description, inputSchema: item.input_schema }),
   )
+  const instructions = Option.getOrUndefined(decodeInstructions(answer.instructions))
   return {
     version: answer.version,
     definitions,
     byName: new Map(definitions.map((item) => [item.name, item])),
+    ...(instructions === undefined ? {} : { instructions }),
     meta: new Map(
       entries.map((item) => {
         const meta = Option.getOrElse(decodeMeta(answer.meta?.[item.name]), () => fallback(item.name))

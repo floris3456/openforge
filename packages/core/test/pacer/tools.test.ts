@@ -30,6 +30,7 @@ const step = (sessionID: SessionID, model = "claude-haiku-5-5", parentID?: Sessi
   sessionID,
   ...(parentID ? { parentID } : {}),
   model,
+  codemode: true,
   step: true,
   continues: false,
 })
@@ -102,6 +103,25 @@ describe("PacerTools.list", () => {
       const again = yield* tools.list(step(child, "claude-haiku-5-5", chat))
       expect(again).toBe(first!)
       expect(cpp.lists()).toHaveLength(1)
+    }),
+  )
+
+  it.effect("tells CPP whether the chat runs Code Mode, and keeps its instructions for agents", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const instructions = { text: "CLIProxyPacer holds the person's memory and tasks.", version: "7" }
+      cpp.answers.list = () => Response.json({ ...ownerList, instructions })
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+
+      const first = yield* tools.list(step(chat))
+      expect(cpp.lists()[0]!.query.get("codemode")).toBe("1")
+      expect(first?.instructions).toEqual(instructions)
+
+      // A chat whose `execute` permission is denied runs no Code Mode, and a list that carries no instructions has none.
+      cpp.answers.list = () => Response.json(listOf("7e57000000000009", ownerList.tools.claude))
+      const direct = yield* tools.list({ ...step(other, "gpt-6-luna"), codemode: false })
+      expect(cpp.lists()[1]!.query.get("codemode")).toBeNull()
+      expect(direct?.instructions).toBeUndefined()
     }),
   )
 

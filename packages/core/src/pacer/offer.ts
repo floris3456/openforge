@@ -27,6 +27,11 @@ export function codemode(known: PacerTools.Known) {
   return new Set([...known].flatMap(([name, meta]) => (meta.codemode === true ? [name] : [])))
 }
 
+/** Whether the chat runs Code Mode: its definitions hold `execute`, which a registry leaves out when Code Mode is denied. */
+export function executes(definitions: ReadonlyArray<{ readonly name: string }>) {
+  return definitions.some((item) => item.name === CodeModeTool.name)
+}
+
 /**
  * Code Mode's catalog without the named tools: those of CPP that a warm chat's recorded start holds as direct tools,
  * which reach its catalog with its next cold point, as its tools change (`SessionPromptStart`).

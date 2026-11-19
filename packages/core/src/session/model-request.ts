@@ -374,6 +374,7 @@ export const layer = Layer.effect(
             parentID: session.parentID,
             project,
             model: model.ref.id,
+            codemode: PacerOffer.executes(tools.definitions),
             step: kind === "primary",
             continues: input.messages.some((message) => message.role === "assistant"),
           }),

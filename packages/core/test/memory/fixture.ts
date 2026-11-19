@@ -279,6 +279,7 @@ export const primeTools = (project: string) =>
       sessionID: SessionID.make(`ses_prime_${crypto.randomUUID().slice(0, 8)}`),
       project: PacerHeaders.project(project, { name: "project" }),
       model: "fake-model",
+      codemode: true,
       step: true,
       continues: false,
     })

@@ -441,28 +441,16 @@ describe("the names of files", () => {
 
 describe("paths", () => {
   it.effect(
-    "each tool's output names its files, absolute, each once; a name is a repository's or the absolute path",
+    "each tool's result names its files, absolute, each once; a name is a repository's or the absolute path",
     () =>
       Effect.sync(() => {
-        expect(TaskFilesPlugin.paths("edit", { files: [{ file: "a.ts" }], replacements: 1 }, "/w")).toEqual(["/w/a.ts"])
-        expect(TaskFilesPlugin.paths("edit", { files: [{ file: "/x/a.ts" }], replacements: 1 }, "/w")).toEqual([
-          "/x/a.ts",
-        ])
-        expect(TaskFilesPlugin.paths("write", { resource: "b.ts", target: "/w/b.ts" }, "/w")).toEqual(["/w/b.ts"])
-        expect(
-          TaskFilesPlugin.paths(
-            "patch",
-            {
-              applied: [
-                { type: "add", resource: "c.ts", target: "/w/c.ts" },
-                { type: "update", resource: "c.ts", target: "/w/c.ts" },
-              ],
-            },
-            "/w",
-          ),
-        ).toEqual(["/w/c.ts"])
-        expect(TaskFilesPlugin.paths("read", { target: "/w/b.ts" }, "/w")).toEqual([])
-        expect(TaskFilesPlugin.paths("write", undefined, "/w")).toEqual([])
+        const files = (...names: string[]) => ({ metadata: { files: names.map((file) => ({ file })) } })
+        expect(TaskFilesPlugin.paths("edit", files("a.ts"), "/w")).toEqual(["/w/a.ts"])
+        expect(TaskFilesPlugin.paths("edit", files("/x/a.ts"), "/w")).toEqual(["/x/a.ts"])
+        expect(TaskFilesPlugin.paths("write", { input: { path: "b.ts", content: "x" } }, "/w")).toEqual(["/w/b.ts"])
+        expect(TaskFilesPlugin.paths("patch", files("c.ts", "c.ts", "../d.ts"), "/w")).toEqual(["/w/c.ts", "/d.ts"])
+        expect(TaskFilesPlugin.paths("read", { input: { path: "b.ts" }, ...files("b.ts") }, "/w")).toEqual([])
+        expect(TaskFilesPlugin.paths("write", {}, "/w")).toEqual([])
         expect(TaskFilesPlugin.repositoryName("/r/repos/openforge/.git")).toBe("openforge")
         const repository = { name: "openforge", worktree: "/r/worktrees/a/openforge" }
         expect(TaskFilesPlugin.named("/r/worktrees/a/openforge/src/x.ts", repository)).toBe("openforge/src/x.ts")

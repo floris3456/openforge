@@ -13,6 +13,7 @@ import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerModels } from "../pacer/models.js"
 import { PacerProject } from "../pacer/project.js"
+import { FileAccess } from "../file-access.js"
 import { AbsolutePath } from "../schema.js"
 import { normalizeContent } from "../tool/runtime.js"
 import { EditTool } from "../tool/plugin/edit.js"
@@ -41,25 +42,29 @@ export const FOLDERS = 1_000
 const provider: string = PacerEndpoint.id
 
 /**
- * The absolute paths a successful call of one of openforge's edit tools changed, as its output names them: an edit's
- * file relative to the chat's folder `directory` (or absolute outside it), a write's and a patch's targets.
+ * The absolute paths a successful call of one of openforge's edit tools changed: an edit's and a patch's files as their
+ * result's metadata names them (`files`, each relative to the chat's folder `directory` or absolute outside it), and a
+ * write's path as its input gives it.
  */
-export function paths(tool: string, output: unknown, directory: string): string[] {
-  if (!isRecord(output)) return []
+export function paths(
+  tool: string,
+  call: { readonly input?: unknown; readonly metadata?: unknown },
+  directory: string,
+): string[] {
   const items = (value: unknown) => (Array.isArray(value) ? value.filter(isRecord) : [])
   const found =
-    tool === EditTool.name
-      ? items(output.files).map((file) => file.file)
+    tool === EditTool.name || tool === PatchTool.name
+      ? isRecord(call.metadata)
+        ? items(call.metadata.files).map((file) => file.file)
+        : []
       : tool === WriteTool.name
-        ? [output.target]
-        : tool === PatchTool.name
-          ? items(output.applied).map((item) => item.target)
-          : []
+        ? [isRecord(call.input) ? call.input.path : undefined]
+        : []
   return [
     ...new Set(
       found
         .filter((item): item is string => typeof item === "string" && item !== "")
-        .map((item) => path.resolve(directory, item)),
+        .map((item) => FileAccess.resolvePath(directory, item)),
     ),
   ]
 }
@@ -143,7 +148,7 @@ export const Plugin = {
     yield* ctx.tool.hook("execute.after", (event) =>
       Effect.gen(function* () {
         if (event.status !== "completed" || !through.has(event.sessionID)) return
-        const files = paths(event.tool, event.result.output, ctx.location.directory)
+        const files = paths(event.tool, { input: event.input, metadata: event.result.metadata }, ctx.location.directory)
         if (files.length === 0) return
         const notice = yield* report(event.sessionID, String(event.agent), files).pipe(
           Effect.timeoutOrElse({

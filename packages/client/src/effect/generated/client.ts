@@ -2388,6 +2388,11 @@ const adaptClient = (raw: RawClient) => {
       /** @deprecated Use `client.experimental.file.unwatch`. Removed in the next minor. */
       unwatch: client.experimental.file.unwatch,
     },
+    shell: {
+      ...client.shell,
+      /** @deprecated Use `client.experimental.shell.watch`. Removed in the next minor. */
+      watch: client.experimental.shell.watch,
+    },
     /** @deprecated Use `client.experimental.migration`. Removed in the next minor. */
     migration: {
       /** @deprecated Use `client.experimental.migration.v1`. Removed in the next minor. */

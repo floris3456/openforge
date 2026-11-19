@@ -100,6 +100,8 @@ export const deprecatedClientPaths = new Set([
   "session.skill",
   "session.stats",
   "session.wait",
+  // openforge: our client shipped it before the route moved under experimental.
+  "shell.watch",
   "usage.limits",
   "voice.models",
   "voice.session",

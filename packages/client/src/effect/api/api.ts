@@ -2980,6 +2980,9 @@ export interface ShellApi<E = never> {
   readonly get: ShellGetOperation<E>
   readonly output: ShellOutputOperation<E>
   readonly remove: ShellRemoveOperation<E>
+
+  /** @deprecated Use `client.experimental.shell.watch`. Removed in the next minor. */
+  readonly watch: ExperimentalShellWatchOperation<E>
 }
 
 export type ExperimentalShellWatchInput = {
@@ -3399,6 +3402,15 @@ export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
 
 /** @deprecated Use `ExperimentalFileUnwatchOperation`. Removed in the next minor. */
 export type FileUnwatchOperation<E = never> = ExperimentalFileUnwatchOperation<E>
+
+/** @deprecated Use `ExperimentalShellWatchInput`. Removed in the next minor. */
+export type ShellWatchInput = ExperimentalShellWatchInput
+
+/** @deprecated Use `ExperimentalShellWatchOutput`. Removed in the next minor. */
+export type ShellWatchOutput = ExperimentalShellWatchOutput
+
+/** @deprecated Use `ExperimentalShellWatchOperation`. Removed in the next minor. */
+export type ShellWatchOperation<E = never> = ExperimentalShellWatchOperation<E>
 
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput

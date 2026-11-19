@@ -5669,6 +5669,12 @@ export type FileUnwatchInput = ExperimentalFileUnwatchInput
 /** @deprecated Use `ExperimentalFileUnwatchOutput`. Removed in the next minor. */
 export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
 
+/** @deprecated Use `ExperimentalShellWatchInput`. Removed in the next minor. */
+export type ShellWatchInput = ExperimentalShellWatchInput
+
+/** @deprecated Use `ExperimentalShellWatchOutput`. Removed in the next minor. */
+export type ShellWatchOutput = ExperimentalShellWatchOutput
+
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput
 

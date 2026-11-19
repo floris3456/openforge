@@ -341,7 +341,12 @@ const layer = Layer.effect(
                 return yield* executeTool(codeModeTool, name, event.input, context)
               // openforge: a warm chat's recorded start may offer as a direct tool one that has moved into Code Mode
               // since; it runs as offered until the chat's next cold point (`SessionPromptStart`).
-              const tool = direct.get(name) ?? (requested ? codeModeTools.get(name) : undefined)
+              // openforge: a model may also call a top-level Code Mode tool by its name, as if it were offered directly
+              // (CLIProxyPacer's `task`); it runs as a call from a script would. A namespaced one stays unknown by its bare name.
+              const moved = codeModeTools.get(name)
+              const topLevel =
+                codeModeTool !== undefined && moved !== undefined && CodeModeTool.qualifiedName(moved) === name
+              const tool = direct.get(name) ?? (requested || topLevel ? moved : undefined)
               if (tool) return yield* executeTool(tool, name, event.input, context)
               // A warm chat keeps offering a tool the rules in force now deny (`SessionPromptStart`): its calls are denied.
               const registered = data.tools.get(name)

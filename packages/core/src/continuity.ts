@@ -48,6 +48,8 @@ const Retry = Schema.Struct({
   timeouts: Schema.Number,
   /** When the run of CLIProxyPacer outages this retry is in began, so a restart keeps its 30 minutes. */
   outageSince: Schema.optional(Schema.Number),
+  /** Until when this run of waits for a free login does not count against the retries, so a restart keeps it. */
+  noLoginUntil: Schema.optional(Schema.Number),
   at: Schema.Number,
   error: SessionError.Error,
 })

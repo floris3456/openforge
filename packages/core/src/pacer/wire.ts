@@ -233,6 +233,11 @@ const decodeRow = Schema.decodeUnknownOption(Row)
 const decodePromptRow = Schema.decodeUnknownOption(PromptRow)
 const decodeSetting = Schema.decodeUnknownOption(Setting)
 const decodeNotice = Schema.decodeUnknownOption(Schema.fromJsonString(Notice))
+const decodeReady = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({ providers: maybe(Schema.Array(Schema.String)), models: maybe(Schema.Array(Schema.String)) }),
+  ),
+)
 
 export const each = <A>(
   items: ReadonlyArray<unknown> | null | undefined,
@@ -315,6 +320,12 @@ export function keyChange(items: ReadonlyArray<unknown>, change: Readonly<Record
 export function notice(data: string) {
   const decoded = Option.getOrUndefined(decodeNotice(data))
   return { sessions: (decoded?.sessions ?? []).map((item) => item.session.toLowerCase()), many: decoded?.many === true }
+}
+
+/** What a `ready` notice names: the providers whose accounts may serve again, and the models (none: any model). */
+export function ready(data: string) {
+  const decoded = Option.getOrUndefined(decodeReady(data))
+  return { providers: decoded?.providers ?? [], models: decoded?.models ?? [] }
 }
 
 export interface Context {

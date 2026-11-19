@@ -193,3 +193,65 @@ describe("PacerAnswers.refused", () => {
     expect(PacerAnswers.refused(chat, new Error("prompt_refused"))).toBe(false)
   })
 })
+
+describe("PacerAnswers.noLogin", () => {
+  const other = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make("anthropic") })
+  // The bodies CPP writes (dispatch.rs `unavailable_text`, `Failure::Cooldown`), on the Messages and OpenAI routes.
+  const unavailable =
+    "auth_unavailable: no auth available (providers=claude, model=claude-test-1; last upstream error: rate_limit_error); check Claude auth/key session and cooldown state via /v0/management/auth-files"
+
+  test("is CPP's 503 auth_unavailable or 429 model_cooldown", () => {
+    expect(
+      PacerAnswers.noLogin(chat, answer(503, { type: "error", error: { type: "api_error", message: unavailable } })),
+    ).toBe(true)
+    expect(PacerAnswers.noLogin(chat, answer(503, { error: { message: unavailable, type: "server_error" } }))).toBe(
+      true,
+    )
+    expect(
+      PacerAnswers.noLogin(
+        chat,
+        answer(429, {
+          error: {
+            code: "model_cooldown",
+            message: "All credentials for model claude-test-1 are cooling down via provider claude",
+            model: "claude-test-1",
+            reset_seconds: 600,
+          },
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  test("is not auth_not_found, the terminal refusal, another 503 or 429, or another provider's", () => {
+    expect(PacerAnswers.noLogin(chat, answer(503, { error: { message: "auth_not_found: no auth available" } }))).toBe(
+      false,
+    )
+    expect(
+      PacerAnswers.noLogin(
+        chat,
+        answer(503, {
+          error: { message: unavailable, type: "authentication_error", code: "upstream_authentication_required" },
+        }),
+      ),
+    ).toBe(false)
+    expect(PacerAnswers.noLogin(chat, answer(503, { error: { type: "pacer_transient_wait", message: "Pacer" } }))).toBe(
+      false,
+    )
+    expect(PacerAnswers.noLogin(chat, answer(429, { error: { type: "rate_limit_error", message: "slow" } }))).toBe(
+      false,
+    )
+    expect(PacerAnswers.noLogin(other, answer(503, { error: { message: unavailable } }))).toBe(false)
+  })
+})
+
+describe("PacerAnswers.readyFor", () => {
+  test("is a ready notice that names the model, without its variant suffix, or names no models", () => {
+    expect(PacerAnswers.readyFor(chat, { models: ["claude-test-1"] })).toBe(true)
+    expect(PacerAnswers.readyFor(chat, { models: [] })).toBe(true)
+    expect(PacerAnswers.readyFor(chat, { models: ["claude-test-2"] })).toBe(false)
+    const variant = Model.Ref.make({ id: Model.ID.make("claude-test-1(high)"), providerID: chat.providerID })
+    expect(PacerAnswers.readyFor(variant, { models: ["claude-test-1"] })).toBe(true)
+    const other = Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID: Provider.ID.make("anthropic") })
+    expect(PacerAnswers.readyFor(other, { models: [] })).toBe(false)
+  })
+})

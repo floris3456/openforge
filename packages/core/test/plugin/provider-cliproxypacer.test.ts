@@ -615,7 +615,9 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
     }),
   )
 
-  it.effect("429 model_cooldown: waits its Retry-After, then tries again", () =>
+  // A want of a free login (2026-11-19): the wait is the Retry-After or a minute, whichever is shorter, it ends early on
+  // CPP's ready notice for the model, and the tries before the first answer's Retry-After ends are free.
+  it.effect("429 model_cooldown: waits its Retry-After of a minute, for a free login, then tries again", () =>
     Effect.gen(function* () {
       const { decisions } = yield* answered(
         "claude-test-1",
@@ -634,7 +636,14 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
           { "retry-after": "60" },
         ),
       )
-      expect(decisions).toEqual([{ retry: true, attempt: 2, delay: 60_000 }])
+      expect(decisions).toEqual([
+        {
+          retry: true,
+          attempt: 1,
+          delay: 60_000,
+          login: Model.Ref.make({ id: Model.ID.make("claude-test-1"), providerID }),
+        },
+      ])
     }),
   )
 
@@ -772,8 +781,11 @@ describe("CLIProxyPacer's answers (spec, section 2)", () => {
             ),
           ),
         ]
+        // The first try, within the Retry-After, is free; the 10 counted ones follow it.
         expect((yield* decided(cooldown.model, Array(20).fill(cooldown.failure), { wait: true })).decisions).toEqual(
-          retries(10, 60_000),
+          [{ retry: true, attempt: 1, delay: 60_000 }, ...retries(10, 60_000)].map((decision) =>
+            decision.retry ? { ...decision, login: cooldown.model } : decision,
+          ),
         )
         for (const { model, failure } of [transient, ...unavailable]) {
           const { decisions } = yield* decided(model, Array(20).fill(failure), { wait: true })

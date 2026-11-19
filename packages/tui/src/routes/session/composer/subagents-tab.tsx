@@ -15,6 +15,7 @@ import { useDialog } from "../../../ui/dialog"
 import { openRowHelp } from "../../../ui/row-help"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { sessionFamily } from "../../../util/session"
+import { useRetryWait } from "../../../util/retry-wait"
 
 interface SubagentEntry {
   sessionID: string
@@ -221,9 +222,11 @@ export function SubagentsTab(props: { sessionID: string }) {
           <For each={entries()}>
             {(entry, index) => {
               const active = createMemo(() => index() === store.selected)
+              const wait = useRetryWait(() => data.session.retry(entry.sessionID))
               const status = createMemo(() => {
-                if (entry.status === "running") return "Running"
-                return ""
+                if (entry.status !== "running") return ""
+                // A child waiting on a retry says so, so it does not look like one that never started.
+                return wait() ?? "Running"
               })
               return (
                 <box
@@ -260,7 +263,16 @@ export function SubagentsTab(props: { sessionID: string }) {
                     </text>
                   </box>
                   <Show when={status()}>
-                    <text fg={active() ? theme.text.action.primary.focused : theme.text.muted} wrapMode="none">
+                    <text
+                      fg={
+                        active()
+                          ? theme.text.action.primary.focused
+                          : entry.status === "running" && wait()
+                            ? theme.text.feedback.warning.base
+                            : theme.text.muted
+                      }
+                      wrapMode="none"
+                    >
                       {status()}
                     </text>
                   </Show>

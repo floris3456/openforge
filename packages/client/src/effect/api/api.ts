@@ -2142,6 +2142,7 @@ export type EventSubscribeInput = {
         | "artifact.updated"
         | "pacer.status"
         | "pacer.accounts.updated"
+        | "pacer.logins.ready"
         | "pacer.models.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"

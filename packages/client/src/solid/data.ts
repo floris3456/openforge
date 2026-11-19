@@ -138,6 +138,9 @@ type Store = {
     // session ID in that family, including the key itself once its info arrives.
     family: Record<string, string[]>
     active: Record<string, DataSessionStatus>
+    // The retry each session waits on, from its `session.retry.scheduled`, whether or not its messages are loaded (a
+    // parent shows its waiting subagents); cleared when its next step starts or its execution ends.
+    retry: Record<string, SessionMessageAssistant["retry"]>
     message: Record<string, SessionMessageInfo[]>
     messageCursor: Record<string, string | undefined>
     messageLoading: Record<string, boolean>
@@ -308,6 +311,7 @@ export function createData(config: CreateDataInput) {
       missing: {},
       family: {},
       active: {},
+      retry: {},
       message: {},
       messageCursor: {},
       messageLoading: {},
@@ -1018,6 +1022,7 @@ export function createData(config: CreateDataInput) {
         })
         return
       case "session.step.started":
+        if (store.session.retry[event.data.sessionID]) setStore("session", "retry", event.data.sessionID, undefined)
         message.update(event.data.sessionID, (draft, index) => {
           const position = index.get(event.data.assistantMessageID)
           const existing = position === undefined ? undefined : draft[position]
@@ -1193,6 +1198,11 @@ export function createData(config: CreateDataInput) {
         })
         return
       case "session.retry.scheduled":
+        setStore("session", "retry", event.data.sessionID, {
+          attempt: event.data.attempt,
+          at: event.data.at,
+          error: event.data.error,
+        })
         message.editAssistant(event.data.sessionID, event.data.assistantMessageID, (assistant) => {
           assistant.retry = { attempt: event.data.attempt, at: event.data.at, error: event.data.error }
         })
@@ -1220,6 +1230,7 @@ export function createData(config: CreateDataInput) {
       case "session.execution.failed":
       case "session.execution.interrupted":
         setSessionActive(event.data.sessionID, "idle")
+        if (store.session.retry[event.data.sessionID]) setStore("session", "retry", event.data.sessionID, undefined)
         message.update(event.data.sessionID, (draft) => {
           const currentAssistant = message.activeAssistant(draft)
           if (currentAssistant) currentAssistant.retry = undefined
@@ -1605,6 +1616,15 @@ export function createData(config: CreateDataInput) {
       },
       status(sessionID: string) {
         return store.session.active[sessionID] ?? "idle"
+      },
+      /**
+       * The retry a running session waits on: from its `session.retry.scheduled`, else from its loaded messages (a
+       * wait scheduled before this client connected). Undefined once its next step starts.
+       */
+      retry(sessionID: string): SessionMessageAssistant["retry"] {
+        if (store.session.active[sessionID] !== "running") return undefined
+        const messages = store.session.message[sessionID]
+        return store.session.retry[sessionID] ?? (messages && message.activeAssistant(messages)?.retry)
       },
       active() {
         return Object.entries(store.session.active).flatMap(([sessionID, status]) =>

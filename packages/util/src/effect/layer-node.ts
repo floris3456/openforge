@@ -303,29 +303,45 @@ export function compile<A, E>(root: Graph<A, E>, options: CompileOptions = {}): 
   }
 
   const roots = resolve(root)
-  return Layer.fromBuild((memoMap, scope) => {
-    const local = shared === undefined ? memoMap : Layer.makeMemoMapUnsafe()
-    const ambient = Layer.succeed(Layer.CurrentMemoMap, memoMap)
-    const layers = new Map<Resolved, RuntimeLayer>()
-    const build = (node: Resolved): RuntimeLayer => {
-      const cached = layers.get(node)
-      if (cached) return cached
-      const dependencies = node.dependencies.map(build)
-      // Acquisition uses the selected cache, while lazy LayerMaps inherit the enclosing shared cache.
-      const implementation = Layer.suspend(() => node.implementation.pipe(Layer.provide([ambient, ...dependencies])))
-      const layer = Layer.fromBuild((_, scope) =>
-        trackRelease(node.name, scope, () => buildContext(implementation, node.shared ? memoMap : local, scope)),
+  return Layer.fromBuild((memoMap, scope) =>
+    Effect.contextWith((context: Context.Context<unknown>) => {
+      const local = shared === undefined ? memoMap : Layer.makeMemoMapUnsafe()
+      // A shared node is built once for every build that shares the map, so it must not see the build that happens
+      // to need it first (a Location's services, or the fiber that asked for that Location): it is built over its
+      // own dependencies and the context the outermost compile was built in.
+      const sharedContext = Context.get(context, SharedContext) ?? context
+      const ambient = Layer.succeedContext(
+        Context.make(Layer.CurrentMemoMap, memoMap).pipe(Context.add(SharedContext, sharedContext)),
       )
-      layers.set(node, layer)
-      return layer
-    }
-    return buildContext(
-      roots.map(build).reduce<RuntimeLayer>((result, layer) => layer.pipe(Layer.provideMerge(result)), Layer.empty),
-      memoMap,
-      scope,
-    )
-  }) as Layer.Layer<A, E>
+      const layers = new Map<Resolved, RuntimeLayer>()
+      const build = (node: Resolved): RuntimeLayer => {
+        const cached = layers.get(node)
+        if (cached) return cached
+        const dependencies = node.dependencies.map(build)
+        // Acquisition uses the selected cache, while lazy LayerMaps inherit the enclosing shared cache and context.
+        const implementation = Layer.suspend(() => node.implementation.pipe(Layer.provide([ambient, ...dependencies])))
+        const layer = Layer.fromBuild((_, scope) =>
+          trackRelease(node.name, scope, () =>
+            node.shared
+              ? buildContext(implementation, memoMap, scope).pipe(Effect.setContext(sharedContext))
+              : buildContext(implementation, local, scope),
+          ),
+        )
+        layers.set(node, layer)
+        return layer
+      }
+      return buildContext(
+        roots.map(build).reduce<RuntimeLayer>((result, layer) => layer.pipe(Layer.provideMerge(result)), Layer.empty),
+        memoMap,
+        scope,
+      )
+    }),
+  ) as Layer.Layer<A, E>
 }
+
+const SharedContext = Context.Reference<Context.Context<unknown> | undefined>("@opencode/LayerNode/SharedContext", {
+  defaultValue: () => undefined,
+})
 
 // The node's scope releases sequentially in reverse order, so a finalizer added before the build runs last and one
 // added after it runs first: together they bracket the release of everything this node acquired. The build must

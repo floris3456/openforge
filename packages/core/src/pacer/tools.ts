@@ -28,10 +28,14 @@ import { PacerModels } from "./models.js"
 // CPP's tools as a client of its API (CLIENT-GUIDE §4.3; the workspace's reference `docs/reference/cpp-tools-api.md`):
 // each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
 // CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
-// anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
-// model or agent changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
-// is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
-// warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
+// anyway, so a list is read again only at those points: the chat's first request, at each of its cold points (after
+// its compaction, once its cache went cold, …: where its start is recorded anew, as `SessionPromptStart.cold` decides
+// them and `SessionContext` tells this module), when its model or agent changes, and when a model answer's
+// `X-Pacer-Tools` names another version. No event of the chat's is listened to for that: this node is built under
+// whichever Location boots first, and the bus hands it only that Location's events (a chat deleted in another one
+// goes as the least recently used). What the model is offered from it is `PacerOffer`'s; this module stays when that
+// changes. With a chat's start recorded (`SessionPromptStart`), its warm steps send the recorded tools: the list then
+// decides only what a cold point records and what a reminder tells.
 
 /** What a client needs to run one of CPP's tools: the list's `meta` of it. */
 export const Meta = PacerModels.ToolMeta
@@ -119,7 +123,7 @@ export interface ListInput {
 /**
  * A chat's list input from the pieces a request knows, built here by both the step's early read (`SessionContext`,
  * before its instructions, so the first request carries CPP's text) and the request's own (`SessionModelRequest`), so
- * the two cannot drift. A chat that holds a list reads nothing for either.
+ * the two cannot drift. A chat that holds a list reads nothing for either, but at its cold point (`cold`).
  */
 export const listInput = (input: {
   readonly session: { readonly id: SessionID; readonly parentID?: SessionID }
@@ -183,6 +187,11 @@ export interface Interface {
   readonly list: (input: ListInput) => Effect.Effect<List | undefined>
   /** A model answer's `X-Pacer-Tools`: another version than the held one is read at the chat's next step. */
   readonly seen: (sessionID: SessionID, version: string | undefined) => void
+  /**
+   * The chat's step is at a cold point, where its start is recorded anew (`SessionPromptStart.cold`): the list it holds
+   * is read again by that step's first read, so what the step records is what CPP offers now.
+   */
+  readonly cold: (sessionID: SessionID) => void
   readonly call: (input: CallInput) => Effect.Effect<Answer, CallError>
   /**
    * Makes sure CPP holds a file's bytes, by its SHA-256: `HEAD /pacer/v1/files/{sha256}` answers 200 when it does, and
@@ -458,8 +467,7 @@ export const layer = Layer.effect(
     const list = Effect.fn("PacerTools.list")(function* (input: ListInput) {
       if (!(yield* offered)) return undefined
       const chat = touch(input)
-      const due =
-        !chat.list || (input.step && (chat.stale || chat.model !== input.model || chat.agent !== input.agent))
+      const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model || chat.agent !== input.agent))
       // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
       // tools would cost it its prompt cache because another chat's read failed first.
       const now = yield* Clock.currentTimeMillis
@@ -561,14 +569,8 @@ export const layer = Layer.effect(
       ),
       Effect.forkScoped({ startImmediately: true }),
     )
-    yield* bus.subscribe([SessionEvent.Compaction.Ended, SessionEvent.Deleted]).pipe(
-      Stream.runForEach((event) =>
-        Effect.sync(() => {
-          if (event.type === "session.deleted") return drop(event.data.sessionID)
-          const chat = chats.get(event.data.sessionID)
-          if (chat) stale(chat)
-        }),
-      ),
+    yield* bus.subscribe(SessionEvent.Deleted).pipe(
+      Stream.runForEach((event) => Effect.sync(() => drop(event.data.sessionID))),
       Effect.forkScoped({ startImmediately: true }),
     )
 
@@ -578,6 +580,10 @@ export const layer = Layer.effect(
         if (version === undefined) return
         const chat = chats.get(sessionID)
         if (chat?.list && chat.list.version !== version) stale(chat)
+      },
+      cold: (sessionID) => {
+        const chat = chats.get(sessionID)
+        if (chat?.list) stale(chat)
       },
       call,
       upload: (bytes, mime, sha256) =>

@@ -24,6 +24,8 @@ export interface Input {
   readonly project?: Readonly<Record<string, string>>
   /** Where the chat works (`PacerWhere`). */
   readonly where?: string
+  /** The agent the request runs as ({@link agent}). */
+  readonly agent?: string
 }
 
 /**
@@ -35,7 +37,8 @@ export function make(input: Input): Readonly<Record<string, string>> {
   if (input.providerID !== provider) return {}
   const kind = input.kind === "title" || input.kind === "generate" ? "title" : input.kind
   return {
-    ...chat(input),
+    ...chat({ ...input, agent: undefined }),
+    ...agent(input.agent),
     ...(kind === "primary"
       ? { "X-Pacer-Compact": input.auto ? "auto, cold, before-cold" : "before-cold" }
       : { "X-Pacer-Kind": kind }),
@@ -58,9 +61,17 @@ export function chat(input: {
     "X-Pacer-Session": PacerSessionID.make(input.sessionID),
     ...(input.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(input.parentID) } : {}),
     ...input.project,
-    ...(input.agent === undefined ? {} : { "X-Pacer-Agent": input.agent, "X-Pacer-Chat": input.sessionID }),
+    ...(input.agent === undefined ? {} : { ...agent(input.agent), "X-Pacer-Chat": input.sessionID }),
     ...where(input.where),
   }
+}
+
+/**
+ * The agent a chat runs as (build, explore, a person's own), its role to CPP: on model requests and tool list reads,
+ * which name the chat by `X-Pacer-Session` alone (workspace spec `docs/specs/agent-tools.md`, section 2).
+ */
+export function agent(name: string | undefined): Readonly<Record<string, string>> {
+  return name === undefined ? {} : { "X-Pacer-Agent": name }
 }
 
 export const WHERE = "X-Pacer-Where"

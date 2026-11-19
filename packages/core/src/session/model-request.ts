@@ -403,6 +403,7 @@ export const layer = Layer.effect(
               session,
               project,
               model: model.ref.id,
+              agent: input.agent,
               codemode: PacerOffer.executes(tools.definitions),
               step: kind === "primary",
               continues: input.messages.some((message) => message.role === "assistant"),
@@ -532,6 +533,7 @@ export const layer = Layer.effect(
             auto: input.autoCompaction === true,
             project,
             where: place,
+            agent: input.agent,
           }),
         },
         // TODO: Persist cache lineage so nested forks reuse the root session's cache key.

@@ -3,6 +3,7 @@ export * as ConfigAgent from "./agent.js"
 import { Effect, Schema } from "effect"
 import { Permission } from "../permission.js"
 import { optional, PositiveInt } from "../schema.js"
+import { ConfigCodeMode } from "./codemode.js"
 import { ConfigModel } from "./model.js"
 import { ConfigProvider } from "./provider.js"
 import { ConfigSandbox } from "./sandbox.js"
@@ -25,4 +26,8 @@ export class Info extends Schema.Class<Info>("Config.Agent")({
   disabled: Schema.Boolean.pipe(optional),
   permissions: Permission.Ruleset.pipe(optional),
   sandbox: ConfigSandbox.Info.pipe(optional),
+  codemode: ConfigCodeMode.Info.pipe(optional).annotate({
+    description:
+      "This agent's Code Mode settings: its `pinned` lie over the config's `codemode.pinned`, its value winning per tool",
+  }),
 }) {}

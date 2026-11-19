@@ -29,7 +29,7 @@ import { PacerModels } from "./models.js"
 // each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
 // CPP keeps a chat's copy frozen while its prompt cache is warm and makes a new one only where the cache is lost
 // anyway, so a list is read again only at those points: the chat's first request, after its compaction, when its
-// model changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
+// model or agent changes, and when a model answer's `X-Pacer-Tools` names another version. What the model is offered from it
 // is `PacerOffer`'s; this module stays when that changes. With a chat's start recorded (`SessionPromptStart`), its
 // warm steps send the recorded tools: the list then decides only what a cold point records and what a reminder tells.
 
@@ -75,7 +75,10 @@ export const UPLOAD_TIMEOUT = Duration.seconds(60)
  */
 export const HELD = Duration.hours(1)
 
-/** A chat's list as CPP answered it. One object per version, shared by every chat that holds it. */
+/**
+ * A chat's list as CPP answered it. One object per version and instructions version, shared by every chat that holds
+ * it: two agents may get the same definitions with different instructions.
+ */
 export interface List {
   /** CPP's `version`: the first 16 hex digits of the definitions' SHA-256. */
   readonly version: string
@@ -95,6 +98,8 @@ export interface ListInput {
   readonly project?: Readonly<Record<string, string>>
   /** The model the request goes to, as CPP's `model`. */
   readonly model: string
+  /** The agent the chat runs as, its role to CPP (`X-Pacer-Agent`): another one is another list. */
+  readonly agent: string
   /** Whether the chat runs Code Mode: its instructions are written for a client that does (`codemode=1`). */
   readonly codemode: boolean
   /**
@@ -118,6 +123,7 @@ export const listInput = (input: {
   readonly session: { readonly id: SessionID; readonly parentID?: SessionID }
   readonly project?: Readonly<Record<string, string>>
   readonly model: string
+  readonly agent: string
   /** Whether the chat runs Code Mode, as `PacerOffer.executes` answers it for the request's definitions. */
   readonly codemode: boolean
   readonly step: boolean
@@ -127,6 +133,7 @@ export const listInput = (input: {
   ...(input.session.parentID === undefined ? {} : { parentID: input.session.parentID }),
   ...(input.project === undefined ? {} : { project: input.project }),
   model: input.model,
+  agent: input.agent,
   codemode: input.codemode,
   step: input.step,
   continues: input.continues,
@@ -185,8 +192,11 @@ export interface Interface {
   readonly knownChanges: () => Stream.Stream<Known>
   /** Whether the list the chat holds names the tool; undefined while it holds none, as before its first read. */
   readonly holds: (sessionID: SessionID, name: string) => boolean | undefined
-  /** What the chat holds, its instructions among it; undefined while it holds none. Never reads from CPP. */
-  readonly held: (sessionID: SessionID) => List | undefined
+  /**
+   * What the chat holds, its instructions among it; undefined while it holds none, or, with `agent`, none read for
+   * that agent. Never reads from CPP.
+   */
+  readonly held: (sessionID: SessionID, agent?: string) => List | undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerTools") {}
@@ -226,6 +236,8 @@ interface Chat {
   list?: List
   /** The model the held list was read for. */
   model?: string
+  /** The agent the held list was read for. */
+  agent?: string
   stale: boolean
   /** Counts the events that make the list stale, so one during a read leaves it stale. */
   generation: number
@@ -300,10 +312,10 @@ export const layer = Layer.effect(
     }
 
     const release = (list: List | undefined) => {
-      const held = list && versions.get(list.version)
+      const held = list && versions.get(keyOf(list))
       if (!held) return
       held.holders--
-      if (held.holders === 0) versions.delete(list.version)
+      if (held.holders === 0) versions.delete(keyOf(list))
     }
     const drop = (sessionID: SessionID) => {
       release(chats.get(sessionID)?.list)
@@ -322,10 +334,11 @@ export const layer = Layer.effect(
       chat.generation++
     }
     const hold = (chat: Chat, answer: typeof ListAnswer.Type) => {
-      const version = answer.version
-      if (chat.list?.version === version) return chat.list
-      const held = versions.get(version) ?? { list: parse(answer), holders: 0 }
-      versions.set(version, held)
+      const list = parse(answer)
+      const key = keyOf(list)
+      if (chat.list && keyOf(chat.list) === key) return chat.list
+      const held = versions.get(key) ?? { list, holders: 0 }
+      versions.set(key, held)
       held.holders++
       release(chat.list)
       chat.list = held.list
@@ -353,11 +366,14 @@ export const layer = Layer.effect(
             ListAnswer,
             {
               timeout: READ_TIMEOUT,
-              headers: PacerHeaders.chat({
-                sessionID: input.sessionID,
-                parentID: chat.parentID,
-                project: input.project,
-              }),
+              headers: {
+                ...PacerHeaders.chat({
+                  sessionID: input.sessionID,
+                  parentID: chat.parentID,
+                  project: input.project,
+                }),
+                ...PacerHeaders.agent(input.agent),
+              },
             },
           )
           .pipe(
@@ -365,13 +381,13 @@ export const layer = Layer.effect(
               Effect.sync((): Read => {
                 if (epoch !== state.epoch) return none
                 // A chat deleted or pushed out meanwhile holds nothing; this request still gets the list.
-                if (chats.get(input.sessionID) !== chat)
-                  return {
-                    list: versions.get(answer.body.version)?.list ?? parse(answer.body),
-                    answered: true,
-                  }
+                if (chats.get(input.sessionID) !== chat) {
+                  const list = parse(answer.body)
+                  return { list: versions.get(keyOf(list))?.list ?? list, answered: true }
+                }
                 const list = hold(chat, answer.body)
                 chat.model = input.model
+                chat.agent = input.agent
                 if (chat.generation === generation) chat.stale = false
                 return { list, answered: true }
               }).pipe(
@@ -405,6 +421,7 @@ export const layer = Layer.effect(
                     release(chat.list)
                     chat.list = undefined
                     chat.model = undefined
+                    chat.agent = undefined
                   }
                   return none
                 }
@@ -434,7 +451,8 @@ export const layer = Layer.effect(
     const list = Effect.fn("PacerTools.list")(function* (input: ListInput) {
       if (!(yield* offered)) return undefined
       const chat = touch(input)
-      const due = !chat.list || (input.step && (chat.stale || chat.model !== input.model))
+      const due =
+        !chat.list || (input.step && (chat.stale || chat.model !== input.model || chat.agent !== input.agent))
       // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
       // tools would cost it its prompt cache because another chat's read failed first.
       if (!due || (chat.list && (yield* Clock.currentTimeMillis) < state.pausedUntil)) return chat.list
@@ -566,7 +584,10 @@ export const layer = Layer.effect(
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),
       holds: (sessionID, name) => chats.get(sessionID)?.list?.byName.has(name),
-      held: (sessionID) => chats.get(sessionID)?.list,
+      held: (sessionID, agent) => {
+        const chat = chats.get(sessionID)
+        return agent === undefined || chat?.agent === agent ? chat?.list : undefined
+      },
     })
   }),
 )
@@ -577,6 +598,11 @@ export const node = makeGlobalNode({
   // Not Session: it imports, through the session context, the model request that uses this.
   deps: [PacerEndpoint.node, PacerHttp.node, PacerModels.node, Bus.node, KV.node],
 })
+
+/** Which list an answer or a held list is: its version and its instructions' version. */
+function keyOf(list: List) {
+  return `${list.version}:${list.instructions?.version ?? ""}`
+}
 
 /**
  * A version's definitions and their meta, each one on its own: an entry this version does not understand drops only

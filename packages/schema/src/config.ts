@@ -7,6 +7,7 @@ import { AbsolutePath, optional } from "./schema.js"
 import { ConfigAgent } from "./config/agent.js"
 import { ConfigMedia } from "./config/media.js"
 import { ConfigCompaction } from "./config/compaction.js"
+import { ConfigCodeMode } from "./config/codemode.js"
 import { ConfigCommand } from "./config/command.js"
 import { ConfigExperimental } from "./config/experimental.js"
 import { ConfigFormatter } from "./config/formatter.js"
@@ -87,16 +88,9 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   tool_output: ConfigToolOutput.Info.pipe(optional).annotate({
     description: "Tool output truncation thresholds",
   }),
-  codemode: Schema.Struct({
-    pinned: Schema.Record(Schema.String, Schema.Boolean).pipe(optional).annotate({
-      description:
-        "Code Mode tools always listed in the catalog (true) or never pinned (false), by catalog path (`web_search`, `openforge.worktree_list`) or namespace (`context7.*`).",
-    }),
-  })
-    .pipe(optional)
-    .annotate({
-      description: "Code Mode (the `execute` tool) configuration",
-    }),
+  codemode: ConfigCodeMode.Info.pipe(optional).annotate({
+    description: "Code Mode (the `execute` tool) configuration",
+  }),
   mcp: ConfigMCP.Info.pipe(optional).annotate({
     description: "MCP server configuration",
   }),

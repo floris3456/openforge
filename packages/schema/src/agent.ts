@@ -1,6 +1,7 @@
 export * as Agent from "./agent.js"
 
 import { Schema } from "effect"
+import { ConfigCodeMode } from "./config/codemode.js"
 import { ConfigSandbox } from "./config/sandbox.js"
 import { ephemeral, inventory } from "./event.js"
 import { optional } from "./schema.js"
@@ -34,6 +35,8 @@ export const Info = Schema.Struct({
   steps: PositiveInt.pipe(optional),
   permissions: Permission.Ruleset,
   sandbox: ConfigSandbox.Info.pipe(optional),
+  /** Its Code Mode pins, laid over the config's when a session runs as it. */
+  codemode: ConfigCodeMode.Info.pipe(optional),
 })
   .annotate({ identifier: "Agent.Info" })
   .pipe(

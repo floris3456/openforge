@@ -50,6 +50,17 @@ describe("PacerHeaders", () => {
     })
   })
 
+  test("names the chat's agent on each kind of model request, without X-Pacer-Chat", () => {
+    for (const kind of ["primary", "title", "generate", "compaction"] as const) {
+      const headers = PacerHeaders.make({ providerID: PacerEndpoint.id, kind, sessionID, auto: true, agent: "explore" })
+      expect(headers).toMatchObject({ "X-Pacer-Session": chat, "X-Pacer-Agent": "explore" })
+      expect(headers).not.toHaveProperty("X-Pacer-Chat")
+    }
+    expect(
+      PacerHeaders.make({ providerID: "anthropic", kind: "primary", sessionID, auto: true, agent: "explore" }),
+    ).toEqual({})
+  })
+
   test("adds nothing for another provider, its project's headers neither", () => {
     const project = PacerHeaders.project(identity, { name: "openforge" })
     for (const providerID of ["anthropic", "openai", "cliproxyapi", "CLIProxyPacer"])

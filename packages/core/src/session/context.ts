@@ -136,7 +136,8 @@ const layer = Layer.effect(
       agent: Agent.Info,
       permissions: Permission.Ruleset,
     ) {
-      if (pacerTools.held(session.id) !== undefined) return
+      // A switch of agent, a cold point, reads the new agent's list, so its instructions are that list's.
+      if (pacerTools.held(session.id, agent.id) !== undefined) return
       const ref = session.model ?? agent.model ?? (yield* model.default())
       if (ref === undefined || ref.providerID !== PACER) return
       yield* pacerTools.list(
@@ -144,6 +145,7 @@ const layer = Layer.effect(
           session,
           project: (yield* pacerProject.chat(session.projectID)).headers,
           model: String(ref.id),
+          agent: agent.id,
           codemode: PacerOffer.executesUnder(permissions),
           step: true,
           continues: yield* SessionHistory.answered(db, session.id),
@@ -226,8 +228,8 @@ const layer = Layer.effect(
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
       // openforge: CPP's text for agents, which its list carries, comes before the instructions that hold it.
       yield* primeList(session, agent.info, permissions)
-      // The person's and the project's Code Mode pins, every config document's merged.
-      const pins = Option.isSome(config) ? CodeModePins.merged(yield* config.value.entries()) : {}
+      // The person's and the project's Code Mode pins, every config document's merged, with the agent's over them.
+      const pins = CodeModePins.forAgent(Option.isSome(config) ? yield* config.value.entries() : [], agent.info)
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(permissions, location, pins),

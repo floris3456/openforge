@@ -66,9 +66,13 @@ const list = (instructions: { readonly text: string; readonly version: string } 
   meta: { moon_phase: { title: "Moon phase", permission: "astronomy", subject: [], read_only: true, codemode: true } },
   ...(instructions === undefined ? {} : { instructions }),
 })
+/** What CPP writes for the plan agent, whose list read names it (`X-Pacer-Agent`). */
+const planText = "CLIProxyPacer holds the person's memory; as plan, note what you decide."
 const fake = {
   /** How many list reads the fake answered. */
   reads: 0,
+  /** The agent each read named. */
+  agents: [] as Array<string | null>,
   instructions: { text, version: "1" } as { readonly text: string; readonly version: string } | undefined,
 }
 const server = Bun.serve({
@@ -78,7 +82,9 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname !== "/pacer/v1/tools") return Response.json({ error: { type: "not_found" } }, { status: 404 })
     fake.reads++
-    return Response.json(list(fake.instructions))
+    const agent = request.headers.get("x-pacer-agent")
+    fake.agents.push(agent)
+    return Response.json(list(agent === "plan" ? { text: planText, version: "2" } : fake.instructions))
   },
 })
 afterAll(() => server.stop(true))
@@ -238,6 +244,7 @@ const cppRef = Model.Ref.make({ providerID: Provider.ID.make("cliproxypacer"), i
 const setup = Effect.fnUntraced(function* (input: { readonly model?: Model.Ref } = {}) {
   yield* SubscriptionRef.set(catalogRef, catalog(true))
   fake.reads = 0
+  fake.agents = []
   fake.instructions = { text, version: "1" }
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
@@ -245,6 +252,10 @@ const setup = Effect.fnUntraced(function* (input: { readonly model?: Model.Ref }
     editor.update(Agent.ID.make("build"), (agent) => {
       agent.mode = "primary"
       agent.system = BASE
+    })
+    editor.update(Agent.ID.make("plan"), (agent) => {
+      agent.mode = "primary"
+      agent.system = "You are the plan agent."
     })
   })
   const project = Project.ID.make(crypto.randomUUID().replaceAll("-", "").padEnd(40, "0"))
@@ -323,6 +334,7 @@ describe("CLIProxyPacer's instructions in a chat's first step", () => {
         PacerTools.listInput({
           session: { id: h.sessionID },
           model: "claude-cpp",
+          agent: "build",
           codemode: true,
           step: true,
           continues: false,
@@ -352,6 +364,21 @@ describe("CLIProxyPacer's instructions in a chat's first step", () => {
       yield* h.prompt("Make a task.")
       expect(section(h.requests()[0])).not.toContain("CLIProxyPacer")
       expect(fake.reads).toBe(1)
+    }),
+  )
+
+  it.live("are the new agent's at the step after a switch of agent, whose list read names it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ model: cppRef })
+      yield* h.prompt("Make a task.")
+      expect(section(h.requests()[0])).toContain(text)
+      yield* h.session.switchAgent({ sessionID: h.sessionID, agent: Agent.ID.make("plan") })
+      yield* h.prompt("Now plan it.")
+      // The switch is a cold point: its step reads the list again, for plan, before its instructions are built.
+      expect(fake.agents).toEqual(["build", "plan"])
+      const switched = h.requests().at(-1)
+      expect(section(switched)).toContain(planText)
+      expect(section(switched)).not.toContain(text)
     }),
   )
 })

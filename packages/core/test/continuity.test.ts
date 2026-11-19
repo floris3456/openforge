@@ -817,6 +817,38 @@ describe("SessionContinuity", () => {
     }),
   )
 
+  it.effect("a foreground child that answered during the pause is not asked again after the stop", () =>
+    Effect.gen(function* () {
+      reset()
+      const llm = yield* TestLLM.Test
+      const release = yield* Deferred.make<void>()
+      yield* script(
+        llm,
+        [
+          TestLLM.toolCall("call_sub", "subagent", { agent: "reviewer", description: "review", prompt: "check it" }),
+          TestLLM.text("parent done", "p2"),
+        ],
+        [held(release, TestLLM.text("child done", "c1"))],
+      )
+
+      const first = yield* start()
+      const parent = yield* createSession(first)
+      yield* first.sessions.prompt({ sessionID: parent.id, text: "delegate" })
+      yield* llm.wait(2)
+      // The pause waits for the child's reply, which the parent's call has not taken yet when the service stops.
+      const pause = yield* first.continuity.pause().pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      expect((yield* Fiber.join(pause)).paused).toBe(true)
+      yield* first.stop
+
+      const second = yield* start({ paused: true })
+      yield* second.continuity.resume
+      yield* succeeded(second.events, parent.id)
+      expect(yield* counts(llm)).toEqual({ parent: 2, child: 1 })
+      expect(yield* transcript(second.sessions, parent.id)).toContain("parent done")
+    }),
+  )
+
   it.effect("a background subagent continues after the stop and is never reported cancelled", () =>
     Effect.gen(function* () {
       reset()

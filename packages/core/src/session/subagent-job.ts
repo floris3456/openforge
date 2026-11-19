@@ -9,8 +9,16 @@ import { SessionExecution } from "./execution.js"
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
 
 export interface Interface {
-  /** openforge: `background: false` starts a child a subagent tool call waits for (`Job.block`), which reports nothing. */
-  readonly start: (recovery: Recovery, options?: { readonly background?: boolean }) => Effect.Effect<Job.Info>
+  /**
+   * openforge: `background: false` starts a child a subagent tool call waits for (`Job.block`), which reports nothing.
+   * `rerun`, for that call run again after a restart: the child is woken rather than run, so it takes a step only
+   * when it has one to take (a rest, new input). The restart sweep resumes a suspended child itself, and one that has
+   * answered by then is not asked again.
+   */
+  readonly start: (
+    recovery: Recovery,
+    options?: { readonly background?: boolean; readonly rerun?: boolean },
+  ) => Effect.Effect<Job.Info>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SubagentJob") {}
@@ -21,6 +29,7 @@ export function start(
   recovery: Recovery,
   notificationID?: Job.Background["notificationID"],
   background = true,
+  rerun = false,
 ) {
   const id = recovery.childSessionID
   return jobs.start({
@@ -31,7 +40,7 @@ export function start(
     recovery,
     notificationID,
     background,
-    run: execution.resume(id).pipe(
+    run: (rerun ? execution.wake(id).pipe(Effect.andThen(execution.awaitIdle(id))) : execution.resume(id)).pipe(
       // Only an explicit caller cancel releases the child's claim. A server shutdown
       // interrupts this job but must leave the child resumable on the next start.
       Effect.onInterrupt(() =>
@@ -51,7 +60,9 @@ const make = Effect.gen(function* () {
 
   return Service.of({
     start: (recovery, options) =>
-      start(jobs, execution, recovery, undefined, options?.background ?? true).pipe(Effect.setContext(context)),
+      start(jobs, execution, recovery, undefined, options?.background ?? true, options?.rerun ?? false).pipe(
+        Effect.setContext(context),
+      ),
   })
 })
 

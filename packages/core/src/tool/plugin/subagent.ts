@@ -94,9 +94,10 @@ export const Plugin = {
       recovery: Extract<Job.Recovery, { kind: "subagent" }>,
       sessionID: SessionSchema.ID,
       callID: string,
+      rerun = false,
     ) {
       const child = recovery.childSessionID
-      yield* subagents.start(recovery, { background: false })
+      yield* subagents.start(recovery, { background: false, rerun })
       const result = yield* continuity
         .wait(callID, jobs.block({ id: child, sessionID }), { childSessionID: child, agent: recovery.agent })
         .pipe(
@@ -182,6 +183,7 @@ export const Plugin = {
                   },
                   context.sessionID,
                   context.id,
+                  true,
                 )
               }
               const parent = yield* sessions

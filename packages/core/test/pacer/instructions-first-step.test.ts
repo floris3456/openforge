@@ -6,6 +6,7 @@ import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
+import { ConfigAgentSources } from "@opencode/core/config/agent-sources"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
@@ -108,6 +109,7 @@ const catalog = (webTools: boolean): PacerModels.Catalog => ({
   models: [],
 })
 
+const decode = Schema.decodeUnknownSync(Info)
 const configs = Effect.runSync(Layer.build(Config.testLayer()).pipe(Effect.scoped))
 
 class LLMRequests extends Context.Service<LLMRequests, LLMRequest[]>()("test/FirstStepRequests") {}
@@ -220,6 +222,7 @@ const layer = AppNodeBuilder.build(
     Tool.node,
     echoNode,
     Config.node,
+    ConfigAgentSources.node,
     Snapshot.node,
     SessionRunnerLLM.node,
     Session.node,
@@ -248,10 +251,14 @@ const cppRef = Model.Ref.make({ providerID: Provider.ID.make("cliproxypacer"), i
 
 /**
  * A chat on CLIProxyPacer with a list to read, and the model requests it made; with `entries` the config's documents,
- * with `codemode` the build agent's pins as its file sets them.
+ * with `file` the build agent's file and the pins it sets, as the agent config plugin loads them.
  */
 const setup = Effect.fnUntraced(function* (
-  input: { readonly model?: Model.Ref; readonly entries?: Entry[]; readonly codemode?: Agent.Info["codemode"] } = {},
+  input: {
+    readonly model?: Model.Ref
+    readonly entries?: Entry[]
+    readonly file?: { readonly path: AbsolutePath; readonly pinned: Readonly<Record<string, boolean>> }
+  } = {},
 ) {
   yield* SubscriptionRef.set(catalogRef, catalog(true))
   fake.reads = 0
@@ -260,13 +267,20 @@ const setup = Effect.fnUntraced(function* (
   fake.instructions = { text, version: "1" }
   const config = Context.get(configs, Config.Test)
   yield* config.setEntries(input.entries ?? [])
+  const file = input.file
+  const sources = yield* ConfigAgentSources.Service
+  yield* sources.hold(() =>
+    file
+      ? [new Document({ type: "document", path: file.path, info: decode({ agents: { build: { codemode: file } } }) })]
+      : [],
+  )
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
     editor.update(Agent.ID.make("build"), (agent) => {
       agent.mode = "primary"
       agent.system = BASE
-      agent.codemode = input.codemode
+      agent.codemode = file && { pinned: { ...file.pinned } }
     })
     editor.update(Agent.ID.make("plan"), (agent) => {
       agent.mode = "primary"
@@ -407,7 +421,7 @@ describe("A chat's list read telling CLIProxyPacer the Code Mode pins its agent 
     new Document({
       type: "document",
       path: AbsolutePath.make(path.join(path.sep, "project", "opencode.json")),
-      info: Schema.decodeUnknownSync(Info)({ codemode: { pinned: { recall: false, "context7.*": true } } }),
+      info: decode({ codemode: { pinned: { recall: false, "context7.*": true } } }),
     }),
   ]
 
@@ -416,7 +430,7 @@ describe("A chat's list read telling CLIProxyPacer the Code Mode pins its agent 
       const h = yield* setup({
         model: cppRef,
         entries,
-        codemode: { pinned: { web_search: true, recall: true }, from: { web_search: file, recall: file } },
+        file: { path: file, pinned: { web_search: true, recall: true } },
       })
       yield* h.prompt("Make a task.")
       expect(fake.pins).toEqual([

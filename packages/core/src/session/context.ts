@@ -5,6 +5,7 @@ import { Permission } from "../permission.js"
 import { Context, Effect, Layer, Option } from "effect"
 import { Agent } from "../agent.js"
 import { Config } from "../config.js"
+import { ConfigAgentSources } from "../config/agent-sources.js"
 import { ImageBank } from "../image/bank.js"
 import type { ImageFit } from "../image/fit.js"
 import type { CodeModeCatalog } from "../codemode/catalog.js"
@@ -118,6 +119,7 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
     const config = yield* Effect.serviceOption(Config.Service)
+    const agentSources = yield* ConfigAgentSources.Service
     const pacerTools = yield* PacerTools.Service
     const pacerProject = yield* PacerProject.Service
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
@@ -260,7 +262,7 @@ const layer = Layer.effect(
       const point = yield* coldPoint(session, agent.info.id)
       if (point.cold) pacerTools.cold(session.id)
       const configured = Option.isSome(config) ? yield* config.value.entries() : []
-      const reported = PacerPins.of(CodeModePins.sourced(configured, agent.info), {
+      const reported = PacerPins.of(CodeModePins.sourced(configured, agent.info, agentSources.documents()), {
         project: location.project.directory,
         home: Global.Path.home,
       })
@@ -361,6 +363,7 @@ export const node = makeLocationNode({
   deps: [
     Agent.node,
     Config.node,
+    ConfigAgentSources.node,
     Model.node,
     Database.node,
     InstructionBuiltIns.node,

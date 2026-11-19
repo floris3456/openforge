@@ -4,6 +4,7 @@ import { Artifact } from "@opencode/core/artifact"
 import { AISDK } from "@opencode/core/aisdk"
 import { Command } from "@opencode/core/command"
 import { Config } from "@opencode/core/config"
+import { ConfigAgentSources } from "@opencode/core/config/agent-sources"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { Environment } from "@opencode/core/environment/index"
@@ -107,6 +108,7 @@ export const makePluginTestLayer = (permission = permissionLayer, generate = gen
       Npm.node,
       Credential.node,
       Config.node,
+      ConfigAgentSources.node,
       Flag.node,
       Database.node,
       Environment.node,

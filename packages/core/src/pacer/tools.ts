@@ -59,7 +59,9 @@ export const READ_TIMEOUT = Duration.seconds(5)
 export const PAUSE = Duration.seconds(30)
 /**
  * A chat with earlier steps that holds no list waits for CPP's answer: it reads again this long after a read that got
- * none, then `RETRY` after each later one, for up to `WAIT` from its first read.
+ * none, then `RETRY` after each later one, for up to `WAIT` from its first read. It waits once: after a wait that went
+ * without, its reads for `PAUSE` take that outcome (the step's request after its instructions' read, its retries), and
+ * later ones read once.
  */
 export const RETRY_FIRST = Duration.seconds(3)
 export const RETRY = Duration.seconds(5)
@@ -242,6 +244,8 @@ interface Chat {
   /** Counts the events that make the list stale, so one during a read leaves it stale. */
   generation: number
   reading?: Deferred.Deferred<Read>
+  /** When the chat's last wait went without a list; cleared once it holds one. */
+  missed?: number
 }
 
 /** A list read's outcome: `answered` is false when CPP gave no definite answer (no answer, a 5xx, a 429, …). */
@@ -334,6 +338,7 @@ export const layer = Layer.effect(
       chat.generation++
     }
     const hold = (chat: Chat, answer: typeof ListAnswer.Type) => {
+      chat.missed = undefined
       const list = parse(answer)
       const key = keyOf(list)
       if (chat.list && keyOf(chat.list) === key) return chat.list
@@ -366,6 +371,8 @@ export const layer = Layer.effect(
             ListAnswer,
             {
               timeout: READ_TIMEOUT,
+              // At another of CPP's addresses at once while this one is away: a chat waits only when none answers.
+              failover: true,
               headers: {
                 ...PacerHeaders.chat({
                   sessionID: input.sessionID,
@@ -455,8 +462,12 @@ export const layer = Layer.effect(
         !chat.list || (input.step && (chat.stale || chat.model !== input.model || chat.agent !== input.agent))
       // A chat that holds no list, as every chat right after a restart, reads through the pause: going without its
       // tools would cost it its prompt cache because another chat's read failed first.
-      if (!due || (chat.list && (yield* Clock.currentTimeMillis) < state.pausedUntil)) return chat.list
-      if (chat.list || !input.continues) return (yield* read(chat, input, false)).list
+      const now = yield* Clock.currentTimeMillis
+      if (!due || (chat.list && now < state.pausedUntil)) return chat.list
+      // Its wait just went without: this request takes that outcome, as the step's request after its instructions'
+      // read does, rather than wait again.
+      if (!chat.list && chat.missed !== undefined && now < chat.missed + Duration.toMillis(PAUSE)) return undefined
+      if (chat.list || !input.continues || chat.missed !== undefined) return (yield* read(chat, input, false)).list
       return yield* wait(chat, input)
     })
 
@@ -475,6 +486,7 @@ export const layer = Layer.effect(
             waited: Duration.format(Duration.millis(now - begun)),
             reason: result.reason,
           })
+          chat.missed = now
           return undefined
         }
         yield* Effect.raceFirst(Effect.sleep(retry), changed)

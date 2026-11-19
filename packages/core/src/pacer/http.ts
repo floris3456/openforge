@@ -90,6 +90,17 @@ export class Unexpected extends Schema.TaggedError<Unexpected>()("PacerHttp.Unex
 export type Error = NotSetUp | Unreachable | Refused | NoPacer | NotFound | Unexpected
 
 /**
+ * CPP did not answer at all (refused, reset, no answer in time), or its gateway said it is down: the address is away,
+ * and another of CPP's addresses may answer (`PacerEndpoint.failover`).
+ */
+export function down(error: Error) {
+  return (
+    error._tag === "PacerHttp.Unreachable" &&
+    (error.status === undefined || error.status === 502 || error.status === 504)
+  )
+}
+
+/**
  * Bounds of the server's clock minus the local one, in milliseconds, from an answer's `Date` header: the server read
  * its clock as `Date` (whole seconds, so between `Date` and a second later) at a moment between the request's sending
  * and its answer's arrival, so the difference lies in [Date − arrival, Date + 1000 − sending].
@@ -118,6 +129,12 @@ export interface Options {
   /** How long the call may take; for a stream, until its headers arrive. Default 10 seconds. */
   readonly timeout?: Duration.Input
   readonly headers?: Readonly<Record<string, string>>
+  /**
+   * For a call safe to send twice, such as a read: when the address does not answer ({@link down}), the endpoint moves
+   * to another of CPP's addresses that does (`PacerEndpoint.failover`), as a model request's retry does, and the call
+   * is made there at once.
+   */
+  readonly failover?: boolean
 }
 
 export interface Interface {
@@ -202,6 +219,30 @@ export const layer = Layer.effect(
     })
 
     const json = <A, I>(
+      request: (url: string) => HttpClientRequest.HttpClientRequest,
+      path: string,
+      schema: Schema.Codec<A, I>,
+      options: Options | undefined,
+    ): Effect.Effect<Answer<A>, Error> => {
+      const failover = endpoints.failover
+      if (!options?.failover || !failover) return once(request, path, schema, options)
+      return Effect.gen(function* () {
+        const at = options.endpoint ?? (yield* endpoints.get())
+        if (!at) return yield* once(request, path, schema, options)
+        return yield* once(request, path, schema, { ...options, endpoint: at }).pipe(
+          Effect.catchIf(down, (error) =>
+            Effect.gen(function* () {
+              yield* failover(at)
+              const now = yield* endpoints.get()
+              if (!now || PacerEndpoint.same(now, at)) return yield* error
+              return yield* once(request, path, schema, { ...options, endpoint: now })
+            }),
+          ),
+        )
+      })
+    }
+
+    const once = <A, I>(
       request: (url: string) => HttpClientRequest.HttpClientRequest,
       path: string,
       schema: Schema.Codec<A, I>,

@@ -17,6 +17,7 @@ import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
 import { McpInstructions } from "../mcp/instructions.js"
 import { McpTool } from "../tool/mcp.js"
+import { PacerInstructions } from "../pacer/instructions.js"
 import { PacerOffer } from "../pacer/offer.js"
 import { PacerTools } from "../pacer/tools.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
@@ -201,6 +202,8 @@ const layer = Layer.effect(
           CodeModeInstructions.make(
             loaded.tools.codeModeCatalog && (yield* catalogOf(session, agent.id, loaded.tools.codeModeCatalog)),
           ),
+          // CLIProxyPacer's, as the chat's list holds them: one text for every chat of one server, near the top.
+          PacerInstructions.make(pacerTools.held(session.id)),
           loaded.mcp,
           loaded.references,
           loaded.skills,

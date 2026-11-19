@@ -125,6 +125,21 @@ describe("PacerTools.list", () => {
     }),
   )
 
+  it.effect("answers what a chat holds without asking CPP, and nothing for a chat that holds none", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      expect(tools.held(chat)).toBeUndefined()
+      const read = yield* tools.list(step(chat))
+      expect(tools.held(chat)).toBe(read!)
+      // Reading for another chat asks once and leaves this one's held list alone.
+      yield* tools.list(step(other))
+      expect(tools.held(other)).not.toBeUndefined()
+      expect(tools.held(chat)).toBe(read!)
+      expect(cpp.lists()).toHaveLength(2)
+    }),
+  )
+
   it.effect("reads it again when the step's model changes, not for a compaction or generation on another model", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp

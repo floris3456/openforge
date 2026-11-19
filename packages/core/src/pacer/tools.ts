@@ -162,6 +162,8 @@ export interface Interface {
   readonly knownChanges: () => Stream.Stream<Known>
   /** Whether the list the chat holds names the tool; undefined while it holds none, as before its first read. */
   readonly holds: (sessionID: SessionID, name: string) => boolean | undefined
+  /** What the chat holds, its instructions among it; undefined while it holds none. Never reads from CPP. */
+  readonly held: (sessionID: SessionID) => List | undefined
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerTools") {}
@@ -530,6 +532,7 @@ export const layer = Layer.effect(
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),
       holds: (sessionID, name) => chats.get(sessionID)?.list?.byName.has(name),
+      held: (sessionID) => chats.get(sessionID)?.list,
     })
   }),
 )

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { agent, model, renderLocal, session } from "../fixture/local"
-import { json } from "../fixture/tui-client"
+import { directory, json } from "../fixture/tui-client"
 
 test("cycles all recent models in a stable order in both directions", async () => {
   await using setup = await renderLocal({
@@ -94,10 +94,9 @@ test("retains an unavailable saved session model instead of selecting a fallback
   expect(setup.data.session.get("ses_first")?.model).toEqual(selected)
 })
 
-test("new-session fallback still skips unavailable CLI and recent models", async () => {
+test("new-session fallback still skips unavailable recent models", async () => {
   await using setup = await renderLocal({
     models: [model("first"), model("second")],
-    args: { model: "provider/missing-cli" },
     preferences: {
       recent: [
         { providerID: "provider", modelID: "missing-recent" },
@@ -107,6 +106,37 @@ test("new-session fallback still skips unavailable CLI and recent models", async
   })
   expect(setup.local.model.current()?.modelID).toBe("second")
   expect(setup.local.model.available()).toBe(true)
+})
+
+// openforge: a model the CLI, the config or the agent names stays selected while the catalog lacks it, shown as
+// unavailable, and becomes usable when the catalog brings it, instead of a recent or the first model taking its place.
+test.each([
+  { named: "--model", args: { model: "provider/late" } },
+  { named: "config", config: "provider/late" },
+  { named: "agent", agent: { providerID: "provider", id: "late" } },
+])("a model named by $named that the catalog lacks yet stays selected until it arrives", async (input) => {
+  const catalog = { models: [model("first")] }
+  await using setup = await renderLocal({
+    args: input.args,
+    agents: [agent("build", input.agent)],
+    preferences: { recent: [{ providerID: "provider", modelID: "first" }] },
+    fetch: (url) => {
+      if (url.pathname === "/api/model") return json({ location: { directory }, data: catalog.models })
+      if (url.pathname === "/api/config" && input.config)
+        return json([{ type: "document", info: { model: input.config } }])
+    },
+  })
+  expect(setup.local.model.current()).toEqual({ providerID: "provider", modelID: "late" })
+  expect(setup.local.model.available()).toBe(false)
+  expect(setup.local.model.parsed().model).toBe("late (unavailable)")
+
+  catalog.models = [model("first"), model("late")]
+  setup.events.emit({ id: "evt_model", created: 0, type: "model.updated", data: {}, location: { directory } })
+  const started = Date.now()
+  while (!setup.local.model.available() && Date.now() - started < 2_000) await Bun.sleep(10)
+  expect(setup.local.model.available()).toBe(true)
+  expect(setup.local.model.current()).toEqual({ providerID: "provider", modelID: "late" })
+  expect(setup.local.model.parsed().model).toBe("late")
 })
 
 test("a manual agent switch supersedes the CLI agent after its commit", async () => {

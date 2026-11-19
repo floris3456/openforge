@@ -72,7 +72,7 @@ export function Home() {
     if (sent) return
     if (!r) return
     if (!local.model.ready || !local.model.catalogReady) return
-    if (!local.agent.current() || !local.model.current()) return
+    if (!local.agent.current() || !local.model.available()) return
     if (!args.prompt) return
     if (r.current.text !== args.prompt) return
     sent = true

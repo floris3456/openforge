@@ -1732,9 +1732,32 @@ describe("Date components convert through ToPrimitive", () => {
         const d = new Date(NaN)
         const result = d.setDate({ valueOf() { d.setTime(0); return 1 } })
         const y = new Date(NaN)
-        return [Number.isNaN(result), d.getTime(), y.setFullYear(2020) === Date.UTC(2020, 0, 1) - y.getTimezoneOffset() * 60000]
+        // An invalid receiver starts from t = +0, so setFullYear(2020) lands on local midnight, not UTC midnight.
+        return [Number.isNaN(result), d.getTime(), y.setFullYear(2020) === new Date(2020, 0, 1).getTime()]
       `),
     ).toEqual([true, 0, true])
+  })
+
+  test("setFullYear on an invalid Date lands on local midnight in zones that are not UTC", async () => {
+    const program = `
+      const y = new Date(NaN)
+      return [y.setFullYear(2020), y.getTime(), y.getTimezoneOffset(), new Date(2020, 0, 1).getTime()]
+    `
+    const previous = process.env.TZ
+    try {
+      for (const timeZone of ["Europe/Amsterdam", "America/New_York", "Asia/Kathmandu"]) {
+        process.env.TZ = timeZone
+        const engine = new Date(NaN)
+        const time = engine.setFullYear(2020)
+        const offset = engine.getTimezoneOffset()
+        // A UTC zone would answer the same with UTC math, so this case has to see a real offset.
+        expect(offset).not.toBe(0)
+        expect({ [timeZone]: await value(program) }).toEqual({ [timeZone]: [time, time, offset, time] })
+      }
+    } finally {
+      if (previous === undefined) delete process.env.TZ
+      else process.env.TZ = previous
+    }
   })
 })
 

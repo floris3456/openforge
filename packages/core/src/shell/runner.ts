@@ -16,6 +16,7 @@ import { AppProcess } from "@opencode/util/process"
 import { Context, Deferred, Effect, Exit, Layer, Option, Queue, Schema, Scope, Semaphore, Stream } from "effect"
 import { App } from "../app.js"
 import { Bus } from "../bus.js"
+import { ShellPage } from "./page.js"
 
 export const DIRECTORY = "shell"
 const STOPPED = "the tool runner stopped unexpectedly"
@@ -525,27 +526,50 @@ const layer = (options: Options) =>
         const entry = yield* require(id)
         const cursor = input?.cursor ?? 0
         const limit = input?.limit ?? RunnerOutput.CHUNK
-        if (entry.control) {
-          const page = yield* entry.control.read(cursor, limit)
-          if (page)
-            return {
-              output: page.data.toString("utf8"),
-              cursor: page.offset + page.data.length,
-              size: page.size,
-              truncated: page.offset > cursor,
-            }
+        const text = (page: ShellPage.Read) => ({
+          output: page.data.toString("utf8"),
+          cursor: page.cursor,
+          size: page.size,
+          truncated: page.truncated,
+        })
+        const control = entry.control
+        if (control) {
+          const page = yield* ShellPage.whole(
+            (from, limit) =>
+              control.read(from, limit).pipe(
+                Effect.map((page) =>
+                  page
+                    ? {
+                        data: page.data,
+                        cursor: page.offset + page.data.length,
+                        size: page.size,
+                        truncated: page.offset > from,
+                      }
+                    : undefined,
+                ),
+              ),
+            cursor,
+            limit,
+            true,
+          )
+          if (page) return text(page)
           yield* Deferred.await(entry.done).pipe(Effect.ignore)
         }
         const exit = entry.exit
         if (!exit || entry.removed) return yield* new NotFoundError({ id })
-        const read = yield* Effect.promise(() =>
-          RunnerOutput.read(entry.info.file, exit, cursor, limit).catch(() => ({
-            data: Buffer.alloc(0),
-            cursor: Math.min(cursor, exit.size),
-            skipped: false,
-          })),
+        const page = yield* ShellPage.whole(
+          (from, limit) =>
+            Effect.promise(() =>
+              RunnerOutput.read(entry.info.file, exit, from, limit).then(
+                (read) => ({ data: read.data, cursor: read.cursor, size: exit.size, truncated: read.skipped }),
+                () => ({ data: Buffer.alloc(0), cursor: Math.min(from, exit.size), size: exit.size, truncated: false }),
+              ),
+            ),
+          cursor,
+          limit,
+          false,
         )
-        return { output: read.data.toString("utf8"), cursor: read.cursor, size: exit.size, truncated: read.skipped }
+        return text(page ?? { data: Buffer.alloc(0), cursor, size: exit.size, truncated: false })
       })
 
       const watch = (id: Shell.ID, input?: Shell.WatchInput) =>

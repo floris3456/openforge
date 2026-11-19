@@ -4,6 +4,7 @@ import net from "net"
 import path from "path"
 import { Deferred, Effect, Fiber, Layer, Queue, Stream } from "effect"
 import { RunnerClient } from "@opencode/runner/client"
+import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -254,6 +255,97 @@ describe("Shell through the tool runner", () => {
         }).pipe(Effect.scoped, Effect.provide(host.service({ separate: true })))
       }),
     { timeout: 20_000 },
+  )
+
+  // Upstream d432a06b9c: a page never splits a character, while the command runs and after it ended.
+  it.live("pages output on whole UTF-8 characters, with byte cursors", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const prefix = "a".repeat(RunnerOutput.CHUNK - 1)
+        for (const char of ["é", "€", "😀"]) {
+          const text = `${prefix}${char}\uFEFFz`
+          const source = path.join(host.tmp, "text")
+          const release = path.join(host.tmp, "release")
+          fs.writeFileSync(source, text)
+          fs.rmSync(release, { force: true })
+          const info = yield* shell.create({
+            shell: "/bin/sh",
+            command: `cat ${source}; while [ ! -e ${release} ]; do sleep 0.02; done`,
+            timeout: 0,
+          })
+          const pages = Effect.gen(function* () {
+            const page = yield* shell.output(info.id)
+            expect(page.cursor).toBe(prefix.length)
+            expect(page.size).toBe(Buffer.byteLength(text))
+            const rest = yield* shell.output(info.id, { cursor: page.cursor })
+            expect(page.output + rest.output).toBe(text)
+            expect(rest.cursor).toBe(page.size)
+            // The first character runs past a limit it does not fit in.
+            expect(yield* shell.output(info.id, { cursor: page.cursor, limit: 1 })).toEqual({
+              output: char,
+              cursor: page.cursor + Buffer.byteLength(char),
+              size: page.size,
+              truncated: false,
+            })
+            // A cursor inside a character starts at the next one.
+            const tail = yield* shell.output(info.id, { cursor: page.cursor + 1 })
+            expect(tail.output).toBe("\uFEFFz")
+            expect(tail.cursor).toBe(page.size)
+          })
+          yield* eventually(() => fs.statSync(info.file).size === Buffer.byteLength(text), "the whole text")
+          expect((yield* shell.get(info.id)).status).toBe("running")
+          yield* pages
+          fs.writeFileSync(release, "")
+          yield* shell.wait(info.id).pipe(Effect.timeout("10 seconds"))
+          yield* pages
+        }
+      }).pipe(Effect.scoped, Effect.provide(host.service()))
+    }),
+  )
+
+  it.live("a running command's incomplete last character waits; bytes that can't be one are passed on", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      const first = path.join(host.tmp, "first")
+      const second = path.join(host.tmp, "second")
+      yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const wait = (file: string) => `while [ ! -e ${file} ]; do sleep 0.02; done`
+        const info = yield* shell.create({
+          shell: "/bin/sh",
+          // 0xff, then the first two bytes of 😀; then its last two, a malformed 0xe0 0x80, and a lone 0xe2.
+          command: `printf '\\377\\360\\237'; ${wait(first)}; printf '\\230\\200\\340\\200\\342'; ${wait(second)}`,
+          timeout: 0,
+        })
+        yield* eventually(() => fs.statSync(info.file).size === 3, "the first bytes")
+        const page = yield* shell.output(info.id)
+        expect(page).toEqual({ output: "\uFFFD", cursor: 1, size: 3, truncated: false })
+        expect(yield* shell.output(info.id, { cursor: 1, limit: 1 })).toEqual({
+          output: "",
+          cursor: 1,
+          size: 3,
+          truncated: false,
+        })
+        fs.writeFileSync(first, "")
+        yield* eventually(() => fs.statSync(info.file).size === 8, "the rest")
+        expect(yield* shell.output(info.id, { cursor: 1 })).toEqual({
+          output: "😀\uFFFD\uFFFD",
+          cursor: 7,
+          size: 8,
+          truncated: false,
+        })
+        fs.writeFileSync(second, "")
+        yield* shell.wait(info.id).pipe(Effect.timeout("10 seconds"))
+        expect(yield* shell.output(info.id, { cursor: 7 })).toEqual({
+          output: "\uFFFD",
+          cursor: 8,
+          size: 8,
+          truncated: false,
+        })
+      }).pipe(Effect.scoped, Effect.provide(host.service()))
+    }),
   )
 })
 

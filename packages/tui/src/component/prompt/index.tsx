@@ -73,6 +73,7 @@ import { directoryRecentValue } from "../../prompt/directory-completion"
 import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
 import { truncateFilePath } from "../../ui/file-path"
 import { PromptMetadataRow } from "./metadata"
+import { createModelHold } from "./model-hold"
 import { limitLabel, useUsageLimits } from "../usage"
 
 export type PromptProps = {
@@ -1094,6 +1095,28 @@ export function Prompt(props: PromptProps) {
     }
   })
 
+  const unavailable = (selection: { providerID: string; modelID: string }) =>
+    toast.show({
+      title: "Model unavailable",
+      message: `${selection.providerID}/${selection.modelID} is not available in this session's location`,
+      variant: "warning",
+    })
+  // openforge: a prompt sent before the model's provider listed its models waits for the model instead of failing.
+  const modelHold = createModelHold({
+    selection: () => local.model.selection(),
+    text: () => store.prompt.text,
+    available: (model) => local.model.available(model),
+    delivered: (model) => local.model.delivered(model),
+    absent: unavailable,
+  })
+
+  Keymap.createLayer(() => ({
+    priority: 1,
+    target: inputTarget,
+    enabled: inputTarget() !== undefined && !disabled() && modelHold.model() !== undefined,
+    commands: [{ bind: "escape", title: "Keep as a draft", group: "Prompt", run: () => modelHold.cancel() }],
+  }))
+
   let submitting = false
   async function submit(delivery: SessionInbox.Delivery = "steer") {
     if (disabled()) return false
@@ -1176,11 +1199,8 @@ export function Prompt(props: PromptProps) {
     }
     const usesModel = !props.sessionID || store.mode !== "shell"
     if (usesModel && !local.model.available(selection)) {
-      toast.show({
-        title: "Model unavailable",
-        message: `${selection.providerID}/${selection.modelID} is not available in this session's location`,
-        variant: "warning",
-      })
+      if (local.model.delivered(selection)) unavailable(selection)
+      else modelHold.hold(selection, () => void submit(delivery))
       return false
     }
 
@@ -1891,7 +1911,21 @@ export function Prompt(props: PromptProps) {
               cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
+            {/* openforge: a held prompt says so in the row between the text and its model, which is blank otherwise. */}
+            <Show when={modelHold.model()}>
+              {(model) => (
+                <text id="prompt.hold" height={1} flexShrink={0} fg={theme.text.muted} wrapMode="none" truncate>
+                  Sends when {model().modelID} is available · Esc keeps it as a draft
+                </text>
+              )}
+            </Show>
+            <box
+              flexDirection="row"
+              flexShrink={0}
+              paddingTop={modelHold.model() ? 0 : 1}
+              gap={1}
+              justifyContent="space-between"
+            >
               <PromptMetadataRow
                 mode={store.mode}
                 agent={agentLabel()}

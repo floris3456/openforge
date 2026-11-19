@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
-import { ai, LanguageModel, LLMRequest, Message, ToolDefinition } from "../../src/effect.js"
+import { ai, LanguageModel, type LLMRequest, Message, ToolDefinition } from "../../src/effect.js"
 import { LLMClient } from "../../src/route/client.js"
 import { OpenAICompatibleResponses as Protocol } from "../../src/protocols/openai-compatible-responses.js"
 import { OpenAICompatibleResponses } from "../../src/providers/index.js"
@@ -83,7 +83,7 @@ it.effect("sends a turn's conversation, instructions and tools to <endpoint>/com
     const compacting = LanguageModel.update(model, {
       route: model.route.with({ compact: { endpoint: Protocol.compact } }),
     })
-    const withCompact = LLMRequest.update(request, { model: compacting })
+    const withCompact = { ...request, model: compacting }
     expect(ai.canCompact(withCompact)).toBe(true)
     if (!ai.canCompact(withCompact)) return
     const response = yield* ai.compact(withCompact)
@@ -97,7 +97,13 @@ it.effect("sends a turn's conversation, instructions and tools to <endpoint>/com
     // The prefix a cache reads is the same text: instructions, tools, then the conversation.
     for (const key of ["model", "instructions", "tools", "input", "prompt_cache_key", "include"])
       expect(JSON.stringify(compact[key])).toBe(JSON.stringify(step[key]))
-    expect(compact.input).toHaveLength(5)
+    // The system prompt leads `input` as a developer message (upstream de291ab7b1), then the conversation's five items.
+    expect(compact.input).toHaveLength(6)
+    expect((compact.input as unknown[])[0]).toEqual({
+      type: "message",
+      role: "developer",
+      content: "You are a coding agent.",
+    })
     // What only a turn takes stays out.
     for (const key of ["stream", "max_output_tokens", "store", "tool_choice"]) expect(compact).not.toHaveProperty(key)
 
@@ -117,10 +123,11 @@ it.effect("sends a turn's conversation, instructions and tools to <endpoint>/com
 it.effect("compactSystemParts: the system parts as a first system item, one input_text each; no instructions", () =>
   Effect.gen(function* () {
     const withSystem = (system: ReadonlyArray<string>, endpoint: typeof Protocol.compact) =>
-      LLMRequest.update(request, {
+      ({
+        ...request,
         model: LanguageModel.update(model, { route: model.route.with({ compact: { endpoint } }) }),
         system: system.map((text) => ({ type: "text" as const, text })),
-      })
+      }) satisfies LLMRequest
     const bodyOf = (compacting: LLMRequest) =>
       Effect.gen(function* () {
         calls.length = 0
@@ -132,7 +139,10 @@ it.effect("compactSystemParts: the system parts as a first system item, one inpu
     const joined = yield* bodyOf(withSystem(parts, Protocol.compact))
     const split = yield* bodyOf(withSystem(parts, Protocol.compactSystemParts))
 
-    expect(joined.instructions).toBe(parts.join("\n"))
+    // The turn's own lowering joins them into a leading developer message (upstream de291ab7b1).
+    const [developer, ...conversation] = joined.input as unknown[]
+    expect(joined).not.toHaveProperty("instructions")
+    expect(developer).toEqual({ type: "message", role: "developer", content: parts.join("\n") })
     expect(split).not.toHaveProperty("instructions")
     // The empty part makes no block, as in a Messages turn.
     expect(split.input).toEqual([
@@ -145,7 +155,7 @@ it.effect("compactSystemParts: the system parts as a first system item, one inpu
           { type: "input_text", text: "A worktree hint." },
         ],
       },
-      ...(joined.input as unknown[]),
+      ...conversation,
     ])
     for (const key of ["model", "tools", "prompt_cache_key", "include"])
       expect(JSON.stringify(split[key])).toBe(JSON.stringify(joined[key]))
@@ -153,7 +163,7 @@ it.effect("compactSystemParts: the system parts as a first system item, one inpu
     // Without system parts: neither the item nor instructions.
     const bare = yield* bodyOf(withSystem([], Protocol.compactSystemParts))
     expect(bare).not.toHaveProperty("instructions")
-    expect(bare.input).toEqual(joined.input)
+    expect(bare.input).toEqual(conversation)
   }),
 )
 

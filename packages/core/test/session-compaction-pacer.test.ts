@@ -516,16 +516,18 @@ it.effect("a Responses chat: CLIProxyPacer writes it from the step's request, ke
       "x-pacer-kind": "compaction",
     })
     expect(sent?.headers).not.toHaveProperty("x-pacer-compact")
-    // The history before the newest exchange, which openforge keeps itself.
+    // The system prompt as the leading developer item (upstream de291ab7b1), then the history before the newest
+    // exchange, which openforge keeps itself.
     expect(sent?.body).toMatchObject({
       model: "kimi-e2e",
       input: [
+        { type: "message", role: "developer", content: expect.stringContaining("Session instructions") },
         { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a dark mode." }] },
         { type: "message", role: "assistant", content: [{ type: "output_text", text: "Here is a five-step plan." }] },
       ],
     })
-    expect(sent?.body.input).toHaveLength(2)
-    expect(String(sent?.body.instructions)).toContain("Session instructions")
+    expect(sent?.body.input).toHaveLength(3)
+    expect(sent?.body).not.toHaveProperty("instructions")
     expect(sent?.body).not.toHaveProperty("stream")
 
     // The record: CLIProxyPacer's summary without its prefix, who wrote it and on which model, the newest exchange kept.
@@ -591,7 +593,8 @@ it.effect(
       const newest = "Write the toggle's tests."
       const { session, messages, context } = yield* chat("prefix", kimi, newest)
       const step = yield* stepBody(context, messages)
-      expect(step.input).toHaveLength(5)
+      // The system prompt's developer item (upstream de291ab7b1), then the five messages.
+      expect(step.input).toHaveLength(6)
       fake.seen.length = 0
 
       const compaction = yield* SessionCompaction.Service
@@ -599,11 +602,11 @@ it.effect(
         yield* compaction.compact({ reason: "auto", context, estimate: { measured: 190_000, estimated: 0 } }),
       ).toEqual({ status: "completed" })
       const sent = compactions()[0]!.body
-      // The same leading bytes as the step: its model, instructions, tools and cache key, then its first items up to
-      // the part openforge keeps (the newest prompt), which is not in it.
+      // The same leading bytes as the step: its model, tools and cache key, then its first items (the system prompt's
+      // among them) up to the part openforge keeps (the newest prompt), which is not in it.
       for (const name of ["model", "instructions", "tools", "prompt_cache_key"])
         expect(JSON.stringify(sent[name])).toBe(JSON.stringify(step[name]))
-      expect(JSON.stringify(sent.input)).toBe(JSON.stringify((step.input as unknown[]).slice(0, 4)))
+      expect(JSON.stringify(sent.input)).toBe(JSON.stringify((step.input as unknown[]).slice(0, 5)))
       expect(occurrences(sent, newest)).toBe(0)
 
       // CLIProxyPacer's list of the user's messages holds the history's two; openforge keeps the newest beside it.
@@ -1151,7 +1154,11 @@ planned.live(
       const [sent] = compactions()
       expect(sent?.headers).toMatchObject({ "x-pacer-session": uuid, "x-pacer-kind": "compaction" })
       expect(sent?.body.model).toBe("kimi-e2e")
-      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual(["user", "assistant"])
+      expect((sent?.body.input as Array<{ role?: string }>).map((item) => item.role)).toEqual([
+        "developer",
+        "user",
+        "assistant",
+      ])
 
       const kept = yield* record(session.id)
       expect(kept.summary).toBe(cppSummary)

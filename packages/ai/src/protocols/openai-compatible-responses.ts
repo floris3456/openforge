@@ -64,7 +64,7 @@ export const compact: CompactOperation = (request, executor, options) =>
 /**
  * {@link compact} for a turn that went out in another format, which the endpoint renders back into it (fork:
  * CLIProxyPacer's Claude chats speak Anthropic Messages). The turn's system parts go as the first input item, a `system`
- * message with one `input_text` per part, in order, instead of joined into `instructions`: CLIProxyPacer makes one
+ * message with one `input_text` per part, in order, instead of joined into one developer message: CLIProxyPacer makes one
  * system block of each such part (`claude_responses.rs`), so the summary request's system blocks are the turn's, and
  * so is the prefix a cache reads. Their cache hints have no Responses form and stay out.
  */

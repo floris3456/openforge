@@ -13,7 +13,7 @@ import { modelPreferenceKey } from "../model-preference"
 import { useLocation } from "../context/location"
 import { useNewDesigns } from "../config"
 import { DialogFreeModels } from "./dialog-model-free"
-import { FavoriteMarker, isFreeModel, prioritizeFavorites, sortModelOptions } from "./model-options"
+import { FavoriteMarker, ModelDetail, isFreeModel, prioritizeFavorites, sortModelOptions } from "./model-options"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
@@ -108,6 +108,8 @@ function DialogConnectedModels(props: {
             description: provider?.name ?? model.providerID,
             category,
             footer: trailing(model, isFavorite(item)),
+            // openforge: the detail line shows a model's price, CLIProxyPacer's too (upstream dropped it with usage).
+            detail: newDesigns() ? () => <ModelDetail model={model} /> : undefined,
             onSelect: () => {
               props.onSelect(model.providerID, model.id)
             },
@@ -142,6 +144,8 @@ function DialogConnectedModels(props: {
             category: connected() ? (freeGroup(model) ? "Free" : (provider?.name ?? model.providerID)) : undefined,
             footer: trailing(model, favorite),
             free: isFreeModel(model),
+            // openforge: the detail line shows a model's price, CLIProxyPacer's too (upstream dropped it with usage).
+            detail: newDesigns() ? () => <ModelDetail model={model} /> : undefined,
             onSelect() {
               props.onSelect(model.providerID, model.id)
             },

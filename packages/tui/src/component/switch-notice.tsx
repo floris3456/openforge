@@ -1,44 +1,30 @@
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
-import { SplitBorder } from "../ui/border"
 import { Spinner } from "./spinner"
+import { stringWidth } from "../util/string-width"
+import { Locale } from "../util/locale"
 
 /**
- * Says that openforge is switching releases and what the switch waits for; the screen stays usable meanwhile. It takes
- * its own lines above the screen's content rather than covering the start of a transcript.
+ * Says that openforge is switching releases, on one row beside the prompt rather than above the transcript.
+ * `message` counts what the switch waits for and names no chat; `compact` drops that count when the row is narrow, and
+ * a row still too narrow is cut rather than wrapped.
  */
-export function SwitchNotice(props: { message: string }) {
+export function SwitchNotice(props: { message: string; compact: string }) {
   const theme = useTheme()
   const dimensions = useTerminalDimensions()
+  // The row's right margin, its spinner and the gap after it.
+  const room = () => Math.max(0, dimensions().width - 4)
+  const line = () => {
+    if (stringWidth(props.message) <= room()) return props.message
+    if (stringWidth(props.compact) <= room()) return props.compact
+    return Locale.truncateWidth(props.compact, room())
+  }
   return (
-    <box
-      flexShrink={0}
-      marginTop={1}
-      marginLeft={2}
-      maxWidth={Math.min(72, dimensions().width - 6)}
-      justifyContent="center"
-      alignItems="flex-start"
-      border={["left", "right"]}
-      customBorderChars={SplitBorder.customBorderChars}
-      borderColor={theme.text.feedback.info.base}
-    >
-      <box
-        width="100%"
-        paddingLeft={2}
-        paddingRight={2}
-        paddingTop={1}
-        paddingBottom={1}
-        backgroundColor={theme.background.raised.high}
-      >
-        <box flexDirection="row" width="100%">
-          <box flexShrink={0} marginRight={1}>
-            <Spinner color={theme.text.base} />
-          </box>
-          <text fg={theme.text.base} wrapMode="word" flexGrow={1} flexShrink={1}>
-            {props.message}
-          </text>
-        </box>
-      </box>
+    <box flexShrink={0} height={1} flexDirection="row" justifyContent="flex-end" paddingRight={2} gap={1}>
+      <Spinner color={theme.text.feedback.info.base} />
+      <text fg={theme.text.base} wrapMode="none">
+        {line()}
+      </text>
     </box>
   )
 }

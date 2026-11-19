@@ -69,6 +69,32 @@ export function switchingMessage(version?: string, waiting?: ReadonlyArray<Switc
   return waiting?.length ? `${switching}; waiting for ${describeWork(waiting, title)}` : switching
 }
 
+/**
+ * How much a switch waits for, as a count rather than its titles: `3 chats`, `1 chat`, `2 chats and 1 command`. A chat
+ * counts once, whatever it is doing; work outside every chat counts as a command, such as a compaction or a chat's
+ * naming, which is what the switch's `model` work with no chat is.
+ */
+export function describeWorkCount(waiting: ReadonlyArray<SwitchWork>) {
+  const chats = new Set(waiting.flatMap((work) => (work.sessionID ? [work.sessionID] : [])))
+  const commands = waiting.filter((work) => !work.sessionID).length
+  return [
+    chats.size ? `${chats.size} chat${chats.size === 1 ? "" : "s"}` : "",
+    commands ? `${commands} command${commands === 1 ? "" : "s"}` : "",
+  ]
+    .filter(Boolean)
+    .join(" and ")
+}
+
+/**
+ * The one line an open screen shows while a release switches: `Updating to openforge 0.1.1 · waiting for 3 chats`. It
+ * never names a chat; the update dialog has the titles. Without a version, a switch another screen runs.
+ */
+export function switchingNotice(version?: string, waiting?: ReadonlyArray<SwitchWork>) {
+  const updating = version ? `Updating to ${Product.name} ${version}` : `Updating to a new ${Product.name} release`
+  const count = waiting?.length ? describeWorkCount(waiting) : ""
+  return count ? `${updating} · waiting for ${count}` : updating
+}
+
 /** Why an installed release is not in use yet, and when it will be. */
 export function waitingMessage(state: Extract<UpgradeState, { type: "waiting" }>, title?: TitleOf) {
   const installed = `${Product.name} ${state.version} is installed.`

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { spokenDuration } from "../src/continuity"
-import { describeWork, switchingMessage, waitingMessage } from "../src/promise"
+import { describeWork, describeWorkCount, switchingMessage, switchingNotice, waitingMessage } from "../src/promise"
 
 const tool = (sessionID: string, name = "webfetch") => ({ sessionID, kind: "tool" as const, name })
 
@@ -31,6 +31,48 @@ test("says what a switch does and what it waits for", () => {
   )
   // A switch another screen runs, whose version this one does not know.
   expect(switchingMessage(undefined, [])).toBe("Switching to a new openforge release")
+})
+
+test("counts what a switch waits for instead of naming it", () => {
+  // A chat counts once, whatever it is doing; a compaction and a chat's naming have no chat.
+  const many = [
+    { sessionID: "ses_a", kind: "model" as const, name: "slow", title: "Fix the tests" },
+    { sessionID: "ses_a", kind: "step" as const, name: "reply", title: "Fix the tests" },
+    { sessionID: "ses_b", kind: "tool" as const, name: "webfetch", title: "Docs" },
+    { sessionID: "ses_c", kind: "step" as const, name: "reply" },
+  ]
+  expect(describeWorkCount(many)).toBe("3 chats")
+  expect(describeWorkCount([tool("ses_a")])).toBe("1 chat")
+  expect(describeWorkCount([{ kind: "model" as const, name: "slow" }])).toBe("1 command")
+  expect(describeWorkCount([tool("ses_a"), tool("ses_b"), { kind: "step" as const, name: "compaction" }])).toBe(
+    "2 chats and 1 command",
+  )
+  expect(
+    describeWorkCount([
+      { kind: "model" as const, name: "a" },
+      { kind: "model" as const, name: "b" },
+    ]),
+  ).toBe("2 commands")
+  expect(describeWorkCount([])).toBe("")
+})
+
+test("the notice is one short line that names no chat", () => {
+  const waiting = [
+    { sessionID: "ses_a", kind: "tool" as const, name: "webfetch", title: "Fix the tests" },
+    { sessionID: "ses_b", kind: "step" as const, name: "reply", title: "Docs" },
+    { sessionID: "ses_c", kind: "tool" as const, name: "shell", title: "Release notes" },
+  ]
+  expect(switchingNotice("0.1.1", waiting)).toBe("Updating to openforge 0.1.1 · waiting for 3 chats")
+  expect(switchingNotice("0.1.1", [tool("ses_a")])).toBe("Updating to openforge 0.1.1 · waiting for 1 chat")
+  expect(switchingNotice("0.1.1", [tool("ses_a"), tool("ses_b"), { kind: "step" as const, name: "compaction" }])).toBe(
+    "Updating to openforge 0.1.1 · waiting for 2 chats and 1 command",
+  )
+  // Without a version, a switch another screen runs; with nothing to wait for, no count.
+  expect(switchingNotice(undefined, [])).toBe("Updating to a new openforge release")
+  expect(switchingNotice("0.1.1")).toBe("Updating to openforge 0.1.1")
+  // Never a title, whatever a switch reports.
+  const notice = switchingNotice("0.1.1", waiting)
+  for (const name of ["Fix the tests", "Docs", "Release notes"]) expect(notice).not.toContain(name)
 })
 
 test("says why an installed release is not in use yet, with the limit the pause had", () => {

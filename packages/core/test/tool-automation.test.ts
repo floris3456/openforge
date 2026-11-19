@@ -29,7 +29,7 @@ const names = [
   "automation_pause",
   "automation_resume",
   "automation_delete",
-].map((name) => `opencode.${name}`)
+].map((name) => `openforge.${name}`)
 
 const it = testEffect(AppNodeBuilder.build(Tool.node, toolNodeReplacements()))
 
@@ -139,7 +139,7 @@ const direct = (registry: Tool.Interface, name: string, input: unknown) =>
       tools.execute({
         sessionID,
         ...toolIdentity,
-        call: { type: "tool-call", id: `call-direct-${name}`, name: `opencode_${name}`, input },
+        call: { type: "tool-call", id: `call-direct-${name}`, name: `openforge_${name}`, input },
       }),
     ),
     Effect.map((result) => result.content?.map((part) => (part.type === "text" ? part.text : "")).join("")),

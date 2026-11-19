@@ -23,6 +23,7 @@ import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
+import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionMessage } from "@opencode/core/session/message"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionExecution } from "@opencode/core/session/execution"
@@ -234,6 +235,8 @@ const locations = makeGlobalNode({
                       PermissionSaved.node.replace(Layer.succeed(PermissionSaved.Service, saved)),
                       Location.node.replace(Layer.succeed(Location.Service, { ...ref, project })),
                       Image.node.replace(imagePassthrough),
+                      // openforge: Permission waits through SessionContinuity, whose layer does real I/O each time it is built.
+                      SessionContinuity.node.replace(SessionContinuity.noopLayer),
                     ],
                   },
                 ),

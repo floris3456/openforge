@@ -67,14 +67,8 @@ describe("core's source", () => {
   test("names CPP's web tools only where a name is all it needs", () => {
     const names = webTools.tools.claude.map((tool) => tool.name)
     const naming = sources.filter((source) => names.some((name) => new RegExp(`\\b${name}\\b`).test(source.text)))
-    // `PacerOffer` hides upstream's own search when CPP's `web_search` takes its place; upstream's search plugins and
-    // OpenAI's Responses API name their providers' own tools of that name.
-    expect(naming.map((source) => source.file).toSorted()).toEqual([
-      "github-copilot/responses/openai-responses-api-types.ts",
-      "github-copilot/responses/openai-responses-language-model.ts",
-      "github-copilot/responses/openai-responses-prepare-tools.ts",
-      "pacer/offer.ts",
-      "plugin/websearch/parallel.ts",
-    ])
+    // `PacerOffer` hides upstream's own search when CPP's `web_search` takes its place; upstream's search plugins name
+    // their providers' own tools of that name.
+    expect(naming.map((source) => source.file).toSorted()).toEqual(["pacer/offer.ts", "plugin/websearch/parallel.ts"])
   })
 })

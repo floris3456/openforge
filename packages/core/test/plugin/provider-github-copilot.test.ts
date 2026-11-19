@@ -295,7 +295,10 @@ describe("GithubCopilotPlugin", () => {
       expect(event.request.headers.get("x-github-api-version")).toBe("2026-08-01")
       expect(event.request.headers.get("openai-intent")).toBe("conversation-edits")
       expect(event.request.headers.has("anthropic-beta")).toBe(false)
-      expect(event.request.headers.get("user-agent")).toBe(`opencode/beta/${App.UPSTREAM_VERSION}/test`)
+      const app = yield* App.Service
+      expect(event.request.headers.get("user-agent")).toBe(
+        `opencode/${app.channel}/${App.UPSTREAM_VERSION}/${app.name}`,
+      )
     }),
   )
 

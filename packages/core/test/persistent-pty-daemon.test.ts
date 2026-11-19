@@ -295,12 +295,12 @@ it.live("ends its subscriptions when it closes, while their daemon keeps running
     let open = 0
     yield* listen(socketPath, (socket, request) => {
       if (request.op === "ping") return pong
-      if (request.op !== "subscribe") return { type: "terminals", terminals: [] }
+      if (request.op !== "subscribe") return { type: "processes", processes: [] }
       open++
       socket.once("close", () => open--)
       return {
         type: "attached",
-        terminal: terminal(1),
+        process: terminal(1),
         role: "observer",
         generation: 1,
         requested_offset: 0,
@@ -344,7 +344,7 @@ it.live("fails a subscription its daemon accepts only after it closed, and close
     let held: Socket | undefined
     yield* listen(socketPath, (socket, request) => {
       if (request.op === "ping") return pong
-      if (request.op !== "subscribe") return { type: "terminals", terminals: [] }
+      if (request.op !== "subscribe") return { type: "processes", processes: [] }
       open++
       socket.once("close", () => open--)
       held = socket
@@ -373,7 +373,7 @@ it.live("fails a subscription its daemon accepts only after it closed, and close
     const attached = Buffer.from(
       JSON.stringify({
         type: "attached",
-        terminal: terminal(1),
+        process: terminal(1),
         role: "observer",
         generation: 1,
         requested_offset: 0,

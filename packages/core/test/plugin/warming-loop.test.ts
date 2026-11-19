@@ -54,6 +54,13 @@ describe("WarmingPlugin's loop", () => {
       yield* WarmingPlugin.Plugin.effect(
         host({
           event: { subscribe: () => Stream.fromQueue(events) },
+          // Upstream's warming reads the model's own cache settings; this one has none.
+          model: {
+            list: () => Effect.succeed({ location: { directory: AbsolutePath.make("/") }, data: [] }),
+            default: () => Effect.die("unused model.default"),
+            transform: () => Effect.die("unused model.transform"),
+            reload: () => Effect.die("unused model.reload"),
+          },
           session: {
             hook: (name, callback) => {
               if (name === "context") context = callback as (input: SessionContext) => Effect.Effect<void>
@@ -100,8 +107,8 @@ describe("WarmingPlugin's loop", () => {
       yield* turn // minute 2: on again, a new entry with its own loop, due at minute 6
       yield* wait(9)
 
-      // One keep-alive at minute 6, the next 4 minutes after it ended (6:10), at 10:10.
-      expect(sent).toEqual([6 * 60_000, 610_000])
+      // One keep-alive at minute 6, the next 4 minutes after it was sent (upstream counts from the send), at 10.
+      expect(sent).toEqual([6 * 60_000, 10 * 60_000])
     }),
   )
 })

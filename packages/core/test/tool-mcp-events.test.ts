@@ -86,7 +86,7 @@ const setup = Effect.fnUntraced(function* (input: { flag?: string } = {}) {
         tools.execute({
           sessionID: session,
           ...toolIdentity,
-          call: { type: "tool-call", id: "call_watch", name: "opencode_watch_mcp_event", input },
+          call: { type: "tool-call", id: "call_watch", name: "openforge_watch_mcp_event", input },
         }),
       ),
       Effect.orDie,
@@ -114,7 +114,7 @@ describe("watch_mcp_event", () => {
   it.live("is absent while the mcp_events flag is off", () =>
     Effect.gen(function* () {
       const { registry } = yield* setup({ flag: "-mcp_events" })
-      expect((yield* registry.list()).map((tool) => tool.id)).not.toContain("opencode_watch_mcp_event")
+      expect((yield* registry.list()).map((tool) => tool.id)).not.toContain("openforge_watch_mcp_event")
     }),
   )
 

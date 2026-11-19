@@ -671,7 +671,11 @@ describe("SessionPromptStart's record", () => {
         definitions: [],
       })
       expect(JSON.stringify(resolved.system)).toBe(JSON.stringify(first?.system))
-      expect(JSON.stringify(resolved.definitions)).toBe(JSON.stringify(first?.tools))
+      // The request then drops a freeform format the model can't take (upstream's step after the start), as before
+      // the restart; the fake model takes none.
+      expect(JSON.stringify(resolved.definitions.map((tool) => ({ ...tool, freeform: undefined })))).toBe(
+        JSON.stringify(first?.tools),
+      )
     }),
   )
 })

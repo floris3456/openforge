@@ -298,6 +298,77 @@ describe("pretty signature rendering", () => {
     )
   })
 
+  test("documents the one non-null branch of a nullable property", () => {
+    expect(
+      jsonSchemaToTypeScript(
+        {
+          type: "object",
+          properties: {
+            pictures: {
+              anyOf: [
+                {
+                  type: "array",
+                  description: "Pictures to review",
+                  minItems: 1,
+                  maxItems: 20,
+                  items: { type: "string", description: "File path" },
+                },
+                { type: "null" },
+              ],
+            },
+          },
+        },
+        true,
+      ),
+    ).toBe(
+      [
+        "{",
+        "  /**",
+        "   * Pictures to review. @minItems 1 @maxItems 20",
+        "   * Each item: File path",
+        "   */",
+        "  pictures?: Array<string> | null,",
+        "}",
+      ].join("\n"),
+    )
+  })
+
+  test("keeps the property's own description over its nullable branch's", () => {
+    expect(
+      jsonSchemaToTypeScript(
+        {
+          type: "object",
+          properties: {
+            labels: {
+              description: "Filter labels",
+              oneOf: [{ type: "array", description: "Label values", minItems: 2 }, { type: "null" }],
+            },
+          },
+        },
+        true,
+      ),
+    ).toBe(["{", "  /** Filter labels. @minItems 2 */", "  labels?: Array<unknown> | null,", "}"].join("\n"))
+  })
+
+  test("leaves a union of several non-null branches undocumented", () => {
+    expect(
+      jsonSchemaToTypeScript(
+        {
+          type: "object",
+          properties: {
+            value: {
+              anyOf: [
+                { type: "string", description: "Name" },
+                { type: "number", description: "Count" },
+              ],
+            },
+          },
+        },
+        true,
+      ),
+    ).toBe(["{", "  value?: string | number,", "}"].join("\n"))
+  })
+
   test.each([
     [{ type: "number", minimum: 0 }, "@minimum 0", "number"],
     [{ type: "number", maximum: 0 }, "@maximum 0", "number"],

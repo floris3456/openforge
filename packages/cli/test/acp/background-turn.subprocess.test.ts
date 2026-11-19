@@ -82,10 +82,12 @@ test("streams the parent's response to a subagent report after end_turn", async 
         return "parent reaction"
       }
       if (last.includes("run the child"))
+        // openforge: a subagent runs in the foreground unless asked otherwise.
         return toolCallStream("call_child", "subagent", {
           agent: "general",
           description: "Background task",
           prompt: "work in child session",
+          background: true,
         })
       if (last.includes("work in child session")) return child.promise
       return "launched"

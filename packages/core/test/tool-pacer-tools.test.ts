@@ -5,6 +5,7 @@ import { TestClock } from "effect/testing"
 import { Money } from "@opencode/schema/money"
 import { Session as SessionInfo } from "@opencode/schema/session"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { CodeModeCatalog } from "@opencode/core/codemode/catalog"
 import { Database } from "@opencode/core/database/database"
 import { Environment } from "@opencode/core/environment/index"
 import { FileAccess } from "@opencode/core/file-access"
@@ -128,7 +129,7 @@ const taskList = {
   ...listOf("7e57000000000003", [...ownerList.tools.claude, taskTool]),
   meta: { ...ownerList.meta, task: taskMeta },
 }
-const step = { sessionID, parentID, model: "claude-haiku-5-5", step: true, continues: false }
+const step = { sessionID, parentID, model: "claude-haiku-5-5", codemode: true, step: true, continues: false }
 
 /** The real registry with the plugin, over a fake CPP whose list the chat has read once. */
 const setup = Effect.fnUntraced(function* (
@@ -517,6 +518,51 @@ describe("PacerToolsPlugin in Code Mode", () => {
     }),
   )
 
+  it.effect("a tool its meta marks pinned stays listed when the catalog has no budget left", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        read: false,
+        catalog: catalogOf(true, { moon_phase: { ...placed, pinned: true, definition } }),
+      })
+      const snapshot = yield* waitForCodeModeTool(h.registry, "moon_phase")
+      const shown = (budget: number) =>
+        CodeModeCatalog.summarize(snapshot.codeModeCatalog!, { budget }).namespaces.flatMap((namespace) =>
+          namespace.entries.map((entry) => entry.path),
+        )
+      // The web tools, unpinned ones, are not listed; the pinned one is, whatever the budget.
+      expect(shown(0)).toEqual(["moon_phase"])
+      expect(shown(Infinity)).toContain("moon_phase")
+    }),
+  )
+
+  it.effect("a tool its meta reports answers the model even when the script does not return it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        read: false,
+        catalog: catalogOf(true, { moon_phase: { ...placed, reported: true, definition } }),
+      })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      h.cpp.answers.call = () => Response.json({ text: "Full moon in Ghent.", data: null, error: null })
+      const ignored = yield* script(h.registry, 'await tools.moon_phase({ day: "today" }); return "Scripted."')
+      expect(ignored.content).toEqual([
+        { type: "text", text: "Scripted.\n\ntools.moon_phase(…) answered:\nFull moon in Ghent." },
+      ])
+      // The script returns the answer itself: it stays where it returned it, once.
+      const returned = yield* script(h.registry, 'return await tools.moon_phase({ day: "today" })')
+      expect(returned.content).toEqual([{ type: "text", text: "Full moon in Ghent." }])
+    }),
+  )
+
+  it.effect("an unreported tool's answer is lost when the script does not return it", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      h.cpp.answers.call = () => Response.json({ text: "Full moon in Ghent.", data: null, error: null })
+      const result = yield* script(h.registry, 'await tools.moon_phase({ day: "today" }); return "Scripted."')
+      expect(result.content).toEqual([{ type: "text", text: "Scripted." }])
+    }),
+  )
+
   it.effect("a failed call's row keeps CPP's metadata too, and the script sees CPP's text", () =>
     Effect.gen(function* () {
       const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
@@ -866,6 +912,7 @@ describe.skipIf(!LIVE)("PacerToolsPlugin files, live", () => {
   const liveStep = {
     sessionID: lead.id,
     model: "claude-haiku-5-5",
+    codemode: true,
     step: true,
     continues: false,
     project: { "X-Pacer-Project": String(lead.projectID) },

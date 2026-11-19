@@ -1,7 +1,7 @@
 export * as CodeModeTool from "./tool.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
-import { CodeMode, Namespace, Tool } from "@opencode/codemode"
+import { CodeMode, Namespace, Tool, toolExpression } from "@opencode/codemode"
 import type {
   Content,
   Context as ToolContext,
@@ -100,6 +100,8 @@ export const create = (
         const callIndex = yield* Ref.make(0)
         const files = yield* Ref.make<Array<CollectedFiles>>([])
         const calls = yield* Ref.make<Array<ExecuteCall>>([])
+        // A reported tool's answers, in call order, for the model: a script that does not return one loses it otherwise.
+        const answers = yield* Ref.make<Array<{ readonly path: string; readonly text: string }>>([])
         // A call's decoded input is the same object at its hooks and its execution, so its row finds its metadata.
         const settled = new WeakMap<object, Metadata>()
         const lock = Semaphore.makeUnsafe(1)
@@ -145,6 +147,11 @@ export const create = (
                   const outputFileParts = outputFiles(content)
                   if (outputFileParts.length > 0)
                     yield* Ref.update(files, (items) => [...items, { index, files: outputFileParts }])
+                  if (tool.options?.reported === true) {
+                    const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+                    if (text !== "")
+                      yield* Ref.update(answers, (items) => [...items, { path: qualifiedName(tool), text }])
+                  }
                   return resultValue(executed)
                 }),
               hooks: progressHooks(record, settled),
@@ -161,8 +168,12 @@ export const create = (
           .toSorted((left, right) => left.index - right.index)
           .flatMap((item) => item.files)
         const output = formatResult(result)
+        // A reported tool's answer reaches the model even when the script does not return it, once per answer.
+        const reported = (yield* Ref.get(answers))
+          .filter((answer) => !output.includes(answer.text))
+          .map((answer) => `${toolExpression(answer.path)}(…) answered:\n${answer.text}`)
         const value: typeof ExecuteOutput.Type = {
-          output,
+          output: [output, ...reported].filter((part) => part !== "").join("\n\n"),
           toolCalls,
           files: collected,
           ...(result.ok ? {} : { error: true }),

@@ -180,9 +180,10 @@ test.each([80, 200])(
 
     const lines = rows(setup)
     const found = noticeRow(setup)
-    // One row, at the screen's bottom: at most a devtools bar below it, nothing above it has to move.
-    expect(found).toBeGreaterThanOrEqual(lines.length - 2)
+    // One row, and the last with anything on it: nothing worth reading sits below the notice.
+    expect(found).toBeGreaterThan(0)
     expect(lines.filter((line) => line.includes("Updating to"))).toHaveLength(1)
+    expect(lines.filter((line) => line.trim()).at(-1)).toBe(lines[found])
     expect(lines.filter((line) => line.includes("3 chats and 1 command"))).toHaveLength(1)
     // It counts; it never names a chat.
     expect(words(setup)).not.toContain("Fix the tests")

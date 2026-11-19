@@ -30,7 +30,8 @@ import { MemoryTexts } from "./texts.js"
 export interface Interface {
   /**
    * Whether the chat works under task plans: its start block in view was built while memory could be reached, and the
-   * tools of its latest cold point hold `task`, which it can call now. Never fails.
+   * tools of its latest cold point hold `task` — itself, or Code Mode's `execute` while the catalog says `task` runs in
+   * it — which it can call now. Never fails.
    */
   readonly planned: (session: SessionSchema.Info) => Effect.Effect<boolean>
   /** CPP's task check for the chat, or null when its task or subtask is not active; the chat's place follows CPP's. */
@@ -107,7 +108,11 @@ const layer = Layer.effect(
         if (catalog && catalog.pacer?.memory?.tools !== true) return false
         const block = yield* MemoryOffer.newestBlock(db, session.id)
         if (!block?.visible || block.unavailable) return false
-        return (yield* recorded(db, session.id)) ?? (yield* allowed(session))
+        const tools = yield* recorded(db, session.id)
+        if (tools === undefined) return yield* allowed(session)
+        // In Code Mode the recorded definitions hold `execute`, and the catalog says whether the server's `task` runs
+        // in it: one that does is the tool the chat can call now.
+        return tools.task || (tools.execute && catalog?.pacer?.tools?.get("task")?.codemode === true)
       }),
       check: Effect.fn("MemoryPlans.check")(function* (session) {
         return (yield* chat(session))?.check ?? null
@@ -147,17 +152,18 @@ export const node = makeLocationNode({
 })
 
 /**
- * Whether the tools recorded at the chat's latest cold point hold `task`; undefined when none are recorded. One lookup,
- * which reads the recorded definitions in the database without decoding them here.
+ * Whether the tools recorded at the chat's latest cold point hold `task` and whether they hold `execute` (Code Mode's
+ * tool, whose catalog decides whether `task` runs in it); undefined when none are recorded. One lookup, which reads the
+ * recorded definitions in the database without decoding them here.
  */
 const recorded = Effect.fnUntraced(function* (db: Db, sessionID: SessionSchema.ID) {
+  const holds = (name: string) =>
+    sql<number>`exists (select 1 from ${PromptToolsTable}, json_each(${PromptToolsTable.value}) where ${PromptToolsTable.hash} = ${PromptStartTable.tools} and json_extract(json_each.value, '$.name') = ${name})`
   const row = yield* db
-    .select({
-      task: sql<number>`exists (select 1 from ${PromptToolsTable}, json_each(${PromptToolsTable.value}) where ${PromptToolsTable.hash} = ${PromptStartTable.tools} and json_extract(json_each.value, '$.name') = 'task')`,
-    })
+    .select({ task: holds("task"), execute: holds("execute") })
     .from(PromptStartTable)
     .where(eq(PromptStartTable.session_id, sessionID))
     .get()
     .pipe(Effect.orDie)
-  return row === undefined ? undefined : row.task === 1
+  return row === undefined ? undefined : { task: row.task === 1, execute: row.execute === 1 }
 })

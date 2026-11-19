@@ -69,7 +69,7 @@ import { testEffect } from "../lib/effect"
 import { permissionLayer } from "../lib/permission"
 import { registerToolPlugin } from "../lib/tool"
 import { texts } from "../pacer/memory-harness"
-import { catalogOf, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied } from "./fixture"
+import { catalogOf, codeModeList, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied } from "./fixture"
 
 // Task plans' enforcement through the real runner (the workspace's spec `docs/specs/task-plans.md`, sections 6, 8 and
 // 10): an edit, write or patch in a chat in no task changes nothing, and a turn inside a task that changed something
@@ -83,6 +83,8 @@ afterAll(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 const planned = () => catalogOf(true, { prompt: false, plans: true })
+/** The server's catalog with `task` in Code Mode, as CLIProxyPacer's `tools.task_codemode` makes it. */
+const codeMode = () => catalogOf(true, { prompt: false, plans: true, codemode: ["task"] })
 /** openforge's config, in the test's hands: `freeze_prompt` off leaves a chat's start unrecorded. */
 const configs = Effect.runSync(Layer.build(Config.testLayer()).pipe(Effect.scoped))
 const config = Context.get(configs, Config.Test)
@@ -263,10 +265,14 @@ const setup = Effect.fnUntraced(function* (
     /** Which chat made the subtask: this one, its lead, or (left out) another. */
     readonly subtaskBy?: "self" | "lead"
     readonly catalog?: PacerModels.Catalog
+    /** The server's `tools.task_codemode`: `task` runs in Code Mode, as its capabilities and its list say. */
+    readonly codemode?: boolean
   } = {},
 ) {
-  Effect.runSync(SubscriptionRef.set(catalogRef, input.catalog ?? planned()))
+  Effect.runSync(SubscriptionRef.set(catalogRef, input.codemode ? codeMode() : (input.catalog ?? planned())))
   server.reset()
+  // The list's meta says it too, or a list read would learn `task` back as a direct tool.
+  server.control.answer = input.codemode ? codeModeList(server, ["task"]) : undefined
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
@@ -452,6 +458,36 @@ describe("an edit outside a task", () => {
     }),
   )
 
+  it.live("with task in Code Mode, an edit in no task changes nothing and says to make the task first", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ codemode: true })
+      const written = file("codemode.txt")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-write", "write", { path: written.name, content: "new" }),
+        TestLLM.text("I make the task first next time.", "after"),
+      )
+      yield* h.prompt("write the file")
+      expect(yield* h.results()).toEqual([{ name: "write", status: "error", error: refused }])
+      expect(written.read()).toBeUndefined()
+      expect(yield* h.checks()).toEqual([])
+    }),
+  )
+
+  it.live("with `execute` recorded and the catalog not saying task is Code Mode's, the chat is not planned", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ codemode: true })
+      yield* h.llm.push(TestLLM.text("Ready.", "ready"))
+      yield* h.prompt("hello")
+      const plans = yield* MemoryPlans.Service
+      const session = yield* h.session.get(h.sessionID)
+      // Its latest cold point recorded `execute`, and the catalog says `task` runs in it.
+      expect(yield* plans.planned(session)).toBe(true)
+      // The catalog changes back: `task` is no longer Code Mode's, so `execute` does not stand for it.
+      Effect.runSync(SubscriptionRef.set(catalogRef, planned()))
+      expect(yield* plans.planned(session)).toBe(false)
+    }),
+  )
+
   it.live("goes ahead while memory cannot be reached, as no task could be made then", () =>
     Effect.gen(function* () {
       const h = yield* setup()
@@ -591,6 +627,17 @@ describe("the check at the end of a turn", () => {
     }),
   )
 
+  it.live("with task in Code Mode, comes just the same after a turn that changed something", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task", codemode: true })
+      yield* h.llm.push(TestLLM.toolCall("call-shell", "shell", { command: "bun test" }), TestLLM.text("Ran.", "ran"))
+      yield* h.prompt("run the tests")
+      expect((yield* h.checks()).map((message) => message.type === "synthetic" && message.text)).toEqual([
+        line(h.task!),
+      ])
+    }),
+  )
+
   it.live("a shell command counts; a turn that called the task tool, or changed nothing, gets none", () =>
     Effect.gen(function* () {
       const h = yield* setup({ inside: "task" })
@@ -606,6 +653,37 @@ describe("the check at the end of a turn", () => {
       yield* h.prompt("run them again and look at the task")
       yield* h.llm.push(TestLLM.text("Nothing to change.", "nothing"))
       yield* h.prompt("anything else?")
+      expect(yield* h.checks()).toHaveLength(1)
+    }),
+  )
+
+  it.live("a task call inside a Code Mode script counts, so the turn gets no check", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task", codemode: true })
+      yield* h.llm.push(
+        TestLLM.toolCall("call-shell", "shell", { command: "bun test" }),
+        TestLLM.toolCall("call-exec", "execute", {
+          code: `try { await tools.task({ id: ${JSON.stringify(h.task!.id)} }) } catch (error) {}\nreturn "called"`,
+        }),
+        TestLLM.text("Ran and looked.", "ran"),
+      )
+      yield* h.prompt("run the tests and look at the task")
+      expect(yield* h.checks()).toEqual([])
+    }),
+  )
+
+  it.live("a goal made inside a Code Mode script is no task call, so the turn still gets its check", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ inside: "task", codemode: true })
+      yield* h.llm.push(
+        TestLLM.toolCall("call-shell", "shell", { command: "bun test" }),
+        TestLLM.toolCall("call-exec", "execute", {
+          code: `try { await tools.task({ kind: "goal", title: "Task tool improvements" }) } catch (error) {}\nreturn "made"`,
+        }),
+        TestLLM.text("Ran.", "ran"),
+        TestLLM.text("It goes on.", "goes-on"),
+      )
+      yield* h.prompt("run the tests and note the goal")
       expect(yield* h.checks()).toHaveLength(1)
     }),
   )

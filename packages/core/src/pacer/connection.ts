@@ -499,6 +499,8 @@ export const layer = Layer.effect(
         if (chat.stopped.has(event.type)) return
         chat.stopped.add(event.type)
       }
+      // The label told is the chat's from now on: the same title again while CPP has not answered yet is no change.
+      if (event.type === "label") chat.label = event.label
       chat.events = [...chat.events.filter((item) => !replaces(event, item)), event]
       mark(chat)
     }
@@ -659,11 +661,6 @@ export const layer = Layer.effect(
 
     const post = (chat: Chat, event: ChatEvent) =>
       send("post", `${sessionPath(chat)}/events`, event, Schema.Unknown).pipe(
-        Effect.tap(() =>
-          Effect.sync(() => {
-            if (event.type === "label") chat.label = event.label
-          }),
-        ),
         Effect.as(true),
         Effect.catch(answered(`a chat's ${event.type} event`)),
       )

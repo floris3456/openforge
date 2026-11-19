@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite"
 import { Effect, FileSystem, Option } from "effect"
 import path from "node:path"
 import { errorMessage } from "../util/error"
+import type { Reply, Request } from "./database-worker"
 import { UpgradeError } from "./release"
 
 /** Writes a consistent copy of `database` to `target` with SQLite's `VACUUM INTO`. False when there is no database. */
@@ -13,14 +14,13 @@ export const copy = Effect.fn("upgrade.database.copy")(function* (database: stri
   if (!(yield* fs.exists(database))) return false
   const temporary = `${target}.partial`
   yield* fs.makeDirectory(path.dirname(target), { recursive: true })
-  yield* fs.remove(temporary, { force: true })
-  yield* sqlite(database, (db) => {
-    db.run("VACUUM INTO ?", [temporary])
-  })
-  // A copy in rollback-journal mode can be read later without creating -wal and -shm files beside it.
-  yield* sqlite(temporary, (db) => {
-    db.run("PRAGMA journal_mode = DELETE")
-  })
+  yield* remove(temporary)
+  // A failed copy is removed too: it can be nearly as large as the database.
+  yield* Effect.gen(function* () {
+    yield* inWorker(database, "VACUUM INTO ?", [temporary])
+    // A copy in rollback-journal mode can be read later without creating -wal and -shm files beside it.
+    yield* inWorker(temporary, "PRAGMA journal_mode = DELETE")
+  }).pipe(Effect.tapError(() => remove(temporary).pipe(Effect.ignore)))
   yield* fs.rename(temporary, target)
   return true
 })
@@ -35,7 +35,10 @@ export const restore = Effect.fn("upgrade.database.restore")(function* (source: 
   yield* fs.rename(temporary, database)
 })
 
-/** Deletes `database` and its sidecars, for a rollback to a release that ran before any database existed. */
+/**
+ * Deletes `database` and its sidecars: for a rollback to a release that ran before any database existed, and for what a
+ * copy left.
+ */
 export const remove = Effect.fn("upgrade.database.remove")(function* (database: string) {
   const fs = yield* FileSystem.FileSystem
   yield* Effect.forEach(["", "-wal", "-shm", "-journal"], (suffix) => fs.remove(database + suffix, { force: true }))
@@ -69,6 +72,27 @@ function sqlite<A>(file: string, use: (db: Database) => A) {
       const { Database } = await import("bun:sqlite")
       using db = new Database(file)
       return use(db)
+    },
+    catch: (cause) => new UpgradeError({ reason: `could not use the database ${file}: ${errorMessage(cause)}` }),
+  })
+}
+
+// A copy's statements run on a thread of their own: VACUUM INTO takes about 6 s per GB, and on this thread it would
+// stop the switch lock's heartbeat, so that other processes took the lock as stale and switched in the middle.
+function inWorker(file: string, sql: string, params: ReadonlyArray<string> = []) {
+  return Effect.tryPromise({
+    try: async () => {
+      const { Worker } = await import("node:worker_threads")
+      const worker = new Worker(new URL("./database-worker.js", import.meta.url), {
+        workerData: { file, sql, params } satisfies Request,
+      })
+      await new Promise<void>((resolve, reject) => {
+        worker.once("message", (reply: Reply) =>
+          reply.error === undefined ? resolve() : reject(new Error(reply.error)),
+        )
+        worker.once("error", reject)
+        worker.once("exit", (code) => reject(new Error(`its worker exited with code ${code}`)))
+      }).finally(() => worker.terminate())
     },
     catch: (cause) => new UpgradeError({ reason: `could not use the database ${file}: ${errorMessage(cause)}` }),
   })

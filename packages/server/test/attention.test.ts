@@ -93,3 +93,13 @@ it.live("a report with a field out of its bounds is refused", () =>
     expect(response.status).toBe(400)
   }),
 )
+
+// A CLIProxyPacer batch is claimed by the TUI that raises it; a batch the service never told (or told and already
+// claimed) is no one's.
+it.live("a claim of a batch the service didn't tell is refused", () =>
+  Effect.gen(function* () {
+    const server = yield* start
+    const api = OpenCode.make({ baseUrl: HttpServer.formatAddress(server.address), headers: { authorization } })
+    expect(yield* Effect.promise(() => api.experimental.attention.claim({ batch: "nobody-told-it" }))).toBe(false)
+  }),
+)

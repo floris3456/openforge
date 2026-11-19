@@ -58,12 +58,13 @@ const eventRows = (
     ["subagent_done", "Subagent done", "a subagent's final reply"],
     ["question", "Question", "a question, form or permission that waits for you"],
     ["error", "Error", "a failed turn"],
-    ["pacer", "CLIProxyPacer", "something new that needs your attention on CLIProxyPacer"],
+    ["pacer", "Needs attention", "something new that needs your attention on CLIProxyPacer"],
   ] as const
 ).flatMap(([event, title, what]): Setting[] => [
   {
     title: `${title}: notification`,
-    category: "Alerts",
+    // CLIProxyPacer's rows show only while it answers.
+    category: event === "pacer" ? "CLIProxyPacer" : "Alerts",
     path: ["attention", "events", event, "notification"],
     description: `Whether ${what} shows a system notification`,
     help: [
@@ -82,7 +83,7 @@ const eventRows = (
   },
   {
     title: `${title}: sound`,
-    category: "Alerts",
+    category: event === "pacer" ? "CLIProxyPacer" : "Alerts",
     path: ["attention", "events", event, "sound"],
     description: `The sound for ${what}; a file set in cli.json shows as its path`,
     help: `The sound played for ${what}, also while the terminal is focused, for chats open in this TUI. Moving to a sound plays it once. A sound file set in cli.json shows here as its path. Needs "Sounds" on; "Volume" sets how loud. When \`openforge notify\` runs on the machine you sit at, the sound plays there instead.`,
@@ -106,6 +107,8 @@ const eventRows = (
       ]
     : []),
 ])
+
+const pacerRows = eventRows.filter((row) => row.category === "CLIProxyPacer")
 
 export const settings: Setting[] = [
   {
@@ -462,7 +465,7 @@ export const settings: Setting[] = [
     labels: ["auto", "OSC 99", "OSC 777", "OSC 9"],
     keywords: ["tmux", "ssh", "osc", "escape sequence", "desktop notifications"],
   },
-  ...eventRows,
+  ...eventRows.filter((row) => row.category === "Alerts"),
   {
     title: "Release highlights",
     category: "Alerts",
@@ -474,6 +477,8 @@ export const settings: Setting[] = [
     labels: ["off", "on"],
     keywords: ["what's new", "changelog", "release notes"],
   },
+  // openforge (spec attention-notifications): CLIProxyPacer's Needs attention, an event of its own, under its heading.
+  ...pacerRows,
   // Cache notices (spec cliproxypacer-cache-notices, section 4): OpenCodePlus's rows and defaults, this TUI's own.
   {
     title: "Cache notices",

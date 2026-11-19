@@ -115,7 +115,7 @@ test("under the new designs too: opened at a row, Enter flips it, and the row sa
   await setup.frame((frame) => row("Compact before cold", "on").test(frame))
 })
 
-test("one CLIProxyPacer heading over the cache notices' six rows and these two, all shown only while it answers", async () => {
+test("one CLIProxyPacer heading over Needs attention's two rows, the cache notices' six and these two, all shown only while it answers", async () => {
   await using setup = await settings()
   setup.open()
   const lines = (await setup.frame((frame) => frame.includes("Compact cold chats first")))
@@ -125,6 +125,8 @@ test("one CLIProxyPacer heading over the cache notices' six rows and these two, 
   const heading = lines.indexOf("CLIProxyPacer")
   // The heading's rows, up to the blank line before the next heading, by title.
   expect(lines.slice(heading + 1, lines.indexOf("", heading)).map((line) => line.replace(/\s{2,}.*$/, ""))).toEqual([
+    "Needs attention: notification",
+    "Needs attention: sound",
     "Cache notices",
     "Cache notices from",
     "Cache notice lifetime",
@@ -155,7 +157,8 @@ test("no rows without a CLIProxyPacer that answers: none set up, a plain proxy, 
   await using setup = await settings()
   setup.fake.unavailable = true
   setup.open()
-  await setup.frame((frame) => frame.includes("Developer tools"))
+  // This TUI's own rows under its heading (Needs attention, the cache notices) fill the screen past Developer tools.
+  await setup.frame((frame) => frame.includes("Cache notice lifetime"))
   await setup.settle()
   expect(setup.reads()).toBe(1)
   expect(setup.app.captureCharFrame()).not.toContain("Compact")
@@ -224,6 +227,8 @@ test("Summaries written by and Keep my messages in summaries, after the other tw
   const header = lines.indexOf("CLIProxyPacer")
   expect(header).toBeGreaterThan(0)
   expect(lines.slice(header + 1, lines.indexOf("", header)).map((line) => line.replace(/ {2,}.*$/, ""))).toEqual([
+    "Needs attention: notification",
+    "Needs attention: sound",
     "Cache notices",
     "Cache notices from",
     "Cache notice lifetime",

@@ -371,6 +371,38 @@ describe("PacerTools.list", () => {
     ),
   )
 
+  it.effect("a chat whose wait went without takes that outcome for 30 s, then reads once at a time", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      cpp.answers.list = busy
+      const waiting = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the first read", () => cpp.lists().length === 1)
+      while (waiting.pollUnsafe() === undefined) {
+        yield* TestClock.adjust("1 second")
+        yield* settle
+      }
+      expect(yield* Fiber.join(waiting)).toBeUndefined()
+      const reads = cpp.lists().length
+      // The step's request after its instructions' read, and its retries meanwhile: no read, no wait.
+      const reused = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* settle
+      expect(reused.pollUnsafe()).toBeDefined()
+      expect(yield* Fiber.join(reused)).toBeUndefined()
+      expect(cpp.lists()).toHaveLength(reads)
+      // Then one read at a time, which does not wait when it gets no answer.
+      yield* TestClock.adjust("30 seconds")
+      const once = yield* tools.list(resumed(chat)).pipe(Effect.forkChild({ startImmediately: true }))
+      yield* until("the read after 30 s", () => cpp.lists().length === reads + 1)
+      yield* settle
+      expect(once.pollUnsafe()).toBeDefined()
+      expect(yield* Fiber.join(once)).toBeUndefined()
+      cpp.answers.list = () => Response.json(ownerList)
+      expect((yield* tools.list(resumed(chat)))?.version).toBe(ownerList.version)
+      expect(cpp.lists()).toHaveLength(reads + 2)
+    }),
+  )
+
   it.effect("a chat without steps reads once and goes without", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp

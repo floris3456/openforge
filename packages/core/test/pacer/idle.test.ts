@@ -10,6 +10,7 @@ import { Global } from "@opencode/util/global"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
+import { ServiceClient } from "@opencode/core/service-client"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
@@ -118,7 +119,7 @@ const start = (input: { readonly origin: string; readonly provider: string; read
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
         Global.node.replace(Layer.succeed(Global.Service, global)),
-        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
+        LayerNodePlatform.llmClient.replace(ServiceClient.llm(Layer.succeed(LLMClient.Service, llm))),
         PluginSupervisor.node.replace(agents),
         offlineModels,
         SessionRunnerModel.node.replace(

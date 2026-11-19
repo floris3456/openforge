@@ -16,6 +16,7 @@ import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { SessionContinuity } from "@opencode/core/continuity"
+import { ServiceClient } from "@opencode/core/service-client"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
@@ -129,7 +130,7 @@ const start = (host: Host, options: { readonly paused?: boolean; readonly separa
     const context = yield* Layer.buildWithScope(
       AppNodeBuilder.build(nodes, [
         Database.node.replace(Layer.succeed(Database.Service, database)),
-        LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient(Layer.succeed(LLMClient.Service, llm))),
+        LayerNodePlatform.llmClient.replace(ServiceClient.llm(Layer.succeed(LLMClient.Service, llm))),
         SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
         ShellRunner.node.replace(
           ShellRunner.configured({ launch: options.separate ? host.launchSeparate : host.launch }),

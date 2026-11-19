@@ -8,6 +8,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
 import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
+import { ServiceClient } from "@opencode/core/service-client"
 import { EventLogger } from "@opencode/core/event-logger"
 import { FileSystemSearch } from "@opencode/core/filesystem/search"
 import { Credential } from "@opencode/core/credential"
@@ -158,7 +159,7 @@ function makeRoutes<AuthError, AuthServices>(
     PersistentPty.node.replace(PersistentPty.configured(options.pty)),
     Bus.node.replace(Bus.configured({ persist: options.events?.persist })),
     SessionContinuity.node.replace(SessionContinuity.configured({ paused: options.paused })),
-    LayerNodePlatform.llmClient.replace(SessionContinuity.llmClient()),
+    LayerNodePlatform.llmClient.replace(ServiceClient.llm()),
     App.node.replace(App.configured(options.app)),
     ModelsDev.node.replace(ModelsDev.configured(options.models)),
     httpFetch.replace(fetchLayer(options.fetch)),

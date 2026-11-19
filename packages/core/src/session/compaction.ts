@@ -26,6 +26,7 @@ import { llmClient } from "../effect/app-node-platform.js"
 import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
 import { Model } from "../model.js"
+import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerSummaries } from "../pacer/summaries.js"
 import { State } from "../state.js"
 import { Token } from "../util/token.js"
@@ -322,6 +323,7 @@ export const layer = Layer.effect(
     const db = (yield* Database.Service).db
     const requests = yield* SessionModelRequest.Service
     const summaries = yield* PacerSummaries.Service
+    const endpoints = yield* PacerEndpoint.Service
 
     const scope = yield* Scope.Scope
     const precomputed = new Map<SessionContext.Loaded["session"]["id"], Precomputed>()
@@ -878,7 +880,8 @@ export const layer = Layer.effect(
       const context = trigger.context
       if (prepared.event.result) return yield* fromHook(context, prepared.event.result, background)
 
-      const policy = yield* SessionRunnerRetry.policy(context.session.id)
+      // An outage moves to another of CPP's addresses, as a step's does; the client sends the retry there.
+      const policy = yield* SessionRunnerRetry.policy(context.session.id, undefined, endpoints)
       let rejections = 0
       let rejected: number | undefined
       let asText = shrink.text ?? false
@@ -1228,6 +1231,7 @@ export const node = makeLocationNode({
     SessionModelRequest.node,
     SessionRunnerModel.node,
     PacerSummaries.node,
+    PacerEndpoint.node,
   ],
 })
 

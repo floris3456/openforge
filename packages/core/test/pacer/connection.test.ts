@@ -602,7 +602,12 @@ const heartbeat = Effect.fnUntraced(function* (h: Harness) {
 /** Connects and waits until the pacer is on and the stream is open. */
 const online = Effect.fnUntraced(function* (h: Harness) {
   yield* h.connect()
-  yield* until("the pacer is on", () => status(h).state === "on" && h.cpp.streams() === 1)
+  // What needs attention is read once at connect, beside the stream, from a fiber of its own: a test counting the
+  // requests CPP saw takes its count only once that read went out too.
+  yield* until(
+    "the pacer is on",
+    () => status(h).state === "on" && h.cpp.streams() === 1 && seen(h, "/pacer/v1/attention").length === 1,
+  )
 })
 
 const cppModel = { id: Model.ID.make("model-a"), providerID: Provider.ID.make("cliproxypacer") }
@@ -945,8 +950,7 @@ describe("PacerConnection states", () => {
     Effect.gen(function* () {
       const h = yield* harness()
       yield* online(h)
-      // What needs attention is read once at connect, beside the stream.
-      yield* until("what needs attention", () => seen(h, "/pacer/v1/attention").length === 1)
+      // What needs attention is read once at connect, beside the stream (`online` waited for it).
       const asked = h.cpp.seen.map((item) => item.path)
       expect(asked.toSorted()).toEqual(["/pacer/v1/attention", "/pacer/v1/state", "/pacer/v1/stream"])
       for (let second = 1; second <= 600; second++) {

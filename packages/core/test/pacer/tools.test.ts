@@ -30,6 +30,7 @@ const step = (sessionID: SessionID, model = "claude-haiku-5-5", parentID?: Sessi
   sessionID,
   ...(parentID ? { parentID } : {}),
   model,
+  agent: "build",
   codemode: true,
   step: true,
   continues: false,
@@ -154,6 +155,29 @@ describe("PacerTools.list", () => {
       expect(cpp.lists().map((item) => item.query.get("model"))).toEqual(["claude-haiku-5-5", "gpt-6-luna"])
       yield* tools.list(step(chat, "gpt-6-luna"))
       expect(cpp.lists()).toHaveLength(2)
+    }),
+  )
+
+  it.effect("reads it again with the new agent's name when the step's agent changes, not for a compaction", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const { tools } = yield* startTools(endpointOf(cpp.origin))
+      const first = yield* tools.list(step(chat))
+      expect(tools.held(chat, "build")).toBe(first!)
+
+      // A compaction run as another agent carries the steps' list.
+      expect(yield* tools.list({ ...compaction(chat), agent: "compaction" })).toBe(first!)
+      expect(cpp.lists()).toHaveLength(1)
+      // What the chat holds was read for build: none for explore until its own read.
+      expect(tools.held(chat, "explore")).toBeUndefined()
+      expect(tools.held(chat)).toBe(first!)
+
+      yield* tools.list({ ...step(chat), agent: "explore" })
+      yield* tools.list({ ...step(chat), agent: "explore" })
+      expect(cpp.lists().map((read) => read.headers.get("x-pacer-agent"))).toEqual(["build", "explore"])
+      expect(tools.held(chat, "explore")).not.toBeUndefined()
+      // Who asks is named only by the agent: the chat is X-Pacer-Session's.
+      expect(cpp.lists()[1]!.headers.get("x-pacer-chat")).toBeNull()
     }),
   )
 

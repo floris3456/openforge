@@ -12,3 +12,10 @@ export const merged = (entries: ReadonlyArray<Entry>): Pins =>
     (pins, entry) => (entry.type === "document" ? Object.assign(pins, entry.info.codemode?.pinned) : pins),
     {},
   )
+
+/** A session's pins: the config's ({@link merged}) with its agent's (`agents.<name>.codemode.pinned`) laid over them,
+ *  the agent's value winning per tool. */
+export const forAgent = (
+  entries: ReadonlyArray<Entry>,
+  agent: { readonly codemode?: { readonly pinned?: Pins } },
+): Pins => ({ ...merged(entries), ...agent.codemode?.pinned })

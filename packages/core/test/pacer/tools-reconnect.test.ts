@@ -106,6 +106,7 @@ const other = SessionID.make("ses_web_tools_reconnect_other")
 const step = (sessionID: SessionID): PacerTools.ListInput => ({
   sessionID,
   model: "claude-opus-5-5",
+  agent: "build",
   codemode: true,
   step: true,
   continues: false,

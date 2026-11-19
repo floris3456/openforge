@@ -109,12 +109,21 @@ const docLines = (schema: JsonSchema, width: number): Array<string> => {
 
 // Neutralize `*\/` so model-provided schema text cannot terminate generated documentation.
 const jsdoc = (schema: JsonSchema, pad: string): string => {
-  // A nullable property keeps its schema and documentation in its one non-null `anyOf`/`oneOf` branch; the
-  // property's own description wins when it has one. Two or more non-null branches stay undocumented.
+  // A nullable property keeps its schema and documentation in its one non-null `anyOf`/`oneOf` branch. Document
+  // that branch with the property's own annotations on top (they win), its description falling back to the
+  // branch's. Two or more non-null branches stay undocumented.
   const branches = (schema.anyOf ?? schema.oneOf)?.filter((member) => member.type !== "null")
   const branch = branches?.length === 1 ? branches[0] : undefined
   const documented =
-    branch === undefined ? schema : { ...branch, description: schema.description ?? branch.description }
+    branch === undefined
+      ? schema
+      : {
+          ...branch,
+          ...schema,
+          anyOf: undefined,
+          oneOf: undefined,
+          description: schema.description ?? branch.description,
+        }
   const content = docLines(documented, pad.length)
   const types = typeof documented.type === "string" ? [documented.type] : (documented.type ?? [])
 

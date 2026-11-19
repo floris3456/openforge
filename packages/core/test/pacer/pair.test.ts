@@ -19,6 +19,7 @@ import { ModelResolver } from "@opencode/core/model-resolver"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerRoute } from "@opencode/core/pacer/route"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { CLIProxyPacerPlugin } from "@opencode/core/plugin/provider/cliproxypacer"
@@ -173,21 +174,36 @@ const model = Effect.gen(function* () {
   return (yield* models.available()).find((item) => item.providerID === providerID && String(item.id) === "gpt-pair-1")
 })
 
-/** One step: a request of the model as the plugin pins it now, through its route; its failure, if it failed. */
-const step = Effect.gen(function* () {
+/** The plugin's model as it pins it now, resolved for a request. */
+const resolvedModel = Effect.gen(function* () {
   const info = yield* model
   if (!info) return yield* Effect.die(new Error("no model"))
-  const resolved = yield* ModelResolver.fromCatalogModel(info)
-  const exit = yield* LLMClient.stream(ai.request({ model: resolved, prompt: "Hello" })).pipe(
-    Stream.runDrain,
-    Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer), Layer.fresh)),
-    Effect.provide(FetchHttpClient.layer),
-    Effect.flip,
-    Effect.option,
-  )
-  const failure = Option.getOrUndefined(exit)
-  return failure instanceof AIError ? failure : undefined
+  return yield* ModelResolver.fromCatalogModel(info)
 })
+
+/**
+ * One step: a request of `resolved` (the model as the plugin pins it now by default), through the model client with
+ * CPP's request mapping on `endpoints`, as the service runs it; its failure, if it failed.
+ */
+const step = (endpoints: PacerEndpoint.Interface, resolved?: Effect.Success<typeof resolvedModel>) =>
+  Effect.gen(function* () {
+    const exit = yield* LLMClient.stream(
+      ai.request({ model: resolved ?? (yield* resolvedModel), prompt: "Hello" }),
+    ).pipe(
+      Stream.runDrain,
+      Effect.provide(
+        Layer.effect(
+          LLMClient.Service,
+          Effect.map(LLMClient.Service, (llm) => PacerRoute.client(llm, endpoints)),
+        ).pipe(Layer.provide(LLMClient.layer), Layer.provide(RequestExecutor.layer), Layer.fresh),
+      ),
+      Effect.provide(FetchHttpClient.layer),
+      Effect.flip,
+      Effect.option,
+    )
+    const failure = Option.getOrUndefined(exit)
+    return failure instanceof AIError ? failure : undefined
+  })
 
 /** The plugin, on these endpoint and catalog services. */
 const plugged = (services: Effect.Success<ReturnType<typeof started>>) =>
@@ -214,10 +230,10 @@ const decided = (failure: AIError, endpoints: PacerEndpoint.Interface) =>
   })
 
 /** The step's failure once `instance` stopped. */
-const failedAt = (instance: Instance) =>
+const failedAt = (instance: Instance, endpoints: PacerEndpoint.Interface) =>
   Effect.gen(function* () {
     yield* Effect.promise(() => instance.stop())
-    const failure = yield* step
+    const failure = yield* step(endpoints)
     if (!failure) return yield* Effect.die(new Error("the step to a stopped instance did not fail"))
     return failure
   })
@@ -239,18 +255,23 @@ describe("CPP's pair addresses", () => {
 
       yield* plugged(services)
       yield* until(model, (info) => info?.settings?.baseURL === `${a.root}/v1`)
-      expect(yield* step).toBeUndefined()
+      expect(yield* step(endpoints)).toBeUndefined()
       expect(a.state.bodies).toHaveLength(1)
+      // The model as the step resolved it before the outage, pinned to the first address.
+      const pinned = yield* resolvedModel
 
-      const decision = yield* decided(yield* failedAt(a), endpoints)
+      const decision = yield* decided(yield* failedAt(a, endpoints), endpoints)
       expect(decision).toMatchObject({ retry: true, delay: 0 })
       expect(yield* at(endpoints)).toBe(b.root)
       expect((yield* endpoints.get())?.home).toBe(a.root)
 
-      // The provider reloads with the new address; the retried step goes there.
-      yield* until(model, (info) => info?.settings?.baseURL === `${b.root}/v1`)
-      expect(yield* step).toBeUndefined()
+      // The retried step goes to the new address at once, before the provider reloads with it.
+      expect(yield* step(endpoints, pinned)).toBeUndefined()
       expect(b.state.bodies).toEqual(a.state.bodies)
+      // And so does one of the model as the reload pins it.
+      yield* until(model, (info) => info?.settings?.baseURL === `${b.root}/v1`)
+      expect(yield* step(endpoints)).toBeUndefined()
+      expect(b.state.bodies).toHaveLength(2)
     }),
   )
 
@@ -360,7 +381,7 @@ describe("CPP's pair addresses", () => {
       yield* plugged(services)
       yield* until(model, (info) => info?.settings?.baseURL === `${a.root}/v1`)
       expect(yield* roots(endpoints)).toEqual([a.root])
-      const failure = yield* failedAt(a)
+      const failure = yield* failedAt(a, endpoints)
       // The wait as before: ModelRetry's backoff, not the move's 0.
       const decision = yield* decided(failure, endpoints)
       expect(decision).toMatchObject({ retry: true, attempt: 2 })

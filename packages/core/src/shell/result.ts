@@ -1,17 +1,19 @@
 export * as ShellResult from "./result.js"
 
+import os from "os"
 import type { Shell } from "@opencode/schema/shell"
 
 export type Result = {
   info: Shell.Info
-  capture: { output: string; truncated: boolean } | undefined
+  // `killed` says why a command was killed when no exit code or signal of its own tells, e.g. the process daemon stopped.
+  capture: { output: string; truncated: boolean; killed?: string } | undefined
   /** Set when the command ran in the sandbox: where it may write, and how to go outside. */
   sandboxNote?: string
   /** Set when the command failed instead of ending, as when its tool runner died under it: why. */
   error?: string
 }
 
-type Output = { output: string; truncated: boolean; exit?: number; signal?: string; timeout?: boolean }
+type Output = { output: string; truncated: boolean; exit?: number; signal?: string; timeout?: boolean; killed?: string }
 
 const missing = "Shell command output is no longer available."
 export const unavailable: Shell.Output = {
@@ -28,6 +30,7 @@ export function output(result: Result): Output {
     ...(result.info.exit !== undefined ? { exit: result.info.exit } : {}),
     ...(result.info.signal !== undefined ? { signal: result.info.signal } : {}),
     ...(result.info.status === "timeout" ? { timeout: true } : {}),
+    ...(result.capture?.killed !== undefined ? { killed: result.capture.killed } : {}),
   }
 }
 
@@ -36,10 +39,36 @@ export function sandboxNote(result: Result) {
   return result.info.exit !== undefined && result.info.exit !== 0 ? result.sandboxNote : undefined
 }
 
-export function notice(output: Pick<Output, "exit" | "signal" | "timeout">) {
-  if (output.timeout) return "Timed out before completion"
-  if (output.signal !== undefined) return `Killed by ${output.signal}`
-  if (output.exit !== undefined && output.exit !== 0) return `Exited with code ${output.exit}`
+// What the model gets for a command stopped because the user interrupted its call (`message`): the output so far,
+// where the full output is, and the shell ID, even when the output fits (which `output` leaves unsaid). `output` and
+// `notice` are its two parts, so a renderer can show the output like a finished call's, then the notice.
+export function interrupted(result: Result) {
+  const capture = result.capture
+  const stopping = result.info.status === "running" ? "; it is still being stopped" : ""
+  const stopped = `Command interrupted by the user (shell ID: ${result.info.id})${stopping}.`
+  const [output, notice] = !capture
+    ? [unavailable.output, stopped]
+    : capture.truncated
+      ? [capture.output, stopped]
+      : capture.output === "(no output)"
+        ? ["", `[no output; output file: ${result.info.file}]\n\n${stopped}`]
+        : [capture.output.replace(/\n$/, ""), `[full output saved to ${result.info.file}]\n\n${stopped}`]
+  return { output, notice, message: output ? `${output}\n\n${notice}` : notice }
+}
+
+export function notice(output: Pick<Output, "exit" | "signal" | "timeout" | "killed">, timeout?: number) {
+  if (output.killed !== undefined) return output.killed
+  if (output.timeout)
+    return `Command timed out${timeout ? ` after ${timeout / 1_000} seconds` : ""}. If it needs longer and isn't waiting for input, rerun with a larger timeout.\nExit code: ${exitCode(output)}`
+  if (output.signal !== undefined || (output.exit !== undefined && output.exit !== 0))
+    return `Exit code: ${exitCode(output)}`
+}
+
+// A signal reads as the shell's 128 + signal number convention, followed by its name.
+function exitCode(output: Pick<Output, "exit" | "signal">) {
+  if (output.exit !== undefined) return output.exit
+  const signal = output.signal === undefined ? undefined : os.constants.signals[output.signal as NodeJS.Signals]
+  return signal === undefined ? "unknown" : `${128 + signal} (${output.signal})`
 }
 
 export function metadata(output: Output) {
@@ -48,6 +77,7 @@ export function metadata(output: Output) {
     ...(output.exit !== undefined ? { exit: output.exit } : {}),
     ...(output.signal !== undefined ? { signal: output.signal } : {}),
     ...(output.timeout !== undefined ? { timeout: output.timeout } : {}),
+    ...(output.killed !== undefined ? { killed: true } : {}),
   }
 }
 
@@ -88,6 +118,6 @@ export function userNotification(result: Result) {
 function ending(result: Result, captured: Output) {
   if (result.error !== undefined) return { state: "error" as const, status: `Failed: ${result.error}` }
   if (result.info.status === "killed") return { state: "cancelled" as const, status: "Cancelled" }
-  const status = captured.exit === 0 ? undefined : (notice(captured) ?? "Exited with code unknown")
+  const status = captured.exit === 0 ? undefined : (notice(captured) ?? "Exit code: unknown")
   return { state: "completed" as const, status }
 }

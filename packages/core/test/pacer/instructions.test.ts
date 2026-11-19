@@ -61,6 +61,7 @@ const builtins = Layer.mock(InstructionBuiltIns.Service, { load: () => Effect.su
 const discovery = Layer.mock(InstructionDiscovery.Service, {
   project: false,
   global: false,
+  claude: false,
   load: () => Effect.succeed(Instructions.empty),
 })
 const skills = Layer.mock(SkillInstructions.Service, { load: () => Effect.succeed(Instructions.empty) })

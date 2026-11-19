@@ -1,4 +1,7 @@
 import fs from "fs"
+import { Config } from "@opencode/core/config"
+import { FileWrite } from "@opencode/core/file-write"
+import { Flag } from "@opencode/core/flag"
 import os from "os"
 import path from "path"
 import { afterAll, beforeEach, describe, expect } from "bun:test"
@@ -207,6 +210,9 @@ const tools = makeLocationNode({
     Formatter.node,
     Location.node,
     Permission.node,
+    FileWrite.node,
+    Config.node,
+    Flag.node,
   ],
 })
 const layer = AppNodeBuilder.build(LayerNode.group([Tool.node, PluginHooks.node, Git.node, FSUtil.node, tools]), [

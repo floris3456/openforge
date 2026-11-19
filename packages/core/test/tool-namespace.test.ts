@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { Automation } from "@opencode/core/automation"
 import { CodeModeCatalog } from "@opencode/core/codemode/catalog"
 import { CodeModeInstructions } from "@opencode/core/codemode/instructions"
 import { Config } from "@opencode/core/config"
@@ -7,13 +8,12 @@ import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { Provider } from "@opencode/core/provider"
-import { Schedule } from "@opencode/core/schedule"
 import { Session } from "@opencode/core/session"
 import { Tool } from "@opencode/core/tool"
 import { ArtifactTools } from "@opencode/core/tool/plugin/artifact"
+import { AutomationTools } from "@opencode/core/tool/plugin/automation"
 import { McpResourceTools } from "@opencode/core/tool/plugin/mcp-resource"
 import { OpenCodeTools } from "@opencode/core/tool/plugin/opencode"
-import { ScheduleTools } from "@opencode/core/tool/plugin/schedule"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { Model } from "@opencode/schema/model"
@@ -32,15 +32,15 @@ it.effect("the model sees openforge's own tools under openforge, never opencode"
     yield* config.setEntries([
       new Document({
         type: "document",
-        info: new Info({ experimental: new ConfigExperimental.Info({ artifacts: true, schedules: true }) }),
+        info: new Info({ experimental: new ConfigExperimental.Info({ artifacts: true, automations: true }) }),
       }),
     ])
     const plugins = yield* Plugin.Service
-    const host = yield* PluginHost.make(plugins)
+    const host = yield* PluginHost.make(plugins, "test")
     yield* OpenCodeTools.Plugin.effect(host)
     yield* McpResourceTools.Plugin.effect(host)
     yield* ArtifactTools.Plugin.effect(host)
-    yield* ScheduleTools.Plugin.effect(host).pipe(Effect.provide(Layer.mock(Schedule.Service)({})))
+    yield* AutomationTools.Plugin.effect(host).pipe(Effect.provide(Layer.mock(Automation.Service)({})))
 
     const location = yield* Location.Service
     const sessions = yield* Session.Service
@@ -69,7 +69,7 @@ it.effect("the model sees openforge's own tools under openforge, never opencode"
         "openforge.models",
         "openforge.list_mcp_resources",
         "openforge.artifact_create",
-        "openforge.schedule_create",
+        "openforge.automation_create",
       ]),
     )
     expect(rendered).toContain("- openforge (")

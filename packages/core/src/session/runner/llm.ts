@@ -38,9 +38,6 @@ import { ImageBudget } from "../../image/budget.js"
 import { MemoryStart } from "../../memory/start.js"
 import { PacerEndpoint } from "../../pacer/endpoint.js"
 
-const CONTINUE_AFTER_INCOMPLETE_STREAM =
-  "The previous response was interrupted. Continue from where you left off without repeating completed content."
-
 const CONTINUE_AFTER_OUTPUT_LIMIT =
   "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces."
 
@@ -50,6 +47,8 @@ const CONTINUE_AFTER_OUTPUT_LIMIT =
  * most.
  */
 const MAX_MOVES = 3
+
+type DrainInput = Parameters<Interface["drain"]>[0]
 
 const layer = Layer.effect(
   Service,
@@ -72,7 +71,8 @@ const layer = Layer.effect(
     // Title generation starts once input is visible and must not delay model execution.
     const titles = yield* FiberMap.make<SessionSchema.ID, void, never>()
 
-    const drain = Effect.fn("SessionRunner.drain")(function* (input: Parameters<Interface["drain"]>[0]) {
+    // Each drain is one turn and starts its own trace, whatever fiber woke it.
+    const drain = Effect.fn("SessionRunner.drain", { root: true })(function* (input: DrainInput) {
       const sessionID = input.sessionID
       let force = input.force
       let continuing = input.continuation !== undefined
@@ -107,7 +107,10 @@ const layer = Layer.effect(
       }
       yield* settleStaleCompactions(sessionID)
       if (rest?.kind === "retry" || rest?.kind === "tools") {
-        continuing = yield* runStep(sessionID, undefined, rest.step, { rest, tools: restored.tools })
+        continuing = yield* runStep(sessionID, undefined, rest.step, input.interruption, {
+          rest,
+          tools: restored.tools,
+        })
         stepped = true
         step = rest.step + 1
         force = false
@@ -168,7 +171,10 @@ const layer = Layer.effect(
                   Effect.gen(function* () {
                     yield* plugins.awaitActivation
                     const selected = yield* context.select(sessionID)
-                    const model = yield* context.resolveModel(selected.session)
+                    const model = yield* context.resolveModel(selected.session, {
+                      kind: "compaction",
+                      agent: selected.agent.id,
+                    })
                     // openforge: at a cold point the instructions as they are become the baseline, as the next step
                     // would make them, so a compaction with no record to send, as after a refused prompt, sends them.
                     // A new baseline renders no update after the marker.
@@ -258,7 +264,7 @@ const layer = Layer.effect(
         yield* continuity.boundary(boundary())
         const next = yield* advanceToStep()
         if (next._tag !== "Ready") return next
-        continuing = yield* runStep(sessionID, next.context, step)
+        continuing = yield* runStep(sessionID, next.context, step, input.interruption)
         stepped = true
         step++
         force = false
@@ -304,6 +310,7 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       first: SessionContext.Loaded | undefined,
       step: number,
+      interruption: DrainInput["interruption"],
       resume?: {
         readonly rest: SessionContinuity.RetryRest | SessionContinuity.ToolsRest
         readonly tools: SessionContinuity.Restored["tools"]
@@ -325,11 +332,10 @@ const layer = Layer.effect(
       let asks = 0
       if (resume?.rest.kind === "retry") {
         yield* retry.resume(resume.rest)
-        if (resume.rest.mode === "continue") {
-          yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
-          assistantMessageID = SessionMessage.ID.create()
-        }
+        // A reply cut off mid-stream continues in a new assistant message, which sees the partial one.
+        if (resume.rest.mode === "continue") assistantMessageID = SessionMessage.ID.create()
       }
+      let retryAttempt: number | undefined
       while (true) {
         // Reuse boundary preparation once; retries refresh context without delivering more input.
         const loaded = initial ?? (yield* prepareContext(sessionID).pipe(Effect.flatMap(load)))
@@ -398,6 +404,7 @@ const layer = Layer.effect(
           )
         const outcome = yield* steps.attempt({
           isLocationClosed: lifecycle.isClosed,
+          interruption,
           sessionID,
           assistantMessageID,
           agent: loaded.agent.id,
@@ -407,6 +414,7 @@ const layer = Layer.effect(
             // A tool call can arrive during a reload; its permission check reads the session's agent.
             executeTool: (call) => plugins.awaitActivation.pipe(Effect.andThen(prepared.executeTool(call))),
           },
+          retryAttempt,
           retry: (cause, error, proposed) =>
             retry.decide({
               cause,
@@ -436,6 +444,7 @@ const layer = Layer.effect(
           step,
           ...(finish ? { resume: finish } : {}),
         })
+        retryAttempt = undefined
         const completed = yield* SessionStep.Outcome.$match(outcome, {
           Completed: Effect.fnUntraced(function* (outcome) {
             // The Session is about to go idle, which leaves the background summary time to finish.
@@ -445,21 +454,15 @@ const layer = Layer.effect(
               )
             return outcome.needsContinuation
           }),
-          Retry: (outcome) =>
-            retry.wait({
-              decision: outcome.decision,
-              error: outcome.error,
-              assistantMessageID,
-            }),
-          Continue: Effect.fnUntraced(function* (outcome) {
+          Retry: Effect.fnUntraced(function* (outcome) {
+            retryAttempt = outcome.decision.attempt
             yield* retry.wait({
               decision: outcome.decision,
               error: outcome.error,
               assistantMessageID,
-              mode: "continue",
+              mode: outcome.freshAssistant ? "continue" : "retry",
             })
-            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
-            assistantMessageID = SessionMessage.ID.create()
+            if (outcome.freshAssistant) assistantMessageID = SessionMessage.ID.create()
           }),
           OutputLimit: Effect.fn("SessionRunner.continueOutputLimit")(function* (outcome) {
             // The current response is included. User input or any other finish breaks the streak.
@@ -566,7 +569,7 @@ const layer = Layer.effect(
     const settleStaleToolCalls = Effect.fn("SessionRunner.settleStaleToolCalls")(function* (
       sessionID: SessionSchema.ID,
     ) {
-      for (const message of yield* store.context(sessionID)) {
+      for (const message of yield* SessionHistory.incompleteAssistants(db, sessionID)) {
         if (message.type !== "assistant") continue
         for (const tool of message.content) {
           if (tool.type !== "tool" || (tool.state.status !== "streaming" && tool.state.status !== "running")) continue
@@ -588,7 +591,9 @@ const layer = Layer.effect(
       }
     })
 
-    return Service.of({ drain })
+    return Service.of({
+      drain: (input) => drain(input).pipe(Effect.annotateSpans("session.id", input.sessionID)),
+    })
   }),
 )
 

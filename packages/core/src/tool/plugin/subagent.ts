@@ -3,17 +3,17 @@ export * as SubagentTool from "./subagent.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
-import { Effect, Option, Predicate, Schema } from "effect"
+import { Effect, Predicate, Schema } from "effect"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
-import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
 import { MemoryTask } from "../../memory/task.js"
 import { Model } from "../../model.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
-import { SubagentCompletion } from "../../session/subagent-completion.js"
+import { SubagentDepth } from "../../session/subagent-depth.js"
+import { SubagentEnded } from "../../session/subagent-ended.js"
 import { SubagentJob } from "../../session/subagent-job.js"
 
 export const name = "subagent"
@@ -22,16 +22,12 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
   sessionID,
   status: "running" as const,
   output: [
-    `The subagent is working in the background (sessionID: ${sessionID}). You will be notified automatically when it finishes.`,
-    "DO NOT sleep, poll for progress, ask the subagent for status, or duplicate this subagent's work; avoid working with the same files or topics it is using.",
+    `The subagent is working in the background (sessionID: ${sessionID}). You will receive a <subagent> message when it goes idle, and again after each later round of work.`,
+    "DO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.",
     "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.",
     "To send it follow-ups or change its instructions while it runs, call subagent again with this sessionID.",
   ].join("\n"),
 })
-
-/** What a parent's subagent call stores while it waits, so the next process waits for the same child. */
-const Attached = Schema.Struct({ childSessionID: SessionSchema.ID, agent: Schema.String })
-const decodeAttached = Schema.decodeUnknownOption(Attached)
 
 export const Input = Schema.Struct({
   agent: Schema.String.annotate({
@@ -47,10 +43,6 @@ export const Input = Schema.Struct({
   sessionID: Schema.optionalKey(SessionSchema.ID).annotate({
     description: "Send a follow-up to an existing subagent, running or finished. Omit to start a new one.",
   }),
-  background: Schema.optionalKey(Schema.Boolean).annotate({
-    description:
-      "Run the subagent in the background and return immediately. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress.",
-  }),
   taskID: Schema.optionalKey(Schema.String).annotate({
     description:
       "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. While you are on a step of a task, that task's own id is refused.",
@@ -59,16 +51,15 @@ export const Input = Schema.Struct({
 
 export const Output = Schema.Struct({
   sessionID: SessionSchema.ID,
-  status: Schema.Literals(["completed", "running"]),
+  status: Schema.Literal("running"),
   output: Schema.String,
 })
 export const description = [
   "Spawns an agent in a child session to work on the specified task.",
-  "The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.",
+  "Subagents always run in the background: the call returns immediately with a sessionID, and you receive a `<subagent>` message each time the child goes idle, including after later work.",
+  "Keep working on non-overlapping tasks, or briefly tell the user what you launched and end your response. Do not sleep, poll, or proactively check on the child's progress.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
-  "Foreground (default) runs the subagent to completion and returns its final response.",
-  "Background mode (background=true) launches it asynchronously and returns immediately; you are notified when it finishes.",
-  "Use background only for independent work that can run while you continue elsewhere.",
+  "Pass the returned sessionID to continue that specific child conversation. A follow-up to a running child joins its current run.",
 ].join("\n")
 
 export const Plugin = {
@@ -81,43 +72,8 @@ export const Plugin = {
     const permission = yield* Permission.Service
     const models = yield* Model.Service
     const subagents = yield* SubagentJob.Service
-    const continuity = yield* SessionContinuity.Service
     const tasks = yield* MemoryTask.Service
-
-    // A foreground call waits in a way that survives a stop: the child rests and resumes itself, and the rerun of
-    // this call waits for it again.
-    const follow = Effect.fnUntraced(function* (
-      recovery: Extract<Job.Recovery, { kind: "subagent" }>,
-      sessionID: SessionSchema.ID,
-      callID: string,
-      ended?: (output: string) => Effect.Effect<string>,
-    ) {
-      const child = recovery.childSessionID
-      const result = yield* continuity
-        .wait(callID, jobs.block({ id: child, sessionID }), { childSessionID: child, agent: recovery.agent })
-        .pipe(
-          Effect.onInterrupt(() =>
-            continuity.stopping()
-              ? Effect.void
-              : Effect.all([sessions.interrupt(child), jobs.cancel(child)], { discard: true }),
-          ),
-        )
-      if (result?.type === "backgrounded") {
-        yield* subagents.notify(recovery, result.info.started_at, ended)
-        return backgroundResult(child)
-      }
-      // The stop interrupted the child first; the next process waits for it again.
-      if (result?.info.status === "running") return yield* Effect.interrupt
-      // Failure surfaces keep the sessionID visible so the model can continue the child.
-      if (result?.info.status === "error")
-        return yield* new ToolFailure({
-          message: `Subagent failed (sessionID: ${child}): ${result.info.error ?? "unknown error"}`,
-        })
-      if (result?.info.status === "cancelled")
-        return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child})` })
-      const output = result?.info.output ?? SubagentCompletion.NO_TEXT
-      return { sessionID: child, status: "completed" as const, output: ended ? yield* ended(output) : output }
-    })
+    const ended = yield* SubagentEnded.Service
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const ref = yield* Effect.try({
@@ -160,29 +116,6 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              // A child started or continued on a task: it moves into the task as a new one does, and its maker gets
-              // the task's state when it ends.
-              const ended =
-                input.taskID === undefined
-                  ? undefined
-                  : (output: string) =>
-                      sessions.get(context.sessionID).pipe(
-                        Effect.flatMap((parent) => tasks.ended(parent, input.taskID!, output)),
-                        Effect.orElseSucceed(() => output),
-                      )
-              const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
-              if (attached) {
-                const recovery = {
-                  kind: "subagent" as const,
-                  parentSessionID: context.sessionID,
-                  childSessionID: attached.childSessionID,
-                  agent: attached.agent,
-                  description: input.description,
-                }
-                yield* context.progress({ sessionID: attached.childSessionID, status: "running" })
-                yield* subagents.start(recovery)
-                return yield* follow(recovery, context.sessionID, context.id, ended)
-              }
               const parent = yield* sessions
                 .get(context.sessionID)
                 .pipe(
@@ -190,20 +123,12 @@ export const Plugin = {
                     (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
                   ),
                 )
-              let current = parent
-              let depth = 0
-              while (current.parentID) {
-                depth++
-                current = yield* sessions
-                  .get(current.parentID)
-                  .pipe(
-                    Effect.mapError(
-                      (error) => new ToolFailure({ message: `Parent session not found: ${current.parentID}`, error }),
-                    ),
-                  )
-              }
-              const limit = Config.latest(yield* config.entries(), "experimental")?.subagent_depth ?? 1
-              if (depth >= limit)
+              const limit = yield* SubagentDepth.reached(parent, sessions, config).pipe(
+                Effect.mapError(
+                  (error) => new ToolFailure({ message: `Parent session not found: ${error.sessionID}`, error }),
+                ),
+              )
+              if (limit !== undefined)
                 return yield* new ToolFailure({
                   message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
                 })
@@ -216,13 +141,7 @@ export const Plugin = {
                   action: name,
                   resources: [agent.id],
                   save: [agent.id],
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source: {
-                    type: "tool",
-                    messageID: context.messageID,
-                    id: context.id,
-                  },
+                  ...Permission.invocation(context),
                 })
                 .pipe(Effect.mapError((error) => new ToolFailure({ message: `Subagent denied: ${agent.id}`, error })))
 
@@ -258,7 +177,10 @@ export const Plugin = {
               }
 
               const model = override ?? agent.model ?? parent.model
-              const assigned = ended ? yield* tasks.assign(parent, input.taskID!) : undefined
+              // A child started or continued on a task moves into the task as a new one does, and its maker gets the
+              // task's state in its reports once the task is no longer active.
+              const taskID = input.taskID
+              const assigned = taskID === undefined ? undefined : yield* tasks.assign(parent, taskID)
               const child =
                 existing ??
                 (yield* sessions
@@ -280,11 +202,20 @@ export const Plugin = {
                 const metadata = yield* tasks.activate(assigned, child, agent.id)
                 if (metadata) yield* sessions.setMetadata({ sessionID: child.id, metadata }).pipe(Effect.ignore)
               }
-              const background = input.background === true
+              if (taskID !== undefined)
+                yield* ended.set(child.id, (output) =>
+                  sessions.get(context.sessionID).pipe(
+                    Effect.flatMap((current) => tasks.ended(current, taskID, output)),
+                    Effect.orElseSucceed(() => output),
+                  ),
+                )
+              // A child that is not draining yet must be admitted without waking: the job's resume
+              // owns the start, so the period cannot run before its boundary is registered.
+              const running =
+                existing !== undefined &&
+                ((yield* sessions.active).has(existing.id) || (yield* jobs.get(existing.id))?.status === "running")
               yield* context.progress({ sessionID: child.id, status: "running" })
 
-              // Standard prompt admission outside the job: Job.start joining a running child skips
-              // its run effect, and the default wake starts an idle child or steers a running one.
               yield* sessions
                 .prompt({
                   sessionID: child.id,
@@ -292,7 +223,7 @@ export const Plugin = {
                     existing === undefined
                       ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
                       : input.prompt,
-                  ...(background && existing === undefined ? { resume: false } : {}),
+                  ...(running ? {} : { resume: false }),
                 })
                 .pipe(
                   Effect.mapError(
@@ -308,22 +239,11 @@ export const Plugin = {
                 description: input.description,
               }
               yield* subagents.start(recovery)
-
-              if (background) {
-                // Known and left so: the task line of a background child is lost when the process restarts before the
-                // notice is delivered (`SessionRestart` delivers it without `ended`).
-                yield* subagents.background(recovery, ended)
-                return backgroundResult(child.id)
-              }
-
-              return yield* follow(recovery, context.sessionID, context.id, ended)
+              return backgroundResult(child.id)
             }).pipe(
               Effect.map((output) => ({
                 output,
-                content:
-                  output.status === "completed"
-                    ? `<subagent sessionID="${output.sessionID}" state="completed">\n${output.output}\n</subagent>`
-                    : output.output,
+                content: output.output,
                 metadata: { sessionID: output.sessionID, status: output.status },
               })),
             ),

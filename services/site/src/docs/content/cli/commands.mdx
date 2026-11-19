@@ -1,0 +1,747 @@
+---
+title: "Commands"
+description: "Reference for the openforge command line."
+---
+
+Every command accepts `--help` for its full flag list, for example `openforge run --help`. Some server-backed commands accept `--standalone` to run a private server or `--server <url>` to target a specific one; check the command's help for its supported flags.
+
+## run
+
+Sends a message and prints the reply without opening the interactive interface.
+
+```bash
+$ openforge run "Explain this repository"
+```
+
+### CI
+
+In CI, pass a provider API key as a secret and use standalone mode so the private server receives it. For example, this GitHub Actions job reviews the checked-out repository:
+
+```yaml
+name: openforge review
+on: [pull_request]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://github.com/floris3456/openforge/releases/latest/download/install.sh | sh
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: openforge run --standalone --model anthropic/claude-sonnet-5-5 "Review this repository for correctness and summarize any issues."
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Choose a model.
+
+```bash
+$ openforge run --model anthropic/claude-sonnet-5-5 "Refactor parseToken"
+```
+
+Continue the last session.
+
+```bash
+$ openforge run --continue "Now handle the expired case"
+```
+
+Emit newline-delimited JSON for scripts.
+
+```bash
+$ openforge run --format json "List the TODO comments"
+```
+
+Attach files to the message.
+
+```bash
+$ openforge run --file src/server.ts --file src/client.ts "Review these for bugs"
+```
+
+Run with a specific agent.
+
+```bash
+$ openforge run --agent build "Fix the failing test"
+```
+
+Continue a specific session.
+
+```bash
+$ openforge run --session ses_4f2a1c "Check edge cases"
+```
+
+Auto-approve permissions that are not explicitly denied.
+
+```bash
+$ openforge run --auto "Fix the failing test"
+```
+
+Create the session archived so scripted or CI runs stay out of session lists and the inbox. The session still exists: `opencode session list` includes it, and you can open it by ID.
+
+```bash
+$ opencode run --archived "Review this diff"
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge run --help
+```
+
+## mini
+
+Starts the minimal interactive interface instead of the full-screen TUI.
+
+```bash
+$ openforge mini
+```
+
+Continue the last session.
+
+```bash
+$ openforge mini --continue
+```
+
+Start with a model and an initial prompt.
+
+```bash
+$ openforge mini --model anthropic/claude-sonnet-5-5 --prompt "Summarize this repository"
+```
+
+Continue a specific session.
+
+```bash
+$ openforge mini --session ses_4f2a1c
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge mini --help
+```
+
+## session
+
+Manages sessions.
+
+```bash
+$ openforge session list
+```
+
+Limit the list and print JSON.
+
+```bash
+$ openforge session list --max-count 20 --format json
+```
+
+Delete a session and its child sessions.
+
+```bash
+$ openforge session delete ses_9c1b08
+```
+
+Export session data as JSON.
+
+```bash
+$ openforge session export ses_4f2a1c
+```
+
+Redact sensitive transcript and file data when exporting.
+
+```bash
+$ openforge session export ses_4f2a1c --sanitize
+```
+
+Import session data from a JSON file or URL.
+
+```bash
+$ openforge session import session.json
+```
+
+Import into a specific directory.
+
+```bash
+$ openforge session import session.json --directory ~/code/project
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge session --help
+```
+
+## auth
+
+Manages AI providers and credentials.
+
+```bash
+$ openforge auth list
+```
+
+List them as JSON.
+
+```bash
+$ openforge auth list --format json
+```
+
+Log in to a provider.
+
+```bash
+$ openforge auth login anthropic
+```
+
+Log in with a specific authentication method.
+
+```bash
+$ openforge auth login anthropic --method key
+```
+
+Log out of a saved account.
+
+```bash
+$ openforge auth logout anthropic work
+```
+
+Switch the active account for an integration.
+
+```bash
+$ openforge auth switch anthropic work
+```
+
+Export saved credentials and import them on another machine. The file contains secrets.
+
+```bash
+$ openforge auth export anthropic > credentials.json
+$ openforge auth import credentials.json
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge auth --help
+```
+
+## models
+
+Lists every available model.
+
+```bash
+$ openforge models
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge models --help
+```
+
+## mcp
+
+Manages MCP (Model Context Protocol) servers.
+
+```bash
+$ openforge mcp list
+```
+
+Add a remote server.
+
+```bash
+$ openforge mcp add context7 --url https://mcp.context7.com/mcp
+```
+
+Add a local server to the global config.
+
+```bash
+$ openforge mcp add everything --global -- npx -y @modelcontextprotocol/server-everything
+```
+
+Add a local server with an environment variable.
+
+```bash
+$ openforge mcp add everything --env LOG_LEVEL=debug -- npx -y @modelcontextprotocol/server-everything
+```
+
+Add a remote server with a header.
+
+```bash
+$ openforge mcp add context7 --url https://mcp.context7.com/mcp --header CONTEXT7_API_KEY=secret
+```
+
+Authenticate with an OAuth-capable remote server.
+
+```bash
+$ openforge mcp auth sentry
+```
+
+Remove stored OAuth credentials for a server.
+
+```bash
+$ openforge mcp logout sentry
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge mcp --help
+```
+
+## plugin
+
+Manages plugins.
+
+```bash
+$ openforge plugin list
+```
+
+Include built-in server plugins.
+
+```bash
+$ openforge plugin list --builtin
+```
+
+Install a plugin and add it to the global configuration.
+
+```bash
+$ openforge plugin add @example/opencode-tui
+```
+
+Check package plugins for updates.
+
+```bash
+$ openforge plugin check
+```
+
+Update package plugins.
+
+```bash
+$ openforge plugin update
+```
+
+Remove a plugin from global configuration.
+
+```bash
+$ openforge plugin remove @example/opencode-tui
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge plugin --help
+```
+
+## stats
+
+Shows shareable usage statistics.
+
+```bash
+$ openforge stats
+```
+
+Show the last 7 days.
+
+```bash
+$ openforge stats --days 7
+```
+
+Show model usage.
+
+```bash
+$ openforge stats --models
+```
+
+Show cost and token details.
+
+```bash
+$ openforge stats --cost
+```
+
+Print JSON instead of a report.
+
+```bash
+$ openforge stats --json
+```
+
+Show only the current project.
+
+```bash
+$ openforge stats --project .
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge stats --help
+```
+
+## serve
+
+Starts the API and web server. See [Web](/cli/web).
+
+```bash
+$ openforge serve
+```
+
+Bind to all interfaces on a fixed port.
+
+```bash
+$ openforge serve --hostname 0.0.0.0 --port 4096
+```
+
+Allow a browser client from another origin.
+
+```bash
+$ openforge serve --cors https://app.example.com
+```
+
+Start paused, as a release switch starts the new background service. Reads are
+answered; model calls and tools wait, and prompts, answers and permission
+replies get `503` ("switching, try again in 1 s") until
+`POST /api/experimental/service/resume`.
+
+```bash
+$ openforge serve --service --paused
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge serve --help
+```
+
+## pair
+
+Prints one-time links, plus a QR code of the first one, that sign a browser or
+app in to the server. Links expire after 5 minutes and work once.
+
+```bash
+$ openforge pair
+```
+
+Use an external URL in the links.
+
+```bash
+$ openforge pair --url https://dev.example.com
+```
+
+Pair from anywhere through an OpenTunnel remote address. This exposes the
+server to the internet, so the first time it enables remote access it explains
+this and asks you to accept. See [Remote access](/cli/web#remote-access).
+
+```bash
+$ openforge pair --remote
+```
+
+Accept without a prompt, for example in a script without a terminal.
+
+```bash
+$ openforge pair --remote --yes
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge pair --help
+```
+
+## service
+
+Manages the background server. See [Web](/cli/web).
+
+```bash
+$ openforge service start
+```
+
+Restart it.
+
+```bash
+$ openforge service restart
+```
+
+Show its status.
+
+```bash
+$ openforge service status
+```
+
+Stop it.
+
+```bash
+$ openforge service stop
+```
+
+Read a setting.
+
+```bash
+$ openforge service get hostname
+```
+
+Set a setting.
+
+```bash
+$ openforge service set hostname 0.0.0.0
+```
+
+Allow an extra CORS origin.
+
+```bash
+$ openforge service set cors https://app.example.com
+```
+
+Pass an environment variable to the server process.
+
+```bash
+$ openforge service set env OPENCODE_LOG_LEVEL DEBUG
+```
+
+Reset a setting to its default.
+
+```bash
+$ openforge service unset hostname
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge service --help
+```
+
+## notify
+
+Plays the notification sounds of openforge's chats on the machine you sit at, and with `--desktop` shows their
+notifications there. Use it when openforge runs on another machine over ssh, or inside tmux in a terminal that shows no
+notifications. It follows the background service on this machine:
+
+```bash
+$ openforge notify
+```
+
+It never starts a service. While none runs, it says so and waits for one to start.
+
+Follow openforge on another machine over ssh, and show its notifications here. openforge must be installed there too,
+on `PATH` or in `~/.local/bin`. No port is forwarded, and the service's password stays on that machine.
+
+```bash
+$ openforge notify me@devbox --desktop
+```
+
+Reach the other machine with a command of your own instead of ssh: one that runs its arguments there, as
+`docker exec -i` does. The command is split at spaces; one that needs quoting goes in a script of its own.
+
+```bash
+$ openforge notify --via "docker exec -i devbox" --desktop
+```
+
+The command may itself go through ssh, to a container on another machine. When its program is `ssh`, openforge quotes
+what it appends, as it does for an ssh target, so the shell there reads it as one command.
+
+```bash
+$ openforge notify --via "ssh me@devbox docker exec -i devbox"
+```
+
+Once connected, ask the service for a test notification. `--test=<event>` picks `done`, `reply`, `subagent_done`,
+`question`, `permission` or `error`; `--test` alone is `done`. Test notifications are titled "openforge test" and play
+the event's built-in sound.
+
+```bash
+$ openforge notify --test=question
+```
+
+Set the volume from `0` to `1` (default `0.4`), and print every notification and what was done with it.
+
+```bash
+$ openforge notify --volume 0.2 --verbose
+```
+
+- While a player is connected, the service's TUIs play no sound of their own. While one with `--desktop` is connected,
+  they show no notification of their own either.
+- Two TUIs on the same chat make one sound: the same notification within 300 ms plays once. A chat that no TUI has
+  open makes none.
+- No desktop notification shows for a chat whose TUI window is focused.
+- Each sound is the one the TUI's settings chose for its event (`attention.events`), played from this install, or a
+  sound file from the TUI's machine.
+- Desktop notifications go through `notify-send` on Linux and `osascript` on macOS.
+- When the connection is lost, it is made again after 1 s, then twice as long each time, up to 30 s. Press Ctrl+C to
+  stop; the other machine's side stops when ssh closes.
+
+Keep the player running as a service of this machine with `--install`: a LaunchAgent on macOS, a systemd user unit on
+Linux. It starts at login and again whenever it stops. Give the same ssh target or `--via` command and flags you tested
+it with:
+
+```bash
+$ openforge notify --via "docker exec -i devbox" --install
+```
+
+- openforge must be installed with `install.sh`: the service runs `~/.local/bin/openforge`, and within a minute of an
+  upgrade it restarts on the new release.
+- There is one player per ssh target, `--via` command, or this machine. Installing the same one again replaces it.
+- The service gets the `PATH` of the shell you ran `--install` in, so the `--via` command and `ssh` are found as they
+  were. Its output goes to `~/Library/Logs/openforge/notify-<name>.log` on macOS and
+  `~/.local/state/openforge/notify-<name>.log` on Linux.
+- `--install` checks that the player runs, then prints its name, its file, its log and the command that removes it.
+- `--uninstall` with the same ssh target or `--via` command stops and removes it. `openforge uninstall` removes every
+  installed player.
+
+View all flags.
+
+```bash
+$ openforge notify --help
+```
+
+## reload
+
+Reloads configuration without restarting the server. Running sessions continue with fresh services at the next step boundary.
+
+```bash
+$ openforge reload
+```
+
+## api
+
+Makes a request to the running server.
+
+```bash
+$ openforge api GET /api/session
+```
+
+Call an operation ID with a query parameter.
+
+```bash
+$ openforge api session.list --param limit=10
+```
+
+Send a JSON body.
+
+```bash
+$ openforge api session.create --data '{"title": "New session"}'
+```
+
+Add a request header.
+
+```bash
+$ openforge api GET /api/session -H "accept: application/json"
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge api --help
+```
+
+## acp
+
+Starts an Agent Client Protocol server over stdin and stdout for editor integrations. It runs until the client closes the connection.
+
+```bash
+$ openforge acp
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge acp --help
+```
+
+## debug
+
+Provides debugging and troubleshooting tools.
+
+```bash
+$ openforge debug agents
+```
+
+List configuration sources.
+
+```bash
+$ openforge debug config
+```
+
+Write a heap snapshot of the running background server and print its path.
+
+```bash
+$ openforge debug heap-dump
+```
+
+Write the snapshot into a directory of your choice.
+
+```bash
+$ openforge debug heap-dump --directory ./snapshots
+```
+
+Show global paths.
+
+```bash
+$ openforge debug paths
+```
+
+Print a single path.
+
+```bash
+$ openforge debug paths db
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge debug --help
+```
+
+## upgrade
+
+Switches openforge to the latest release, or to a given version, kept or
+downloaded. Alias: `update`. `/update` in the TUI does the same.
+
+```bash
+$ openforge upgrade
+$ openforge upgrade 0.1.1
+```
+
+The switch happens while chats run. openforge pauses the background service:
+replies being streamed and tools already running finish, then every chat rests.
+It stops the service, copies the database next to the release it leaves, starts
+the new release paused and checks it within 10 s, then resumes every chat where
+it rested. Prompts, answers and permission replies sent meanwhile are sent
+again until the new release takes them, for up to 2 minutes. If anything
+fails, openforge goes back to the release it left, and the chats resume there.
+
+If something has not finished within 2 minutes, the pause is lifted and the
+chats carry on; the switch tries again once that has finished, and the TUI and
+this command say what it waits for. A switch away from a release before 0.1.0
+waits until no chat is running, since those releases cannot pause.
+
+With Settings › Updates › Automatic updates on (`"update": "auto"` in the
+global config), the background service does the same by itself: it checks for
+a new release every 15 minutes and switches to it. See
+[Updates](/config#updates).
+
+Going back to an older release needs a database it can read. Use the copy made
+when that release was left, which lacks everything stored since then:
+
+```bash
+$ openforge upgrade 0.1.0 --restore-database
+```
+
+View all flags.
+
+```bash
+$ openforge upgrade --help
+```
+
+## uninstall
+
+Stops background services, removes the global cache, and uninstalls openforge. Session data, configuration, and
+state are not removed.
+
+```bash
+$ openforge uninstall
+```
+
+Preview what would be removed.
+
+```bash
+$ openforge uninstall --dry-run
+```
+
+View all subcommands and flags.
+
+```bash
+$ openforge uninstall --help
+```

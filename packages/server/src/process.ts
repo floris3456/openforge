@@ -5,8 +5,8 @@ import { AutoUpdate } from "./auto-update"
 import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
-import { Schedule } from "@opencode/core/schedule"
 import { ShellRunner } from "@opencode/core/shell/runner"
+import { Automation } from "@opencode/core/automation"
 import { InstallationEvent } from "@opencode/schema/installation-event"
 import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
@@ -23,6 +23,7 @@ import { ServerAuth } from "./auth"
 import { isAllowedCorsOrigin } from "./cors"
 import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
 import { withoutParentSpan } from "./request-tracing"
+import { RequestSite } from "./request-site"
 import { createRoutes } from "./routes"
 import { ServerInfo } from "./server-info"
 import { Status } from "./service-status"
@@ -78,6 +79,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   yield* bound.http
     .serve(
       (transform ? transform(app) : app).pipe(
+        RequestSite.middleware(options),
         HttpMiddleware.compression(),
         HttpMiddleware.cors({ allowedOrigins: (origin) => isAllowedCorsOrigin(origin, options), maxAge: 86_400 }),
       ),
@@ -101,6 +103,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     ),
   )
 
+  // Built without the startup span: route handlers and background fibers capture this context, and would
+  // otherwise nest every request and session turn for the life of the process under one trace.
   const boot = Effect.gen(function* () {
     const context = yield* Layer.buildWithScope(
       createRoutes(
@@ -123,10 +127,10 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
         continuity,
       ).pipe(Effect.provideService(Scope.Scope, applicationScope))
     }
-    // Schedules fire from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
-    // A paused start fires nothing until it is resumed.
+    // Automations run from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
+    // A paused start runs nothing until it is resumed.
     yield* Effect.forkIn(
-      continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Schedule.Service).run)),
+      continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Automation.Service).run)),
       applicationScope,
     )
     // openforge: automatic updates check only once the service runs (spec auto-update).
@@ -148,6 +152,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
       updated: (version: string) => bus.publish(InstallationEvent.Updated, { version }).pipe(Effect.asVoid),
     }
   }).pipe(
+    withoutParentSpan,
     Effect.catchCause((cause) => {
       if (!lifecycle || Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
       return status.fail.pipe(

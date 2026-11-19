@@ -1,6 +1,15 @@
 export * as ImageBudget from "./budget.js"
 
-import { type LLMRequest, type Media, Message } from "@opencode/ai/effect"
+import {
+  AssistantMessage,
+  type LLMRequest,
+  type Media,
+  type MediaPart,
+  Message,
+  ToolMessage,
+  type ToolResultPart,
+  UserMessage,
+} from "@opencode/ai/effect"
 import type { Tool } from "@opencode/schema/tool"
 import { Effect } from "effect"
 import type { Bus } from "../bus.js"
@@ -52,21 +61,36 @@ export const bound = (messages: LLMRequest["messages"], limits: Limits) => {
     state.full = true
     return false
   }
-  const shaped = messages.map((message) => {
-    const content = message.content.map((part) => {
-      if (part.type === "media") {
-        if (!isImage(part.media.mediaType)) return part
-        return place(mediaBytes(part.media)) ? part : Message.text(NOT_SHOWN)
-      }
-      if (part.type !== "tool-result" || part.result.type !== "content") return part
-      const result = part.result
-      const value = result.value.map((item): Tool.Content => {
-        if (item.type !== "file" || !isImage(item.mime)) return item
-        return place(uriBytes(item.uri)) ? item : { type: "text", text: NOT_SHOWN }
-      })
-      return same(value, result.value) ? part : { ...part, result: { ...result, value } }
+  const media = (part: MediaPart) =>
+    !isImage(part.media.mediaType) || place(mediaBytes(part.media)) ? part : Message.text(NOT_SHOWN)
+  const toolResult = (part: ToolResultPart): ToolResultPart => {
+    if (part.result.type !== "content") return part
+    const result = part.result
+    const value = result.value.map((item): Tool.Content => {
+      if (item.type !== "file" || !isImage(item.mime)) return item
+      return place(uriBytes(item.uri)) ? item : { type: "text", text: NOT_SHOWN }
     })
-    return same(content, message.content) ? message : new Message({ ...message, content })
+    return same(value, result.value) ? part : { ...part, result: { ...result, value } }
+  }
+  const shaped = messages.map((message): Message => {
+    switch (message.role) {
+      case "system":
+        return message
+      case "user": {
+        const content = message.content.map((part) => (part.type === "media" ? media(part) : part))
+        return same(content, message.content) ? message : new UserMessage({ ...message, content })
+      }
+      case "assistant": {
+        const content = message.content.map((part) =>
+          part.type === "media" ? media(part) : part.type === "tool-result" ? toolResult(part) : part,
+        )
+        return same(content, message.content) ? message : new AssistantMessage({ ...message, content })
+      }
+      case "tool": {
+        const content = message.content.map(toolResult)
+        return same(content, message.content) ? message : new ToolMessage({ ...message, content })
+      }
+    }
   })
   return same(shaped, messages) ? messages : shaped
 }

@@ -124,20 +124,7 @@ export const apply = Effect.fn("InstructionState.apply")(function* (
 ) {
   const stored = yield* find(db, sessionID)
   const current = Instructions.applyHashDelta(stored?.current_values ?? {}, delta)
-  if (!stored) {
-    yield* db
-      .insert(InstructionStateTable)
-      .values({
-        session_id: sessionID,
-        epoch_start: seq,
-        through_seq: seq,
-        initial_values: current,
-        current_values: current,
-      })
-      .run()
-      .pipe(Effect.orDie)
-    return
-  }
+  if (!stored) return yield* initialize(db, sessionID, seq, current)
   yield* db
     .update(InstructionStateTable)
     .set({ through_seq: seq, current_values: current })
@@ -211,20 +198,20 @@ export const initial = Effect.fn("InstructionState.initial")(function* (
   return Instructions.renderInitial(instructions, dereference(state.initial_values, blobs))
 })
 
-/** openforge: the `seq` the chat's epoch starts at; the updates before it are in its baseline. */
-export const epochStart = Effect.fn("InstructionState.epochStart")(function* (
-  db: DatabaseService,
-  sessionID: SessionSchema.ID,
-) {
-  return (yield* find(db, sessionID))?.epoch_start
-})
-
 /** The current instruction values, used to seed a fork's baseline. */
 export const current = Effect.fn("InstructionState.current")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
 ) {
   return (yield* find(db, sessionID))?.current_values
+})
+
+/** Where the current baseline starts; updates before it are already folded into the baseline. */
+export const epochStart = Effect.fn("InstructionState.epochStart")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  return (yield* find(db, sessionID))?.epoch_start
 })
 
 export const preview = Effect.fn("InstructionState.preview")(function* (

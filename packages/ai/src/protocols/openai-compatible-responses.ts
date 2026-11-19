@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import { Route } from "../route/client.js"
 import { Endpoint } from "../route/endpoint.js"
-import { LLMRequest } from "../schema/index.js"
+import type { LLMRequest } from "../schema/index.js"
 import { OpenResponses } from "./open-responses.js"
 import type { CompactOperation } from "../route/client.js"
 import { OpenAIFreeform } from "./openai-freeform.js"
@@ -21,7 +21,7 @@ export const route = Route.make({
   protocol: OpenResponses.protocol,
   endpoint: Endpoint.path(OpenResponses.PATH),
   transport: OpenResponses.httpTransport,
-  defaults: { providerOptions: { store: false, include: ["reasoning.encrypted_content"] } },
+  options: { providerOptions: { store: false, include: ["reasoning.encrypted_content"] } },
 })
 
 // Open Responses' own adapter, as `OpenResponses.fromRequest` lowers a turn of this route.
@@ -32,7 +32,7 @@ const compactEndpoint = ResponsesCompaction.make(turnAdapter, lowerTools)
 const systemPartsEndpoint = ResponsesCompaction.make(turnAdapter, lowerTools, (request, adapter) => {
   // As a Messages turn has them: one system block per part with text.
   const parts = request.system.filter((part) => part.text.length > 0)
-  return OpenResponses.lowerConversation(LLMRequest.update(request, { system: [] }), adapter).pipe(
+  return OpenResponses.lowerConversation({ ...request, system: [] }, adapter).pipe(
     Effect.map((native) =>
       parts.length === 0
         ? native

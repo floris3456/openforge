@@ -1,6 +1,12 @@
 export * as SessionContinuity from "./continuity.js"
 
-import { Usage, type AIError, type CompactionCheckpointResponse, type CompactionResponse } from "@opencode/ai/effect"
+import {
+  Usage,
+  type AIError,
+  type CompactionCheckpointResponse,
+  type CompactionResponse,
+  type LLMRequest,
+} from "@opencode/ai/effect"
 import {
   LLMClient,
   RequestExecutor,
@@ -8,7 +14,6 @@ import {
   type CompactionRequest,
   type EndpointCompactOptions,
   type LLMClientService,
-  type LLMClientShape,
   type TriggerCompactOptions,
 } from "@opencode/ai/route"
 import { Continuity } from "@opencode/schema/continuity"
@@ -211,8 +216,8 @@ const pendingRequest = (row: typeof PendingRequestTable.$inferSelect): PendingRe
 })
 
 /** The arguments of each `compact` overload, told apart by the mechanism. */
-type TriggerCompact = [request: CheckpointRequest, options: TriggerCompactOptions]
-type EndpointCompact = [request: CompactionRequest, options?: EndpointCompactOptions]
+type TriggerCompact = [request: LLMRequest & Pick<CheckpointRequest, "model">, options: TriggerCompactOptions]
+type EndpointCompact = [request: LLMRequest & Pick<CompactionRequest, "model">, options?: EndpointCompactOptions]
 const triggers = (args: TriggerCompact | EndpointCompact): args is TriggerCompact => args[1]?.mechanism === "trigger"
 
 export interface Options {
@@ -264,7 +269,7 @@ export interface Interface {
   /** Whether this tool call is one a restart continues, so it may find what it asked before. */
   readonly rerun: (callID: string | undefined) => Effect.Effect<boolean>
   /** Gates model calls outside a busy execution. */
-  readonly client: (llm: LLMClientShape) => LLMClientShape
+  readonly client: (llm: LLMClientService["Service"]) => LLMClientService["Service"]
   readonly restored: (sessionID: SessionSchema.ID) => Effect.Effect<Restored>
   readonly save: (sessionID: SessionSchema.ID, rest: Rest) => Effect.Effect<void>
   readonly clearRest: (sessionID: SessionSchema.ID) => Effect.Effect<void>
@@ -516,14 +521,8 @@ export const layer = (options: Options = {}) =>
         Effect.flatMap(enter(name), (call) => Effect.acquireUseRelease(call.acquire, () => effect, call.release))
 
       const client: Interface["client"] = (llm) => {
-        function compact(
-          request: CheckpointRequest,
-          options: TriggerCompactOptions,
-        ): Effect.Effect<CompactionCheckpointResponse, AIError>
-        function compact(
-          request: CompactionRequest,
-          options?: EndpointCompactOptions,
-        ): Effect.Effect<CompactionResponse, AIError>
+        function compact(...args: TriggerCompact): Effect.Effect<CompactionCheckpointResponse, AIError>
+        function compact(...args: EndpointCompact): Effect.Effect<CompactionResponse, AIError>
         // `llm.compact` refuses a route that cannot compact, as without the gate.
         function compact(...args: TriggerCompact | EndpointCompact) {
           const name = String(args[0].model.id)

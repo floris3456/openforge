@@ -1,5 +1,5 @@
 import { afterAll, describe, expect } from "bun:test"
-import { LLMEvent, LLMRequest } from "@opencode/ai/effect"
+import { LLMEvent, type LLMRequest } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { LanguageModel } from "@opencode/ai/effect"
 import { TestLLM } from "@opencode/ai/testing"
@@ -189,7 +189,9 @@ const replacements: LayerNode.Replacements = [
   LayerNodePlatform.llmClient.replace(testLLM),
   SessionRunnerModel.node.replace(models),
   InstructionBuiltIns.node.replace(Layer.mock(InstructionBuiltIns.Service, none)),
-  InstructionDiscovery.node.replace(Layer.mock(InstructionDiscovery.Service, { project: true, global: true, ...none })),
+  InstructionDiscovery.node.replace(
+    Layer.mock(InstructionDiscovery.Service, { project: true, global: true, claude: false, ...none }),
+  ),
   SkillInstructions.node.replace(Layer.mock(SkillInstructions.Service, none)),
   ReferenceInstructions.node.replace(Layer.mock(ReferenceInstructions.Service, none)),
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),

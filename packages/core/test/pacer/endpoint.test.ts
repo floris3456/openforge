@@ -384,7 +384,11 @@ describe("PacerEndpoint.Service", () => {
             yield* db.run(
               sql`INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated) VALUES (${id}, ${PacerEndpoint.id}, ${id}, ${JSON.stringify(key(id, "https://a.test"))}, NULL, ${created}, ${created})`,
             )
-          yield* bus.publish(Credential.Event.Updated, {}, { global: true })
+          yield* bus.publish(
+            Credential.Event.Updated,
+            { integrationID: PacerEndpoint.id, credentialID: Credential.ID.make("cred_legacy_new") },
+            { global: true },
+          )
           yield* agrees
         }),
     ),

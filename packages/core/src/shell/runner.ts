@@ -94,6 +94,8 @@ export interface Interface {
   readonly watch: (id: Shell.ID, input?: Shell.WatchInput) => Stream.Stream<Shell.WatchEvent, NotFoundError>
   readonly timeout: (id: Shell.ID, duration: number) => Effect.Effect<Shell.Info, NotFoundError>
   readonly remove: (id: Shell.ID) => Effect.Effect<void, NotFoundError>
+  /** Ends a running command (SIGTERM, then SIGKILL) and keeps it, output file included; `wait` observes the exit. */
+  readonly stop: (id: Shell.ID) => Effect.Effect<Shell.Info, NotFoundError>
   /** Running commands of one Location. */
   readonly list: (location: Location.Ref) => Effect.Effect<Shell.Info[]>
   /** Newlines a finished command printed. */
@@ -158,7 +160,7 @@ const layer = (options: Options) =>
     Effect.gen(function* () {
       const global = yield* Global.Service
       const bus = yield* Bus.Service
-      const app = yield* App.Metadata
+      const app = yield* App.Service
       const scope = yield* Scope.Scope
       // A runner hosted in this process gets a folder of its own, so no other service starts commands in it.
       const current = options.launch
@@ -620,9 +622,17 @@ const layer = (options: Options) =>
         yield* bus.publish(Shell.Event.Deleted, { id }, { location: entry.location })
       })
 
+      const stopCommand = Effect.fn("ShellRunner.stop")(function* (id: Shell.ID) {
+        const entry = yield* require(id)
+        if (detaching || entry.exit || !entry.control) return entry.info
+        yield* entry.control.signal("SIGTERM", false)
+        return entry.info
+      })
+
       return Service.of({
         start,
         attach,
+        stop: stopCommand,
         get: Effect.fn("ShellRunner.get")(function* (id) {
           return (yield* require(id)).info
         }),

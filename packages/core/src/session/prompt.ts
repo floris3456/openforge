@@ -9,6 +9,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Effect, Option, Schema } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
+import { Agent } from "../agent.js"
 import { Database } from "../database/database.js"
 import { Config } from "../config.js"
 import { Image } from "../image.js"
@@ -77,10 +78,11 @@ export const prepare = Effect.fn("SessionPrompt.prepare")(function* (request: {
         const skill = yield* skillService.get(attachment.id)
         if (!skill) return yield* new SkillNotFoundError({ skill: attachment.id })
         prepared.set(skill.id, skill.name)
+        const files = yield* skillService.files(skill.id)
         return {
           id: skill.id,
           name: skill.name,
-          text: (yield* Skill.prepare(fs, skill).pipe(Effect.orDie)).output,
+          text: (yield* Skill.prepare(fs, skill, files).pipe(Effect.orDie)).output,
           mention: attachment.mention,
         }
       }),
@@ -182,7 +184,9 @@ const imageBank = Effect.fnUntraced(function* (session: Session.Info) {
   if (Option.isNone(config) || Option.isNone(models) || Option.isNone(catalog)) return undefined
   // The model is resolved only while the setting is on.
   if (!ImageBank.setting(yield* config.value.entries())) return undefined
-  const model = yield* models.value.resolve(session, catalog.value.available).pipe(Effect.option)
+  const model = yield* models.value
+    .resolve(session, catalog.value.available, { kind: "primary", agent: session.agent ?? Agent.defaultID })
+    .pipe(Effect.option)
   if (Option.isNone(model)) return undefined
   const entry = yield* ImageBank.applies(config, model.value)
   if (!entry) return undefined
@@ -259,9 +263,9 @@ const readFileAttachment = Effect.fn("SessionPrompt.readFileAttachment")(functio
     return {
       bytes: Buffer.from(
         entries
-          .filter((entry) => entry.type === "file" || entry.type === "directory")
-          .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1))
-          .map((entry) => entry.name + (entry.type === "directory" ? path.sep : ""))
+          .filter((entry) => entry.type === "File" || entry.type === "Directory")
+          .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "Directory" ? -1 : 1))
+          .map((entry) => entry.name + (entry.type === "Directory" ? path.sep : ""))
           .join("\n"),
       ),
       source: { type: "uri" as const, uri },

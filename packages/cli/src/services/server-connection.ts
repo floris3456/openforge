@@ -13,12 +13,16 @@ export type Args = {
   readonly server?: string
   readonly standalone?: boolean
   readonly mismatch?: "replace" | "ignore" | "error"
+  /** Start the background service when none is running. When false, use a standalone server instead. */
+  readonly autostart?: boolean
   readonly onStart?: EnsureOptions["onStart"]
 }
 
 export type Resolved = {
   readonly endpoint: Endpoint
   readonly service?: ReturnType<typeof managedService>
+  /** A private server started for this command alone. */
+  readonly standalone?: boolean
 }
 
 export const resolve = Effect.fn("cli.server-connection.resolve")(function* (args: Args = {}) {
@@ -47,7 +51,7 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
     return { endpoint } satisfies Resolved
   }
   if (standalone || (yield* ServiceConfig.read()).disabled === true) {
-    return { endpoint: yield* Standalone.start() } satisfies Resolved
+    return { endpoint: yield* Standalone.start(), standalone: true } satisfies Resolved
   }
 
   const mismatch = args.mismatch ?? "ignore"
@@ -61,6 +65,11 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
     onNone: () => Effect.succeed(false),
     onSome: (updater) => updater.switching(),
   })
+  if (args.autostart === false) {
+    const endpoint = yield* Service.discover({ ...options, version: undefined })
+    if (!endpoint) return { endpoint: yield* Standalone.start(), standalone: true } satisfies Resolved
+    return { endpoint, service: managedService(options, switched) } satisfies Resolved
+  }
   return {
     // One that starts during a switch does the same, rather than replace the service the switch started because it
     // runs another version.

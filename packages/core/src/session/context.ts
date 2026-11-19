@@ -8,6 +8,7 @@ import { Config } from "../config.js"
 import { ImageBank } from "../image/bank.js"
 import type { ImageFit } from "../image/fit.js"
 import type { CodeModeCatalog } from "../codemode/catalog.js"
+import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { CodeModeInstructions } from "../codemode/instructions.js"
 import { CodeModePins } from "../codemode/pins.js"
 import { Database } from "../database/database.js"
@@ -72,6 +73,7 @@ export interface Interface {
   readonly cold: (selection: Selection) => Effect.Effect<boolean>
   readonly resolveModel: (
     session: SessionSchema.Info,
+    request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
   ) => Effect.Effect<SessionRunnerModel.Resolved, SessionRunnerModel.Error>
   /** openforge: the model's entry when a chat on `model` gets optimized images (`ImageBank.applies`). */
   readonly images: (model: SessionRunnerModel.Resolved) => Effect.Effect<ImageFit.Model | undefined>
@@ -114,7 +116,10 @@ const layer = Layer.effect(
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     const images = (model: SessionRunnerModel.Resolved) => ImageBank.applies(config, model)
 
-    const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
+    const resolveModel = (
+      session: SessionSchema.Info,
+      request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
+    ) => models.resolve(session, model.available, request)
 
     // CLIProxyPacer's provider id, which a chat's model names when its list applies.
     const PACER: string = PacerEndpoint.id
@@ -149,7 +154,9 @@ const layer = Layer.effect(
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
       if (!agent) return
-      const primary = yield* resolveModel(session).pipe(Effect.orElseSucceed(() => undefined))
+      const primary = yield* resolveModel(session, { kind: "title", agent: agent.id }).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
       const candidate = yield* Effect.gen(function* () {
         if (agent.model) {
           const info = yield* model.get(agent.model.providerID, agent.model.id)
@@ -165,14 +172,17 @@ const layer = Layer.effect(
       })
       const preferred =
         candidate &&
-        (yield* resolveModel({
-          ...session,
-          model: Model.Ref.make({
-            providerID: candidate.info.providerID,
-            id: candidate.info.id,
-            ...(candidate.variant ? { variant: candidate.variant } : {}),
-          }),
-        }).pipe(Effect.orElseSucceed(() => undefined)))
+        (yield* resolveModel(
+          {
+            ...session,
+            model: Model.Ref.make({
+              providerID: candidate.info.providerID,
+              id: candidate.info.id,
+              ...(candidate.variant ? { variant: candidate.variant } : {}),
+            }),
+          },
+          { kind: "title", agent: agent.id },
+        ).pipe(Effect.orElseSucceed(() => undefined)))
       const selected = preferred ?? primary
       if (!selected) return
       return { agent, primary, selected }
@@ -189,7 +199,7 @@ const layer = Layer.effect(
     ) {
       const moved = PacerOffer.codemode(yield* pacerTools.known())
       if (moved.size === 0 || Option.isNone(starts)) return catalog
-      const resolved = yield* resolveModel(session).pipe(Effect.option)
+      const resolved = yield* resolveModel(session, { kind: "primary", agent }).pipe(Effect.option)
       if (Option.isNone(resolved)) return catalog
       const recorded = yield* starts.value.recorded({
         sessionID: session.id,
@@ -220,7 +230,7 @@ const layer = Layer.effect(
       const pins = Option.isSome(config) ? CodeModePins.merged(yield* config.value.entries()) : {}
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions, pins),
+          tools: registry.snapshot(permissions, location, pins),
           builtins: builtins.load(),
           discovery: discovery.load(),
           skills: skillInstructions.load(permissions),
@@ -258,7 +268,9 @@ const layer = Layer.effect(
 
     const cold = Effect.fn("SessionContext.cold")(function* (selection: Selection) {
       if (Option.isNone(starts)) return false
-      const resolved = yield* resolveModel(selection.session).pipe(Effect.option)
+      const resolved = yield* resolveModel(selection.session, { kind: "primary", agent: selection.agent.id }).pipe(
+        Effect.option,
+      )
       if (Option.isNone(resolved)) return false
       resolvedFor.set(selection, resolved.value)
       return yield* starts.value.cold({
@@ -270,7 +282,9 @@ const layer = Layer.effect(
     })
 
     const load = Effect.fn("SessionContext.load")(function* (selection: Selection) {
-      const model = resolvedFor.get(selection) ?? (yield* resolveModel(selection.session))
+      const model =
+        resolvedFor.get(selection) ??
+        (yield* resolveModel(selection.session, { kind: "primary", agent: selection.agent.id }))
       const history = yield* SessionHistory.entriesForRunner(
         db,
         selection.session.id,

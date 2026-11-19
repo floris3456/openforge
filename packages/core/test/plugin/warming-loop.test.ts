@@ -64,7 +64,11 @@ describe("WarmingPlugin's loop", () => {
               Clock.currentTimeMillis.pipe(
                 Effect.tap((now) => Effect.sync(() => sent.push(now))),
                 Effect.andThen(Effect.sleep("10 seconds")),
-                Effect.as({ text: "OK" }),
+                Effect.as({
+                  text: "OK",
+                  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                  cost: Money.USD.zero,
+                }),
               ),
           },
         }),

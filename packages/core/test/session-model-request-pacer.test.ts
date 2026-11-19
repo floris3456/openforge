@@ -689,7 +689,7 @@ const cppSchema = (name: string) =>
   JSON.stringify(ownerList.tools.claude.find((tool) => tool.name === name)?.input_schema)
 /** The request headers of CPP's: `X-Pacer-*`. */
 const pacerHeaders = (prepared: SessionModelRequest.Prepared<unknown>) =>
-  Object.keys(prepared.request.http?.headers ?? {}).filter((name) => /^x-pacer-/i.test(name))
+  Object.keys(prepared.request.headers ?? {}).filter((name) => /^x-pacer-/i.test(name))
 
 /** The store's answer for the chat, a subagent: where the web tools' plugin reads a call's parent from. */
 const sessions = Layer.mock(Sessions.Service, {
@@ -818,7 +818,7 @@ describe("SessionModelRequest for a chat on another provider, with a CPP set up"
           model: other.label,
           pacer: [[], [], [], []],
         })
-        expect(prepared[0]?.request.http?.headers).toMatchObject({
+        expect(prepared[0]?.request.headers).toMatchObject({
           "x-opencode-session-id": session.id,
           "x-opencode-parent-session-id": parentID,
         })
@@ -911,8 +911,8 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
             yield* h.requests.generate(input),
             yield* h.requests.compaction(input),
           ]
-          expect(prepared.map((item) => project(item.request.http?.headers))).toEqual([named, named, named, named])
-          expect(prepared[0]?.request.http?.headers).toMatchObject({
+          expect(prepared.map((item) => project(item.request.headers))).toEqual([named, named, named, named])
+          expect(prepared[0]?.request.headers).toMatchObject({
             "X-Pacer-Session": PacerSessionID.make(chat.id),
             ...(chat.parentID ? { "X-Pacer-Parent-Session": PacerSessionID.make(chat.parentID) } : {}),
           })
@@ -930,7 +930,7 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
   it.effect("names the folder without a remote, and no project for a chat outside any", () =>
     Effect.gen(function* () {
       const h = yield* setup(true, { session: lead })
-      expect(project((yield* h.requests.primary(h.input(snapshot(all)))).request.http?.headers)).toEqual({
+      expect(project((yield* h.requests.primary(h.input(snapshot(all)))).request.headers)).toEqual({
         "X-Pacer-Project": identity,
         "X-Pacer-Project-Name": "Caf%C3%A9",
       })
@@ -981,7 +981,7 @@ describe("SessionModelRequest saying where the chat works", () => {
           yield* h.requests.generate(input),
           yield* h.requests.compaction(input),
         ]
-        expect(prepared.map((item) => item.request.http?.headers?.["X-Pacer-Where"])).toEqual([
+        expect(prepared.map((item) => item.request.headers?.["X-Pacer-Where"])).toEqual([
           "~/repos/openforge@adj-of",
           "~/repos/openforge@adj-of",
           "~/repos/openforge@adj-of",

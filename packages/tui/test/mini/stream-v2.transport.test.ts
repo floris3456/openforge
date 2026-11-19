@@ -3703,7 +3703,7 @@ describe("V2 mini transport", () => {
       id: "evt_credential.updated",
       created: 0,
       type: "credential.updated",
-      data: {},
+      data: { integrationID: "openai", credentialID: "credential" },
     })
     for (const credentialID of ["credential", null])
       events.push({
@@ -3891,7 +3891,6 @@ describe("V2 mini transport", () => {
         label: "Explore",
         description: "Inspect progress",
         status: "running",
-        background: undefined,
       },
     ])
 
@@ -4661,7 +4660,7 @@ describe("V2 mini transport", () => {
         model: { providerID: "test", id: "model" },
       },
     })
-    // Parent's background subagent tool.success adopts the child mid-discovery.
+    // Parent's subagent tool.success adopts the child mid-discovery.
     events.push({
       id: "evt_parent_input",
       created: 0,
@@ -4683,7 +4682,7 @@ describe("V2 mini transport", () => {
         sessionID: "ses_1",
         assistantMessageID: "msg_parent_a",
         id: "call_sub",
-        input: { agent: "explore", description: "Find things", prompt: "go", background: true },
+        input: { agent: "explore", description: "Find things", prompt: "go" },
         executed: true,
       },
     })

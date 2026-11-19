@@ -193,7 +193,7 @@ const step = Effect.gen(function* () {
 const plugged = (services: Effect.Success<ReturnType<typeof started>>) =>
   Effect.gen(function* () {
     const plugin = yield* Plugin.Service
-    yield* CLIProxyPacerPlugin.effect(yield* PluginHost.make(plugin)).pipe(
+    yield* CLIProxyPacerPlugin.effect(yield* PluginHost.make(plugin, "test")).pipe(
       Effect.provideService(PacerEndpoint.Service, services.endpoints),
       Effect.provideService(PacerModels.Service, services.catalogs),
     )

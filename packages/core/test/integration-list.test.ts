@@ -260,7 +260,7 @@ describe("Integration.list after a config change", () => {
         const bus = yield* Bus.Service
         const plugins = yield* Plugin.Service
         const test = yield* Config.Test
-        yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+        yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test"))
         const read = Effect.gen(function* () {
           const listed = (yield* integrations.list()).find((integration) => integration.id === "custom")
           return {

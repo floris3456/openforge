@@ -6,6 +6,9 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { CodeModeCatalog } from "@opencode/core/codemode/catalog"
 import { CodeModePins } from "@opencode/core/codemode/pins"
 import { Tool } from "@opencode/core/tool"
+import { Agent } from "@opencode/core/agent"
+import { Session } from "@opencode/core/session"
+import { SessionMessage } from "@opencode/core/session/message"
 import { Document, Info } from "@opencode/schema/config"
 import { Effect, Layer, Schema } from "effect"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
@@ -60,6 +63,40 @@ describe("CodeMode", () => {
           },
         ],
       })
+    }).pipe(Effect.scoped, Effect.provide(toolNode())),
+  )
+
+  it.effect("never hands a stop to a nested call, so its error cannot replace the execute call's result", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      yield* tools.transform((editor) => {
+        editor.add({
+          name: "stoppable",
+          description: "Stops on cancel",
+          input: Schema.Struct({}),
+          output: Schema.String,
+          execute: (_input, context) =>
+            context.cancel
+              ? context.cancel.pipe(Effect.andThen(Effect.fail(new Tool.Error({ message: "nested stopped" }))))
+              : Effect.succeed({ output: "ran" }),
+        })
+      })
+      const snapshot = yield* tools.snapshot()
+      const result = yield* snapshot.execute({
+        sessionID: Session.ID.make("ses_codemode_cancel"),
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.create(),
+        call: {
+          type: "tool-call",
+          id: "call-execute",
+          name: "execute",
+          input: { code: "return await tools.stoppable({})" },
+        },
+        // Already stopped: the execute call itself does not wait for it.
+        cancel: Effect.void,
+      })
+      expect(JSON.stringify(result.content)).toContain("ran")
+      expect(JSON.stringify(result.content)).not.toContain("nested stopped")
     }).pipe(Effect.scoped, Effect.provide(toolNode())),
   )
 
@@ -139,7 +176,7 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "context7.query-docs",
         "context7.resolve-library-id",
         "openforge.worktree_list",
@@ -152,7 +189,7 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      const catalog = (yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog!
+      const catalog = (yield* tools.snapshot(undefined, undefined, yield* configPins)).codeModeCatalog!
       // Nothing is pinned, though `openforge.worktree_list` is by its registration; the budget still shows it.
       expect(listed(catalog)).toEqual([])
       expect(
@@ -168,7 +205,7 @@ describe("CodeMode pins", () => {
       const tools = yield* Tool.Service
       yield* register(tools)
       // The person's pins stay, the project's add theirs and unpin openforge's exact path over the person's `openforge.*`.
-      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "context7.query-docs",
         "context7.resolve-library-id",
         "web_search",
@@ -187,12 +224,12 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "openforge.worktree_list",
       ])
       const config = yield* Config.Test
       yield* config.setEntries(pinned({ web_search: true }))
-      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "openforge.worktree_list",
         "web_search",
       ])

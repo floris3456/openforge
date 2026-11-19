@@ -1,19 +1,23 @@
 export * as SessionExecution from "./execution.js"
 
-import { Cause, Context, Effect, Exit, Layer } from "effect"
+import { Cause, Context, Effect, Exit, Layer, Option } from "effect"
 import { Bus } from "../bus.js"
 import { SessionContinuity } from "../continuity.js"
+import { SubagentEnded } from "./subagent-ended.js"
+import { CodeModeJob } from "../codemode/job.js"
 import { Database } from "../database/database.js"
 import { Job } from "../job.js"
 import { Instance } from "../instance/service.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { SessionEvent } from "./event.js"
+import { SessionInbox } from "./inbox.js"
+import { SubagentReport } from "./execution/subagent-report.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionRunner } from "./runner/index.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
+import { SessionSynthetic } from "./synthetic.js"
 import { toSessionError } from "./to-session-error.js"
-import { SessionInbox } from "./inbox.js"
 
 export interface Interface {
   /** Snapshots active execution owned by this process. */
@@ -65,8 +69,12 @@ export const layer = Layer.effect(
     const instances = yield* Instance.Service
     const bus = yield* Bus.Service
     const jobs = yield* Job.Service
+    const inbox = yield* SessionInbox.Service
+    const scope = yield* Effect.scope
     const db = (yield* Database.Service).db
     const continuity = yield* SessionContinuity.Service
+    // openforge: optional, so a host without it reports a child's answer as it is.
+    const subagentEnded = yield* Effect.serviceOption(SubagentEnded.Service)
     const reportLifecycle = <A>(sessionID: SessionSchema.ID, effect: Effect.Effect<A>) =>
       effect.pipe(
         Effect.tapCause((cause) =>
@@ -86,7 +94,26 @@ export const layer = Layer.effect(
     const claimOnCommit = (sessionID: SessionSchema.ID) => ({
       commit: () => store.claim(sessionID),
     })
-    const releaseOnCommit = release(store, continuity)
+    // The report coordinator is built first so the run coordinator's hooks can use it, while its
+    // wake and draining dependencies bind late to the coordinator the hooks belong to.
+    const holder: {
+      coordinator?: SessionRunCoordinator.Coordinator<SessionSchema.ID, SessionRunner.RunError, InterruptReason>
+    } = {}
+    const wake = (sessionID: SessionSchema.ID) =>
+      Effect.suspend(() => (holder.coordinator ? holder.coordinator.wake(sessionID) : Effect.void))
+    const background = CodeModeJob.make(jobs, SessionSynthetic.make(store, inbox, wake), scope)
+    const subagentReport = SubagentReport.make({
+      store,
+      jobs,
+      inbox,
+      wake,
+      draining: Effect.suspend<ReadonlySet<SessionSchema.ID>, never, never>(() =>
+        holder.coordinator ? holder.coordinator.draining : Effect.succeed(new Set<SessionSchema.ID>()),
+      ),
+      ...(Option.isSome(subagentEnded) ? { ended: subagentEnded.value.apply } : {}),
+    })
+    // Why a Session's execution is being interrupted, read from the coordinator once it exists.
+    let interruption: (sessionID: SessionSchema.ID) => InterruptReason | undefined = () => undefined
     const drain = Effect.fnUntraced(function* (
       sessionID: SessionSchema.ID,
       force: boolean,
@@ -97,8 +124,16 @@ export const layer = Layer.effect(
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
       const result = yield* SessionRunner.Service.use((runner) =>
-        runner.drain({ sessionID, force, continuation, promotable, stepped }),
+        runner.drain({
+          sessionID,
+          force,
+          continuation,
+          promotable,
+          stepped,
+          interruption: () => interruption(sessionID),
+        }),
       ).pipe(
+        Effect.provideServiceEffect(CodeModeJob.Current, background),
         instances.provide(session),
         Effect.provideService(SessionContinuity.Current, continuity.activity(sessionID)),
         Effect.tapCause((cause) =>
@@ -117,7 +152,17 @@ export const layer = Layer.effect(
       started: (sessionID) =>
         reportLifecycle(
           sessionID,
-          bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID)),
+          Effect.gen(function* () {
+            // Bind before the started publication yields to SQLite so a cancel arriving during
+            // that window still matches this generation.
+            const before = yield* jobs.currentGeneration(sessionID)
+            const event = yield* bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID))
+            const bound = before?.running ? before : yield* jobs.currentGeneration(sessionID)
+            subagentReport.started(sessionID, {
+              startedSeq: event.durable.seq,
+              boundGeneration: bound?.running ? bound.generation : undefined,
+            })
+          }),
         ),
       drain: (sessionID, force, promotable) => drain(sessionID, force, undefined, promotable),
       // One terminal observation per busy period, covering every coalesced drain.
@@ -127,34 +172,32 @@ export const layer = Layer.effect(
           Effect.gen(function* () {
             yield* continuity.end(sessionID)
             const outcome = terminal(exit, reason)
-            if (outcome.type === "succeeded") {
-              yield* bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, releaseOnCommit(sessionID))
+            if (outcome.type === "interrupted" && outcome.reason === "shutdown") {
+              subagentReport.clear(sessionID)
+              // Shutdown keeps the claim and the running Job row for restart continuity.
+              yield* bus.publish(SessionEvent.Execution.Interrupted, { sessionID, reason: "shutdown" })
               return
             }
-            if (outcome.type === "interrupted") {
-              // Deliberate stops release the claim; shutdown keeps it for restart continuity.
-              if (outcome.reason !== "shutdown") yield* jobs.cancel(sessionID)
-              yield* bus.publish(
-                SessionEvent.Execution.Interrupted,
-                { sessionID, reason: outcome.reason },
-                outcome.reason === "shutdown" ? undefined : releaseOnCommit(sessionID),
-              )
-              return
-            }
-            yield* bus.publish(
-              SessionEvent.Execution.Failed,
-              {
-                sessionID,
-                error: outcome.error,
-              },
-              releaseOnCommit(sessionID),
+            // Claim the Job generation before cancelling it so the settlement commit owns its outbox row.
+            const settlement = yield* subagentReport.prepare(sessionID, outcome)
+            if (outcome.type === "interrupted") yield* jobs.cancel(sessionID)
+            yield* publishTerminal(bus, sessionID, outcome, () =>
+              // openforge: a terminal also drops the records a restart would have continued from.
+              settlement.commit().pipe(Effect.andThen(continuity.clear(sessionID))),
+            )
+            // Post-commit delivery is best effort: a retained outbox marker is recovered on the
+            // next restart, and a delivery defect must not fail the settled hook.
+            yield* settlement.deliver.pipe(
+              Effect.ignoreCause({ log: "Error", message: "Subagent report delivery failed" }),
             )
           }),
         ),
     })
     // Runs before the coordinator interrupts its executions, so they can tell a stop from a user interrupt.
     yield* Effect.addFinalizer(() => continuity.stop)
+    holder.coordinator = coordinator
 
+    interruption = coordinator.interruption
     return Service.of({
       active: coordinator.active,
       isActive: coordinator.isActive,
@@ -183,10 +226,33 @@ export const layer = Layer.effect(
   }),
 )
 
+/** Publishes the terminal event with the settlement's atomic commit. */
+function publishTerminal(
+  bus: Bus.Interface,
+  sessionID: SessionSchema.ID,
+  outcome: ReturnType<typeof terminal>,
+  commit: (seq: number) => Effect.Effect<void>,
+) {
+  if (outcome.type === "succeeded") return bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, { commit })
+  if (outcome.type === "interrupted") {
+    return bus.publish(SessionEvent.Execution.Interrupted, { sessionID, reason: outcome.reason }, { commit })
+  }
+  return bus.publish(SessionEvent.Execution.Failed, { sessionID, error: outcome.error }, { commit })
+}
+
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [SessionStore.node, Instance.node, Bus.node, Database.node, Job.node, SessionContinuity.node],
+  deps: [
+    SessionStore.node,
+    Instance.node,
+    Bus.node,
+    Database.node,
+    Job.node,
+    SessionInbox.node,
+    SessionContinuity.node,
+    SubagentEnded.node,
+  ],
 })
 
 /** Low-level compatibility layer for callers that only need durable Session recording. */

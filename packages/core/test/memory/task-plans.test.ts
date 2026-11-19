@@ -1,4 +1,6 @@
 import fs from "fs"
+import { FileWrite } from "@opencode/core/file-write"
+import { Flag } from "@opencode/core/flag"
 import os from "os"
 import path from "path"
 import { afterAll, describe, expect } from "bun:test"
@@ -166,6 +168,9 @@ const files = makeLocationNode({
     Formatter.node,
     Permission.node,
     Location.node,
+    FileWrite.node,
+    Config.node,
+    Flag.node,
   ],
 })
 // CPP's tools as openforge registers them, the memory tools among them.
@@ -175,7 +180,9 @@ const replacements: LayerNode.Replacements = [
   LayerNodePlatform.llmClient.replace(testLLM),
   SessionRunnerModel.node.replace(models),
   InstructionBuiltIns.node.replace(Layer.mock(InstructionBuiltIns.Service, none)),
-  InstructionDiscovery.node.replace(Layer.mock(InstructionDiscovery.Service, { project: true, global: true, ...none })),
+  InstructionDiscovery.node.replace(
+    Layer.mock(InstructionDiscovery.Service, { project: true, global: true, claude: false, ...none }),
+  ),
   SkillInstructions.node.replace(Layer.mock(SkillInstructions.Service, none)),
   ReferenceInstructions.node.replace(Layer.mock(ReferenceInstructions.Service, none)),
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),

@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { SubagentEnded } from "@opencode/core/session/subagent-ended"
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { eq } from "drizzle-orm"
@@ -183,6 +184,7 @@ const plugins = makeLocationNode({
     Job.node,
     SubagentJob.node,
     MemoryTask.node,
+    SubagentEnded.node,
     Tool.node,
     PluginHooks.node,
     SessionContinuity.node,
@@ -299,7 +301,7 @@ const held = (release: Deferred.Deferred<void>, events: ReadonlyArray<LLMEvent>)
     Stream.fromEffect(Deferred.await(release)).pipe(Stream.flatMap(() => Stream.fromIterable(events.slice(1)))),
   )
 
-const isChild = (request: LLMRequest) => request.http?.headers?.["x-opencode-parent-session-id"] !== undefined
+const isChild = (request: LLMRequest) => request.headers?.["x-opencode-parent-session-id"] !== undefined
 
 /** Answers the parent Session's requests and its subagent's from separate scripts; gives when each came, in clock time. */
 const script = (llm: TestLLM.TestInterface, parent: TestLLM.Response[], child: TestLLM.Response[] = []) =>

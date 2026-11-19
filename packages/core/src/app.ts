@@ -9,9 +9,7 @@ export interface Info {
   readonly channel: string
 }
 
-export const Metadata = Context.Reference<Info>("@opencode/App", {
-  defaultValue: () => make(),
-})
+export class Service extends Context.Service<Service, Info>()("@opencode/App") {}
 
 export function make(input: Partial<Info> = {}): Info {
   return {
@@ -26,16 +24,15 @@ export function make(input: Partial<Info> = {}): Info {
  * merge brings along. Providers read the user agent's version, and OpenCode Zen gives its free tier only to OpenCode
  * 1.18.0 or newer, so the user agent carries this rather than openforge's own 0.0.x.
  */
-export const UPSTREAM_VERSION = "2.2.5"
+export const UPSTREAM_VERSION = "2.3.2"
 
 /** The user agent that upstream release sends, as the owner decided (2026-11-05). */
 export function useragent(app: Info) {
   return `opencode/${app.channel}/${UPSTREAM_VERSION}/${app.name}`
 }
 
-export const layer = (input?: Partial<Info>) => Layer.succeed(Metadata, make(input))
+export const layer = (input?: Partial<Info>) => Layer.succeed(Service, make(input))
 
-export const configured = (input?: Partial<Info>) =>
-  makeGlobalNode({ service: Metadata, layer: layer(input), deps: [] })
+export const configured = (input?: Partial<Info>) => makeGlobalNode({ service: Service, layer: layer(input), deps: [] })
 
 export const node = configured()

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { LLMClient, LLMEvent, Media, Message, ToolResultPart, type LLMRequest } from "@opencode/ai/effect"
+import { LLMClient, LLMEvent, Media, Message, ToolResultPart, type LLMRequest, type UserMessage } from "@opencode/ai/effect"
 import { AnthropicMessages, OpenAIChat } from "@opencode/ai/protocols"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -199,7 +199,7 @@ describe("zoom", () => {
   })
 })
 
-const image = (bytes: number): Message["content"][number] => ({
+const image = (bytes: number): UserMessage["content"][number] => ({
   type: "media",
   media: Media.base64("A".repeat(bytes), "image/webp"),
   filename: "shot.webp",

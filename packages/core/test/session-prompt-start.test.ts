@@ -157,6 +157,7 @@ const replacements: LayerNode.Replacements = [
     Layer.mock(InstructionDiscovery.Service, {
       project: true,
       global: true,
+      claude: false,
       load: () => Effect.sync(() => sources.discovery),
     }),
   ),
@@ -379,8 +380,8 @@ describe("SessionPromptStart: a warm chat's start between two steps", () => {
       const [first, second, third] = h.requests()
       expect(startOf(second)).toBe(startOf(first))
       expect(startOf(third)).toBe(startOf(first))
-      expect(second?.generation).toEqual(first?.generation)
-      expect(third?.generation).toEqual(first?.generation)
+      expect(second?.maxTokens).toEqual(first?.maxTokens)
+      expect(third?.maxTokens).toEqual(first?.maxTokens)
       expect(texts(third)).toEqual(["one", "two", "three"])
       expect(yield* h.reminders()).toEqual([])
     }).pipe(Effect.ensuring(Effect.sync(() => delete point.compact))),

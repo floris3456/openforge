@@ -25,9 +25,13 @@ export type ProviderCompaction = { type: "summary" } | { type: "native" }
 
 export type ProviderCacheTTL = `${number}${"ms" | "s" | "m" | "h" | "d"}`
 
+export type ProviderCacheWarming = boolean | { interval?: "auto" | (string & {}); duration?: string }
+
 export type ProviderTransport = "http" | "websocket"
 
 export type ProviderEncoding = "zstd" | "gzip" | "none"
+
+export type ProviderTls = { cert: string; key: string; passphrase?: string }
 
 export type AgentColor = string
 
@@ -133,8 +137,6 @@ export type SessionMessageCompactionWriter = {
   fallback?: string
 }
 
-export type SessionGenerateResponse = { data: { text: string } }
-
 export type SessionInterruptResponse = { interrupted: boolean }
 
 export type FormID = string
@@ -195,7 +197,7 @@ export type SessionMessageToolStateRunning1 = {
   metadata: { [x: string]: JsonValue }
 }
 
-export type ModelType = "chat" | "decision" | "image" | (string & {})
+export type ModelType = "chat" | "decision" | "image" | "video" | (string & {})
 
 export type ModelReasoningField = "reasoning" | "reasoning_content" | "reasoning_text" | (string & {})
 
@@ -205,7 +207,7 @@ export type ModelCacheFormat = "anthropic" | "alibaba"
 
 export type ModelMediaInput = "assets" | "state" | "root"
 
-export type ModelCapabilities = { tools: boolean; input: Array<string>; output: Array<string>; temperature?: boolean }
+export type ToolFreeformFormat = "text" | "regex" | "lark"
 
 export type MoneyUSDPerMillionTokens = number
 
@@ -214,6 +216,12 @@ export type GenerateTextResponse = { data: { text: string } }
 export type GenerateUsage = { input?: number; output?: number }
 
 export type GenerateNative = { [x: string]: JsonValue }
+
+export type GenerateVideoID = string
+
+export type BlobID = string
+
+export type GenerateVideoErrorReason = "failed" | "cancelled" | "expired" | "unknown"
 
 export type GeneratePredicateAnswer = { type: "predicate"; name: string; probability: number }
 
@@ -364,29 +372,31 @@ export type AutoUpdateFailure = { version: string; message: string; at: number }
 
 export type PersistentPtyHandoff = { directory: string; instanceID: string; ticket: string; expiresAt: number }
 
-export type ScheduleID = string
+export type AutomationID = string
 
-export type ScheduleDuration = string
+export type AutomationTriggerAt = { type: "at"; at: string; tz?: string }
 
-export type ScheduleWhenAt = { type: "at"; at: string; tz?: string }
+export type AutomationDuration = string
 
-export type ScheduleWhenCron = { type: "cron"; cron: string; tz?: string }
+export type AutomationTriggerCron = { type: "cron"; cron: string; tz?: string }
 
-export type ScheduleConditionShell = { type: "shell"; run: string; is?: string; matches?: string; changes?: boolean }
+export type AutomationTriggerEvent = { type: "event"; server: string; event: string; args?: { [x: string]: JsonValue } }
 
-export type ScheduleConditionCode = { type: "code"; code: string }
+export type AutomationActionCode = { type: "code"; code: string; args?: JsonValue }
 
-export type ScheduleActionPrompt = { type: "prompt"; prompt: string }
+export type AutomationStatus = "active" | "paused" | "done"
 
-export type ScheduleStatus = "active" | "paused" | "done"
-
-export type ScheduleOutcome = "fired" | "late" | "checked" | "expired" | "skipped" | "disabled" | "failed"
+export type AutomationOutcome = "fired" | "late" | "skipped" | "disabled" | "failed" | "expired"
 
 export type ArtifactCapability = "static" | "server-code" | "sqlite" | "durable-objects"
 
 export type ArtifactID = string
 
 export type ArtifactTime = { created: number; updated: number }
+
+export type JobStatus = "running" | "completed" | "error" | "cancelled"
+
+export type JobTime = { started: number; completed?: number }
 
 export type ContinuityState = "running" | "pausing" | "paused"
 
@@ -508,7 +518,7 @@ export type LocationPublicInfo = {
 
 export type ModelRef = { id: string; providerID: ProviderID; variant?: string }
 
-export type ProviderCache = { ttl?: ProviderCacheTTL }
+export type ProviderCache = { ttl?: ProviderCacheTTL; warming?: ProviderCacheWarming }
 
 export type ModelVariantSettings = { compaction?: ProviderCompaction; encoding?: ProviderEncoding } & {
   [x: string]: any
@@ -531,6 +541,8 @@ export type ConfigSandbox = {
 export type PluginInfo = { id?: PluginID; source: PluginSource; features: PluginFeatures; state: PluginState }
 
 export type ContinuityWork = { sessionID?: SessionID; kind: "step" | "tool" | "model"; name: string }
+
+export type AutomationTarget = { session: SessionID; subagent?: never } | { subagent: AgentID; session?: never }
 
 export type SessionForkBoundary =
   | { type: "before"; messageID: SessionMessageID }
@@ -589,6 +601,8 @@ export type PacerNotice = {
 }
 
 export type UsageLimitsBudgetModel = { providerID: ProviderID; modelID: string; name: string; spent?: MoneyUSD }
+
+export type SessionGenerateResponse = { data: { text: string; tokens: TokenUsageInfo; cost: MoneyUSD } }
 
 export type FileSystemEntry = { path: RelativePath; type: "file" | "directory" }
 
@@ -838,11 +852,30 @@ export type ProviderCompatibility = {
   mediaInput?: ModelMediaInput
 }
 
+export type ModelCapabilities = {
+  tools: boolean
+  freeform?: Array<ToolFreeformFormat>
+  input: Array<string>
+  output: Array<string>
+  temperature?: boolean
+}
+
 export type ModelCost = {
   tier?: { type: "context"; size: number }
   input: MoneyUSDPerMillionTokens
   output: MoneyUSDPerMillionTokens
   cache: { read: MoneyUSDPerMillionTokens; write: MoneyUSDPerMillionTokens }
+}
+
+export type GenerateVideoRunning = { id: GenerateVideoID; status: "running" }
+
+export type BlobInfo = { id: BlobID; mime: string; bytes: number; expiresAt: number }
+
+export type GenerateVideoError = {
+  id: GenerateVideoID
+  status: "error"
+  error: string
+  reason: GenerateVideoErrorReason
 }
 
 export type GenerateChoiceAnswer = {
@@ -894,6 +927,7 @@ export type IntegrationAttempt = {
   url: string
   instructions: string
   mode: "auto" | "code"
+  paste?: true
   time: { created: number; expires: number }
 }
 
@@ -1083,13 +1117,7 @@ export type PacerChat = {
 
 export type AutoUpdateStatus = { enabled: boolean; unavailable?: string; failure?: AutoUpdateFailure }
 
-export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
-
-export type ScheduleWhenEvery = { type: "every"; every: ScheduleDuration; tz?: string }
-
-export type ScheduleCondition = ScheduleConditionShell | ScheduleConditionCode
-
-export type ScheduleAction = ScheduleActionPrompt
+export type AutomationTriggerEvery = { type: "every"; every: AutomationDuration; tz?: string }
 
 export type ArtifactProvider = { id: string; name: string; capabilities: Array<ArtifactCapability>; default: boolean }
 
@@ -1101,6 +1129,49 @@ export type ArtifactInfo = {
   entry: string
   url: string
   time: ArtifactTime
+}
+
+export type JobShell = {
+  kind: "shell"
+  id: string
+  sessionID: SessionID
+  status: JobStatus
+  title?: string
+  time: JobTime
+  shellID: string
+  command: string
+}
+
+export type JobSubagent = {
+  kind: "subagent"
+  id: string
+  sessionID: SessionID
+  status: JobStatus
+  title?: string
+  time: JobTime
+  childSessionID: SessionID
+  agent: string
+  description: string
+}
+
+export type JobImage = {
+  kind: "image"
+  id: string
+  sessionID: SessionID
+  status: JobStatus
+  title?: string
+  time: JobTime
+  path: string
+  model: string
+}
+
+export type JobCodeMode = {
+  kind: "codemode"
+  id: string
+  sessionID: SessionID
+  status: JobStatus
+  title?: string
+  time: JobTime
 }
 
 export type AttentionSound = { name: AttentionKind; id?: AttentionSoundID; file?: string }
@@ -1143,6 +1214,7 @@ export type UsageLimitsGo = { rolling: UsageLimitsMeter; weekly: UsageLimitsMete
 
 export type ConfigModelCapabilities = {
   tools?: boolean
+  freeform?: Array<ToolFreeformFormat>
   input?: Array<string>
   output?: Array<string>
   temperature?: boolean
@@ -1219,6 +1291,7 @@ export type ProviderSettings = {
   cache?: ProviderCache
   transport?: ProviderTransport
   encoding?: ProviderEncoding
+  tls?: ProviderTls
 } & { [x: string]: any }
 
 export type ModelSettings = { compaction?: ProviderCompaction; cache?: ProviderCache; encoding?: ProviderEncoding } & {
@@ -1233,6 +1306,7 @@ export type ConfigProviderSettings = {
   cache?: ProviderCache
   transport?: ProviderTransport
   encoding?: ProviderEncoding
+  tls?: ProviderTls
 } & { [x: string]: JsonValue | null }
 
 export type ConfigModelSettings = {
@@ -1263,6 +1337,8 @@ export type ContinuityStatus = {
 export type ContinuityPauseResult =
   | { paused: true; rested: Array<SessionID> }
   | { paused: false; waiting: Array<ContinuityWork> }
+
+export type AutomationActionPrompt = { type: "prompt"; prompt: string; to: AutomationTarget }
 
 export type UsageLimitsBudget = {
   id: string
@@ -1604,6 +1680,16 @@ export type SessionStepStarted = {
   }
 }
 
+export type SessionStepFirstToken = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "session.step.first-token"
+  durable: { aggregateID: string; seq: EventSeq; version: 1 }
+  location?: LocationRef
+  data: { sessionID: SessionID; assistantMessageID: SessionMessageID }
+}
+
 export type SessionStepStreamed = {
   id: EventID
   created: number
@@ -1843,7 +1929,7 @@ export type SessionUsageRecorded = {
   type: "session.usage.recorded"
   durable: { aggregateID: string; seq: EventSeq; version: 1 }
   location?: LocationRef
-  data: { sessionID: SessionID; source: "title" | "compaction"; cost: MoneyUSD; tokens: TokenUsageInfo }
+  data: { sessionID: SessionID; source: "title" | "compaction" | "generate"; cost: MoneyUSD; tokens: TokenUsageInfo }
 }
 
 export type LocationShutdown = {
@@ -1870,7 +1956,7 @@ export type CredentialUpdated = {
   metadata?: { [x: string]: any }
   type: "credential.updated"
   location?: LocationRef
-  data: {}
+  data: { integrationID: IntegrationID; credentialID: CredentialID }
 }
 
 export type CredentialSwitched = {
@@ -2375,6 +2461,24 @@ export type McpResourcesChanged = {
   data: { server: string }
 }
 
+export type ExperimentalMcpEvent = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "experimental.mcp.event"
+  location?: LocationRef
+  data: {
+    id: string
+    server: string
+    name: string
+    eventId: string
+    timestamp: string
+    data: JsonValue
+    cursor: string | null
+    truncated?: boolean | undefined
+  }
+}
+
 export type SessionToolSuccess = {
   id: EventID
   created: number
@@ -2426,6 +2530,10 @@ export type SessionMessageToolStateError1 = {
   content?: [ToolContent1, ...Array<ToolContent1>]
   metadata?: { [x: string]: JsonValue }
 }
+
+export type GenerateVideoCreateResponse = { data: GenerateVideoRunning }
+
+export type GenerateVideoCompleted = { id: GenerateVideoID; status: "completed"; blobs: Array<BlobInfo> }
 
 export type GenerateDecisionAnswer =
   | GeneratePredicateAnswer
@@ -2537,9 +2645,15 @@ export type PacerChatUpdated = {
   data: { chat: PacerChat }
 }
 
-export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery | ScheduleWhenCron
+export type AutomationTrigger =
+  | AutomationTriggerAt
+  | AutomationTriggerEvery
+  | AutomationTriggerCron
+  | AutomationTriggerEvent
 
 export type ArtifactContent = { info: ArtifactInfo; files: { [x: string]: string } }
+
+export type JobInfo = JobShell | JobSubagent | JobImage | JobCodeMode
 
 export type AttentionOccurrence = {
   kind: AttentionKind
@@ -2727,6 +2841,7 @@ export type ConfigEntry =
             | "mcp.use"
             | "skill.use"
             | "plugin.use"
+            | "websearch.use"
           resource: string
           effect: "allow" | "deny"
         }>
@@ -2794,6 +2909,7 @@ export type ConfigEntry =
                   codemode?: boolean
                   timeout?: { startup?: number; catalog?: number; execution?: number }
                   protocol?: McpProtocol
+                  pool?: boolean
                 }
               | {
                   type: "remote"
@@ -2813,11 +2929,17 @@ export type ConfigEntry =
                   codemode?: boolean
                   timeout?: { startup?: number; catalog?: number; execution?: number }
                   protocol?: McpProtocol
+                  pool?: boolean
                 }
           }
         }
         memory?: { project?: string }
-        compaction?: { auto?: boolean; keep?: { tokens?: number }; buffer?: ConfigCompactionPercent | number }
+        compaction?: {
+          auto?: boolean
+          background?: boolean
+          keep?: { tokens?: number }
+          buffer?: ConfigCompactionPercent | number
+        }
         skills?: Array<string>
         commands?: {
           [x: string]: {
@@ -2839,7 +2961,7 @@ export type ConfigEntry =
         websearch?: false | { provider: "random" | WebSearchID }
         plugins?: Array<string | { package: string; options?: { [x: string]: JsonValue } }>
         worktree?: ConfigWorktree
-        warming?: boolean | { prompt?: string; interval?: string; duration?: string }
+        warming?: boolean | { prompt?: string; interval?: "auto" | (string & {}); duration?: string }
         freeze_prompt?: boolean
         providers?: {
           [x: string]: {
@@ -2891,12 +3013,19 @@ export type ConfigEntry =
         }
         experimental?: {
           portable_shell_scanner?: boolean
+          codemode_vm?: boolean
+          all_flags?: boolean
           todo?: boolean
-          background_compaction?: boolean
           media_blob?: boolean
-          image_generate?: boolean | { model?: string | { providerID: string; model: string; variant?: string } }
-          schedules?: boolean
+          automations?: boolean
           artifacts?: boolean
+          video_generate?: boolean
+          console_watches?: boolean
+          mcp_events?: boolean
+          full_codemode?: boolean
+          schedules?: boolean
+          part_rows?: boolean
+          image_generate?: boolean | { model?: string | { providerID: string; model: string; variant?: string } }
           subagent_depth?: number
           location_idle_timeout?: string | false
           policies?: Array<{
@@ -2908,6 +3037,7 @@ export type ConfigEntry =
               | "mcp.use"
               | "skill.use"
               | "plugin.use"
+              | "websearch.use"
             resource: string
             effect: "allow" | "deny"
           }>
@@ -2915,6 +3045,8 @@ export type ConfigEntry =
       }
     }
   | { type: "directory"; path: AbsolutePath }
+
+export type AutomationAction = AutomationActionPrompt | AutomationActionCode
 
 export type UsageLimitsInfo = {
   workspace: { id: string; name?: string; usageURL: string }
@@ -2969,6 +3101,8 @@ export type SessionMessageAssistantTool1 = {
   time: { created: number; ran?: number; completed?: number }
 }
 
+export type GenerateVideoJob = GenerateVideoRunning | GenerateVideoCompleted | GenerateVideoError
+
 export type GenerateDecisionResult = {
   answers: Array<GenerateDecisionAnswer>
   cost?: MoneyUSD
@@ -2987,26 +3121,6 @@ export type CredentialEntry = {
 export type FormFields1 = [FormField1, ...Array<FormField1>]
 
 export type PacerAccounts = { items: Array<PacerAccount>; asOf: number }
-
-export type ScheduleInfo = {
-  id: ScheduleID
-  sessionID?: SessionID
-  name?: string
-  when: ScheduleWhen
-  tz: string
-  if?: ScheduleCondition
-  until?: ScheduleCondition
-  action: ScheduleAction
-  status: ScheduleStatus
-  nextDueAt?: number
-  endsAt?: number
-  remainingRuns?: number
-  runCount: number
-  lastFiredAt?: number
-  lastOutcome?: ScheduleOutcome
-  lastOutput?: string
-  time: { created: number; updated: number }
-}
 
 export type AttentionFollowEvent =
   | { type: "following"; version: string }
@@ -3032,12 +3146,32 @@ export type SessionsResponse = {
   cursor: { previous?: SessionsCursor | null; next?: SessionsCursor | null }
 }
 
+export type AutomationInfo = {
+  id: AutomationID
+  name: string
+  projectID: ProjectID
+  sessionID?: SessionID
+  directory: string
+  trigger: AutomationTrigger
+  tz: string
+  action: AutomationAction
+  expires?: number
+  status: AutomationStatus
+  nextDueAt?: number
+  runCount: number
+  lastRunAt?: number
+  lastOutcome?: AutomationOutcome
+  lastOutput?: string
+  state?: JsonValue
+  time: { created: number; updated: number }
+}
+
 export type SessionInboxInfo = SessionInboxUser | SessionInboxSynthetic | SessionInboxCompaction | SessionInboxMove
 
 export type SessionMessageAssistant = {
   id: SessionMessageID
   metadata?: { [x: string]: JsonValue }
-  time: { created: number; streamed?: number; completed?: number }
+  time: { created: number; firstToken?: number; streamed?: number; completed?: number }
   type: "assistant"
   agent: AgentID
   model: ModelRef
@@ -3084,6 +3218,8 @@ export type SessionMessageAssistantContentEncoded =
   | SessionMessageAssistantText1
   | SessionMessageAssistantReasoning1
   | SessionMessageAssistantTool1
+
+export type GenerateVideoGetResponse = { data: GenerateVideoJob }
 
 export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
 
@@ -3179,6 +3315,7 @@ export type SessionEventDurable =
   | SessionShellStarted
   | SessionShellEnded
   | SessionStepStarted
+  | SessionStepFirstToken
   | SessionStepStreamed
   | SessionStepEnded
   | SessionStepFailed
@@ -3237,6 +3374,7 @@ export type V2Event =
   | SessionShellStarted
   | SessionShellEnded
   | SessionStepStarted
+  | SessionStepFirstToken
   | SessionStepStreamed
   | SessionStepEnded
   | SessionStepFailed
@@ -3311,6 +3449,7 @@ export type V2Event =
   | VcsBranchUpdated
   | McpStatusChanged
   | McpResourcesChanged
+  | ExperimentalMcpEvent
   | V2EventRpc
   | V2EventServerConnected
 
@@ -3500,6 +3639,18 @@ export type ProviderRequestError = {
 export const isProviderRequestError = (value: unknown): value is ProviderRequestError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProviderRequestError"
 
+export type ForbiddenError = { readonly _tag: "ForbiddenError"; readonly message: string }
+export const isForbiddenError = (value: unknown): value is ForbiddenError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ForbiddenError"
+
+export type VideoNotFoundError = {
+  readonly _tag: "VideoNotFoundError"
+  readonly videoID: string
+  readonly message: string
+}
+export const isVideoNotFoundError = (value: unknown): value is VideoNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "VideoNotFoundError"
+
 export type IntegrationNotFoundError = {
   readonly _tag: "IntegrationNotFoundError"
   readonly integrationID: string
@@ -3533,10 +3684,6 @@ export type McpServerNotFoundError = {
 }
 export const isMcpServerNotFoundError = (value: unknown): value is McpServerNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "McpServerNotFoundError"
-
-export type ForbiddenError = { readonly _tag: "ForbiddenError"; readonly message: string }
-export const isForbiddenError = (value: unknown): value is ForbiddenError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ForbiddenError"
 
 export type ProjectNotFoundError = {
   readonly _tag: "ProjectNotFoundError"
@@ -3596,13 +3743,21 @@ export type PtyFeatureUnsupportedError = {
 export const isPtyFeatureUnsupportedError = (value: unknown): value is PtyFeatureUnsupportedError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "PtyFeatureUnsupportedError"
 
-export type ScheduleNotFoundError = {
-  readonly _tag: "ScheduleNotFoundError"
-  readonly scheduleID: string
+export type BlobNotFoundError = {
+  readonly _tag: "BlobNotFoundError"
+  readonly blobID: string
   readonly message: string
 }
-export const isScheduleNotFoundError = (value: unknown): value is ScheduleNotFoundError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ScheduleNotFoundError"
+export const isBlobNotFoundError = (value: unknown): value is BlobNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "BlobNotFoundError"
+
+export type AutomationNotFoundError = {
+  readonly _tag: "AutomationNotFoundError"
+  readonly automationID: string
+  readonly message: string
+}
+export const isAutomationNotFoundError = (value: unknown): value is AutomationNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "AutomationNotFoundError"
 
 export type ArtifactNotFoundError = {
   readonly _tag: "ArtifactNotFoundError"
@@ -4293,7 +4448,7 @@ export type MessageListOutput = SessionMessagesResponse
 
 export type ModelListInput = {
   readonly location?: { readonly directory?: string | undefined } | undefined
-  readonly types?: ReadonlyArray<"chat" | "decision" | "image" | (string & {})> | undefined
+  readonly types?: ReadonlyArray<"chat" | "decision" | "image" | "video" | (string & {})> | undefined
 }
 
 export type ModelListOutput = { location: LocationPublicRef; data: Array<ModelInfo> }
@@ -4320,6 +4475,26 @@ export type ExperimentalGenerateImageInput = {
 
 export type ExperimentalGenerateImageOutput = GenerateImageResponse["data"]
 
+export type ExperimentalGenerateVideoCreateInput = {
+  readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+  readonly prompt: string
+  readonly start?: { readonly data: string; readonly mime: string; readonly name?: string } | undefined
+  readonly end?: { readonly data: string; readonly mime: string; readonly name?: string } | undefined
+  readonly references?:
+    | ReadonlyArray<{ readonly data: string; readonly mime: string; readonly name?: string }>
+    | undefined
+  readonly duration?: number | undefined
+  readonly aspect?: (`${number}${":"}${number}` | "auto") | undefined
+  readonly resolution?: ("480p" | "720p" | "1080p" | "4k" | (string & {})) | undefined
+  readonly sound?: boolean | undefined
+}
+
+export type ExperimentalGenerateVideoCreateOutput = GenerateVideoCreateResponse["data"]
+
+export type ExperimentalGenerateVideoGetInput = { readonly id: string }
+
+export type ExperimentalGenerateVideoGetOutput = GenerateVideoGetResponse["data"]
+
 export type ExperimentalGenerateDecisionsInput = {
   readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
   readonly input: ReadonlyArray<
@@ -4328,7 +4503,12 @@ export type ExperimentalGenerateDecisionsInput = {
     | { readonly type: "file"; readonly data: string; readonly mime: string; readonly name?: string }
   >
   readonly questions: ReadonlyArray<
-    | { readonly type: "predicate"; readonly name: string; readonly instructions: string }
+    | {
+        readonly type: "predicate"
+        readonly name: string
+        readonly instructions: string
+        readonly criteria?: { readonly true?: string; readonly false?: string }
+      }
     | {
         readonly type: "choice"
         readonly name: string
@@ -4488,6 +4668,7 @@ export type ExperimentalMcpAddInput = {
         readonly codemode?: boolean
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
         readonly protocol?: "legacy" | "auto" | "2026-07-28"
+        readonly pool?: boolean
       }
     | {
         readonly type: "remote"
@@ -4507,6 +4688,7 @@ export type ExperimentalMcpAddInput = {
         readonly codemode?: boolean
         readonly timeout?: { readonly startup?: number; readonly catalog?: number; readonly execution?: number }
         readonly protocol?: "legacy" | "auto" | "2026-07-28"
+        readonly pool?: boolean
       }
 }
 
@@ -4743,6 +4925,7 @@ export type EventSubscribeInput = {
         | "session.shell.started"
         | "session.shell.ended"
         | "session.step.started"
+        | "session.step.first-token"
         | "session.step.streamed"
         | "session.step.ended"
         | "session.step.failed"
@@ -4817,6 +5000,7 @@ export type EventSubscribeInput = {
         | "vcs.branch.updated"
         | "mcp.status.changed"
         | "mcp.resources.changed"
+        | "experimental.mcp.event"
         | `${"rpc."}${string}`
       >
     | undefined
@@ -4926,102 +5110,60 @@ export type ExperimentalMediaGetInput = { readonly hash: string }
 
 export type ExperimentalMediaGetOutput = globalThis.Uint8Array
 
-export type ExperimentalScheduleCreateInput = {
-  readonly sessionID: string
-  readonly name?: string | undefined
-  readonly when?:
-    | (
-        | {
-            readonly in: string
-            readonly at?: never
-            readonly every?: never
-            readonly cron?: never
-            readonly tz?: string
-          }
-        | {
-            readonly at: string
-            readonly in?: never
-            readonly every?: never
-            readonly cron?: never
-            readonly tz?: string
-          }
-        | {
-            readonly every: string
-            readonly in?: never
-            readonly at?: never
-            readonly cron?: never
-            readonly tz?: string
-          }
-        | {
-            readonly cron: string
-            readonly in?: never
-            readonly at?: never
-            readonly every?: never
-            readonly tz?: string
-          }
-      )
-    | undefined
-  readonly if?:
-    | (
-        | {
-            readonly run: string
-            readonly is?: string
-            readonly matches?: string
-            readonly changes?: boolean
-            readonly code?: never
-          }
-        | {
-            readonly code: string
-            readonly run?: never
-            readonly is?: never
-            readonly matches?: never
-            readonly changes?: never
-          }
-      )
-    | undefined
-  readonly until?:
-    | (
-        | {
-            readonly run: string
-            readonly is?: string
-            readonly matches?: string
-            readonly changes?: boolean
-            readonly code?: never
-          }
-        | {
-            readonly code: string
-            readonly run?: never
-            readonly is?: never
-            readonly matches?: never
-            readonly changes?: never
-          }
-      )
-    | undefined
-  readonly ends?: { readonly after?: string; readonly at?: string; readonly times?: number } | undefined
-  readonly prompt: string
+export type ExperimentalBlobGetInput = { readonly id: string }
+
+export type ExperimentalBlobGetOutput = globalThis.Uint8Array
+
+export type ExperimentalAutomationCreateInput = {
+  readonly sessionID?: string | undefined
+  readonly directory?: string | undefined
+  readonly name: string
+  readonly trigger:
+    | { readonly type: "at"; readonly at: string; readonly tz?: string }
+    | { readonly type: "every"; readonly every: string; readonly tz?: string }
+    | { readonly type: "cron"; readonly cron: string; readonly tz?: string }
+    | {
+        readonly type: "event"
+        readonly server: string
+        readonly event: string
+        readonly args?: { readonly [x: string]: JsonValue }
+      }
+  readonly action:
+    | {
+        readonly type: "prompt"
+        readonly prompt: string
+        readonly to?:
+          | { readonly session: string; readonly subagent?: never }
+          | { readonly subagent: string; readonly session?: never }
+      }
+    | { readonly type: "code"; readonly code: string; readonly args?: JsonValue }
+  readonly expires?: string | undefined
 }
 
-export type ExperimentalScheduleCreateOutput = { data: ScheduleInfo }["data"]
+export type ExperimentalAutomationCreateOutput = { data: AutomationInfo }["data"]
 
-export type ExperimentalScheduleListInput = { readonly sessionID: string }
+export type ExperimentalAutomationListInput = {
+  readonly sessionID?: string | undefined
+  readonly directory?: string | undefined
+}
 
-export type ExperimentalScheduleListOutput = { data: Array<ScheduleInfo> }["data"]
+export type ExperimentalAutomationListOutput = { data: Array<AutomationInfo> }["data"]
 
-export type ExperimentalScheduleGetInput = { readonly scheduleID: string }
+export type ExperimentalAutomationGetInput = { readonly automationID: string }
 
-export type ExperimentalScheduleGetOutput = { data: ScheduleInfo }["data"]
+export type ExperimentalAutomationGetOutput = { data: AutomationInfo }["data"]
 
-export type ExperimentalSchedulePauseInput = { readonly scheduleID: string }
+export type ExperimentalAutomationPauseInput = { readonly automationID: string }
 
-export type ExperimentalSchedulePauseOutput = { data: ScheduleInfo }["data"]
+export type ExperimentalAutomationPauseOutput = { data: AutomationInfo }["data"]
 
-export type ExperimentalScheduleResumeInput = { readonly scheduleID: string }
+export type ExperimentalAutomationResumeInput = { readonly automationID: string }
 
-export type ExperimentalScheduleResumeOutput = { data: ScheduleInfo }["data"]
+export type ExperimentalAutomationResumeOutput = { data: AutomationInfo }["data"]
 
-export type ExperimentalScheduleDeleteInput = { readonly scheduleID: string }
+export type ExperimentalAutomationDeleteInput = { readonly automationID: string }
 
-export type ExperimentalScheduleDeleteOutput = void
+export type ExperimentalAutomationDeleteOutput = void
 
 export type ExperimentalArtifactsProvidersInput = {
   readonly location?: { readonly directory?: string | undefined } | undefined
@@ -5080,6 +5222,15 @@ export type ExperimentalArtifactsViewInput = {
 }
 
 export type ExperimentalArtifactsViewOutput = globalThis.Uint8Array
+
+export type ExperimentalJobListInput = {
+  readonly sessionID?: string | undefined
+  readonly kind?: ("shell" | "subagent" | "image" | "codemode") | undefined
+  readonly status?: ("running" | "completed" | "error" | "cancelled") | undefined
+  readonly descendants?: boolean | undefined
+}
+
+export type ExperimentalJobListOutput = { data: Array<JobInfo> }["data"]
 
 export type ExperimentalServiceStatusOutput = { data: ContinuityStatus }["data"]
 
@@ -5517,12 +5668,6 @@ export type FileUnwatchInput = ExperimentalFileUnwatchInput
 
 /** @deprecated Use `ExperimentalFileUnwatchOutput`. Removed in the next minor. */
 export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
-
-/** @deprecated Use `ExperimentalShellWatchInput`. Removed in the next minor. */
-export type ShellWatchInput = ExperimentalShellWatchInput
-
-/** @deprecated Use `ExperimentalShellWatchOutput`. Removed in the next minor. */
-export type ShellWatchOutput = ExperimentalShellWatchOutput
 
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput

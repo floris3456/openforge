@@ -1,0 +1,64 @@
+---
+title: "Intro"
+description: "Install OpenCode, the open source coding agent, as a CLI, desktop app, web app, or Docker image, then connect a model provider."
+---
+
+openforge is an open source AI coding agent for the terminal: a fork of [opencode](https://github.com/anomalyco/opencode)
+v2 with [CLIProxyPacer](/cli/cliproxypacer) built in, upgrades that switch while agents run, one background service for
+all your terminals, and notifications over ssh. It runs on Linux x64 and macOS on Apple silicon.
+
+## Install
+
+```bash
+curl -fsSL https://github.com/floris3456/openforge/releases/latest/download/install.sh | sh
+```
+
+The script downloads the release for your platform from
+[GitHub Releases](https://github.com/floris3456/openforge/releases), checks its SHA-256 against the release's
+`SHA256SUMS`, and installs it as `~/.local/share/openforge/releases/<version>/openforge` (or under `$XDG_DATA_HOME`),
+with `~/.local/share/openforge/current` pointing at it and `~/.local/bin/openforge` at that. A given version:
+`… | sh -s -- 0.0.12`. Nothing needs `sudo`.
+
+To install by hand, in the same layout:
+
+```bash
+P=linux-x64          # or darwin-arm64 on a Mac
+V=0.0.12             # the version, without the v
+U=https://github.com/floris3456/openforge/releases/download/v$V
+
+curl -fLO $U/openforge-$P.tar.gz
+curl -fLO $U/SHA256SUMS
+grep " openforge-$P.tar.gz\$" SHA256SUMS | sha256sum -c -        # on a Mac: shasum -a 256 -c -
+
+D=${XDG_DATA_HOME:-$HOME/.local/share}/openforge
+mkdir -p "$D/releases/$V" ~/.local/bin
+tar -xzf openforge-$P.tar.gz -C "$D/releases/$V"
+ln -sfn "releases/$V" "$D/current"
+ln -sfn "$D/current/openforge" ~/.local/bin/openforge
+~/.local/bin/openforge --version
+```
+
+`openforge upgrade` switches to the latest release while your chats run, `openforge upgrade <version>` to a given one,
+and `openforge uninstall` removes openforge but keeps your sessions, configuration and state.
+
+## Web
+
+Open the openforge web interface with the `openforge pair` command, which prints one-time links.
+
+---
+
+## Connect
+
+openforge has built-in support for many LLM providers. You can connect to them [in the TUI](/cli/providers) with
+`/connect`, or with `openforge auth login`. `openforge auth login cliproxypacer` connects
+[CLIProxyPacer](/providers#cliproxypacer).
+
+See [Providers](/providers) to configure custom providers.
+
+---
+
+## Customize
+
+Make openforge your own by editing its [config](/config), [loading plugins](/plugins), [connecting MCP
+servers](/mcp-servers), or [creating commands](/commands). For terminal interface themes and keybindings, see [CLI
+settings](/cli/config).

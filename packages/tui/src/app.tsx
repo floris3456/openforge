@@ -121,7 +121,7 @@ import { PacerNotices } from "./pacer/notices"
 import { SessionFrame } from "./component/session-frame"
 import { createTuiClipboard } from "./clipboard"
 
-const appGlobalBindingCommands = ["session.list", "session.new", "open.menu"] as const
+const appGlobalBindingCommands = ["session.list", "session.new", "open.menu", "terminal.suspend"] as const
 // Longer than a release switch takes, a rollback included: a switch whose service stays away this long gets the
 // full-screen reconnect overlay back.
 const SWITCH_OVERDUE = 60_000
@@ -187,7 +187,6 @@ const appBindingCommands = [
   "diff.open",
   "app.debug",
   "app.console",
-  "terminal.suspend",
   "terminal.title.toggle",
   "app.toggle.animations",
   "app.toggle.file_context",
@@ -419,84 +418,84 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                               >
                                 <ClipboardProvider value={clipboard}>
                                   <ImageTerminalProvider value={images}>
-                                  <ArgsProvider {...input.args}>
-                                    <ConfigProvider
-                                      config={config}
-                                      service={input.config}
-                                      options={{ terminalSuspend: process.platform !== "win32" }}
-                                    >
-                                      <Keymap.Provider>
-                                        <ToastProvider>
-                                          <RouteProvider
-                                            initialRoute={
-                                              input.args.continue
-                                                ? {
-                                                    type: "session",
-                                                    sessionID: "dummy",
-                                                  }
-                                                : undefined
-                                            }
-                                          >
-                                            <ClientProvider
-                                              api={api}
-                                              url={input.server.endpoint.url}
-                                              headers={headers}
-                                              service={service}
-                                              resender={resender}
+                                    <ArgsProvider {...input.args}>
+                                      <ConfigProvider
+                                        config={config}
+                                        service={input.config}
+                                        options={{ terminalSuspend: process.platform !== "win32" }}
+                                      >
+                                        <Keymap.Provider>
+                                          <ToastProvider>
+                                            <RouteProvider
+                                              initialRoute={
+                                                input.args.continue
+                                                  ? {
+                                                      type: "session",
+                                                      sessionID: "dummy",
+                                                    }
+                                                  : undefined
+                                              }
                                             >
-                                              <PermissionProvider>
-                                                <DataProvider directory={directory}>
-                                                  <LocationProvider>
-                                                    <SessionTabsProvider>
-                                                      <SessionTerminalsProvider>
-                                                        <ThemeProvider
-                                                          mode={mode}
-                                                          source={createThemeSource(global.config)}
-                                                        >
-                                                          <ThemeErrorToast />
-                                                          <ClientMcp />
-                                                          <LocalProvider>
-                                                            <PromptStashProvider>
-                                                              <PacerProvider>
-                                                                <AttentionProvider>
-                                                                  <DialogProvider>
-                                                                    <FrecencyProvider>
-                                                                      <PromptHistoryProvider>
-                                                                        <PromptRefProvider>
-                                                                          <EditorContextProvider>
-                                                                            <UpdateNotificationProvider
-                                                                              updater={input.updater}
-                                                                            >
-                                                                              <PanelProvider>
-                                                                                <PluginProvider
-                                                                                  packages={input.packages}
-                                                                                  directories={pluginDirectories}
-                                                                                >
-                                                                                  <App />
-                                                                                </PluginProvider>
-                                                                              </PanelProvider>
-                                                                            </UpdateNotificationProvider>
-                                                                          </EditorContextProvider>
-                                                                        </PromptRefProvider>
-                                                                      </PromptHistoryProvider>
-                                                                    </FrecencyProvider>
-                                                                  </DialogProvider>
-                                                                </AttentionProvider>
-                                                              </PacerProvider>
-                                                            </PromptStashProvider>
-                                                          </LocalProvider>
-                                                        </ThemeProvider>
-                                                      </SessionTerminalsProvider>
-                                                    </SessionTabsProvider>
-                                                  </LocationProvider>
-                                                </DataProvider>
-                                              </PermissionProvider>
-                                            </ClientProvider>
-                                          </RouteProvider>
-                                        </ToastProvider>
-                                      </Keymap.Provider>
-                                    </ConfigProvider>
-                                  </ArgsProvider>
+                                              <ClientProvider
+                                                api={api}
+                                                url={input.server.endpoint.url}
+                                                headers={headers}
+                                                service={service}
+                                                resender={resender}
+                                              >
+                                                <PermissionProvider>
+                                                  <DataProvider directory={directory}>
+                                                    <LocationProvider>
+                                                      <SessionTabsProvider>
+                                                        <SessionTerminalsProvider>
+                                                          <ThemeProvider
+                                                            mode={mode}
+                                                            source={createThemeSource(global.config)}
+                                                          >
+                                                            <ThemeErrorToast />
+                                                            <ClientMcp />
+                                                            <LocalProvider>
+                                                              <PromptStashProvider>
+                                                                <PacerProvider>
+                                                                  <AttentionProvider>
+                                                                    <DialogProvider>
+                                                                      <FrecencyProvider>
+                                                                        <PromptHistoryProvider>
+                                                                          <PromptRefProvider>
+                                                                            <EditorContextProvider>
+                                                                              <UpdateNotificationProvider
+                                                                                updater={input.updater}
+                                                                              >
+                                                                                <PanelProvider>
+                                                                                  <PluginProvider
+                                                                                    packages={input.packages}
+                                                                                    directories={pluginDirectories}
+                                                                                  >
+                                                                                    <App />
+                                                                                  </PluginProvider>
+                                                                                </PanelProvider>
+                                                                              </UpdateNotificationProvider>
+                                                                            </EditorContextProvider>
+                                                                          </PromptRefProvider>
+                                                                        </PromptHistoryProvider>
+                                                                      </FrecencyProvider>
+                                                                    </DialogProvider>
+                                                                  </AttentionProvider>
+                                                                </PacerProvider>
+                                                              </PromptStashProvider>
+                                                            </LocalProvider>
+                                                          </ThemeProvider>
+                                                        </SessionTerminalsProvider>
+                                                      </SessionTabsProvider>
+                                                    </LocationProvider>
+                                                  </DataProvider>
+                                                </PermissionProvider>
+                                              </ClientProvider>
+                                            </RouteProvider>
+                                          </ToastProvider>
+                                        </Keymap.Provider>
+                                      </ConfigProvider>
+                                    </ArgsProvider>
                                   </ImageTerminalProvider>
                                 </ClipboardProvider>
                               </TuiStartupProvider>
@@ -734,6 +733,7 @@ function App() {
         limit: 1,
         order: "desc",
         parentID: null,
+        archived: false,
         directory: location.directory,
       })
       .then((response) => {
@@ -1207,7 +1207,7 @@ function App() {
         name: "docs.open",
         title: "Open docs",
         run: () => {
-          openUrl("https://opencode.ai/v2/docs").catch(() => {})
+          openUrl("https://opencode.ai/docs").catch(() => {})
           dialog.clear()
         },
         category: "System",

@@ -119,13 +119,13 @@ const fakeCPP = Effect.fn(function* (
 
 const addPlugin = Effect.fn(function* (cpp: Effect.Success<ReturnType<typeof fakeCPP>>) {
   const plugin = yield* Plugin.Service
-  yield* cpp.provide(CLIProxyPacerPlugin.effect(yield* PluginHost.make(plugin)))
+  yield* cpp.provide(CLIProxyPacerPlugin.effect(yield* PluginHost.make(plugin, "test")))
 })
 
 /** Config's provider plugin, with these documents as the location's config. */
 const addConfig = Effect.fn(function* (...providers: ReadonlyArray<Record<string, unknown>>) {
   const plugin = yield* Plugin.Service
-  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin)).pipe(
+  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin, "test")).pipe(
     Effect.provide(
       Config.testLayer(
         providers.map((item) => new Document({ type: "document", info: decodeConfig({ providers: item }) })),

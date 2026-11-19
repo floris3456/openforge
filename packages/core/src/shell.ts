@@ -61,13 +61,20 @@ export interface Interface {
   // command is unknown or is removed before it terminates, and with RunnerStoppedError if its runner died under it.
   readonly wait: (id: Shell.ID) => Effect.Effect<Shell.Info, ShellRunner.NotFoundError | ShellRunner.RunnerStoppedError>
   // A known shell's terminal state and bounded tail. Missing capture remains distinct from its exit status.
-  readonly result: (started: Shell.Info) => Effect.Effect<ShellResult.Result, ShellRunner.RunnerStoppedError>
+  // With `wait`, stops waiting for the exit after that long and returns the output so far, still running.
+  readonly result: (
+    started: Shell.Info,
+    options?: { readonly wait?: Duration.Input },
+  ) => Effect.Effect<ShellResult.Result, ShellRunner.RunnerStoppedError>
   // Replaces the running command's timeout from now; zero clears it. Ignored once the command has ended.
   readonly timeout: (id: Shell.ID, duration: number) => Effect.Effect<Shell.Info, ShellRunner.NotFoundError>
   readonly output: (id: Shell.ID, input?: Shell.OutputInput) => Effect.Effect<Shell.Output, ShellRunner.NotFoundError>
   // Output as it arrives from `cursor` on, then the terminal Info.
   readonly watch: (id: Shell.ID, input?: Shell.WatchInput) => Stream.Stream<Shell.WatchEvent, ShellRunner.NotFoundError>
   readonly remove: (id: Shell.ID) => Effect.Effect<void, ShellRunner.NotFoundError>
+  // Stops a running command (SIGTERM, then SIGKILL) without forgetting it: it stays observable, file included. Returns
+  // at once; `wait` observes the exit. Ignored once the command has ended.
+  readonly stop: (id: Shell.ID) => Effect.Effect<Shell.Info, ShellRunner.NotFoundError>
   // How the commands of an agent are confined here, worked out once per change of the config or the agent.
   readonly confinement: (agent: Agent.ID) => Effect.Effect<ShellWrap.Confinement>
 }
@@ -79,7 +86,7 @@ export const cleanup = Effect.fn("Shell.cleanup")(function* () {
   const global = yield* Global.Service
   const directory = path.join(global.data, DIRECTORY)
   const projects = yield* fs.readDirectoryEntries(directory).pipe(
-    Effect.map((entries) => entries.filter((entry) => entry.type === "directory")),
+    Effect.map((entries) => entries.filter((entry) => entry.type === "Directory")),
     Effect.orElseSucceed(() => []),
   )
   const files = yield* Effect.forEach(
@@ -88,7 +95,7 @@ export const cleanup = Effect.fn("Shell.cleanup")(function* () {
       fs.readDirectoryEntries(path.join(directory, project.name)).pipe(
         Effect.map((entries) =>
           entries.flatMap((entry) =>
-            entry.type === "file" && /^sh_[0-9a-f]{12}.*\.(out|exit|tmp)$/.test(entry.name)
+            entry.type === "File" && /^sh_[0-9a-f]{12}.*\.(out|exit|tmp)$/.test(entry.name)
               ? [path.join(directory, project.name, entry.name)]
               : [],
           ),
@@ -128,8 +135,18 @@ const layer = () =>
       const outputDir = path.join(global.data, DIRECTORY, location.project.id)
       yield* Effect.promise(() => mkdir(outputDir, { recursive: true }))
 
-      const result = Effect.fn("Shell.result")(function* (started: Shell.Info) {
-        const info = yield* runner.wait(started.id).pipe(
+      const result = Effect.fn("Shell.result")(function* (
+        started: Shell.Info,
+        options?: { readonly wait?: Duration.Input },
+      ) {
+        const waited =
+          options?.wait === undefined
+            ? runner.wait(started.id)
+            : runner.wait(started.id).pipe(
+                Effect.timeoutOption(options.wait),
+                Effect.flatMap((info) => (info._tag === "Some" ? Effect.succeed(info.value) : runner.get(started.id))),
+              )
+        const info = yield* waited.pipe(
           Effect.catchTag("Shell.NotFoundError", () =>
             Effect.succeed({
               ...started,
@@ -241,6 +258,7 @@ const layer = () =>
         output: runner.output,
         watch: runner.watch,
         remove: runner.remove,
+        stop: runner.stop,
         confinement: wrap.confinement,
       })
     }),

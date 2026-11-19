@@ -161,6 +161,16 @@ export const settings: Setting[] = [
     keywords: ["scroll bar"],
   },
   {
+    title: "Scroll on send",
+    category: "Session",
+    path: ["session", "submit_scroll"],
+    description: "Whether sending a prompt jumps to the latest message",
+    default: "bottom",
+    values: ["bottom", "keep"],
+    labels: ["jump to latest", "keep position"],
+    keywords: ["submit", "scroll position", "jump to latest", "follow"],
+  },
+  {
     title: "Thinking",
     category: "Session",
     path: ["session", "thinking"],
@@ -196,7 +206,7 @@ export const settings: Setting[] = [
     path: ["session", "verbosity"],
     description: "How much tool activity is shown in the chat",
     help: 'How much of a chat\'s tool work shows. "low" sums up each run of tools and thinking; "medium" shows each tool call; "high" also opens the groups of reads, searches and instructions.',
-    default: "medium",
+    default: "low",
     values: ["low", "medium", "high"],
     keywords: ["detail", "activity", "summary", "transcript"],
   },
@@ -604,7 +614,7 @@ export const settings: Setting[] = [
     pacer: "summaryWriter",
     description:
       "For all chats: who writes a chat's summary when it compacts; openforge does whenever CLIProxyPacer can't",
-    help: 'Who writes a chat\'s summary when it compacts. "CLIProxyPacer" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Claude chats follow it too: CLIProxyPacer writes their summary from the chat\'s last request, so it reads the chat\'s cache while it is warm. Where CLIProxyPacer can\'t write one, openforge does. "openforge" always writes it; on a Claude model it sends the chat\'s own request, which also reads the cache. Kept by CLIProxyPacer for all your chats.',
+    help: "Who writes a chat's summary when it compacts. \"CLIProxyPacer\" uses its own summary prompt, on a cheap model when the chat is cold; openforge keeps the summary as its own, so the chat goes on the same way on any provider. Claude chats follow it too: CLIProxyPacer writes their summary from the chat's last request, so it reads the chat's cache while it is warm. Where CLIProxyPacer can't write one, openforge does. \"openforge\" always writes it; on a Claude model it sends the chat's own request, which also reads the cache. Kept by CLIProxyPacer for all your chats.",
     default: "cliproxypacer",
     values: ["cliproxypacer", "openforge"],
     labels: ["CLIProxyPacer", "openforge"],
@@ -719,8 +729,16 @@ export function DialogConfig(props: { current?: string }) {
   )
   const [selected, setSelected] = createSignal(current)
   const [saving, setSaving] = createSignal(false)
-  const { shown, pacerValues, setPacerValues, updateStatus, setUpdateStatus, client, serviceConfig, readServiceConfig } =
-    useShownSettings()
+  const {
+    shown,
+    pacerValues,
+    setPacerValues,
+    updateStatus,
+    setUpdateStatus,
+    client,
+    serviceConfig,
+    readServiceConfig,
+  } = useShownSettings()
   // The setting Settings opens at, once it shows: a CLIProxyPacer row shows once its read answered. A memo, so a write's
   // new values don't move the selection back to it.
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))

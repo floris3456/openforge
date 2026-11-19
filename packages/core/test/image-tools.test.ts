@@ -72,7 +72,7 @@ const painter = Effect.gen(function* () {
 })
 
 const setup = Effect.gen(function* () {
-  const host = yield* PluginHost.make(yield* Plugin.Service)
+  const host = yield* PluginHost.make(yield* Plugin.Service, "test")
   yield* ImageTool.Plugin.effect(host)
   yield* ImageGenerateTool.Plugin.effect(host)
 })

@@ -51,7 +51,9 @@ export function toolImages(part: SessionMessageAssistantTool): ChatImage[] {
   const content = toolDisplayContent(part.state)
   return content.flatMap((item, index) => {
     if (item.type !== "file" || !item.mime.startsWith("image/")) return []
-    if (!item.uri.startsWith("data:image/") && !mediaHashFromUri(item.uri)) return []
+    // An emptied `data:` URI is a payload the store dropped while previews were off.
+    const inline = item.uri.startsWith("data:image/") && !item.uri.endsWith(",")
+    if (!inline && !mediaHashFromUri(item.uri)) return []
     const before = content[index - 1]
     return [
       {

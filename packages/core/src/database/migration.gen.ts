@@ -62,8 +62,11 @@ import m59 from "./migration/20261104162813_continuity.js"
 import m60 from "./migration/20261109135149_session_image.js"
 import m61 from "./migration/20261113214735_session_prompt_start.js"
 import m62 from "./migration/20261114112752_memory_prompt.js"
-import m63 from "./migration/20261116120000_openforge_namespace.js"
-import m64 from "./migration/20261116121524_prompt_start_parts.js"
+import m63 from "./migration/20261116043204_automation.js"
+import m64 from "./migration/20261116120000_openforge_namespace.js"
+import m65 from "./migration/20261116121524_prompt_start_parts.js"
+import m66 from "./migration/20261116181958_automation_event_position.js"
+import m67 from "./migration/20261116213417_automation_active_index.js"
 
 export const migrations = [
   m00,
@@ -131,4 +134,7 @@ export const migrations = [
   m62,
   m63,
   m64,
+  m65,
+  m66,
+  m67,
 ] satisfies DatabaseMigration.Migration[]

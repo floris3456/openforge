@@ -1,8 +1,8 @@
 export * as PacerSummaries from "./summaries.js"
 
-import { ai, AIError, type ContentPart, LanguageModel, LLMRequest, Message } from "@opencode/ai/effect"
+import { ai, AIError, AssistantMessage, LanguageModel, type LLMRequest, type Message } from "@opencode/ai/effect"
 import { AnthropicMessages, OpenAICompatibleResponses } from "@opencode/ai/protocols"
-import type { HttpMiddleware } from "@opencode/ai/route"
+import type { CompactionRequest, HttpMiddleware } from "@opencode/ai/route"
 import type { SessionID } from "@opencode/schema/session-id"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Context, Effect, Layer, Option, Result, Schema } from "effect"
@@ -37,7 +37,7 @@ export const provider: string = PacerEndpoint.id
  * with a part each (`OpenAICompatibleResponses.compactSystemParts`), and its thinking blocks, signed or redacted, as
  * reasoning items in their places ({@link thinking}).
  */
-export function responses(request: LLMRequest) {
+export function responses(request: LLMRequest): LLMRequest & Pick<CompactionRequest, "model"> {
   const route = request.model.route
   const model =
     route.protocol === OpenAICompatibleResponses.route.protocol
@@ -58,7 +58,7 @@ export function responses(request: LLMRequest) {
     route.protocol === AnthropicMessages.protocol.id
       ? request.messages.map((message) => thinking(message, request, key))
       : request.messages
-  const next = LLMRequest.update(request, { model, messages })
+  const next = { ...request, model, messages }
   if (!ai.canCompact(next)) throw new Error("A route with a compact endpoint can compact")
   return next
 }
@@ -75,9 +75,9 @@ const REDACTED = "claude-redacted-thinking:"
  */
 function thinking(message: Message, request: LLMRequest, key: string) {
   if (message.role !== "assistant" || !message.content.some((part) => part.type === "reasoning")) return message
-  return new Message({
+  return new AssistantMessage({
     ...message,
-    content: message.content.flatMap((part): ContentPart[] => {
+    content: message.content.flatMap((part): AssistantMessage["content"][number][] => {
       if (part.type !== "reasoning") return [part]
       const block = AnthropicMessages.thinkingBlock(part, request)
       if (block === undefined) return []

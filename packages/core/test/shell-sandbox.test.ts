@@ -1,4 +1,5 @@
 import fs from "fs"
+import { Flag } from "@opencode/core/flag"
 import path from "path"
 import { afterAll, beforeAll, describe, expect } from "bun:test"
 import { Effect, Exit, Fiber, Layer, Queue, Stream } from "effect"
@@ -89,6 +90,7 @@ const plugins = makeLocationNode({
     Config.node,
     Environment.node,
     FileAccess.node,
+    Flag.node,
     Permission.node,
     Session.node,
     Job.node,

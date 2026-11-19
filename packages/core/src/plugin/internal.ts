@@ -18,6 +18,7 @@ import { Config } from "../config.js"
 import { Credential } from "../credential.js"
 import { llmClient } from "../effect/app-node-platform.js"
 import { ConfigAgentPlugin } from "../config/plugin/agent.js"
+import { ConfigAgentSources } from "../config/agent-sources.js"
 import { ConfigCommandPlugin } from "../config/plugin/command.js"
 import { ConfigCompactionPlugin } from "../config/plugin/compaction.js"
 import { ConfigFormatterPlugin } from "../config/plugin/formatter.js"
@@ -145,6 +146,7 @@ const services = [
   Model.Service,
   Command.Service,
   Config.Service,
+  ConfigAgentSources.Service,
   Credential.Service,
   Bus.Service,
   Environment.Service,
@@ -215,6 +217,7 @@ export const requirements = LayerNode.group([
   Model.node,
   Command.node,
   Config.node,
+  ConfigAgentSources.node,
   Credential.node,
   Bus.node,
   Environment.node,

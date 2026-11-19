@@ -8,6 +8,7 @@ import path from "path"
 import { Effect, Result, SchemaIssue, SchemaParser } from "effect"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
+import { ConfigAgentSources } from "../agent-sources.js"
 import { ConfigMarkdown } from "../markdown.js"
 import { ConfigEntryObserver } from "./entry-observer.js"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -41,6 +42,7 @@ export const Plugin = define({
     const config = yield* Config.Service
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
+    const sources = yield* ConfigAgentSources.Service
     const loadEntry = Effect.fnUntraced(function* (entry: Entry) {
       if (entry.type === "document") return [entry]
       if (entry.type !== "directory") return []
@@ -62,6 +64,8 @@ export const Plugin = define({
       load,
       reload: ctx.agent.reload(),
     })
+    // openforge: where each agent setting came from, for what is told of it elsewhere (`ConfigAgentSources`).
+    yield* sources.hold(() => loaded.documents)
     yield* ctx.agent.transform((editor) => {
       const permissions = expandPermissions(
         loaded.documents.flatMap((document) => document.info.permissions ?? []),

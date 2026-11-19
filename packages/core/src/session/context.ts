@@ -5,6 +5,7 @@ import { Permission } from "../permission.js"
 import { Context, Effect, Layer, Option } from "effect"
 import { Agent } from "../agent.js"
 import { Config } from "../config.js"
+import { ConfigAgentSources } from "../config/agent-sources.js"
 import { ImageBank } from "../image/bank.js"
 import type { ImageFit } from "../image/fit.js"
 import type { CodeModeCatalog } from "../codemode/catalog.js"
@@ -13,6 +14,7 @@ import { CodeModeInstructions } from "../codemode/instructions.js"
 import { CodeModePins } from "../codemode/pins.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { Global } from "@opencode/util/global"
 import { InstructionDiscovery } from "../instruction-discovery.js"
 import { Instructions } from "../instructions/index.js"
 import { InstructionBuiltIns } from "../instructions/builtins.js"
@@ -22,6 +24,7 @@ import { McpTool } from "../tool/mcp.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerInstructions } from "../pacer/instructions.js"
 import { PacerOffer } from "../pacer/offer.js"
+import { PacerPins } from "../pacer/pins.js"
 import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
@@ -42,6 +45,8 @@ export interface Selection {
   readonly agent: Agent.Selection & { readonly info: Agent.Info }
   readonly instructions: Instructions.List
   readonly tools: Tool.Snapshot
+  /** openforge: the Code Mode pins the agent's file or the config sets, as CPP's list reads tell them. */
+  readonly pins?: PacerPins.Pins
 }
 
 export interface Loaded {
@@ -51,6 +56,8 @@ export interface Loaded {
   readonly initial: ReadonlyArray<Instructions.Rendered>
   readonly messages: ReadonlyArray<SessionMessage.Info>
   readonly tools: Tool.Snapshot
+  /** openforge: the selection's {@link Selection.pins}. */
+  readonly pins?: PacerPins.Pins
   /** openforge: the model's entry when the chat gets optimized images (`ImageBank.applies`). */
   readonly images?: ImageFit.Model
 }
@@ -112,6 +119,7 @@ const layer = Layer.effect(
     const store = yield* SessionStore.Service
     const registry = yield* Tool.Service
     const config = yield* Effect.serviceOption(Config.Service)
+    const agentSources = yield* ConfigAgentSources.Service
     const pacerTools = yield* PacerTools.Service
     const pacerProject = yield* PacerProject.Service
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
@@ -137,6 +145,7 @@ const layer = Layer.effect(
       agent: Agent.Info,
       permissions: Permission.Ruleset,
       cold: boolean,
+      pins: PacerPins.Pins,
     ) {
       // A switch of agent, a cold point, reads the new agent's list, so its instructions are that list's.
       if (!cold && pacerTools.held(session.id, agent.id) !== undefined) return
@@ -148,6 +157,7 @@ const layer = Layer.effect(
           project: (yield* pacerProject.chat(session.projectID)).headers,
           model: String(ref.id),
           agent: agent.id,
+          pins,
           codemode: PacerOffer.executesUnder(permissions),
           step: true,
           continues: yield* SessionHistory.answered(db, session.id),
@@ -251,9 +261,14 @@ const layer = Layer.effect(
       // now; and before the instructions, so they hold the text CPP writes for that list.
       const point = yield* coldPoint(session, agent.info.id)
       if (point.cold) pacerTools.cold(session.id)
-      yield* primeList(session, agent.info, permissions, point.cold)
+      const configured = Option.isSome(config) ? yield* config.value.entries() : []
+      const reported = PacerPins.of(CodeModePins.sourced(configured, agent.info, agentSources.documents()), {
+        project: location.project.directory,
+        home: Global.Path.home,
+      })
+      yield* primeList(session, agent.info, permissions, point.cold, reported)
       // The person's and the project's Code Mode pins, every config document's merged, with the agent's over them.
-      const pins = CodeModePins.forAgent(Option.isSome(config) ? yield* config.value.entries() : [], agent.info)
+      const pins = CodeModePins.forAgent(configured, agent.info)
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(permissions, location, pins),
@@ -286,6 +301,7 @@ const layer = Layer.effect(
           loaded.entries,
         ]),
         tools: loaded.tools,
+        pins: reported,
       }
       coldFor.set(selection, point.cold)
       if (point.resolved) resolvedFor.set(selection, point.resolved)
@@ -317,6 +333,7 @@ const layer = Layer.effect(
         initial: history.initial,
         messages: history.entries.map((entry) => entry.message),
         tools: selection.tools,
+        ...(selection.pins === undefined ? {} : { pins: selection.pins }),
         images: yield* images(model),
       }
     })
@@ -346,6 +363,7 @@ export const node = makeLocationNode({
   deps: [
     Agent.node,
     Config.node,
+    ConfigAgentSources.node,
     Model.node,
     Database.node,
     InstructionBuiltIns.node,

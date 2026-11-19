@@ -24,6 +24,7 @@ import { PacerEndpoint } from "./endpoint.js"
 import { PacerHeaders } from "./headers.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
+import { PacerPins } from "./pins.js"
 
 // CPP's tools as a client of its API (CLIENT-GUIDE §4.3; the workspace's reference `docs/reference/cpp-tools-api.md`):
 // each chat's own list of their definitions, the memory tools with them while the chat has memory, and their calls.
@@ -106,6 +107,8 @@ export interface ListInput {
   readonly model: string
   /** The agent the chat runs as, its role to CPP (`X-Pacer-Agent`): another one is another list. */
   readonly agent: string
+  /** The Code Mode pins the agent's file or the config sets (`X-Pacer-Pins`), which CPP only records. */
+  readonly pins?: PacerPins.Pins
   /** Whether the chat runs Code Mode: its instructions are written for a client that does (`codemode=1`). */
   readonly codemode: boolean
   /**
@@ -130,6 +133,7 @@ export const listInput = (input: {
   readonly project?: Readonly<Record<string, string>>
   readonly model: string
   readonly agent: string
+  readonly pins?: PacerPins.Pins
   /** Whether the chat runs Code Mode, as `PacerOffer.executes` answers it for the request's definitions. */
   readonly codemode: boolean
   readonly step: boolean
@@ -140,6 +144,7 @@ export const listInput = (input: {
   ...(input.project === undefined ? {} : { project: input.project }),
   model: input.model,
   agent: input.agent,
+  ...(input.pins === undefined ? {} : { pins: input.pins }),
   codemode: input.codemode,
   step: input.step,
   continues: input.continues,
@@ -322,6 +327,8 @@ export const layer = Layer.effect(
       absent: false,
       /** Done at the next endpoint change, which ends every chat's wait. */
       changed: Deferred.makeUnsafe<void>(),
+      /** A read's pins were cut to CPP's limits, which is logged once. */
+      pinsCut: false,
     }
 
     const release = (list: List | undefined) => {
@@ -373,6 +380,15 @@ export const layer = Layer.effect(
             if (chat.reading === result) chat.reading = undefined
             Deferred.doneUnsafe(result, Exit.succeed(read))
           })
+        const pins = PacerPins.header(input.pins ?? {})
+        if (pins.cut && !state.pinsCut) {
+          state.pinsCut = true
+          yield* Effect.logWarning("cut the Code Mode pins told to CLIProxyPacer to its limits", {
+            agent: input.agent,
+            set: Object.keys(input.pins ?? {}).length,
+            limits: `${PacerPins.TOOLS} tools, ${PacerPins.BYTES} bytes, ${PacerPins.FROM} characters of a file`,
+          })
+        }
         // Shared by the chat's requests that wait for it, so it outlives the one that started it.
         yield* http
           .get(
@@ -389,6 +405,7 @@ export const layer = Layer.effect(
                   project: input.project,
                 }),
                 ...PacerHeaders.agent(input.agent),
+                ...(pins.value === undefined ? {} : { [PacerPins.HEADER]: pins.value }),
               },
             },
           )

@@ -8,7 +8,9 @@ import { Config } from "@opencode/core/config"
 import { Directory, Document, Event, Info } from "@opencode/schema/config"
 import { Model } from "@opencode/schema/model"
 import { ConfigAgentPlugin } from "@opencode/core/config/plugin/agent"
+import { ConfigAgentSources } from "@opencode/core/config/agent-sources"
 import { CodeModePins } from "@opencode/core/codemode/pins"
+import { PacerPins } from "@opencode/core/pacer/pins"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -23,7 +25,9 @@ import { tmpdir, tmpdirScoped } from "../fixture/tmpdir"
 import { testEffect } from "../lib/effect"
 import { agentHost, host } from "../plugin/host"
 
-const it = testEffect(AppNodeBuilder.build(LayerNode.group([Agent.node, Bus.node, FSUtil.node, Global.node])))
+const it = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Agent.node, Bus.node, FSUtil.node, Global.node, ConfigAgentSources.node])),
+)
 const decode = Schema.decodeUnknownSync(Info)
 
 function migrateV1(input: unknown) {
@@ -498,7 +502,10 @@ permissions:
               type: "document",
               info: decode({
                 codemode: { pinned: { web_search: true, "context7.*": true } },
-                agents: { reviewer: { codemode: { pinned: { web_search: false } } }, writer: { description: "Writes" } },
+                agents: {
+                  reviewer: { codemode: { pinned: { web_search: false } } },
+                  writer: { description: "Writes" },
+                },
               }),
             }),
             new Document({
@@ -526,6 +533,75 @@ permissions:
           })
           expect(CodeModePins.forAgent(entries, tester!)).toEqual({ web_search: true, "context7.*": false })
           expect(CodeModePins.forAgent(entries, writer!)).toEqual({ web_search: true, "context7.*": true })
+        }),
+      ),
+    ),
+  )
+
+  it.live("says which file sets each of an agent's pins, as CLIProxyPacer is told them", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const project = tmp.path
+          const home = path.join(path.parse(project).root, "home", "floris")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(project, ".opencode", "agent"), { recursive: true })
+            await fs.writeFile(
+              path.join(project, ".opencode", "agent", "build.md"),
+              "---\ncodemode:\n  pinned:\n    web_search: true\n    recall: true\n    task: true\n---\nBuild it.",
+            )
+          })
+          const agents = yield* Agent.Service
+          const sources = yield* ConfigAgentSources.Service
+          const entries = [
+            new Document({
+              type: "document",
+              path: AbsolutePath.make(path.join(home, ".config", "openforge", "openforge.jsonc")),
+              info: decode({ codemode: { pinned: { "openforge.*": true } } }),
+            }),
+            new Document({
+              type: "document",
+              path: AbsolutePath.make(path.join(project, "opencode.json")),
+              info: decode({
+                codemode: { pinned: { recall: false, "context7.*": true } },
+                agents: { build: { codemode: { pinned: { task: false, "context7.*": false } } } },
+              }),
+            }),
+            directoryEntry(path.join(project, ".opencode")),
+            // Later than the agent's file and without one of its own, as `OPENCODE_CONFIG_CONTENT` is.
+            new Document({
+              type: "document",
+              info: decode({ agents: { build: { codemode: { pinned: { task: false } } } } }),
+            }),
+          ]
+
+          yield* ConfigAgentPlugin.Plugin.effect(host({ agent: agentHost(agents) })).pipe(
+            Effect.provide(Config.testLayer(entries)),
+          )
+
+          const build = (yield* agents.get(Agent.ID.make("build")))!
+          const header = PacerPins.header(
+            PacerPins.of(CodeModePins.sourced(entries, build, sources.documents()), { project, home }),
+          )
+          const told = JSON.parse(decodeURIComponent(header.value!))
+          // Every pin the session gets (`forAgent`), each from the file whose value won: the agent's file over the
+          // project's config, which is over the person's; a document without a file names none.
+          expect(told).toEqual({
+            "context7.*": { pinned: false, from: "opencode.json" },
+            "openforge.*": { pinned: true, from: "~/.config/openforge/openforge.jsonc" },
+            recall: { pinned: true, from: ".opencode/agent/build.md" },
+            task: { pinned: false },
+            web_search: { pinned: true, from: ".opencode/agent/build.md" },
+          })
+          expect(Object.keys(told)).toEqual(["context7.*", "openforge.*", "recall", "task", "web_search"])
+          expect(
+            Object.fromEntries(Object.entries(told).map(([tool, pin]) => [tool, (pin as { pinned: boolean }).pinned])),
+          ).toEqual(CodeModePins.forAgent(entries, build))
+          expect(header.cut).toBe(false)
+          // Nothing of where they are set is on the agent's info, which the API serves.
+          expect(build.codemode).toEqual({
+            pinned: { task: false, "context7.*": false, web_search: true, recall: true },
+          })
         }),
       ),
     ),

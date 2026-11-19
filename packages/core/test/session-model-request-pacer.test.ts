@@ -1022,3 +1022,42 @@ describe("SessionModelRequest saying where the chat works", () => {
       }),
   )
 })
+
+describe("SessionModelRequest telling CPP the agent's own Code Mode pins", () => {
+  const pins = {
+    web_search: { pinned: true, from: ".opencode/agent/build.md" },
+    recall: { pinned: false, from: "opencode.json" },
+  }
+  /** A turn, a title, a generation and a compaction of the chat, each as it goes to the model. */
+  const each = (h: Effect.Success<ReturnType<typeof setup>>, input: SessionModelRequest.Input) =>
+    Effect.forEach([h.requests.primary, h.requests.title, h.requests.generate, h.requests.compaction], (request) =>
+      Effect.gen(function* () {
+        const prepared = yield* request(input)
+        return {
+          headers: prepared.request.headers,
+          options: prepared.options,
+          body: (yield* compileRequest(prepared.request)).body,
+        }
+      }),
+    )
+
+  it.effect("on the chat's tool list read only: each model request is what it is without them", () =>
+    Effect.gen(function* () {
+      const pinned = yield* setup()
+      const plain = yield* setup()
+      const sent = yield* each(pinned, { ...pinned.input(snapshot(all)), pins })
+      const without = yield* each(plain, plain.input(snapshot(all)))
+      const told = pinned.cpp.lists().map((read) => read.headers.get("x-pacer-pins"))
+      expect(told).toHaveLength(1)
+      expect(JSON.parse(decodeURIComponent(told[0]!))).toEqual(pins)
+      expect(plain.cpp.lists().map((read) => read.headers.get("x-pacer-pins"))).toEqual([null])
+      // The same headers, system prompt, tools and messages, byte for byte, on every kind of request.
+      expect(sent[0]?.headers?.["X-Pacer-Agent"]).toBe("build")
+      expect(JSON.stringify(sent[0]?.body)).toContain(cppTools(["web_search"]).slice(1, -1))
+      expect(JSON.stringify(sent)).toBe(JSON.stringify(without))
+      expect(
+        sent.flatMap((request) => Object.keys(request.headers ?? {})).filter((name) => /pins/i.test(name)),
+      ).toEqual([])
+    }),
+  )
+})

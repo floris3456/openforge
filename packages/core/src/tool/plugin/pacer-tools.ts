@@ -1,5 +1,6 @@
 export * as PacerToolsPlugin from "./pacer-tools.js"
 
+import { isUtf8 } from "node:buffer"
 import path from "path"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
@@ -53,8 +54,11 @@ export const Plugin = {
       return { sha256: found.image.hash, name: `image ${number}` }
     })
 
-    /** One picture the model wrote (`#N`, or a path the chat may read): read, hashed, sent to CPP once, and named. */
-    const picture = Effect.fnUntraced(function* (written: string, context: FileAccess.Invocation) {
+    /**
+     * One file the model wrote (`#N`, or a path the chat may read): a picture, or a text by its name (`.md`, `.txt`,
+     * read as UTF-8), read, hashed, sent to CPP once, and named.
+     */
+    const file = Effect.fnUntraced(function* (written: string, context: FileAccess.Invocation) {
       const number = /^#(\d+)$/.exec(written)?.[1]
       if (number !== undefined) return yield* fromChat(written, Number(number))
       const target = yield* access
@@ -63,11 +67,15 @@ export const Plugin = {
       // A file that cannot be described or read is answered as one that is not there: the model wrote a wrong path.
       const unreadable = () => notSent(`${written} does not exist`)
       const info = yield* environment.files.stat(target.absolute).pipe(Effect.catch(unreadable))
+      const text = TEXT_TYPES[path.extname(written).toLowerCase()]
+      if (text !== undefined && info.size > MAX_TEXT_BYTES)
+        return yield* notSent(`${written} is ${Math.ceil(info.size / 1024)} KB, over 256 KB`)
       if (info.size > MAX_PICTURE_BYTES)
         return yield* notSent(`${written} is ${Math.ceil(info.size / MEGABYTE)} MB, over 20 MB`)
       const bytes = (yield* environment.files.read(target.absolute).pipe(Effect.catch(unreadable))).bytes
-      const mime = pictureMime(bytes, written)
-      if (mime === undefined) return yield* notSent(`${written} is not a PNG, JPEG, WebP, GIF or SVG`)
+      if (text !== undefined && !isUtf8(bytes)) return yield* notSent(`${written} is not UTF-8 text`)
+      const mime = text ?? pictureMime(bytes, written)
+      if (mime === undefined) return yield* notSent(`${written} is not a picture or a text (.md, .txt)`)
       const sha256 = SessionBlob.hashBytes(bytes)
       yield* calls
         .upload(bytes, mime, sha256)
@@ -76,8 +84,10 @@ export const Plugin = {
     })
 
     /**
-     * A call's arguments that hold local files (CPP's `meta.files`): each string of those is a picture, replaced by its
-     * hash and name once CPP holds its bytes, so the model writes only the paths. Anything else keeps its shape.
+     * A call's arguments that hold local files (CPP's `meta.files`): each string of those is a file, replaced by its
+     * hash and name once CPP holds its bytes, so the model writes only the paths; so are the first two of an array
+     * (`[picture, comparison, comment]`) and an entry's named parts `picture`, `compare` and `text`. Anything else
+     * (a decision, a comment) keeps its shape.
      */
     const withFiles = Effect.fn("PacerToolsPlugin.withFiles")(function* (
       input: Readonly<Record<string, unknown>>,
@@ -92,12 +102,21 @@ export const Plugin = {
         if (!Array.isArray(value)) continue
         if (value.length > PICTURE_LIMIT) return yield* notSent(`${name} has more than ${PICTURE_LIMIT} items`)
         sent[name] = yield* Effect.forEach(value, (item) => {
-          if (typeof item === "string") return picture(item, context)
-          if (!Array.isArray(item)) return Effect.succeed(item)
+          if (typeof item === "string") return file(item, context)
           // `[picture, comparison, caption]`: the first two are files, and the caption is text.
-          return Effect.forEach(item, (part, index) =>
-            index < 2 && typeof part === "string" ? picture(part, context) : Effect.succeed(part),
-          )
+          if (Array.isArray(item))
+            return Effect.forEach(item, (part, index) =>
+              index < 2 && typeof part === "string" ? file(part, context) : Effect.succeed(part),
+            )
+          if (!isRecord(item)) return Effect.succeed(item)
+          return Effect.gen(function* () {
+            const named = { ...item }
+            for (const part of FILE_PARTS) {
+              const written = item[part]
+              if (typeof written === "string") named[part] = yield* file(written, context)
+            }
+            return named
+          })
         })
       }
       return sent
@@ -207,6 +226,11 @@ function subject(args: Readonly<Record<string, unknown>>, names: ReadonlyArray<s
 const PICTURE_LIMIT = 20
 const MAX_PICTURE_BYTES = 20 * 1024 * 1024
 const MEGABYTE = 1024 * 1024
+/** A text file's types by its name, and the most it may weigh. */
+const TEXT_TYPES: Readonly<Record<string, string>> = { ".md": "text/markdown", ".txt": "text/plain" }
+const MAX_TEXT_BYTES = 256 * 1024
+/** An entry's parts that name a file, in an entry written as an object (`{picture, compare, comment}`, `{text}`). */
+const FILE_PARTS = ["picture", "compare", "text"]
 const PICTURE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"]
 const SVG = "image/svg+xml"
 /** `<svg` at the start, after an optional byte-order mark, XML declaration, comments and whitespace. */

@@ -5,11 +5,12 @@ export type { Context, Metadata, Namespace, Options, Result } from "@opencode/sc
 import { ToolDefinition, type ToolCall } from "@opencode/ai/effect"
 import type { CodeMode } from "@opencode/codemode"
 import { Tool } from "@opencode/schema/tool"
-import { Context, Effect, Layer, Ref, Result, Schema, SchemaIssue, Types } from "effect"
+import { Context, Effect, Layer, Option, Ref, Result, Schema, SchemaIssue, Types } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import type { Agent } from "./agent.js"
 import { CodeModeCatalog } from "./codemode/catalog.js"
 import { CodeModeTool } from "./codemode/tool.js"
+import { Config } from "./config.js"
 import { Image } from "./image.js"
 import { ImageBank } from "./image/bank.js"
 import { Permission } from "./permission.js"
@@ -88,6 +89,16 @@ const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const image = yield* Image.Service
     const permission = yield* Permission.Service
+    // The person's Code Mode pins: a tool is always (true) or never (false) listed by its catalog path or namespace.
+    const config = yield* Effect.serviceOption(Config.Service)
+    /** Every document's pins, lowest priority first: a project's add to the person's, a later value winning per tool. */
+    const pins = Effect.fnUntraced(function* () {
+      if (Option.isNone(config)) return {} as Readonly<Record<string, boolean>>
+      return (yield* config.value.entries()).reduce<Record<string, boolean>>(
+        (merged, entry) => (entry.type === "document" ? Object.assign(merged, entry.info.codemode?.pinned) : merged),
+        {},
+      )
+    })
 
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
@@ -180,6 +191,8 @@ const layer = Layer.effect(
       | {
           data: Data
           names: string
+          /** The config's pins this value was built for, as JSON. */
+          pinning: string
           inventory: CodeModeTool.Inventory
           value: CodeModeCatalog.Inventory
           definition: ToolDefinition
@@ -265,8 +278,10 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions) =>
-        Effect.sync(() => {
+      snapshot: Effect.fn("Tool.snapshot")(function* (permissions) {
+        const configured = yield* pins()
+        const pinning = JSON.stringify(configured)
+        return yield* Effect.sync(() => {
           const data = state.get()
           const active = new Map<string, Tool.Info>()
           const rules = permissions ?? []
@@ -284,7 +299,8 @@ const layer = Layer.effect(
           // Discovery is immutable for a registry revision and visible tool set. Keep executors
           // fresh, but share the inventory, whose prepared runtime and much larger rendered catalog
           // are cached by identity, and the execute tool's definition across steps.
-          const cached = catalog?.data === data && catalog.names === names ? catalog : undefined
+          const cached =
+            catalog?.data === data && catalog.names === names && catalog.pinning === pinning ? catalog : undefined
           const codeModeInventory = cached?.inventory ?? { tools: codeModeTools, namespaces: data.namespaces }
           const codeModeTool = codeModeEnabled
             ? CodeModeTool.create(
@@ -298,12 +314,13 @@ const layer = Layer.effect(
             : undefined
           const codeModeCatalog = !codeModeEnabled
             ? undefined
-            : (cached?.value ?? CodeModeTool.catalog(codeModeInventory))
+            : (cached?.value ?? CodeModeTool.catalog(codeModeInventory, configured))
           const codeModeDefinition = codeModeTool && (cached?.definition ?? definition(codeModeTool))
           if (codeModeCatalog && codeModeDefinition)
             catalog = {
               data,
               names,
+              pinning,
               inventory: codeModeInventory,
               value: codeModeCatalog,
               definition: codeModeDefinition,
@@ -346,8 +363,8 @@ const layer = Layer.effect(
               })
             }),
           }
-        }),
-      ),
+        })
+      }),
       check: Effect.fn("Tool.check")(function* (input) {
         if (whollyDisabled("execute", input.permissions)) {
           return {
@@ -388,7 +405,8 @@ const layer = Layer.effect(
   }),
 )
 
-const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
+/** Whether `rules` deny `action` on every resource, leaving a tool that asks it unusable in the chat. */
+export const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
 }
@@ -427,5 +445,5 @@ function namespaceError(name: string) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [PluginHooks.node, Image.node, Permission.node],
+  deps: [Config.node, PluginHooks.node, Image.node, Permission.node],
 })

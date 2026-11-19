@@ -369,14 +369,16 @@ export const layer = Layer.effect(
         if (known.size > 0 && !PacerOffer.wanted(tools.definitions, known)) return tools.definitions
         return PacerOffer.apply(
           tools.definitions,
-          yield* pacerTools.list({
-            sessionID: session.id,
-            parentID: session.parentID,
-            project,
-            model: model.ref.id,
-            step: kind === "primary",
-            continues: input.messages.some((message) => message.role === "assistant"),
-          }),
+          yield* pacerTools.list(
+            PacerTools.listInput({
+              session,
+              project,
+              model: model.ref.id,
+              codemode: PacerOffer.executes(tools.definitions),
+              step: kind === "primary",
+              continues: input.messages.some((message) => message.role === "assistant"),
+            }),
+          ),
           known,
         )
       })

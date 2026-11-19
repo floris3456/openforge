@@ -1,7 +1,7 @@
 export * as CodeModeTool from "./tool.js"
 
 import { ToolFailure } from "@opencode/ai/effect"
-import { CodeMode, Namespace, Tool } from "@opencode/codemode"
+import { CodeMode, Namespace, Tool, toolExpression } from "@opencode/codemode"
 import type {
   Content,
   Context as ToolContext,
@@ -100,6 +100,8 @@ export const create = (
         const callIndex = yield* Ref.make(0)
         const files = yield* Ref.make<Array<CollectedFiles>>([])
         const calls = yield* Ref.make<Array<ExecuteCall>>([])
+        // A reported tool's answers, in call order, for the model: a script that does not return one loses it otherwise.
+        const answers = yield* Ref.make<Array<{ readonly path: string; readonly text: string }>>([])
         // A call's decoded input is the same object at its hooks and its execution, so its row finds its metadata.
         const settled = new WeakMap<object, Metadata>()
         const lock = Semaphore.makeUnsafe(1)
@@ -145,6 +147,11 @@ export const create = (
                   const outputFileParts = outputFiles(content)
                   if (outputFileParts.length > 0)
                     yield* Ref.update(files, (items) => [...items, { index, files: outputFileParts }])
+                  if (tool.options?.reported === true) {
+                    const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+                    if (text !== "")
+                      yield* Ref.update(answers, (items) => [...items, { path: qualifiedName(tool), text }])
+                  }
                   return resultValue(executed)
                 }),
               hooks: progressHooks(record, settled),
@@ -161,8 +168,12 @@ export const create = (
           .toSorted((left, right) => left.index - right.index)
           .flatMap((item) => item.files)
         const output = formatResult(result)
+        // A reported tool's answer reaches the model even when the script does not return it, once per answer.
+        const reported = (yield* Ref.get(answers))
+          .filter((answer) => !output.includes(answer.text))
+          .map((answer) => `${toolExpression(answer.path)}(…) answered:\n${answer.text}`)
         const value: typeof ExecuteOutput.Type = {
-          output,
+          output: [output, ...reported].filter((part) => part !== "").join("\n\n"),
           toolCalls,
           files: collected,
           ...(result.ok ? {} : { error: true }),
@@ -235,12 +246,15 @@ function progressHooks(
   } satisfies CodeMode.Hooks
 }
 
-export const catalog = (inventory: Inventory) => {
-  const pinned = new Set(
+export const catalog = (inventory: Inventory, configured: Readonly<Record<string, boolean>> = {}) => {
+  const registered = new Set(
     Array.from(inventory.tools.values())
       .filter((registration) => registration.options?.pinned === true)
       .map(qualifiedName),
   )
+  // The config decides first: the tool's path, else its namespace's `*`; the registration's pin holds otherwise.
+  const isPinned = (path: string) =>
+    configured[path] ?? configured[`${path.split(".", 1)[0] ?? path}.*`] ?? registered.has(path)
   const root: CatalogNode = { children: new Map() }
   for (const namespace of inventory.namespaces?.values() ?? []) getNode(root, namespace.name).namespace = namespace
   for (const tool of runtime(inventory).catalog)
@@ -249,7 +263,7 @@ export const catalog = (inventory: Inventory) => {
       name: tool.path.split(".").at(-1) ?? tool.path,
       description: tool.description,
       signature: tool.signature,
-      pinned: pinned.has(tool.path),
+      pinned: isPinned(tool.path),
     }
   return {
     tools: renderCatalog(root),

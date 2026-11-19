@@ -18868,6 +18868,18 @@
             },
             "additionalProperties": false
           },
+          "codemode": {
+            "type": "object",
+            "properties": {
+              "pinned": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
           "mcp": {
             "type": "object",
             "properties": {

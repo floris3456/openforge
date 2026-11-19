@@ -51,6 +51,10 @@ export const ToolMeta = Schema.Struct({
   files: Schema.optional(Schema.Array(Schema.String)),
   /** In the code-execution tool (Code Mode) rather than on the direct list; a server without the field: direct. */
   codemode: Schema.optional(Schema.Boolean),
+  /** Always listed in Code Mode's catalog, whatever its budget ("Always listed in Code Mode" on CPP's Tools page). */
+  pinned: Schema.optional(Schema.Boolean),
+  /** A Code Mode tool whose answers reach the model even when a script does not return them. */
+  reported: Schema.optional(Schema.Boolean),
   /**
    * A Code Mode tool's definition, which describes it in Code Mode's catalog and `search` for every chat: as
    * capabilities give it, else as a list read named it.

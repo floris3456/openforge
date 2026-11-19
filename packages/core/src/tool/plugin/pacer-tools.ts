@@ -118,7 +118,15 @@ export const Plugin = {
         for (const [name, meta] of state.known)
           editor.add({
             name,
-            options: { codemode: meta.codemode === true, permission: meta.permission },
+            options:
+              meta.codemode === true
+                ? {
+                    codemode: true,
+                    permission: meta.permission,
+                    pinned: meta.pinned === true,
+                    reported: meta.reported === true,
+                  }
+                : { codemode: false, permission: meta.permission },
             description: (meta.codemode === true ? meta.definition?.description : undefined) ?? placeholder,
             input: (meta.codemode === true ? meta.definition?.input_schema : undefined) ?? { type: "object" },
             execute: (input, context) =>

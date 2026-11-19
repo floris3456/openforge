@@ -34,10 +34,13 @@ export type Options = BaseOptions &
     | {
         readonly codemode?: true
         readonly pinned?: boolean
+        /** Its answers reach the model even when a Code Mode script does not return them. */
+        readonly reported?: boolean
       }
     | {
         readonly codemode: boolean
         readonly pinned?: never
+        readonly reported?: never
       }
   )
 

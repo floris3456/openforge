@@ -266,7 +266,7 @@ const harness = Effect.fnUntraced(function* (input?: HarnessInput) {
         type: "tool-call" as const,
         id,
         name: SubagentTool.name,
-        input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+        input: { background: true, agent: "reviewer", description: "review", prompt: "review this", ...input },
       },
     })
   return { ...base, ...app, registry, parent, call }
@@ -398,7 +398,8 @@ describe("Code Mode session jobs", () => {
       yield* Fiber.join(delivered)
       yield* s.idle
       expect(yield* s.h.jobs.pendingBackground).toEqual([])
-      const text = `<codemode id="${job.id}" state="completed">\nresult: done\n</codemode>`
+      // openforge: a synthetic notice reaches the model inside <system-reminder> (spec checkpoint).
+      const text = `<system-reminder>\n<codemode id="${job.id}" state="completed">\nresult: done\n</codemode>\n</system-reminder>`
       expect((yield* s.h.llm.requests()).at(-1)?.messages).toContainEqual(
         expect.objectContaining({ content: expect.arrayContaining([expect.objectContaining({ type: "text", text })]) }),
       )
@@ -561,6 +562,7 @@ describe("subagent idle reports end to end", () => {
                 agent: "fallback",
                 description: "grandchild review",
                 prompt: "review the grandchild fixture",
+                background: true,
               }),
               TestLLM.text("child launched grandchild", "child-turn-1"),
               TestLLM.text("child saw first grandchild report", "child-turn-2"),
@@ -703,7 +705,7 @@ describe("subagent idle reports end to end", () => {
             type: "tool-call",
             id: "call-launch",
             name: SubagentTool.name,
-            input: { agent: "reviewer", description: "restart review", prompt: "review this" },
+            input: { background: true, agent: "reviewer", description: "restart review", prompt: "review this" },
           },
         })
         const childID = outputSessionID(launched.metadata)

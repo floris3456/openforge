@@ -50,6 +50,8 @@ export type SubagentReportState =
       readonly startedAt: number
     }
   | { readonly mode: "none" }
+  /** openforge: a subagent tool call waits for this period; its answer goes to that call, not to a report. */
+  | { readonly mode: "foreground" }
 
 export type SubagentOutboxReport = {
   readonly notificationID: SessionMessage.ID
@@ -649,6 +651,14 @@ export const make = Effect.gen(function* () {
     function* (id, boundGeneration) {
       return yield* SynchronizedRef.modify(state.jobs, (jobs): readonly [SubagentReportState, Map<string, Active>] => {
         const job = jobs.get(id)
+        if (
+          job !== undefined &&
+          !job.isBackgrounded &&
+          job.recovery?.kind === "subagent" &&
+          job.info.status === "running" &&
+          !job.settling
+        )
+          return [{ mode: "foreground" }, jobs]
         // A generation reports at most once, even when an earlier attempt only observed a cancel.
         if (!job?.isBackgrounded || job.reported || !job.info.notificationID || job.recovery?.kind !== "subagent") {
           return [{ mode: "none" }, jobs]

@@ -3,15 +3,17 @@ export * as SubagentTool from "./subagent.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
-import { Effect, Predicate, Schema } from "effect"
+import { Effect, Option, Predicate, Schema } from "effect"
 import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
+import { SessionContinuity } from "../../continuity.js"
 import { Job } from "../../job.js"
 import { MemoryTask } from "../../memory/task.js"
 import { Model } from "../../model.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 import { SessionSchema } from "../../session/schema.js"
+import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentDepth } from "../../session/subagent-depth.js"
 import { SubagentEnded } from "../../session/subagent-ended.js"
 import { SubagentJob } from "../../session/subagent-job.js"
@@ -29,6 +31,10 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
   ].join("\n"),
 })
 
+/** What a parent's foreground subagent call stores while it waits, so the next process waits for the same child. */
+const Attached = Schema.Struct({ childSessionID: SessionSchema.ID, agent: Schema.String })
+const decodeAttached = Schema.decodeUnknownOption(Attached)
+
 export const Input = Schema.Struct({
   agent: Schema.String.annotate({
     description:
@@ -43,6 +49,10 @@ export const Input = Schema.Struct({
   sessionID: Schema.optionalKey(SessionSchema.ID).annotate({
     description: "Send a follow-up to an existing subagent, running or finished. Omit to start a new one.",
   }),
+  background: Schema.optionalKey(Schema.Boolean).annotate({
+    description:
+      "Run the subagent in the background and return immediately. You will receive a <subagent> message when it goes idle. DO NOT sleep, poll, or proactively check on its progress.",
+  }),
   taskID: Schema.optionalKey(Schema.String).annotate({
     description:
       "The id of the task or subtask (the task tool) this subagent is to work on: the subtask's when it does one step of a plan; give it whenever the work is a task. While you are on a step of a task, that task's own id is refused.",
@@ -51,15 +61,17 @@ export const Input = Schema.Struct({
 
 export const Output = Schema.Struct({
   sessionID: SessionSchema.ID,
-  status: Schema.Literal("running"),
+  status: Schema.Literals(["completed", "running"]),
   output: Schema.String,
 })
+// openforge: foreground subagents stay the default (specs v0.0.2-tool-runner-and-live-switch, cliproxypacer-step-1).
 export const description = [
   "Spawns an agent in a child session to work on the specified task.",
-  "Subagents always run in the background: the call returns immediately with a sessionID, and you receive a `<subagent>` message each time the child goes idle, including after later work.",
-  "Keep working on non-overlapping tasks, or briefly tell the user what you launched and end your response. Do not sleep, poll, or proactively check on the child's progress.",
+  "The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
-  "Pass the returned sessionID to continue that specific child conversation. A follow-up to a running child joins its current run.",
+  "Foreground (default) runs the subagent to completion and returns its final response.",
+  "Background mode (background=true) launches it and returns immediately; you receive a `<subagent>` message each time the child goes idle, including after later work. Do not sleep, poll, or proactively check on it.",
+  "Use background only for independent work that can run while you continue elsewhere. A follow-up to a running child joins its current run.",
 ].join("\n")
 
 export const Plugin = {
@@ -74,6 +86,47 @@ export const Plugin = {
     const subagents = yield* SubagentJob.Service
     const tasks = yield* MemoryTask.Service
     const ended = yield* SubagentEnded.Service
+    const continuity = yield* SessionContinuity.Service
+
+    // A foreground call starts the child as a job it waits for. The wait survives a stop: the child rests and resumes
+    // itself, and the rerun of this call waits for it again.
+    const follow = Effect.fnUntraced(function* (
+      recovery: Extract<Job.Recovery, { kind: "subagent" }>,
+      sessionID: SessionSchema.ID,
+      callID: string,
+    ) {
+      const child = recovery.childSessionID
+      yield* subagents.start(recovery, { background: false })
+      const result = yield* continuity
+        .wait(callID, jobs.block({ id: child, sessionID }), { childSessionID: child, agent: recovery.agent })
+        .pipe(
+          Effect.onInterrupt(() =>
+            continuity.stopping()
+              ? Effect.void
+              : Effect.all([sessions.interrupt(child), jobs.cancel(child)], { discard: true }),
+          ),
+        )
+      // Backgrounded while it waited (or already running in the background): its report arrives as a message.
+      if (result?.type === "backgrounded") return backgroundResult(child)
+      // The stop interrupted the child first; the next process waits for it again.
+      if (result?.info.status === "running") return yield* Effect.interrupt
+      // Failure surfaces keep the sessionID visible so the model can continue the child.
+      if (result?.info.status === "error")
+        return yield* new ToolFailure({
+          message: `Subagent failed (sessionID: ${child}): ${result.info.error ?? "unknown error"}`,
+        })
+      if (result?.info.status === "cancelled")
+        return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child})` })
+      const messages = yield* sessions
+        .messages({ sessionID: child, order: "desc", limit: 20 })
+        .pipe(Effect.orElseSucceed(() => []))
+      const assistant = messages.find(
+        (message) =>
+          message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+      )
+      const output = yield* ended.apply(child, SubagentCompletion.text(assistant))
+      return { sessionID: child, status: "completed" as const, output }
+    })
 
     const resolveModel = Effect.fn("SubagentTool.resolveModel")(function* (input: string) {
       const ref = yield* Effect.try({
@@ -116,6 +169,21 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              const attached = Option.getOrUndefined(decodeAttached(yield* continuity.resumed(context.id)))
+              if (attached) {
+                yield* context.progress({ sessionID: attached.childSessionID, status: "running" })
+                return yield* follow(
+                  {
+                    kind: "subagent" as const,
+                    parentSessionID: context.sessionID,
+                    childSessionID: attached.childSessionID,
+                    agent: attached.agent,
+                    description: input.description,
+                  },
+                  context.sessionID,
+                  context.id,
+                )
+              }
               const parent = yield* sessions
                 .get(context.sessionID)
                 .pipe(
@@ -238,12 +306,16 @@ export const Plugin = {
                 agent: agent.name,
                 description: input.description,
               }
+              if (input.background !== true) return yield* follow(recovery, context.sessionID, context.id)
               yield* subagents.start(recovery)
               return backgroundResult(child.id)
             }).pipe(
               Effect.map((output) => ({
                 output,
-                content: output.output,
+                content:
+                  output.status === "completed"
+                    ? `<subagent sessionID="${output.sessionID}" state="completed">\n${output.output}\n</subagent>`
+                    : output.output,
                 metadata: { sessionID: output.sessionID, status: output.status },
               })),
             ),

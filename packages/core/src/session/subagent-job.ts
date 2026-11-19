@@ -9,7 +9,8 @@ import { SessionExecution } from "./execution.js"
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
 
 export interface Interface {
-  readonly start: (recovery: Recovery) => Effect.Effect<Job.Info>
+  /** openforge: `background: false` starts a child a subagent tool call waits for (`Job.block`), which reports nothing. */
+  readonly start: (recovery: Recovery, options?: { readonly background?: boolean }) => Effect.Effect<Job.Info>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SubagentJob") {}
@@ -19,6 +20,7 @@ export function start(
   execution: SessionExecution.Interface,
   recovery: Recovery,
   notificationID?: Job.Background["notificationID"],
+  background = true,
 ) {
   const id = recovery.childSessionID
   return jobs.start({
@@ -28,7 +30,7 @@ export function start(
     metadata: notificationID === undefined ? {} : undefined,
     recovery,
     notificationID,
-    background: true,
+    background,
     run: execution.resume(id).pipe(
       // Only an explicit caller cancel releases the child's claim. A server shutdown
       // interrupts this job but must leave the child resumable on the next start.
@@ -48,7 +50,8 @@ const make = Effect.gen(function* () {
   const context = yield* Effect.context<never>()
 
   return Service.of({
-    start: (recovery) => start(jobs, execution, recovery).pipe(Effect.setContext(context)),
+    start: (recovery, options) =>
+      start(jobs, execution, recovery, undefined, options?.background ?? true).pipe(Effect.setContext(context)),
   })
 })
 

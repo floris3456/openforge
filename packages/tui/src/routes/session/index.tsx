@@ -3365,10 +3365,19 @@ function Subagent(props: ToolProps) {
         if (id) navigate({ type: "session", sessionID: id })
       }}
       status={
-        wait() ? (
-          <text flexShrink={0} fg={theme.text.feedback.warning.base} wrapMode="none">
-            {wait()}
-          </text>
+        wait() || isBackgroundSubagent(props.metadata, props.part.state.status) ? (
+          <>
+            <Show when={wait()}>
+              {(text) => (
+                <text flexShrink={0} fg={theme.text.feedback.warning.base} wrapMode="none">
+                  {text()}
+                </text>
+              )}
+            </Show>
+            <Show when={isBackgroundSubagent(props.metadata, props.part.state.status)}>
+              <StatusBadge>Background</StatusBadge>
+            </Show>
+          </>
         ) : undefined
       }
     >
@@ -3388,6 +3397,13 @@ export function subagentModelLabel(
   const modelID = separator === -1 ? reference : reference.slice(separator + 1)
   const name = models?.find((item) => item.providerID === providerID && item.id === modelID)?.name
   return `${name ?? reference}${variant ? ` (${variant})` : ""}`
+}
+
+export function isBackgroundSubagent(
+  metadata: Record<string, unknown>,
+  status: SessionMessageAssistantTool["state"]["status"],
+) {
+  return status === "completed" && metadata.status === "running"
 }
 
 export { executeCallSummary }

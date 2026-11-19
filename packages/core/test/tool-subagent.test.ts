@@ -171,6 +171,14 @@ const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
 const it = testEffect(
   AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(subagentPluginSupervisor)]),
 )
+const childRunnerModel = SessionRunnerModel.resolved(
+  LanguageModel.make({ id: "child", provider: "test", route: OpenAIChat.route }),
+  {
+    capabilities: { tools: true, input: ["text"], output: ["text"] },
+    cost: [],
+    limit: { context: 200_000, output: 32_000 },
+  },
+)
 const completionLLM = TestLLM.testLayer({ fallback: TestLLM.text(childText, "completion") })
 const completionIt = testEffect(
   Layer.merge(
@@ -181,19 +189,7 @@ const completionIt = testEffect(
       PluginSupervisor.node.replace(subagentPluginSupervisor),
       LayerNodePlatform.llmClient.replace(completionLLM),
       SessionRunnerModel.node.replace(
-        Layer.succeed(SessionRunnerModel.Service, {
-          resolve: () =>
-            Effect.succeed(
-              SessionRunnerModel.resolved(
-                LanguageModel.make({ id: "child", provider: "test", route: OpenAIChat.route }),
-                {
-                  capabilities: { tools: true, input: ["text"], output: ["text"] },
-                  cost: [],
-                  limit: { context: 200_000, output: 32_000 },
-                },
-              ),
-            ),
-        }),
+        Layer.succeed(SessionRunnerModel.Service, { resolve: () => Effect.succeed(childRunnerModel) }),
       ),
     ]),
   ),
@@ -206,26 +202,45 @@ const tasksEndpoint = Layer.succeed(
   PacerEndpoint.Service,
   PacerEndpoint.Service.of({ get: () => Effect.succeed(endpointAt(tasksServer.origin)), changes: () => Stream.empty }),
 )
+const tasksReplacements = [
+  MemoryClient.node.replace(
+    MemoryClient.layer.pipe(
+      Layer.provide(PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(tasksEndpoint))),
+    ),
+  ),
+  PacerModels.node.replace(
+    Layer.succeed(
+      PacerModels.Service,
+      PacerModels.Service.of({
+        get: () => Effect.succeed(catalogOf(true)),
+        changes: () => Stream.empty,
+        refresh: () => Effect.void,
+      }),
+    ),
+  ),
+] satisfies LayerNode.Replacements
 const tasksIt = testEffect(
   AppNodeBuilder.build(nodes, [
     ...replacements,
     PluginSupervisor.node.replace(subagentPluginSupervisor),
-    MemoryClient.node.replace(
-      MemoryClient.layer.pipe(
-        Layer.provide(PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(tasksEndpoint))),
-      ),
-    ),
-    PacerModels.node.replace(
-      Layer.succeed(
-        PacerModels.Service,
-        PacerModels.Service.of({
-          get: () => Effect.succeed(catalogOf(true)),
-          changes: () => Stream.empty,
-          refresh: () => Effect.void,
-        }),
-      ),
-    ),
+    ...tasksReplacements,
   ]),
+)
+// A background child reports through the real execution, as in production.
+const tasksReportIt = testEffect(
+  Layer.merge(
+    completionLLM,
+    AppNodeBuilder.build(LayerNode.group([nodes, SessionRestart.node, KV.node]), [
+      Global.node.replace(tempGlobalLayer),
+      offlineModels,
+      PluginSupervisor.node.replace(subagentPluginSupervisor),
+      LayerNodePlatform.llmClient.replace(completionLLM),
+      SessionRunnerModel.node.replace(
+        Layer.succeed(SessionRunnerModel.Service, { resolve: () => Effect.succeed(childRunnerModel) }),
+      ),
+      ...tasksReplacements,
+    ]),
+  ),
 )
 
 const withSubagent = (location: Location.Ref) =>
@@ -303,7 +318,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-completion-replay",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "background review", prompt: "review" },
+              input: { background: true, agent: "reviewer", description: "background review", prompt: "review" },
             },
           })
           const marker = yield* Deferred.await(admitted)
@@ -450,7 +465,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-configured-nested-subagent",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "nested", prompt: "should run" },
+              input: { background: true, agent: "reviewer", description: "nested", prompt: "should run" },
             },
           })
 
@@ -490,7 +505,14 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "review", prompt: "review this", model: "", sessionID: "" },
+              input: {
+                background: true,
+                agent: "reviewer",
+                description: "review",
+                prompt: "review this",
+                model: "",
+                sessionID: "",
+              },
             },
           })
 
@@ -522,11 +544,114 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent-fallback",
               name: SubagentTool.name,
+              input: { background: true, agent: "fallback", description: "fallback", prompt: "fallback" },
+            },
+          })
+          const fallbackChild = yield* sessions.get(outputSessionID(fallback.metadata))
+          expect(fallbackChild).toMatchObject({ parentID: parent.id, model: parentModel })
+        }),
+      ),
+    ),
+  )
+
+  it.live("runs a foreground child session and returns the final assistant text", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location, model: parentModel })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+          const progress: Tool.Metadata[] = []
+
+          const settled = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            progress: (update) => Effect.sync(() => progress.push(update)),
+            call: {
+              type: "tool-call",
+              id: "call-subagent",
+              name: SubagentTool.name,
+              input: { agent: "reviewer", description: "review", prompt: "review this", model: "", sessionID: "" },
+            },
+          })
+
+          expect(settled).toMatchObject({
+            status: "completed",
+            metadata: { status: "completed" },
+            content: [{ type: "text", text: expect.stringContaining(childText) }],
+          })
+          const child = yield* sessions.get(outputSessionID(settled.metadata))
+          expect(settled.content).toEqual([{ type: "text", text: completedOutput(child.id) }])
+          expect(settled.metadata).toEqual({ sessionID: child.id, status: "completed" })
+          expect(progress[0]).toEqual({ sessionID: child.id, status: "running" })
+          // The call took the answer: the parent gets no <subagent> report of it.
+          expect((yield* sessions.inbox(parent.id)).filter((item) => item.type === "synthetic")).toEqual([])
+          expect((yield* sessions.context(parent.id)).filter((message) => message.type === "synthetic")).toEqual([])
+          expect(child).toMatchObject({
+            parentID: parent.id,
+            location: parent.location,
+            agent: "reviewer",
+            model: childModel,
+          })
+          expect((yield* sessions.inbox(child.id)).find((message) => message.type === "user")?.payload.text).toBe(
+            "You are a subagent spawned by another session.\nreview this",
+          )
+
+          const fallback = yield* executeTool(registry, {
+            sessionID: parent.id,
+            ...toolIdentity,
+            call: {
+              type: "tool-call",
+              id: "call-subagent-fallback",
+              name: SubagentTool.name,
               input: { agent: "fallback", description: "fallback", prompt: "fallback" },
             },
           })
           const fallbackChild = yield* sessions.get(outputSessionID(fallback.metadata))
           expect(fallbackChild).toMatchObject({ parentID: parent.id, model: parentModel })
+        }),
+      ),
+    ),
+  )
+
+  it.live("returns child runner failures as tool errors", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const sessions = yield* Session.Service
+          const parent = yield* sessions.create({ location })
+          yield* withSubagent(parent.location)
+          const locations = yield* LocationServiceMap.Service
+          const registry = yield* Tool.Service.pipe(Effect.provide(locations.get(parent.location)))
+
+          expect(
+            yield* executeTool(registry, {
+              sessionID: parent.id,
+              ...toolIdentity,
+              call: {
+                type: "tool-call",
+                id: "call-subagent-failure",
+                name: SubagentTool.name,
+                input: { agent: "reviewer", description: "fail review", prompt: "please fail" },
+              },
+            }),
+          ).toEqual({
+            status: "error",
+            error: {
+              type: "tool.execution",
+              message: expect.stringContaining("No model is available for session"),
+            },
+          })
         }),
       ),
     ),
@@ -550,7 +675,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-subagent-first",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "review", prompt: "review this" },
+              input: { background: true, agent: "reviewer", description: "review", prompt: "review this" },
             },
           })
           const childID = outputSessionID(first.metadata)
@@ -562,6 +687,7 @@ describe("SubagentTool", () => {
               id: "call-subagent-second",
               name: SubagentTool.name,
               input: {
+                background: true,
                 agent: "reviewer",
                 description: "follow up",
                 prompt: "continue this",
@@ -616,6 +742,7 @@ describe("SubagentTool", () => {
               id: "call-running-subagent",
               name: SubagentTool.name,
               input: {
+                background: true,
                 agent: "reviewer",
                 description: "follow up",
                 prompt: "continue while running",
@@ -667,7 +794,7 @@ describe("SubagentTool", () => {
                 type: "tool-call",
                 id,
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "review", prompt: id, ...input },
+                input: { background: true, agent: "reviewer", description: "review", prompt: id, ...input },
               },
             }).pipe(Effect.timeout("2 seconds"))
 
@@ -724,7 +851,7 @@ describe("SubagentTool", () => {
                 type: "tool-call" as const,
                 id,
                 name: SubagentTool.name,
-                input: { agent, description: "follow up", prompt: "continue", sessionID },
+                input: { background: true, agent, description: "follow up", prompt: "continue", sessionID },
               },
             })
 
@@ -807,7 +934,7 @@ describe("SubagentTool", () => {
                 type: "tool-call" as const,
                 id,
                 name: SubagentTool.name,
-                input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+                input: { background: true, agent: "reviewer", description: "review", prompt: "review this", ...input },
               },
             })
 
@@ -891,7 +1018,7 @@ describe("SubagentTool", () => {
               type: "tool-call",
               id: "call-background-subagent",
               name: SubagentTool.name,
-              input: { agent: "reviewer", description: "background review", prompt: "review" },
+              input: { background: true, agent: "reviewer", description: "background review", prompt: "review" },
             },
           })
           const childID = outputSessionID(settled.metadata)
@@ -1156,7 +1283,7 @@ describe("SubagentTool", () => {
         ),
     )
 
-    tasksIt.live("a background child's notice ends with the task's state", () =>
+    tasksReportIt.live("a background child's notice ends with the task's state", () =>
       withDir((dir) =>
         Effect.gen(function* () {
           const h = yield* prepare(dir)
@@ -1252,7 +1379,7 @@ const reportingFixture = () =>
           type: "tool-call" as const,
           id,
           name: SubagentTool.name,
-          input: { agent: "reviewer", description: "review", prompt: "review this", ...input },
+          input: { background: true, agent: "reviewer", description: "review", prompt: "review this", ...input },
         },
       })
     // A notice is either still queued or already delivered to the parent; count both.

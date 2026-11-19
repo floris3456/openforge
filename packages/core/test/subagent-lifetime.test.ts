@@ -106,6 +106,7 @@ describe("subagent observer lifetime", () => {
                 sessionID: child.id,
                 description: "Review fixture",
                 prompt: "Review the fixture",
+                background: true,
               },
             },
           })

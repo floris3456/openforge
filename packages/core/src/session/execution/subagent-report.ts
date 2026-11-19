@@ -141,6 +141,8 @@ export const make = (deps: Deps) => {
     const period = periods.get(sessionID)
     periods.delete(sessionID)
     const jobState = yield* deps.jobs.prepareSubagentReport(sessionID, period?.boundGeneration)
+    // openforge: a foreground subagent call takes the answer itself.
+    if (jobState.mode === "foreground") return { commit: () => deps.store.release(sessionID), deliver: Effect.void }
     const initial = yield* deps.store.get(sessionID)
     // An automation run's child finishes quietly; only a follow-up the parent sent through a Job reports back.
     if ((!initial?.parentID || Automation.isRunSession(sessionID)) && jobState.mode === "none") {

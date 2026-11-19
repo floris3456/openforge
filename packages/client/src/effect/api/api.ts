@@ -2196,6 +2196,7 @@ export type EventSubscribeInput = {
         | "pacer.requests.updated"
         | "pacer.notice.added"
         | "pacer.notice.dismissed"
+        | "pacer.attention.raised"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -2766,6 +2767,12 @@ export type ExperimentalAttentionFollowOperation<E = never> = (
   input?: ExperimentalAttentionFollowInput,
 ) => Stream.Stream<ExperimentalAttentionFollowOutput, E>
 
+export type ExperimentalAttentionClaimInput = { readonly batch: string }
+export type ExperimentalAttentionClaimOutput = boolean
+export type ExperimentalAttentionClaimOperation<E = never> = (
+  input: ExperimentalAttentionClaimInput,
+) => Effect.Effect<ExperimentalAttentionClaimOutput, E>
+
 export type ExperimentalAttentionTestInput = {
   readonly kind: "done" | "reply" | "subagent_done" | "question" | "permission" | "error"
 }
@@ -2904,6 +2911,7 @@ export interface ExperimentalApi<E = never> {
   readonly attention: {
     readonly occurrence: ExperimentalAttentionOccurrenceOperation<E>
     readonly follow: ExperimentalAttentionFollowOperation<E>
+    readonly claim: ExperimentalAttentionClaimOperation<E>
     readonly test: ExperimentalAttentionTestOperation<E>
   }
   readonly pacer: {

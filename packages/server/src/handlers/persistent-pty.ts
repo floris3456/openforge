@@ -67,6 +67,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("service.resume", () => service.resume)
       .handle("attention.occurrence", (ctx) => attention.occurrence(ctx.payload))
       .handle("attention.test", (ctx) => attention.test(ctx.payload.kind))
+      .handle("attention.claim", (ctx) => attention.claim(ctx.payload.batch))
       .handleRaw("attention.follow", (ctx) => attention.follow(ctx.query.desktop === true))
       .handle("pacer.notices.list", () => notices.list)
       .handle("pacer.notices.dismiss", (ctx) => notices.dismiss(ctx.params.requestID))

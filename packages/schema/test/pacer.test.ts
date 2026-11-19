@@ -52,6 +52,7 @@ describe("pacer shapes", () => {
       "pacer.requests.updated",
       "pacer.notice.added",
       "pacer.notice.dismissed",
+      "pacer.attention.raised",
     ])
     for (const definition of Pacer.Event.Definitions) {
       expect(EventManifest.ServerDefinitions).toContain(definition)

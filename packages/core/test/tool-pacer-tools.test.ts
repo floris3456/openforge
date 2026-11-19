@@ -645,11 +645,26 @@ describe("PacerToolsPlugin in Code Mode", () => {
       ])
       const ran = yield* snapshot.execute({ sessionID, ...toolIdentity, call, definitions: offered })
       expect(ran.content).toEqual([{ type: "text", text: "answered /pacer/v1/tools/moon_phase" }])
-      // Not offered directly: as any tool the request doesn't hold.
-      const refused = yield* snapshot
+    }),
+  )
+
+  it.effect("a direct call of it, which the request offers only in Code Mode, runs it as a script's call would", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })
+      const snapshot = yield* waitForCodeModeTool(h.registry, "moon_phase")
+      h.cpp.answers.call = () => Response.json({ text: "Full moon in Ghent.", data: null, error: null })
+      const call = { type: "tool-call" as const, id: "call-direct", name: "moon_phase", input: { day: "today" } }
+      const ran = yield* snapshot.execute({ sessionID, ...toolIdentity, call, definitions: new Map() })
+      expect(ran.content).toEqual([{ type: "text", text: "Full moon in Ghent." }])
+      expect(h.asked.map((item) => [item.action, item.resources])).toEqual([["astronomy", ["today"]]])
+      expect(h.cpp.calls().map((item) => item.path)).toEqual(["/pacer/v1/tools/moon_phase"])
+      // Wholly denied by the rules in force: denied, and CPP is not called.
+      const denied = yield* h.registry.snapshot([{ action: "astronomy", resource: "*", effect: "deny" }])
+      const refused = yield* denied
         .execute({ sessionID, ...toolIdentity, call, definitions: new Map() })
         .pipe(Effect.flip)
-      expect(refused.message).toContain('No tool named "moon_phase"')
+      expect(refused.message).toBe("Permission denied: moon_phase")
+      expect(h.cpp.calls()).toHaveLength(1)
     }),
   )
 })

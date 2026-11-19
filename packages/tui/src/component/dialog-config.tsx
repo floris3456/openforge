@@ -58,15 +58,19 @@ const eventRows = (
     ["subagent_done", "Subagent done", "a subagent's final reply"],
     ["question", "Question", "a question, form or permission that waits for you"],
     ["error", "Error", "a failed turn"],
+    ["pacer", "Needs attention", "something new that needs your attention on CLIProxyPacer"],
   ] as const
 ).flatMap(([event, title, what]): Setting[] => [
   {
     title: `${title}: notification`,
-    category: "Alerts",
+    // CLIProxyPacer's rows show only while it answers.
+    category: event === "pacer" ? "CLIProxyPacer" : "Alerts",
     path: ["attention", "events", event, "notification"],
     description: `Whether ${what} shows a system notification`,
     help: [
-      `A system notification for ${what}. It shows only while the terminal is not focused (a terminal that doesn't report focus counts as not focused), and only for chats open in this TUI: its tabs and the chat it shows, with their subagents.`,
+      event === "pacer"
+        ? `A system notification for ${what}: an account that needs signing in, quota running out, a failing client and the rest of its dashboard's Needs attention, each once when it appears (again only after it was gone 30 minutes). Only one TUI raises it, with a link to the dashboard page where it is fixed; with no TUI open, \`openforge notify\` still gets it. Needs the owner to turn on "Needs attention" for this client key on CLIProxyPacer. It shows only while the terminal is not focused.`
+        : `A system notification for ${what}. It shows only while the terminal is not focused (a terminal that doesn't report focus counts as not focused), and only for chats open in this TUI: its tabs and the chat it shows, with their subagents.`,
       ...(event === "question"
         ? ["A permission this TUI accepts by itself (Permissions: auto accept) raises none."]
         : []),
@@ -79,7 +83,7 @@ const eventRows = (
   },
   {
     title: `${title}: sound`,
-    category: "Alerts",
+    category: event === "pacer" ? "CLIProxyPacer" : "Alerts",
     path: ["attention", "events", event, "sound"],
     description: `The sound for ${what}; a file set in cli.json shows as its path`,
     help: `The sound played for ${what}, also while the terminal is focused, for chats open in this TUI. Moving to a sound plays it once. A sound file set in cli.json shows here as its path. Needs "Sounds" on; "Volume" sets how loud. When \`openforge notify\` runs on the machine you sit at, the sound plays there instead.`,
@@ -103,6 +107,8 @@ const eventRows = (
       ]
     : []),
 ])
+
+const pacerRows = eventRows.filter((row) => row.category === "CLIProxyPacer")
 
 export const settings: Setting[] = [
   {
@@ -471,7 +477,7 @@ export const settings: Setting[] = [
     labels: ["auto", "OSC 99", "OSC 777", "OSC 9"],
     keywords: ["tmux", "ssh", "osc", "escape sequence", "desktop notifications"],
   },
-  ...eventRows,
+  ...eventRows.filter((row) => row.category === "Alerts"),
   {
     title: "Release highlights",
     category: "Alerts",
@@ -483,6 +489,8 @@ export const settings: Setting[] = [
     labels: ["off", "on"],
     keywords: ["what's new", "changelog", "release notes"],
   },
+  // openforge (spec attention-notifications): CLIProxyPacer's Needs attention, an event of its own, under its heading.
+  ...pacerRows,
   // Cache notices (spec cliproxypacer-cache-notices, section 4): OpenCodePlus's rows and defaults, this TUI's own.
   {
     title: "Cache notices",
@@ -840,7 +848,7 @@ export function DialogConfig(props: { current?: string }) {
   // Through the same report as an event, so a connected player plays it where you sit; never a notification.
   function preview(event: AttentionEvent, id: Attention.SoundID) {
     void attention?.raise({
-      kind: event,
+      kind: event === "pacer" ? "default" : event,
       message: `Sound preview: ${id}`,
       notification: false,
       sound: { when: "always", id },

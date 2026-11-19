@@ -1,3 +1,4 @@
+import { PacerAttention } from "@opencode/core/pacer/attention"
 import { Attention } from "@opencode/schema/attention"
 import { Product } from "@opencode/schema/product"
 import { Effect, Queue, Stream } from "effect"
@@ -22,7 +23,8 @@ const TEST_MESSAGES: Record<Attention.TestKind, string> = {
  * follow this service (`openforge notify`) get each one. Only the connected players are kept; with none, a report
  * costs nothing but its answer.
  */
-export const makeAttention = Effect.sync(() => {
+export const makeAttention = Effect.gen(function* () {
+  const pacer = yield* PacerAttention.Service
   // Each player's queue, and whether it shows desktop notifications.
   const players = new Map<Queue.Queue<string>, boolean>()
   const connected = (): Attention.Players => ({
@@ -35,7 +37,27 @@ export const makeAttention = Effect.sync(() => {
     for (const queue of players.keys()) Queue.offerUnsafe(queue, encoded)
   }
 
+  // A CLIProxyPacer notification no TUI claimed (none is open): the players get it with its event's defaults, a
+  // notification and its sound. It goes as a `default` occurrence with the sound's ID, which every player reads (one
+  // before 2026-11-19 knows no other kind for it).
+  yield* pacer.unclaimed((raised) =>
+    Effect.sync(() =>
+      deliver({
+        type: "occurrence",
+        occurrence: {
+          kind: "default",
+          title: raised.title,
+          message: raised.message,
+          notify: true,
+          sound: { name: "default", id: PacerAttention.SOUND },
+          focused: false,
+        },
+      }),
+    ),
+  )
+
   return {
+    claim: (batch: string) => Effect.map(pacer.claim(batch), (data) => ({ data })),
     occurrence: (occurrence: Attention.Occurrence) =>
       Effect.sync(() => {
         deliver({ type: "occurrence", occurrence })

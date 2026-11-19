@@ -10,9 +10,11 @@ import { Agent } from "@opencode/core/agent"
 import { Session } from "@opencode/core/session"
 import { SessionMessage } from "@opencode/core/session/message"
 import { Document, Info } from "@opencode/schema/config"
+import { Session } from "@opencode/schema/session"
 import { Effect, Layer, Schema } from "effect"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
 import { it } from "./lib/effect"
+import { toolIdentity } from "./lib/tool"
 
 // A registry, beside a config the test holds: its pins reach a snapshot as the session's context passes them
 // (`configPins`), so no config on this machine decides what a catalog pins.
@@ -141,6 +143,49 @@ describe("CodeMode", () => {
       const direct = JSON.stringify(snapshot.definitions.find((tool) => tool.name === "direct"))
       expect(direct).toContain('{"anyOf":[{"type":"number"},{"type":"string","enum":["Infinity","-Infinity","NaN"]}]}')
       expect(direct).not.toContain("$ref")
+    }).pipe(Effect.scoped, Effect.provide(toolNode())),
+  )
+
+  it.effect("runs a direct call of a top-level Code Mode tool; a namespaced one stays unknown", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      const tool = (name: string, options?: Tool.Options): ToolInfo<any, any> => ({
+        name,
+        description: name,
+        input: Schema.Struct({}),
+        output: Schema.String,
+        execute: () => Effect.succeed({ output: `${name} answered` }),
+        ...(options === undefined ? {} : { options }),
+      })
+      yield* tools.transform((editor) => {
+        editor.add(tool("task"))
+        editor.add(tool("query-docs", { namespace: "context7" }))
+      })
+      const snapshot = yield* tools.snapshot()
+      expect(snapshot.definitions.map((item) => item.name)).toEqual(["execute"])
+      const call = (name: string) =>
+        snapshot.execute({
+          sessionID: Session.ID.make("ses_codemode_direct"),
+          ...toolIdentity,
+          call: { type: "tool-call", id: `call-${name}`, name, input: {} },
+          definitions: new Map(),
+        })
+      expect((yield* call("task")).content).toEqual([{ type: "text", text: "task answered" }])
+      for (const name of ["query-docs", "context7_query-docs"]) {
+        const refused = yield* call(name).pipe(Effect.flip)
+        expect(refused.message).toContain(`No tool named "${name}"`)
+      }
+      // Wholly denied by the rules in force: denied.
+      const denied = yield* tools.snapshot([{ action: "task", resource: "*", effect: "deny" }])
+      const refused = yield* denied
+        .execute({
+          sessionID: Session.ID.make("ses_codemode_direct"),
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-denied", name: "task", input: {} },
+          definitions: new Map(),
+        })
+        .pipe(Effect.flip)
+      expect(refused.message).toBe("Permission denied: task")
     }).pipe(Effect.scoped, Effect.provide(toolNode())),
   )
 })

@@ -18,6 +18,8 @@ import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
+import { PacerAttention } from "@opencode/core/pacer/attention"
+import { KV } from "@opencode/core/kv"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerStatus } from "@opencode/core/pacer/status"
 import { PacerWarmth } from "@opencode/core/pacer/warmth"
@@ -70,6 +72,8 @@ interface Cpp {
   readonly key: Json
   /** The settings CPP's registry has: an older CPP may lack one. */
   registry: string[]
+  /** What needs attention (`GET /pacer/v1/attention`); undefined: the key isn't allowed (403 `not_allowed`). */
+  attention: Json[] | undefined
   /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
    * them until the first bytes. */
   quiet: boolean
@@ -156,6 +160,10 @@ const fakeCpp = (now: () => number) =>
             next: [],
           })
         if (path === "/pacer/v1/meters") return answer(cpp.meters)
+        if (path === "/pacer/v1/attention")
+          return cpp.attention
+            ? answer({ items: cpp.attention })
+            : answer({ error: { type: "not_allowed", message: "not allowed" } }, 403)
         if (path === "/pacer/v1/sessions") return answer({ items: cpp.listed })
         const events = path.match(/^\/pacer\/v1\/sessions\/([^/]+)\/events$/)?.[1]
         if (events && method === "POST") {
@@ -257,6 +265,7 @@ const fakeCpp = (now: () => number) =>
         server: {},
         key: {},
         registry: ["pings.enabled", "warming.compact_before_cold", "warming.compact_cold_first"],
+        attention: undefined,
         holds: new Set(),
         release: () => {
           cpp.holds.clear()
@@ -434,6 +443,7 @@ const harness = Effect.fnUntraced(function* () {
       LayerNode.group([
         Database.node,
         Bus.node,
+        KV.node,
         Job.node,
         SessionProjector.node,
         SessionStore.node,
@@ -469,6 +479,7 @@ const harness = Effect.fnUntraced(function* () {
       Pacer.Event.ModelsUpdated,
       Pacer.Event.ChatUpdated,
       Pacer.Event.RequestsUpdated,
+      Pacer.Event.AttentionRaised,
     ])
     .pipe(
       Stream.runForEach((event) => Effect.sync(() => void published.push({ type: event.type, data: event.data }))),
@@ -487,6 +498,10 @@ const harness = Effect.fnUntraced(function* () {
   const notices = yield* PacerNotices.make.pipe(
     Effect.provideService(Bus.Service, bus),
     Effect.provideService(Session.Service, sessions),
+  )
+  const attention = yield* PacerAttention.make.pipe(
+    Effect.provideService(Bus.Service, bus),
+    Effect.provideService(KV.Service, Context.get(context, KV.Service)),
   )
   const shared = Context.get(yield* Layer.build(PacerStatus.layer), PacerStatus.Service)
   const warmth = Context.get(yield* Layer.build(PacerWarmth.layer), PacerWarmth.Service)
@@ -514,6 +529,7 @@ const harness = Effect.fnUntraced(function* () {
           Layer.succeed(Job.Service, Context.get(context, Job.Service)),
           Layer.succeed(Session.Service, counted),
           Layer.succeed(PacerNotices.Service, notices),
+          Layer.succeed(PacerAttention.Service, attention),
         ),
       ),
     ),
@@ -929,8 +945,10 @@ describe("PacerConnection states", () => {
     Effect.gen(function* () {
       const h = yield* harness()
       yield* online(h)
+      // What needs attention is read once at connect, beside the stream.
+      yield* until("what needs attention", () => seen(h, "/pacer/v1/attention").length === 1)
       const asked = h.cpp.seen.map((item) => item.path)
-      expect(asked).toEqual(["/pacer/v1/state", "/pacer/v1/stream"])
+      expect(asked.toSorted()).toEqual(["/pacer/v1/attention", "/pacer/v1/state", "/pacer/v1/stream"])
       for (let second = 1; second <= 600; second++) {
         yield* TestClock.adjust("1 second")
         if (second % 25 === 0) yield* heartbeat(h)
@@ -1374,6 +1392,54 @@ describe("PacerConnection notices", () => {
       yield* until("everything", () => seen(h, "/pacer/v1/state").length === 2 && h.refreshes.count === before + 3)
       yield* until("the requests too", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
     }),
+  )
+
+  it.effect(
+    "reads what needs attention at connect and on its notice, tells what is new; a key not allowed is asked again only after a capabilities notice",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const asked = () => seen(h, "/pacer/v1/attention").length
+        const raised = () => h.published.filter((event) => event.type === "pacer.attention.raised")
+        yield* online(h)
+        yield* until("asked at connect", () => asked() === 1)
+        // Refused: no notice of it reads it again, until the owner may have allowed it.
+        h.cpp.notice("attention", { at: 1 })
+        yield* settle
+        expect(asked()).toBe(1)
+        h.cpp.attention = [
+          {
+            id: "noready:claude",
+            tone: "bad",
+            what: "Claude: no account ready",
+            fix: "Accounts",
+            page: "providers",
+            params: { f: "provider:claude" },
+          },
+        ]
+        h.cpp.notice("settings", { at: 2 })
+        yield* settle
+        expect(asked()).toBe(1)
+        // The owner turned it on for the key: CPP tells its streams `capabilities`.
+        h.cpp.notice("capabilities", { at: 2 })
+        yield* until("asked after capabilities", () => asked() === 2)
+        yield* settle
+        // The first list from this CPP and key tells nothing.
+        expect(raised()).toHaveLength(0)
+        h.cpp.attention = [
+          ...h.cpp.attention,
+          { id: "store", tone: "bad", what: "The store fails to write", fix: "Storage", page: "server" },
+        ]
+        h.cpp.notice("attention", { at: 3 })
+        yield* until("asked on its notice", () => asked() === 3)
+        yield* until("told", () => raised().length === 1)
+        expect(raised()[0]?.data).toMatchObject({
+          title: "CLIProxyPacer",
+          message: "The store fails to write",
+          link: `${h.cpp.origin}/management.html#/server`,
+          items: [{ id: "store", tone: "bad", what: "The store fails to write" }],
+        })
+      }),
   )
 
   it.effect(
@@ -2123,6 +2189,8 @@ describe("PacerConnection chats", () => {
   it.effect("marks the held views stale on a settings notice, and reads nothing for it", () =>
     Effect.gen(function* () {
       const h = yield* harness()
+      // A key allowed to read what needs attention: a capabilities notice doesn't ask for it again.
+      h.cpp.attention = []
       yield* online(h)
       const id = yield* chat(h)
       const uuid = PacerSessionID.make(id)

@@ -20,6 +20,13 @@ export default Plugin.define({
       ours: host.ours,
       failed: (sessionID, message) =>
         context.ui.toast.show({ sessionID, title: "Session failed", message, variant: "error" }),
+      claim: (batch) => context.client.experimental.attention.claim({ batch }),
+      shown: (raised) =>
+        context.ui.toast.show({
+          title: raised.title,
+          message: `${raised.message}\n${raised.link}`,
+          variant: "warning",
+        }),
     })
   },
 })

@@ -182,7 +182,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
 
       // openforge: a model the agent, the CLI or the config names is kept while the catalog lacks it (shown as
-      // unavailable, and not sent), so that one a provider lists late, as CLIProxyPacer's are, is the one the chat
+      // unavailable; a prompt waits for it), so that one a provider lists late, as CLIProxyPacer's are, is the one the chat
       // starts on.
       const fallbackModel = createMemo(() => {
         if (args.model) {
@@ -359,6 +359,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         },
         available(model = currentModel()) {
           return model ? isModelValid(model) : false
+        },
+        /** Whether the model's provider has listed its models: CLIProxyPacer's come once its catalog is read. */
+        delivered(model = currentModel()) {
+          return !!model && !!models()?.some((item) => item.providerID === model.providerID)
         },
         trackSessionCommit(
           sessionID: string,

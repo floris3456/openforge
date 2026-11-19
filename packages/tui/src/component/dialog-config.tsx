@@ -165,6 +165,7 @@ export const settings: Setting[] = [
     category: "Session",
     path: ["session", "submit_scroll"],
     description: "Whether sending a prompt jumps to the latest message",
+    help: 'Where the chat is when you send a prompt: "jump to latest" scrolls to the newest message, "keep position" stays where you were reading.',
     default: "bottom",
     values: ["bottom", "keep"],
     labels: ["jump to latest", "keep position"],
@@ -206,7 +207,8 @@ export const settings: Setting[] = [
     path: ["session", "verbosity"],
     description: "How much tool activity is shown in the chat",
     help: 'How much of a chat\'s tool work shows. "low" sums up each run of tools and thinking; "medium" shows each tool call; "high" also opens the groups of reads, searches and instructions.',
-    default: "low",
+    // openforge: each tool call shows, as before upstream 2.3 (the specs' rows); upstream defaults to "low".
+    default: "medium",
     values: ["low", "medium", "high"],
     keywords: ["detail", "activity", "summary", "transcript"],
   },

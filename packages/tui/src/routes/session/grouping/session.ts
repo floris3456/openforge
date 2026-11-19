@@ -30,7 +30,8 @@ export type SessionGroup = {
 
 /** Experimental transcript detail; undefined selects the default production rules. */
 export type Verbosity = "low" | "medium" | "high"
-export const defaultVerbosity: Verbosity = "low"
+// openforge: each tool call shows, as before upstream 2.3 (the specs' rows); upstream defaults to "low".
+export const defaultVerbosity: Verbosity = "medium"
 
 export type SessionRow = SessionEntry | SessionGroup
 

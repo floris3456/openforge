@@ -368,7 +368,8 @@ test("? in Settings opens the selected row's help as a popup over Settings; Esc 
   await setup.mockInput.typeText("scroll")
   await setup.waitForFrame((frame) => frame.includes("Scroll speed") && frame.includes("Acceleration"))
   await setup.waitForVisualIdle()
-  // Grouped by category: Scrollbar, then Scroll speed and Acceleration.
+  // Grouped by category: Scroll on send (upstream's) and Scrollbar, then Scroll speed and Acceleration.
+  setup.mockInput.pressArrow("down")
   setup.mockInput.pressArrow("down")
   setup.mockInput.pressArrow("down")
   await setup.waitForVisualIdle()

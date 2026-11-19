@@ -1911,7 +1911,21 @@ export function Prompt(props: PromptProps) {
               cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
+            {/* openforge: a held prompt says so in the row between the text and its model, which is blank otherwise. */}
+            <Show when={modelHold.model()}>
+              {(model) => (
+                <text id="prompt.hold" height={1} flexShrink={0} fg={theme.text.muted} wrapMode="none" truncate>
+                  Sends when {model().modelID} is available · Esc keeps it as a draft
+                </text>
+              )}
+            </Show>
+            <box
+              flexDirection="row"
+              flexShrink={0}
+              paddingTop={modelHold.model() ? 0 : 1}
+              gap={1}
+              justifyContent="space-between"
+            >
               <PromptMetadataRow
                 mode={store.mode}
                 agent={agentLabel()}
@@ -1968,15 +1982,6 @@ export function Prompt(props: PromptProps) {
                 }}
               >
                 <Switch>
-                  <Match when={modelHold.model()}>
-                    {(model) => (
-                      <box paddingLeft={3} height={1} minHeight={0} flexShrink={1}>
-                        <text id="prompt.footer.hold" fg={theme.text.muted} wrapMode="none" truncate>
-                          Sends when {model().modelID} is available · Esc keeps it as a draft
-                        </text>
-                      </box>
-                    )}
-                  </Match>
                   <Match when={status() === "running"}>
                     <box flexDirection="row" gap={1} flexGrow={1} justifyContent="flex-start">
                       <box marginLeft={1}>

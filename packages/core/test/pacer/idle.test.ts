@@ -170,7 +170,8 @@ const start = (input: { readonly origin: string; readonly provider: string; read
     return { llm, events, sessions, create }
   })
 
-const goals = () => catalogOf(true, { goals: true })
+/** CPP's answers for this fake server: it has no tools list, only the idle notice's route answers. */
+const goals = () => catalogOf(true, { goals: true, tools: false })
 const cppModel = "cliproxypacer"
 
 /** Waits until `count` notices arrived, at most 5 seconds. */

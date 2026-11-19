@@ -352,7 +352,10 @@ describe("PacerTools.list", () => {
   it.effect("ends the wait at once on a 404 that is not CPP's, or a refused key", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
-      const { tools, endpoints } = yield* startTools(endpointOf(cpp.origin))
+      const { tools, endpoints, catalogs } = yield* startTools(endpointOf(cpp.origin))
+      // No catalog read yet: a 404 that is not CPP's own is this endpoint's answer, not a failed read.
+      yield* SubscriptionRef.set(catalogs, undefined)
+      yield* settle
       cpp.answers.list = () => Response.json({ error: { type: "unauthorized", message: "no" } }, { status: 401 })
       expect(yield* tools.list(resumed(chat))).toBeUndefined()
       expect(cpp.lists()).toHaveLength(1)
@@ -555,7 +558,10 @@ describe("PacerTools.list", () => {
   it.effect("takes a 404 for no web tools at this endpoint, until the catalog changes", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp
-      const { tools, catalogs } = yield* startTools(endpointOf(cpp.origin), undefined)
+      const { tools, catalogs } = yield* startTools(endpointOf(cpp.origin))
+      // No catalog read yet: a 404 is this endpoint's answer, not a failed read.
+      yield* SubscriptionRef.set(catalogs, undefined)
+      yield* settle
       cpp.answers.list = () => new Response("404 page not found", { status: 404 })
       expect(yield* tools.list(step(chat))).toBeUndefined()
       expect(yield* tools.list(step(other))).toBeUndefined()
@@ -567,6 +573,46 @@ describe("PacerTools.list", () => {
       expect((yield* tools.list(step(other)))?.version).toBe(ownerList.version)
       expect(cpp.lists()).toHaveLength(2)
     }),
+  )
+
+  it.effect("takes a 404 for a failed read, not for no tools, while the catalog says the server has them", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools } = yield* startTools(endpointOf(cpp.origin))
+        const held = yield* tools.list(step(chat))
+        expect(held?.version).toBe(ownerList.version)
+
+        // A proxy in front of CPP answers its list's path with a plain 404: that is no answer of this server's.
+        cpp.answers.list = () => new Response("404 page not found", { status: 404 })
+        tools.seen(chat, "0123456789abcdef")
+        expect(yield* tools.list(step(chat))).toBe(held!)
+        expect(warnings.map((item) => item[0])).toEqual(["could not read CLIProxyPacer's tools"])
+
+        // The endpoint still has the tools: a chat holding none reads at its next request.
+        cpp.answers.list = () => Response.json(ownerList)
+        expect((yield* tools.list(step(other)))?.version).toBe(ownerList.version)
+        expect(cpp.lists()).toHaveLength(3)
+      }),
+    ),
+  )
+
+  it.effect("warns once when a 404 without a catalog makes this endpoint absent", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools, catalogs } = yield* startTools(endpointOf(cpp.origin))
+        yield* SubscriptionRef.set(catalogs, undefined)
+        yield* settle
+        cpp.answers.list = () => new Response("404 page not found", { status: 404 })
+        expect(yield* tools.list(step(chat))).toBeUndefined()
+        expect(yield* tools.list(step(other))).toBeUndefined()
+        expect(cpp.lists()).toHaveLength(1)
+        expect(warnings).toEqual([
+          ["took CLIProxyPacer for no tools: its list answered 404", { reason: "This proxy has no pacer: HTTP 404" }],
+        ])
+      }),
+    ),
   )
 
   it.effect("forgets a deleted chat", () =>

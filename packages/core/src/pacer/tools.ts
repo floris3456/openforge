@@ -344,8 +344,19 @@ export const layer = Layer.effect(
               Effect.gen(function* () {
                 if (epoch !== state.epoch) return none
                 if (error._tag === "PacerHttp.NoPacer") {
-                  state.absent = true
-                  return none
+                  // A catalog that says the server has tools makes a 404 no answer of this one's (a proxy in front of it
+                  // answers it): a failed read, like any other, rather than no tools for every chat. Before one says so,
+                  // it is a proxy without the tools.
+                  const catalog = yield* catalogs.get()
+                  if (!catalog?.pacer?.webTools && !catalog?.pacer?.memory?.tools) {
+                    if (!state.absent) {
+                      state.absent = true
+                      yield* Effect.logWarning("took CLIProxyPacer for no tools: its list answered 404", {
+                        reason: error.message,
+                      })
+                    }
+                    return none
+                  }
                 }
                 // CPP never answers this path with its own 404 (cpa-server web_tools/mod.rs, `client`): one would be
                 // about this chat, so only it goes without, and reads again at its next request.

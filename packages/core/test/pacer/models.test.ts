@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Context, Effect, Fiber, Layer, Option, Stream, SubscriptionRef } from "effect"
+import { Context, Effect, Fiber, Layer, Logger, Option, Stream, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
@@ -160,6 +160,15 @@ const until = (models: PacerModels.Interface, check: (catalog: PacerModels.Catal
     .pipe(Stream.filter(check), Stream.runHead, Effect.map(Option.getOrThrow), Effect.timeout("3 seconds"))
 
 const loaded = (catalog: PacerModels.Catalog | undefined) => catalog !== undefined
+
+/** Runs `body` with every warning logged meanwhile in hand, as `[message, annotations]`. */
+const logged = <A, E, R>(body: (warnings: ReadonlyArray<ReadonlyArray<unknown>>) => Effect.Effect<A, E, R>) => {
+  const warnings: Array<ReadonlyArray<unknown>> = []
+  const logger = Logger.make(({ logLevel, message }) => {
+    if (logLevel === "Warn") warnings.push(message as ReadonlyArray<unknown>)
+  })
+  return body(warnings).pipe(Effect.provide(Logger.layer([logger])))
+}
 
 /** Waits until `check` holds, for what no catalog change announces. */
 const eventually = (check: () => boolean) =>
@@ -727,6 +736,45 @@ describe("PacerModels", () => {
         expect(Object.keys((yield* models.get())?.models[0] ?? {})).toEqual(["id", "ownedBy"])
       }
     }),
+  )
+
+  it.live("fails a first read that gets a 429, a 408 or a redirect, and finds the pacer at its next read", () =>
+    Effect.gen(function* () {
+      const answers: Array<() => Response> = [
+        () => Response.json({ error: { type: "rate_limited", message: "slow down" } }, { status: 429 }),
+        () => new Response("request timeout", { status: 408 }),
+        () => Response.redirect("http://127.0.0.1/elsewhere", 302),
+      ]
+      for (const answer of answers) {
+        const server = yield* serve({ ...cpp(), "/pacer/v1/capabilities": answer })
+        const { models } = yield* start(endpoint(server.origin))
+        yield* eventually(() => server.seen.includes("/pacer/v1/capabilities"))
+        yield* models.refresh()
+        // No catalog: the server is not taken for a plain proxy, so `PacerTools` still reads each chat's own list.
+        expect(yield* models.get()).toBeUndefined()
+
+        server.answers["/pacer/v1/capabilities"] = cpp()["/pacer/v1/capabilities"]
+        yield* models.refresh()
+        expect(yield* models.get()).toMatchObject({ pacer: { webTools: false } })
+      }
+    }),
+  )
+
+  it.live("takes a server that serves a page at every path for a plain proxy, with a warning", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const server = yield* serve({
+          ...cpp(),
+          "/pacer/v1/capabilities": () =>
+            new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } }),
+        })
+        const { models } = yield* start(endpoint(server.origin))
+        expect(yield* until(models, loaded)).toMatchObject({ pacer: null })
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]![0]).toBe("took CLIProxyPacer for a plain proxy: capabilities answered a page")
+        expect(warnings[0]![1]).toMatchObject({ status: 200 })
+      }),
+    ),
   )
 
   it.live("keeps the last catalog when a read fails, and the last prices while only they are unreachable", () =>

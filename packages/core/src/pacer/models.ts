@@ -353,18 +353,26 @@ export const layer = Layer.effect(
 
     const read = Effect.fn("PacerModels.read")(function* (endpoint: PacerEndpoint.Endpoint) {
       const options = { endpoint }
-      // A first read takes an answer it can't use for a plain proxy, as one that serves a page at every path; once a
-      // catalog is held, such an answer (a 429, a redirect, a body that does not decode) keeps it instead.
+      // A first read takes an answer it can't use for a plain proxy only if it is a page (a server that serves one at
+      // every path); a 429, a 408, a redirect or one without a status fails it, and once a catalog is held, such an
+      // answer keeps it instead.
       const held = (yield* SubscriptionRef.get(current)) !== undefined
       const [list, capabilities, priced] = yield* Effect.all(
         [
           http.get("/v1/models", ListAnswer, options),
-          // A refusal or a 404 is a plain proxy; an unreachable server or another answer fails the read.
+          // A refusal or a 404 is a plain proxy; an unreachable server, a 429, a 408, a redirect or a body that does
+          // not decode fails the read.
           http.get("/pacer/v1/capabilities", CapabilitiesAnswer, options).pipe(
             Effect.map((answer) => answer.body),
             Effect.catchIf(
-              (error) => definite(error) || (!held && error._tag === "PacerHttp.Unexpected"),
-              () => Effect.succeed(undefined),
+              (error) => definite(error) || (!held && servesPage(error)),
+              (error) =>
+                error._tag === "PacerHttp.Unexpected"
+                  ? Effect.logWarning("took CLIProxyPacer for a plain proxy: capabilities answered a page", {
+                      status: error.status,
+                      reason: error.reason,
+                    }).pipe(Effect.as(undefined))
+                  : Effect.succeed(undefined),
             ),
           ),
           http.get("/pacer/v1/models", PricesAnswer, options).pipe(
@@ -477,6 +485,16 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
 /** An answer that will not change on its own: a 404, a refused key. Not an unreachable server, a 429 or a redirect. */
 function definite(error: PacerHttp.Error) {
   return error._tag !== "PacerHttp.Unreachable" && error._tag !== "PacerHttp.Unexpected"
+}
+
+/**
+ * Whether an answer means a server that serves a page at every path, such as a plain proxy: an `Unexpected` 2xx, as a
+ * page where the API's JSON should be. A 429, a 408, a redirect or an `Unexpected` without a status is no such server.
+ */
+function servesPage(error: PacerHttp.Error) {
+  return (
+    error._tag === "PacerHttp.Unexpected" && error.status !== undefined && error.status >= 200 && error.status < 300
+  )
 }
 
 /** CPP did not answer at all, or its gateway said it is down: what `PacerAnswers.outage` calls an outage. */

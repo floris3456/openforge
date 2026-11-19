@@ -190,6 +190,31 @@ describe("PacerTools across a reconnect of CPP's stream", () => {
     ),
   )
 
+  it.live("keeps reading tools when the catalog says the server has them and the list's path answers 404", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* serve
+        const h = yield* start(cpp.origin)
+        const held = yield* h.tools.list(step(chat))
+        expect(held?.version).toBe(ownerList.version)
+        // The catalog of this service says the server has the web tools, so a plain 404 is a proxy's, not this
+        // endpoint's: a failed read with its pause, never no tools for every chat.
+        expect((yield* h.catalogs.get())?.pacer?.webTools).toBe(true)
+
+        cpp.answers["/pacer/v1/tools"] = () => new Response("404 page not found", { status: 404 })
+        h.tools.seen(chat, "0123456789abcdef")
+        expect(yield* h.tools.list(step(chat))).toBe(held!)
+        expect(warnings.map((item) => (item as ReadonlyArray<unknown>)[0])).toEqual([
+          "could not read CLIProxyPacer's tools",
+        ])
+        // Not absent: the next chat of this endpoint asks again.
+        cpp.answers["/pacer/v1/tools"] = () => Response.json(ownerList)
+        expect((yield* h.tools.list(step(other)))?.version).toBe(ownerList.version)
+        expect(lists(cpp.seen)).toBe(3)
+      }),
+    ),
+  )
+
   it.live("leaves out only the chat whose list read answered CPP's own 404", () =>
     logged((warnings) =>
       Effect.gen(function* () {

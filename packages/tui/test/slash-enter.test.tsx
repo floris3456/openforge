@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test"
+import { beforeEach, expect, test } from "bun:test"
+import { takeDraft } from "../src/component/prompt/draft-stash"
 import { createAppFixture } from "./fixture/app"
 import { directory, json } from "./fixture/tui-client"
 import { shows } from "./fixture/wait"
@@ -12,6 +13,10 @@ const read = (setup: { renderer: { stdin: NodeJS.EventEmitter } }, keys: string)
 const updating = (frame: string) => frame.includes("Checking for a new openforge release")
 
 const updater = { subscribe: () => () => {}, upgrade: () => new Promise<never>(() => {}) }
+
+// The home screen's draft is kept in the process across apps (draft-stash); one an earlier test file left would be
+// typed before these commands.
+beforeEach(() => takeDraft(undefined))
 
 test("a slash command read together with its Enter runs", async () => {
   await using setup = await createAppFixture({ updater })

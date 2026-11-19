@@ -150,7 +150,8 @@ test("shows the TPS default in session settings", () => {
 test("shows transcript verbosity in session settings", () => {
   expect(settings.find((setting) => setting.path.join(".") === "session.verbosity")).toMatchObject({
     category: "Session",
-    default: "low",
+    // openforge: each tool call shows by default.
+    default: "medium",
     values: ["low", "medium", "high"],
   })
 })

@@ -108,9 +108,9 @@ describe("CodeMode", () => {
 // `codemode.pinned` (workspace spec `docs/specs/codemode-pinning.md`): the person's config says whether a tool is
 // always listed, by its catalog path or its namespace's `*`, and it wins over the tool's own registration.
 describe("CodeMode pins", () => {
-  const pinned = (pins: Record<string, boolean>) => [
-    new Document({ type: "document", info: new Info({ codemode: { pinned: pins } }) }),
-  ]
+  /** One config document per map, from lowest to highest priority. */
+  const pinned = (...maps: Array<Record<string, boolean>>) =>
+    maps.map((pins) => new Document({ type: "document", info: new Info({ codemode: { pinned: pins } }) }))
   /** The listed entries when no budget is left: only the pinned ones are shown. */
   const listed = (catalog: CodeModeCatalog.Inventory | undefined) =>
     CodeModeCatalog.summarize(catalog!, { budget: 0 })
@@ -158,6 +158,26 @@ describe("CodeMode pins", () => {
           .some((item) => item.path === "openforge.worktree_list"),
       ).toBe(true)
     }).pipe(Effect.scoped, Effect.provide(toolNode(pinned({ "openforge.worktree_list": false })))),
+  )
+
+  it.effect("merges every document's pins, a later document's value winning per tool", () =>
+    Effect.gen(function* () {
+      const tools = yield* Tool.Service
+      yield* register(tools)
+      // The person's pins stay, the project's add theirs and unpin openforge's exact path over the person's `openforge.*`.
+      expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual([
+        "context7.query-docs",
+        "context7.resolve-library-id",
+        "web_search",
+      ])
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        toolNode(
+          pinned({ web_search: true, "openforge.*": true }, { "context7.*": true, "openforge.worktree_list": false }),
+        ),
+      ),
+    ),
   )
 
   it.effect("reaches the catalog the registry keeps by identity when the config changes", () =>

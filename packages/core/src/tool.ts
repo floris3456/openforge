@@ -91,6 +91,14 @@ const layer = Layer.effect(
     const permission = yield* Permission.Service
     // The person's Code Mode pins: a tool is always (true) or never (false) listed by its catalog path or namespace.
     const config = yield* Effect.serviceOption(Config.Service)
+    /** Every document's pins, lowest priority first: a project's add to the person's, a later value winning per tool. */
+    const pins = Effect.fnUntraced(function* () {
+      if (Option.isNone(config)) return {} as Readonly<Record<string, boolean>>
+      return (yield* config.value.entries()).reduce<Record<string, boolean>>(
+        (merged, entry) => (entry.type === "document" ? Object.assign(merged, entry.info.codemode?.pinned) : merged),
+        {},
+      )
+    })
 
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
@@ -271,9 +279,7 @@ const layer = Layer.effect(
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
       snapshot: Effect.fn("Tool.snapshot")(function* (permissions) {
-        const configured = Option.isNone(config)
-          ? {}
-          : (Config.latest(yield* config.value.entries(), "codemode")?.pinned ?? {})
+        const configured = yield* pins()
         const pinning = JSON.stringify(configured)
         return yield* Effect.sync(() => {
           const data = state.get()

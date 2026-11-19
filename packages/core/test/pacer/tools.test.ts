@@ -181,6 +181,55 @@ describe("PacerTools.list", () => {
     }),
   )
 
+  it.effect("tells CPP the pins the agent sets itself on the list read, and nothing without them", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools } = yield* startTools(endpointOf(cpp.origin))
+        const pins = {
+          web_search: { pinned: true, from: ".opencode/agent/build.md" },
+          recall: { pinned: false, from: "opencode.json" },
+        }
+        const pinned = yield* tools.list({ ...step(chat), pins })
+        yield* tools.list(step(other))
+        yield* tools.list({ ...step(child), pins: {} })
+        const told = cpp.lists().map((read) => read.headers.get("x-pacer-pins"))
+        expect(JSON.parse(decodeURIComponent(told[0]!))).toEqual(pins)
+        expect(told.slice(1)).toEqual([null, null])
+        // CPP only records them: the chat gets the same list.
+        expect(pinned?.version).toBe(ownerList.version)
+        expect(claude(pinned)).toBe(ownerClaude)
+        expect(warnings).toEqual([])
+      }),
+    ),
+  )
+
+  it.effect("cuts the pins to CPP's limits on a read that still gets the list, and logs that once", () =>
+    logged((warnings) =>
+      Effect.gen(function* () {
+        const cpp = yield* fakeCpp
+        const { tools } = yield* startTools(endpointOf(cpp.origin))
+        const pins = Object.fromEntries(
+          Array.from({ length: 40 }, (_, index) => [`pin_${String(index).padStart(2, "0")}`, { pinned: true }]),
+        )
+        const first = yield* tools.list({ ...step(chat), pins })
+        yield* tools.list({ ...step(other), pins })
+        const told = cpp.lists().map((read) => read.headers.get("x-pacer-pins"))
+        expect(told.map((sent) => sent && Object.keys(JSON.parse(decodeURIComponent(sent))))).toEqual([
+          Object.keys(pins).slice(0, 32),
+          Object.keys(pins).slice(0, 32),
+        ])
+        expect(claude(first)).toBe(ownerClaude)
+        expect(warnings).toEqual([
+          [
+            "cut the Code Mode pins told to CLIProxyPacer to its limits",
+            { agent: "build", set: 40, limits: "32 tools, 4096 bytes, 300 characters of a file" },
+          ],
+        ])
+      }),
+    ),
+  )
+
   it.effect("reads it for a compaction or generation only when the chat holds none", () =>
     Effect.gen(function* () {
       const cpp = yield* fakeCpp

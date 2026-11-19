@@ -1,4 +1,5 @@
 import { afterAll, describe, expect } from "bun:test"
+import path from "path"
 import { LanguageModel, type LLMRequest } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
@@ -39,6 +40,7 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SkillInstructions } from "@opencode/core/skill/instructions"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
+import { Document, type Entry, Info } from "@opencode/schema/config"
 import { Provider } from "@opencode/schema/provider"
 import { Global } from "@opencode/util/global"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
@@ -73,6 +75,8 @@ const fake = {
   reads: 0,
   /** The agent each read named. */
   agents: [] as Array<string | null>,
+  /** The pins each read told (`X-Pacer-Pins`), decoded. */
+  pins: [] as Array<unknown>,
   instructions: { text, version: "1" } as { readonly text: string; readonly version: string } | undefined,
 }
 const server = Bun.serve({
@@ -84,6 +88,8 @@ const server = Bun.serve({
     fake.reads++
     const agent = request.headers.get("x-pacer-agent")
     fake.agents.push(agent)
+    const pins = request.headers.get("x-pacer-pins")
+    fake.pins.push(pins === null ? null : JSON.parse(decodeURIComponent(pins)))
     return Response.json(list(agent === "plan" ? { text: planText, version: "2" } : fake.instructions))
   },
 })
@@ -240,18 +246,27 @@ const it = testEffect(layer)
 const BASE = "You are the build agent."
 const cppRef = Model.Ref.make({ providerID: Provider.ID.make("cliproxypacer"), id: Model.ID.make("claude-cpp") })
 
-/** A chat on CLIProxyPacer with a list to read, and the model requests it made. */
-const setup = Effect.fnUntraced(function* (input: { readonly model?: Model.Ref } = {}) {
+/**
+ * A chat on CLIProxyPacer with a list to read, and the model requests it made; with `entries` the config's documents,
+ * with `codemode` the build agent's pins as its file sets them.
+ */
+const setup = Effect.fnUntraced(function* (
+  input: { readonly model?: Model.Ref; readonly entries?: Entry[]; readonly codemode?: Agent.Info["codemode"] } = {},
+) {
   yield* SubscriptionRef.set(catalogRef, catalog(true))
   fake.reads = 0
   fake.agents = []
+  fake.pins = []
   fake.instructions = { text, version: "1" }
+  const config = Context.get(configs, Config.Test)
+  yield* config.setEntries(input.entries ?? [])
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
     editor.update(Agent.ID.make("build"), (agent) => {
       agent.mode = "primary"
       agent.system = BASE
+      agent.codemode = input.codemode
     })
     editor.update(Agent.ID.make("plan"), (agent) => {
       agent.mode = "primary"
@@ -382,6 +397,59 @@ describe("CLIProxyPacer's instructions in a chat's first step", () => {
       const switched = h.requests().at(-1)
       expect(section(switched)).toContain(planText)
       expect(section(switched)).not.toContain(text)
+    }),
+  )
+})
+
+describe("A chat's list read telling CLIProxyPacer the Code Mode pins its agent sets itself", () => {
+  const file = AbsolutePath.make(path.join(path.sep, "project", ".opencode", "agent", "build.md"))
+  const entries = [
+    new Document({
+      type: "document",
+      path: AbsolutePath.make(path.join(path.sep, "project", "opencode.json")),
+      info: Schema.decodeUnknownSync(Info)({ codemode: { pinned: { recall: false, "context7.*": true } } }),
+    }),
+  ]
+
+  it.live("names each pin the agent's file and the config set, with the file, relative to the project", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        model: cppRef,
+        entries,
+        codemode: { pinned: { web_search: true, recall: true }, from: { web_search: file, recall: file } },
+      })
+      yield* h.prompt("Make a task.")
+      expect(fake.pins).toEqual([
+        {
+          "context7.*": { pinned: true, from: "opencode.json" },
+          recall: { pinned: true, from: ".opencode/agent/build.md" },
+          web_search: { pinned: true, from: ".opencode/agent/build.md" },
+        },
+      ])
+      // An agent whose file sets none gets the config's, on the read at its switch.
+      yield* h.session.switchAgent({ sessionID: h.sessionID, agent: Agent.ID.make("plan") })
+      yield* h.prompt("Now plan it.")
+      expect(fake.agents).toEqual(["build", "plan"])
+      expect(fake.pins[1]).toEqual({
+        "context7.*": { pinned: true, from: "opencode.json" },
+        recall: { pinned: false, from: "opencode.json" },
+      })
+    }),
+  )
+
+  it.live("tells none while neither the agent's file nor the config sets a pin", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ model: cppRef })
+      yield* h.prompt("Make a task.")
+      expect(fake.pins).toEqual([null])
+      // Once the config sets one, the next read tells it: here the one at the switch to plan.
+      yield* Context.get(configs, Config.Test).setEntries(entries)
+      yield* h.session.switchAgent({ sessionID: h.sessionID, agent: Agent.ID.make("plan") })
+      yield* h.prompt("Now plan it.")
+      expect(fake.pins).toEqual([
+        null,
+        { "context7.*": { pinned: true, from: "opencode.json" }, recall: { pinned: false, from: "opencode.json" } },
+      ])
     }),
   )
 })

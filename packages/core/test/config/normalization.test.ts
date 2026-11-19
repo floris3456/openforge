@@ -129,6 +129,13 @@ describe("ConfigNormalize", () => {
     expect(Duration.toMillis(info.warming.duration ?? Duration.zero)).toBe(1_800_000)
   })
 
+  test("keeps codemode's pins, as a config file names them", () => {
+    const pinned = { web_search: true, "context7.*": true, "openforge.worktree_list": false }
+    const result = normalized(JSON.parse(JSON.stringify({ codemode: { pinned } })))
+    expect(result.diagnostics).toEqual([])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded).codemode?.pinned).toEqual(pinned)
+  })
+
   test("preserves arbitrary JSON-round-tripped native configuration", () => {
     const result = Effect.runSync(
       Arbitrary.checkEffect(

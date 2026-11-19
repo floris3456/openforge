@@ -9,6 +9,7 @@ import { ImageBank } from "../image/bank.js"
 import type { ImageFit } from "../image/fit.js"
 import type { CodeModeCatalog } from "../codemode/catalog.js"
 import { CodeModeInstructions } from "../codemode/instructions.js"
+import { CodeModePins } from "../codemode/pins.js"
 import { Database } from "../database/database.js"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { InstructionDiscovery } from "../instruction-discovery.js"
@@ -215,9 +216,11 @@ const layer = Layer.effect(
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
       // openforge: CPP's text for agents, which its list carries, comes before the instructions that hold it.
       yield* primeList(session, agent.info, permissions)
+      // The person's and the project's Code Mode pins, every config document's merged.
+      const pins = Option.isSome(config) ? CodeModePins.merged(yield* config.value.entries()) : {}
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions),
+          tools: registry.snapshot(permissions, pins),
           builtins: builtins.load(),
           discovery: discovery.load(),
           skills: skillInstructions.load(permissions),

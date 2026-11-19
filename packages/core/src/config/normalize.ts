@@ -214,6 +214,7 @@ export function normalize(input: unknown): Result {
     snapshots: Info.fields.snapshots,
     media: Info.fields.media,
     tool_output: Info.fields.tool_output,
+    codemode: Info.fields.codemode,
     memory: Info.fields.memory,
     websearch: Info.fields.websearch,
     worktree: Info.fields.worktree,

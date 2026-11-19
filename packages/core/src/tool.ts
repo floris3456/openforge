@@ -5,12 +5,12 @@ export type { Context, Metadata, Namespace, Options, Result } from "@opencode/sc
 import { ToolDefinition, type ToolCall } from "@opencode/ai/effect"
 import type { CodeMode } from "@opencode/codemode"
 import { Tool } from "@opencode/schema/tool"
-import { Context, Effect, Layer, Option, Ref, Result, Schema, SchemaIssue, Types } from "effect"
+import { Context, Effect, Layer, Ref, Result, Schema, SchemaIssue, Types } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import type { Agent } from "./agent.js"
 import { CodeModeCatalog } from "./codemode/catalog.js"
+import type { CodeModePins } from "./codemode/pins.js"
 import { CodeModeTool } from "./codemode/tool.js"
-import { Config } from "./config.js"
 import { Image } from "./image.js"
 import { ImageBank } from "./image/bank.js"
 import { Permission } from "./permission.js"
@@ -45,7 +45,9 @@ type Data = {
 
 export interface Interface extends State.Transformable<Editor> {
   readonly list: () => Effect.Effect<ReadonlyArray<Tool.Info & { readonly id: string }>>
-  readonly snapshot: (permissions?: Permission.Ruleset) => Effect.Effect<Snapshot>
+  /** The tools a chat gets under `permissions`; `pins`, the config's Code Mode pins (`CodeModePins.merged`), decide
+   *  over a registration's own which Code Mode tools are always listed. */
+  readonly snapshot: (permissions?: Permission.Ruleset, pins?: CodeModePins.Pins) => Effect.Effect<Snapshot>
   /**
    * Runs a Code Mode program with no model step over only the Code Mode tools named in `tools` (still subject to
    * whole-tool permission filtering and each tool's own executor policy), with no `fetch`.
@@ -89,17 +91,6 @@ const layer = Layer.effect(
     const hooks = yield* PluginHooks.Service
     const image = yield* Image.Service
     const permission = yield* Permission.Service
-    // The person's Code Mode pins: a tool is always (true) or never (false) listed by its catalog path or namespace.
-    const config = yield* Effect.serviceOption(Config.Service)
-    /** Every document's pins, lowest priority first: a project's add to the person's, a later value winning per tool. */
-    const pins = Effect.fnUntraced(function* () {
-      if (Option.isNone(config)) return {} as Readonly<Record<string, boolean>>
-      return (yield* config.value.entries()).reduce<Record<string, boolean>>(
-        (merged, entry) => (entry.type === "document" ? Object.assign(merged, entry.info.codemode?.pinned) : merged),
-        {},
-      )
-    })
-
     type NormalizedItem = Tool.Content | "decode" | "size"
     const normalizeImages = Effect.fnUntraced(function* (content: ReadonlyArray<Tool.Content>) {
       // openforge: optimized images arrive once, whole, where the request gets the tool's result (ImageBank).
@@ -278,8 +269,7 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
-      snapshot: Effect.fn("Tool.snapshot")(function* (permissions) {
-        const configured = yield* pins()
+      snapshot: Effect.fn("Tool.snapshot")(function* (permissions, configured = {}) {
         const pinning = JSON.stringify(configured)
         return yield* Effect.sync(() => {
           const data = state.get()
@@ -445,5 +435,5 @@ function namespaceError(name: string) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Config.node, PluginHooks.node, Image.node, Permission.node],
+  deps: [PluginHooks.node, Image.node, Permission.node],
 })

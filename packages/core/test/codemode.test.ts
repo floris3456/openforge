@@ -4,23 +4,26 @@ import { Config } from "@opencode/core/config"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
 import { CodeModeCatalog } from "@opencode/core/codemode/catalog"
+import { CodeModePins } from "@opencode/core/codemode/pins"
 import { Tool } from "@opencode/core/tool"
 import { Document, Info } from "@opencode/schema/config"
 import { Effect, Layer, Schema } from "effect"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
 import { it } from "./lib/effect"
 
-// A registry whose config the test holds, so no config on this machine decides what a catalog pins.
-const toolNode = (entries: Parameters<typeof Config.testLayer>[0] = []) => {
-  const config = Config.testLayer(entries)
-  return Layer.merge(
-    config,
+// A registry, beside a config the test holds: its pins reach a snapshot as the session's context passes them
+// (`configPins`), so no config on this machine decides what a catalog pins.
+const toolNode = (entries: Parameters<typeof Config.testLayer>[0] = []) =>
+  Layer.merge(
+    Config.testLayer(entries),
     AppNodeBuilder.build(Tool.node, [
       Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
-      Config.node.replace(config),
     ]),
   )
-}
+const configPins = Effect.gen(function* () {
+  const config = yield* Config.Service
+  return CodeModePins.merged(yield* config.entries())
+})
 
 describe("CodeMode", () => {
   it.effect("owns registrations, execute, and catalog materialization", () =>
@@ -136,7 +139,7 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "context7.query-docs",
         "context7.resolve-library-id",
         "openforge.worktree_list",
@@ -149,7 +152,7 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      const catalog = (yield* tools.snapshot()).codeModeCatalog!
+      const catalog = (yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog!
       // Nothing is pinned, though `openforge.worktree_list` is by its registration; the budget still shows it.
       expect(listed(catalog)).toEqual([])
       expect(
@@ -165,7 +168,7 @@ describe("CodeMode pins", () => {
       const tools = yield* Tool.Service
       yield* register(tools)
       // The person's pins stay, the project's add theirs and unpin openforge's exact path over the person's `openforge.*`.
-      expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual([
+      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
         "context7.query-docs",
         "context7.resolve-library-id",
         "web_search",
@@ -184,10 +187,15 @@ describe("CodeMode pins", () => {
     Effect.gen(function* () {
       const tools = yield* Tool.Service
       yield* register(tools)
-      expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual(["openforge.worktree_list"])
+      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+        "openforge.worktree_list",
+      ])
       const config = yield* Config.Test
       yield* config.setEntries(pinned({ web_search: true }))
-      expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual(["openforge.worktree_list", "web_search"])
+      expect(listed((yield* tools.snapshot(undefined, yield* configPins)).codeModeCatalog)).toEqual([
+        "openforge.worktree_list",
+        "web_search",
+      ])
     }).pipe(Effect.scoped, Effect.provide(toolNode())),
   )
 })

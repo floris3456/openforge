@@ -81,6 +81,8 @@ export interface Interface extends State.Transformable<Editor> {
   /** Enabled models of the given types, chat when none are given. Only chat models are offered for sessions. */
   readonly available: (types?: readonly Model.Type[]) => Effect.Effect<readonly Info[]>
   readonly default: () => Effect.Effect<Info | undefined>
+  /** openforge: the default the config or a plugin names, whether or not the catalog has it. */
+  readonly requested: () => Effect.Effect<{ providerID: Provider.ID; modelID: ID } | undefined>
   readonly small: (providerID: Provider.ID) => Effect.Effect<Info | undefined>
 }
 
@@ -304,6 +306,9 @@ const layer = Layer.effect(
         const requested = value.data.defaultModel
         const model = requested && value.byProvider.get(requested.providerID)?.get(requested.modelID)
         return model?.enabled ? model : value.available.find(supportsText)
+      }),
+      requested: Effect.fn("Model.requested")(function* () {
+        return (yield* read()).data.defaultModel
       }),
       small: Effect.fn("Model.small")(function* (providerID) {
         const value = yield* read()

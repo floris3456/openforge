@@ -927,6 +927,30 @@ export const layer = Layer.effect(
         Effect.andThen(Effect.sync(requests)),
       ),
     )
+    // CPP's `ready` notices, merged until the catalog read they start is done: a server before 2026-11-19 leaves a
+    // model whose logins rest out of its list, so a step woken for it would find it gone without the read.
+    let readied: { providers: Set<string>; models: Set<string>; any: boolean } | undefined
+    const readModels = yield* trigger(
+      "the models after a ready notice",
+      Effect.gen(function* () {
+        const notice = readied
+        readied = undefined
+        if (!notice) return
+        yield* models.refresh()
+        yield* bus.publish(Pacer.Event.LoginsReady, {
+          providers: [...notice.providers],
+          models: notice.any ? [] : [...notice.models],
+        })
+      }),
+    )
+    const readyNotice = (data: string) => {
+      const notice = PacerWire.ready(data)
+      readied ??= { providers: new Set(), models: new Set(), any: false }
+      for (const provider of notice.providers) readied.providers.add(provider)
+      for (const model of notice.models) readied.models.add(model)
+      if (notice.models.length === 0) readied.any = true
+      readModels()
+    }
     const askAll = yield* trigger(
       "the chats CLIProxyPacer asks to compact",
       Effect.gen(function* () {
@@ -966,8 +990,9 @@ export const layer = Layer.effect(
       if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
       if (event === "resync") return everything()
-      // A login may serve again (CPP since 2026-11-19): a step waiting for one tries now (SessionRunnerRetry).
-      if (event === "ready") return void (yield* bus.publish(Pacer.Event.LoginsReady, PacerWire.ready(data)))
+      // A login may serve again (CPP since 2026-11-19): the catalog is read again, then a step waiting for one tries
+      // now (SessionRunnerRetry).
+      if (event === "ready") return readyNotice(data)
       if (event !== "compact") return
       const asked = PacerWire.notice(data)
       if (asked.many) askAll()

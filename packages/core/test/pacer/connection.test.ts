@@ -396,7 +396,8 @@ interface Harness {
   readonly enqueue: (sessionID: SessionID) => Effect.Effect<unknown>
   readonly endpoint: SubscriptionRef.SubscriptionRef<PacerEndpoint.Endpoint | undefined>
   readonly catalog: SubscriptionRef.SubscriptionRef<PacerModels.Catalog | undefined>
-  readonly refreshes: { count: number }
+  /** Catalog reads asked for; while `hold` is set, each waits for it. */
+  readonly refreshes: { count: number; hold?: Deferred.Deferred<void> }
   readonly execution: { readonly active: Set<SessionID>; readonly woken: SessionID[] }
   /** The real background jobs (`Job`), which the connection counts per chat. */
   readonly jobs: Job.Interface
@@ -418,7 +419,7 @@ const harness = Effect.fnUntraced(function* () {
   const folder = yield* tmpdirScoped("opencode-pacer-connection-")
   const endpoint = yield* SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(undefined)
   const models = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(catalog(0))
-  const refreshes = { count: 0 }
+  const refreshes: Harness["refreshes"] = { count: 0 }
   const lookups = { count: 0 }
   const execution = { active: new Set<SessionID>(), woken: [] as SessionID[] }
   const endpoints = Layer.succeed(
@@ -502,7 +503,11 @@ const harness = Effect.fnUntraced(function* () {
             PacerModels.Service.of({
               get: () => SubscriptionRef.get(models),
               changes: () => SubscriptionRef.changes(models),
-              refresh: () => Effect.sync(() => void refreshes.count++),
+              refresh: () =>
+                Effect.gen(function* () {
+                  refreshes.count++
+                  if (refreshes.hold) yield* Deferred.await(refreshes.hold)
+                }),
             }),
           ),
           Layer.succeed(Bus.Service, bus),
@@ -1371,22 +1376,37 @@ describe("PacerConnection notices", () => {
     }),
   )
 
-  it.effect("relays CPP's ready notice as pacer.logins.ready, reading nothing", () =>
-    Effect.gen(function* () {
-      const h = yield* harness()
-      yield* online(h)
-      const reads = h.cpp.seen.length
-      h.cpp.notice("ready", { providers: ["claude"], models: ["claude-opus-5-5"], at: 1 })
-      const ready = () => h.published.filter((event) => event.type === "pacer.logins.ready")
-      yield* until("relayed", () => ready().length === 1)
-      expect(ready()[0]?.data).toEqual({ providers: ["claude"], models: ["claude-opus-5-5"] })
-      // One that names no models frees any model.
-      h.cpp.notice("ready", { providers: ["codex"], at: 2 })
-      yield* until("relayed again", () => ready().length === 2)
-      expect(ready()[1]?.data).toEqual({ providers: ["codex"], models: [] })
-      yield* settle
-      expect(h.cpp.seen.length).toBe(reads)
-    }),
+  it.effect(
+    "relays CPP's ready notices as pacer.logins.ready after reading the models again, merged while a read runs",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const reads = h.cpp.seen.length
+        const before = h.refreshes.count
+        const ready = () => h.published.filter((event) => event.type === "pacer.logins.ready")
+        h.refreshes.hold = yield* Deferred.make<void>()
+        h.cpp.notice("ready", { providers: ["claude"], models: ["claude-opus-5-5"], at: 1 })
+        yield* until("the models read", () => h.refreshes.count === before + 1)
+        yield* settle
+        // Told only once the catalog is read again: a server before 2026-11-19 left a resting login's model out of it.
+        expect(ready()).toHaveLength(0)
+        h.cpp.notice("ready", { providers: ["claude"], models: ["claude-haiku-5-5"], at: 2 })
+        yield* TestClock.adjust("1 second")
+        h.cpp.notice("ready", { providers: ["codex"], at: 3 })
+        yield* settle
+        const hold = h.refreshes.hold
+        h.refreshes.hold = undefined
+        yield* Deferred.succeed(hold, undefined)
+        yield* until("both told", () => ready().length === 2)
+        expect(ready()[0]?.data).toEqual({ providers: ["claude"], models: ["claude-opus-5-5"] })
+        // The two that came during the read: one more read, one event, any model as the second named none.
+        expect(ready()[1]?.data).toEqual({ providers: ["claude", "codex"], models: [] })
+        expect(h.refreshes.count).toBe(before + 2)
+        yield* settle
+        expect(ready()).toHaveLength(2)
+        expect(h.cpp.seen.length).toBe(reads)
+      }),
   )
 })
 

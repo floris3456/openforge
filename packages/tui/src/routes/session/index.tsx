@@ -135,6 +135,7 @@ import { explorationLabel } from "./activity-summary"
 import { useEntryAnchor } from "./anchor-view"
 import { containsAnchor, createTimelineAnchors, groupID } from "./anchors"
 import { rowsAfter, rowsBefore, rowWeight } from "./mount-budget"
+import { useRetryWait } from "../../util/retry-wait"
 export { InlineToolRow } from "./message-parts"
 export { toolDisplay } from "./message-parts"
 
@@ -3309,6 +3310,12 @@ function Subagent(props: ToolProps) {
     const id = sessionID()
     return props.part.state.status === "running" || Boolean(id && data.session.status(id) === "running")
   })
+  // A child waiting on a retry shows it, so it does not look like one that never started.
+  const wait = useRetryWait(() => {
+    const id = sessionID()
+    return id ? data.session.retry(id) : undefined
+  })
+  const theme = useTheme()
 
   return (
     <InlineTool
@@ -3323,8 +3330,19 @@ function Subagent(props: ToolProps) {
         if (id) navigate({ type: "session", sessionID: id })
       }}
       status={
-        isBackgroundSubagent(props.metadata, props.part.state.status) ? (
-          <StatusBadge>Background</StatusBadge>
+        wait() || isBackgroundSubagent(props.metadata, props.part.state.status) ? (
+          <>
+            <Show when={wait()}>
+              {(text) => (
+                <text flexShrink={0} fg={theme.text.feedback.warning.base} wrapMode="none">
+                  {text()}
+                </text>
+              )}
+            </Show>
+            <Show when={isBackgroundSubagent(props.metadata, props.part.state.status)}>
+              <StatusBadge>Background</StatusBadge>
+            </Show>
+          </>
         ) : undefined
       }
     >

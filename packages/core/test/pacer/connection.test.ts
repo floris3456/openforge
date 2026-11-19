@@ -464,6 +464,7 @@ const harness = Effect.fnUntraced(function* () {
     .subscribe([
       Pacer.Event.StatusChanged,
       Pacer.Event.AccountsUpdated,
+      Pacer.Event.LoginsReady,
       Pacer.Event.ModelsUpdated,
       Pacer.Event.ChatUpdated,
       Pacer.Event.RequestsUpdated,
@@ -1367,6 +1368,24 @@ describe("PacerConnection notices", () => {
       h.cpp.notice("resync", { at: 6 })
       yield* until("everything", () => seen(h, "/pacer/v1/state").length === 2 && h.refreshes.count === before + 3)
       yield* until("the requests too", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+    }),
+  )
+
+  it.effect("relays CPP's ready notice as pacer.logins.ready, reading nothing", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const reads = h.cpp.seen.length
+      h.cpp.notice("ready", { providers: ["claude"], models: ["claude-opus-5-5"], at: 1 })
+      const ready = () => h.published.filter((event) => event.type === "pacer.logins.ready")
+      yield* until("relayed", () => ready().length === 1)
+      expect(ready()[0]?.data).toEqual({ providers: ["claude"], models: ["claude-opus-5-5"] })
+      // One that names no models frees any model.
+      h.cpp.notice("ready", { providers: ["codex"], at: 2 })
+      yield* until("relayed again", () => ready().length === 2)
+      expect(ready()[1]?.data).toEqual({ providers: ["codex"], models: [] })
+      yield* settle
+      expect(h.cpp.seen.length).toBe(reads)
     }),
   )
 })

@@ -2,6 +2,7 @@ export * as PacerAnswers from "./answers.js"
 
 import { AIError } from "@opencode/ai/effect"
 import { Model } from "@opencode/schema/model"
+import { Pacer } from "@opencode/schema/pacer"
 import { Option, Schema } from "effect"
 
 /** The provider these answers come from; `PacerEndpoint.id` as a plain string, so this module stays free of services. */
@@ -116,3 +117,26 @@ export function outage(model: Model.Ref, failure: AIError) {
   if (status === 502 || status === 504) return true
   return status === 503 && reason.body !== undefined && Option.isSome(decodeCppDown(reason.body))
 }
+
+/**
+ * Whether a request to the CLIProxyPacer provider was refused for want of a free login: CPP's `503 auth_unavailable`
+ * (every account that could serve the model rests) or `429 model_cooldown` (every one is at its quota), both with a
+ * `Retry-After` that is the soonest moment one is due back (its CLIENT-GUIDE, "Answers a client gets back"). An account
+ * can come back sooner, which CPP's `ready` notice says (`Pacer.Event.LoginsReady`). Not `auth_not_found` (no account
+ * serves the model) nor the terminal `upstream_authentication_required`, which carry no wait.
+ */
+export function noLogin(model: Model.Ref, failure: AIError) {
+  if (model.providerID !== provider) return false
+  return Pacer.noFreeLogin(failure.reason.http?.status, failure.reason.body ?? failure.reason.message)
+}
+
+/**
+ * Whether CPP's `ready` notice may free a login for `model`: it names the model (without a variant suffix, as CPP keeps
+ * its cooldowns), or names no models (any model of its providers).
+ */
+export function readyFor(model: Model.Ref, ready: { readonly models: ReadonlyArray<string> }) {
+  if (model.providerID !== provider) return false
+  return ready.models.length === 0 || ready.models.includes(baseModel(model.id))
+}
+
+const baseModel = (id: string) => id.replace(/\([^()]*\)$/, "")

@@ -1573,6 +1573,45 @@ function modelInfo(name: string): ModelInfo {
   }
 }
 
+test("keeps a session's scheduled retry without its messages, until its next step starts or it ends", () => {
+  const setup = activityFixture(() => Response.json({ data: {} }))
+  const event = (type: string, seq: number, data: Record<string, unknown>) =>
+    ({
+      id: `evt_${seq}`,
+      created: seq,
+      type,
+      durable: { aggregateID: "ses_child", seq, version: 1 },
+      data: { sessionID: "ses_child", ...data },
+    }) as OpenCodeEvent
+  const error = {
+    type: "provider.rate-limit",
+    message: "auth_unavailable: no auth available (providers=claude, model=claude-opus-5-5)",
+    status: 503,
+  }
+  try {
+    setup.emit(event("session.execution.started", 1, {}))
+    setup.emit(event("session.retry.scheduled", 2, { assistantMessageID: "msg_a", attempt: 2, at: 60_000, error }))
+    // The parent shows its child's wait: the child's messages were never read.
+    expect(setup.data.session.message.list("ses_child")).toEqual([])
+    expect(setup.data.session.retry("ses_child")).toEqual({ attempt: 2, at: 60_000, error })
+    setup.emit(
+      event("session.step.started", 3, {
+        assistantMessageID: "msg_a",
+        agent: "general",
+        model: { id: "claude-opus-5-5", providerID: "cliproxypacer" },
+        started: 3,
+      }),
+    )
+    expect(setup.data.session.retry("ses_child")).toBeUndefined()
+    setup.emit(event("session.retry.scheduled", 4, { assistantMessageID: "msg_a", attempt: 3, at: 70_000, error }))
+    expect(setup.data.session.retry("ses_child")?.attempt).toBe(3)
+    setup.emit(event("session.execution.interrupted", 5, { reason: "user" }))
+    expect(setup.data.session.retry("ses_child")).toBeUndefined()
+  } finally {
+    setup.dispose()
+  }
+})
+
 function activityFixture(read: () => Response | Promise<Response>, sessions: SessionInfo[] = []) {
   const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
   const api = OpenCode.make({

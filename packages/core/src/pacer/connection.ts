@@ -966,6 +966,8 @@ export const layer = Layer.effect(
       if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
       if (event === "resync") return everything()
+      // A login may serve again (CPP since 2026-11-19): a step waiting for one tries now (SessionRunnerRetry).
+      if (event === "ready") return void (yield* bus.publish(Pacer.Event.LoginsReady, PacerWire.ready(data)))
       if (event !== "compact") return
       const asked = PacerWire.notice(data)
       if (asked.many) askAll()

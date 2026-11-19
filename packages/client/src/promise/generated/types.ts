@@ -2171,6 +2171,15 @@ export type ArtifactUpdated = {
   data: {}
 }
 
+export type PacerLoginsReady = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.logins.ready"
+  location?: LocationRef
+  data: { providers: Array<string>; models: Array<string> }
+}
+
 export type PacerRequestsUpdated = {
   id: EventID
   created: number
@@ -3279,6 +3288,7 @@ export type V2Event =
   | ArtifactUpdated
   | PacerStatus2
   | PacerAccountsUpdated
+  | PacerLoginsReady
   | PacerModelsUpdated
   | PacerChatUpdated
   | PacerRequestsUpdated
@@ -4784,6 +4794,7 @@ export type EventSubscribeInput = {
         | "artifact.updated"
         | "pacer.status"
         | "pacer.accounts.updated"
+        | "pacer.logins.ready"
         | "pacer.models.updated"
         | "pacer.chat.updated"
         | "pacer.requests.updated"

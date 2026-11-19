@@ -458,10 +458,29 @@ export const Notice = Schema.Struct({
   at: Instant,
 }).annotate({ identifier: "Pacer.Notice" })
 
+/**
+ * Whether an answer says no login is free for the model: CPP's (and CLIProxyAPI's) `503 auth_unavailable`, every account
+ * that could serve it resting, or `429 model_cooldown`, every one at its quota; not `auth_not_found` (none serves it)
+ * nor the terminal `upstream_authentication_required`. `text` is the answer's body, else its message.
+ */
+export function noFreeLogin(status: number | undefined, text: string) {
+  if (status === 503) return text.includes("auth_unavailable") && !text.includes("upstream_authentication_required")
+  return status === 429 && text.includes("model_cooldown")
+}
+
 /** The connection's state changed. */
 const StatusChanged = ephemeral({ type: "pacer.status", schema: { status: Status } })
 /** The accounts were read again and changed. */
 const AccountsUpdated = ephemeral({ type: "pacer.accounts.updated", schema: { accounts: Accounts } })
+/**
+ * CPP's `ready` notice: accounts of these providers may serve these models again (model names without a variant
+ * suffix; none: any model), after a cooldown ended by its time or early, or an account was added, enabled or unpaused.
+ * A step waiting out a want of a free login for one of these models retries now.
+ */
+const LoginsReady = ephemeral({
+  type: "pacer.logins.ready",
+  schema: { providers: Schema.Array(Schema.String), models: Schema.Array(Schema.String) },
+})
 /** CPP's models were read again and the providers serving them changed. */
 const ModelsUpdated = ephemeral({ type: "pacer.models.updated", schema: { models: Models } })
 /**
@@ -491,6 +510,7 @@ const NoticeDismissed = ephemeral({ type: "pacer.notice.dismissed", schema: { re
 export const Event = {
   StatusChanged,
   AccountsUpdated,
+  LoginsReady,
   ModelsUpdated,
   ChatUpdated,
   RequestsUpdated,
@@ -499,6 +519,7 @@ export const Event = {
   Definitions: inventory(
     StatusChanged,
     AccountsUpdated,
+    LoginsReady,
     ModelsUpdated,
     ChatUpdated,
     RequestsUpdated,

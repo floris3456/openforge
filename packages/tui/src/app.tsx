@@ -4,7 +4,7 @@ import { render, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import "./component/spinner-renderable"
 import { Effect, Latch } from "effect"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
-import { createResender, OpenCode, switchingMessage, type SessionInfo } from "@opencode/client"
+import { createResender, OpenCode, switchingNotice, type SessionInfo } from "@opencode/client"
 import { Global } from "@opencode/util/global"
 import { Product } from "@opencode/schema/product"
 import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
@@ -1439,14 +1439,16 @@ function App() {
     if (reconnectTimer) clearTimeout(reconnectTimer)
   })
 
-  // A release switch under way, started from this screen or seen in the service's pause events. Its notice says what
-  // the switch waits for and the screen stays usable; the full-screen overlay comes back once the switch is overdue.
+  // A release switch under way, started from this screen or seen in the service's pause events. Its notice is one line
+  // at the screen's bottom, counting what the switch waits for and naming no chat; the update dialog has the titles.
+  // The full-screen overlay comes back once the switch is overdue.
   const switching = createMemo(() => {
     const pause = data.service.pause()
     const current = updater.state()
     const own = current?.type === "switching" ? current : undefined
     if (!pause && !own) return undefined
-    return `${switchingMessage(own?.version, pause?.state === "pausing" ? pause.waiting : own?.waiting, updater.title)}…`
+    const waiting = pause?.state === "pausing" ? pause.waiting : own?.waiting
+    return { message: switchingNotice(own?.version, waiting), compact: switchingNotice(own?.version) }
   })
   const inSwitch = createMemo(() => switching() !== undefined)
   const [switchOverdue, setSwitchOverdue] = createSignal(false)
@@ -1495,10 +1497,6 @@ function App() {
               <Show when={tabsVisible() && !tabsVertical()}>
                 <SessionTabs />
               </Show>
-              {/* Above the screen's content, so it never covers the start of a transcript. */}
-              <Show when={!switchOverdue() && !updater.dialogOpen() && switching()}>
-                {(message) => <SwitchNotice message={message()} />}
-              </Show>
               <Switch>
                 <Match when={route.data.type === "home"}>
                   <Home />
@@ -1521,6 +1519,10 @@ function App() {
                   />
                 </Match>
               </Switch>
+              {/* One row at the screen's bottom, under the prompt and its footer: nothing worth reading sits there. */}
+              <Show when={!switchOverdue() && !updater.dialogOpen() && switching()}>
+                {(notice) => <SwitchNotice message={notice().message} compact={notice().compact} />}
+              </Show>
             </box>
             <Slot path="app" />
             <PacerNotices />

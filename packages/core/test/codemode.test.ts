@@ -165,7 +165,8 @@ describe("CodeMode pins", () => {
       const tools = yield* Tool.Service
       yield* register(tools)
       expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual(["openforge.worktree_list"])
-      yield* (yield* Config.Test).setEntries(pinned({ web_search: true }))
+      const config = yield* Config.Test
+      yield* config.setEntries(pinned({ web_search: true }))
       expect(listed((yield* tools.snapshot()).codeModeCatalog)).toEqual(["openforge.worktree_list", "web_search"])
     }).pipe(Effect.scoped, Effect.provide(toolNode())),
   )

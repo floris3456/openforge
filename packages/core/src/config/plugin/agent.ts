@@ -7,6 +7,7 @@ import { ConfigSandbox } from "@opencode/schema/config/sandbox"
 import path from "path"
 import { Effect, Result, SchemaIssue, SchemaParser } from "effect"
 import { Agent } from "../../agent.js"
+import { CodeModePins } from "../../codemode/pins.js"
 import { Config } from "../../config.js"
 import { ConfigMarkdown } from "../markdown.js"
 import { ConfigEntryObserver } from "./entry-observer.js"
@@ -105,7 +106,7 @@ export const Plugin = define({
             }
             if (item.sandbox !== undefined) agent.sandbox = ConfigSandbox.merge(agent.sandbox, item.sandbox)
             if (item.codemode?.pinned !== undefined)
-              agent.codemode = { pinned: { ...agent.codemode?.pinned, ...item.codemode.pinned } }
+              agent.codemode = CodeModePins.lay(agent.codemode, item.codemode.pinned, document.path)
           })
         }
       }

@@ -3155,7 +3155,7 @@ export type AgentInfo = {
   steps?: number
   permissions: PermissionRuleset
   sandbox?: ConfigSandbox
-  codemode?: { pinned?: { [x: string]: boolean } }
+  codemode?: { pinned?: { [x: string]: boolean }; from?: { [x: string]: AbsolutePath } }
 }
 
 export type SessionsResponse = {

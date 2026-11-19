@@ -4,7 +4,7 @@ import { Schema } from "effect"
 import { ConfigCodeMode } from "./config/codemode.js"
 import { ConfigSandbox } from "./config/sandbox.js"
 import { ephemeral, inventory } from "./event.js"
-import { optional } from "./schema.js"
+import { AbsolutePath, optional } from "./schema.js"
 import { Model } from "./model.js"
 import { Permission } from "./permission.js"
 import { Provider } from "./provider.js"
@@ -35,8 +35,13 @@ export const Info = Schema.Struct({
   steps: PositiveInt.pipe(optional),
   permissions: Permission.Ruleset,
   sandbox: ConfigSandbox.Info.pipe(optional),
-  /** Its Code Mode pins, laid over the config's when a session runs as it. */
-  codemode: ConfigCodeMode.Info.pipe(optional),
+  /** Its Code Mode pins, laid over the config's when a session runs as it, and the file that sets each. */
+  codemode: Schema.Struct({
+    pinned: ConfigCodeMode.Info.fields.pinned,
+    from: Schema.Record(Schema.String, AbsolutePath).pipe(optional).annotate({
+      description: "The file that sets each of `pinned`, by tool; none for a pin set without a file",
+    }),
+  }).pipe(optional),
 })
   .annotate({ identifier: "Agent.Info" })
   .pipe(

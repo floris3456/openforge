@@ -43,6 +43,7 @@ import { PacerHeaders } from "../pacer/headers.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerWhere } from "../pacer/where.js"
 import { PacerOffer } from "../pacer/offer.js"
+import type { PacerPins } from "../pacer/pins.js"
 import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
 import { Instructions } from "../instructions/index.js"
@@ -119,6 +120,8 @@ export interface Input {
   readonly autoCompaction?: boolean
   /** openforge: the model's entry when the chat gets optimized images (`ImageBank`). */
   readonly images?: ImageFit.Model
+  /** openforge: the agent's Code Mode pins, for the chat's list read only (`SessionContext.Selection.pins`). */
+  readonly pins?: PacerPins.Pins
 }
 
 /** The default output limit: the catalog limit, fitted to the room the prompt leaves in the context window. */
@@ -404,6 +407,7 @@ export const layer = Layer.effect(
               project,
               model: model.ref.id,
               agent: input.agent,
+              pins: input.pins,
               codemode: PacerOffer.executes(tools.definitions),
               step: kind === "primary",
               continues: input.messages.some((message) => message.role === "assistant"),

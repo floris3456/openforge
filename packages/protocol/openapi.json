@@ -17711,6 +17711,12 @@
                 "additionalProperties": {
                   "type": "boolean"
                 }
+              },
+              "from": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/AbsolutePath"
+                }
               }
             },
             "additionalProperties": false

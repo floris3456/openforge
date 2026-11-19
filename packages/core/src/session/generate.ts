@@ -65,6 +65,7 @@ export const generate = Effect.fn("SessionGenerate.generate")(function* (input: 
         ...(history.instructionUpdate ? [Message.system(history.instructionUpdate)] : []),
         Message.user(input.prompt),
       ],
+      pins: selection.pins,
     })
     yield* Effect.logInfo("sending session generation request", {
       sessionID: selection.session.id,

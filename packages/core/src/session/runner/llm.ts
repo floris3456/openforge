@@ -388,6 +388,7 @@ const layer = Layer.effect(
             inputTokens: estimate,
             autoCompaction: compaction.auto(),
             images: loaded.images,
+            pins: loaded.pins,
           })
           .pipe(
             // The hook event holds every message from before images are bounded, screenshots included, and is a separate

@@ -1119,6 +1119,7 @@ export const layer = Layer.effect(
         inputTokens: { measured: budget, estimated: 0 },
         // The summary's model gets the chat's optimized images only when they fit it too.
         images: context.images && ImageFit.forModel(context.model),
+        pins: context.pins,
       })
     }
 

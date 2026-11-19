@@ -32,6 +32,9 @@ export type Info = Shell.Info
 export const Event = Shell.Event
 
 export const RETENTION = Duration.days(7)
+const SPAN_COMMAND_LIMIT = 200
+/** How far back from the end a single cut-off line's start is looked for. */
+const LINE_START_SCAN_LIMIT = 1024 * 1024
 export const DIRECTORY = ShellRunner.DIRECTORY
 
 type CreateInput = Shell.CreateInput & {
@@ -135,6 +138,25 @@ const layer = () =>
       const outputDir = path.join(global.data, DIRECTORY, location.project.id)
       yield* Effect.promise(() => mkdir(outputDir, { recursive: true }))
 
+      // Where the output's last line starts, found by reading back from the end; only needed to size a single cut-off
+      // line. A start further back than LINE_START_SCAN_LIMIT is unknown.
+      const lastLineStart = Effect.fnUntraced(function* (id: Shell.ID, size: number, endsWithNewline: boolean) {
+        const wanted = endsWithNewline ? 2 : 1
+        const starts: number[] = []
+        const floor = Math.max(0, size - LINE_START_SCAN_LIMIT)
+        let end = size
+        while (end > floor && starts.length < wanted) {
+          const from = Math.max(floor, end - ToolOutput.MAX_BYTES)
+          const chunk = yield* runner.output(id, { cursor: from, limit: end - from })
+          const text = chunk.output
+          for (let index = text.length - 1; index >= 0 && starts.length < wanted; index--)
+            if (text[index] === "\n") starts.push(chunk.cursor - Buffer.byteLength(text.slice(index + 1)))
+          if (chunk.cursor <= from) break
+          end = from
+        }
+        return starts[wanted - 1] ?? (floor > 0 ? undefined : 0)
+      })
+
       const result = Effect.fn("Shell.result")(function* (
         started: Shell.Info,
         options?: { readonly wait?: Duration.Input },
@@ -155,23 +177,43 @@ const layer = () =>
             }),
           ),
         )
+        yield* annotate(info)
         const capture = yield* Effect.gen(function* () {
           const limits = Config.latest(yield* config.entries(), "tool_output")
           const maxLines = limits?.max_lines ?? ToolOutput.MAX_LINES
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
-          const latest = yield* runner.output(info.id, { cursor: Number.MAX_SAFE_INTEGER })
-          const page = yield* runner.output(info.id, { cursor: Math.max(0, latest.size - maxBytes), limit: maxBytes })
-          const lines = page.output.split("\n")
-          if (page.output.endsWith("\n")) lines.pop()
-          const truncated = latest.size > maxBytes || lines.length > maxLines
-          const text = lines.length > maxLines ? lines.slice(-maxLines).join("\n") : page.output
+          const size = (yield* runner.output(info.id, { cursor: Number.MAX_SAFE_INTEGER })).size
+          const start = Math.max(0, size - maxBytes)
+          const page = (yield* runner.output(info.id, { cursor: start, limit: maxBytes })).output
+          // Whether the window starts on a line boundary: the byte before it is a newline (upstream's rule).
+          const partial = start > 0 && (yield* runner.output(info.id, { cursor: start - 1, limit: 1 })).output !== "\n"
+          const endsWithNewline = page.endsWith("\n")
+          const lines = page.split("\n")
+          if (endsWithNewline) lines.pop()
           // Counted by the runner while the command printed, so a notice never rescans the output file.
-          const total = (yield* runner.lines(info.id)) + (page.output.endsWith("\n") ? 0 : 1)
-          const shown = Math.min(lines.length, maxLines)
-          const notice = truncated
-            ? `\n\n[showing lines ${total - shown + 1}-${total} of ${total}; full output saved to ${info.file}]`
-            : ""
-          return { output: `${text || "(no output)"}${notice}`, truncated }
+          const total = (yield* runner.lines(info.id)) + (endsWithNewline ? 0 : 1)
+          const suffix = `full output saved to ${info.file}]`
+          if (partial && lines.length === 1) {
+            const lineStart = yield* lastLineStart(info.id, size, endsWithNewline)
+            const end = size - (endsWithNewline ? 1 : 0)
+            const lineSize =
+              lineStart === undefined
+                ? `over ${formatSize(Math.min(end, LINE_START_SCAN_LIMIT))}`
+                : formatSize(end - lineStart)
+            return {
+              output: `${lines[0]}\n\n[showing the last ${formatSize(Buffer.byteLength(lines[0]))} of line ${total} (${lineSize}); ${suffix}`,
+              truncated: true,
+            }
+          }
+          if (start > 0 || lines.length > maxLines) {
+            // A window that starts mid-line drops that partial line so the line numbers stay exact.
+            const kept = lines.slice(-Math.min(maxLines, lines.length - (partial ? 1 : 0)))
+            return {
+              output: `${kept.join("\n")}\n\n[showing lines ${total - kept.length + 1}-${total} of ${total}; ${suffix}`,
+              truncated: true,
+            }
+          }
+          return { output: page || "(no output)", truncated: false }
         }).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.succeed(undefined)))
         const sandboxNote = yield* runner
           .sandboxNote(info.id)
@@ -226,6 +268,7 @@ const layer = () =>
           time: { started },
         }
         const deadline = invocation.timeout > 0 ? started + invocation.timeout : undefined
+        yield* annotate(info)
         if (location.workspaceID !== undefined || process.platform === "win32")
           return yield* ShellInProcess.start({
             info,
@@ -280,3 +323,29 @@ export const node = makeLocationNode({
     cleanupNode,
   ],
 })
+
+// Upstream's span attributes. Spans carry only the command text, truncated; never env, stdin or output. Shells outlive
+// the turn that started them, so the session comes from the shell's own metadata rather than the caller's span
+// annotations.
+function annotate(info: Shell.Info) {
+  const sessionID = info.metadata.sessionID
+  return Effect.annotateCurrentSpan({
+    "opencode.shell.id": info.id,
+    "opencode.shell.command": spanCommand(info.command),
+    ...(typeof sessionID === "string" ? { "session.id": sessionID } : {}),
+    ...(info.metadata.background === true ? { "opencode.shell.background": true } : {}),
+    ...(info.status === "running" ? {} : { "opencode.shell.status": info.status }),
+    ...(info.exit === undefined ? {} : { "process.exit.code": info.exit }),
+  })
+}
+
+// Strict OTLP JSON parsers reject a lone surrogate, which a cut through an emoji would leave.
+function spanCommand(command: string) {
+  if (command.length <= SPAN_COMMAND_LIMIT) return command.toWellFormed()
+  return `${command.slice(0, SPAN_COMMAND_LIMIT).toWellFormed()}…`
+}
+
+function formatSize(bytes: number) {
+  const kb = bytes / 1024
+  return kb > 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.round(kb)} KB`
+}

@@ -739,14 +739,15 @@ function exitOf(entry: Entry, ended: Ended): RunnerProtocol.Exit {
 /** The runner is exiting, or its connection dropped: another attempt reaches the runner that takes over. */
 const exiting = (error: RunnerClient.RunnerError) => error.reason === "closing" || error.reason === "lost"
 
-// How a command's end reads as Shell.Info. Only a command that exited by itself reports its code or signal.
+// How a command's end reads as Shell.Info. A timed-out or killed command keeps its status and still records how its
+// process ended, as upstream's shell does.
 function terminal(info: Shell.Info, exit: RunnerProtocol.Exit): Shell.Info {
   const status = exit.status === "failed" ? "killed" : exit.status
   return {
     ...info,
     status,
-    ...(status === "exited" && exit.code !== undefined ? { exit: exit.code } : {}),
-    ...(status === "exited" && exit.signal !== undefined ? { signal: exit.signal } : {}),
+    ...(exit.code !== undefined ? { exit: exit.code } : {}),
+    ...(exit.signal !== undefined ? { signal: exit.signal } : {}),
     time: { ...info.time, completed: exit.ended },
   }
 }

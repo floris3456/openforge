@@ -938,14 +938,16 @@ describe("SessionRestart background recovery", () => {
         )
         yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
         expect((yield* restarted.pendingBackground).map((job) => job.id)).toEqual(["call-runner-running"])
-        expect(yield* restarted.get("call-runner-running")).toMatchObject({ status: "running" })
+        // Upstream's shell jobs are keyed by their shell, so the reattached job is the shell's.
+        expect(yield* restarted.get(running.id)).toMatchObject({ status: "running" })
 
         fs.writeFileSync(release, "")
         expect(yield* Deferred.await(observed)).toEqual([
-          `<shell id="call-runner-finished" state="completed" command="printf done; exit 3">\ndone\n\nExited with code 3\n</shell>`,
-          // As the shell tool reports it; the timeout the call gave is not kept with its job.
-          `<shell id="call-runner-timed" state="completed" command="${timed.command}">\nslow\n\nCommand exceeded its timeout. Retry with a larger timeout if the command is expected to take longer.\n\nTimed out before completion\n</shell>`,
-          `<shell id="call-runner-running" state="completed" command="${running.command}">\nbeforeafter\n</shell>`,
+          // As upstream's shell tool reports them, each named by its shell; the timeout the call gave is not kept with
+          // its job.
+          `<shell id="${finished.id}" state="completed" command="printf done; exit 3">\ndone\n\nExit code: 3\n</shell>`,
+          `<shell id="${timed.id}" state="completed" command="${timed.command}">\nslow\n\nCommand timed out. If it needs longer and isn't waiting for input, rerun with a larger timeout.\nExit code: 143 (SIGTERM)\n</shell>`,
+          `<shell id="${running.id}" state="completed" command="${running.command}">\nbeforeafter\n</shell>`,
         ])
         yield* Context.get(context, SessionExecution.Service).awaitIdle(sessionID)
         expect(yield* restarted.pendingBackground).toEqual([])

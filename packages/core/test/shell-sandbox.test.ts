@@ -233,7 +233,8 @@ describe("the agent's shell commands in the sandbox", () => {
           expect(refused).toMatchObject({ status: "completed", metadata: { exit: 1 } })
           expect(fs.existsSync(target)).toBe(false)
           expect(text(refused)).toContain("Permission denied")
-          expect(text(refused)).toContain(`Exited with code 1\n\n${NOTE}`)
+          // Upstream's shell tool states the exit on its own line; the note follows it.
+          expect(text(refused)).toContain(`Exit code: 1\n\n${NOTE}`)
           // The chat's folder comes first in the write list, shortened when it is under the home folder.
           const home = fs.realpathSync((yield* Global.Service).home)
           const folder = fs.realpathSync(chat)

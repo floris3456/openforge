@@ -17,8 +17,10 @@ import { InstructionBuiltIns } from "../instructions/builtins.js"
 import { Location } from "../location.js"
 import { McpInstructions } from "../mcp/instructions.js"
 import { McpTool } from "../tool/mcp.js"
+import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerInstructions } from "../pacer/instructions.js"
 import { PacerOffer } from "../pacer/offer.js"
+import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
 import { SkillInstructions } from "../skill/instructions.js"
@@ -107,10 +109,41 @@ const layer = Layer.effect(
     const registry = yield* Tool.Service
     const config = yield* Effect.serviceOption(Config.Service)
     const pacerTools = yield* PacerTools.Service
+    const pacerProject = yield* PacerProject.Service
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     const images = (model: SessionRunnerModel.Resolved) => ImageBank.applies(config, model)
 
     const resolveModel = (session: SessionSchema.Info) => models.resolve(session, model.available)
+
+    // CLIProxyPacer's provider id, which a chat's model names when its list applies.
+    const PACER: string = PacerEndpoint.id
+
+    /**
+     * openforge: reads the chat's list before its instructions are built, for a chat on CLIProxyPacer that holds none.
+     * The list carries the text CPP writes for agents, and an agent makes its first task in its first request, so the
+     * read must come first for the text to be part of that request's baseline. The request's own read then finds the
+     * list held (`SessionModelRequest`); a chat that holds one, or is on another provider, costs nothing here. The
+     * chat's model ref is taken as `SessionRunnerModel.resolve` picks it, without resolving it.
+     */
+    const primeList = Effect.fnUntraced(function* (
+      session: SessionSchema.Info,
+      agent: Agent.Info,
+      permissions: Permission.Ruleset,
+    ) {
+      if (pacerTools.held(session.id) !== undefined) return
+      const ref = session.model ?? agent.model ?? (yield* model.default())
+      if (ref === undefined || ref.providerID !== PACER) return
+      yield* pacerTools.list(
+        PacerTools.listInput({
+          session,
+          project: (yield* pacerProject.chat(session.projectID)).headers,
+          model: String(ref.id),
+          codemode: PacerOffer.executesUnder(permissions),
+          step: true,
+          continues: yield* SessionHistory.answered(db, session.id),
+        }),
+      )
+    })
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
@@ -180,6 +213,8 @@ const layer = Layer.effect(
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      // openforge: CPP's text for agents, which its list carries, comes before the instructions that hold it.
+      yield* primeList(session, agent.info, permissions)
       const loaded = yield* Effect.all(
         {
           tools: registry.snapshot(permissions),
@@ -283,6 +318,7 @@ export const node = makeLocationNode({
     Location.node,
     McpInstructions.node,
     McpTool.node,
+    PacerProject.node,
     PacerTools.node,
     ReferenceInstructions.node,
     SessionRunnerModel.node,

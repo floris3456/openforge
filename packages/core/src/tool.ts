@@ -405,7 +405,8 @@ const layer = Layer.effect(
   }),
 )
 
-const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
+/** Whether `rules` deny `action` on every resource, leaving a tool that asks it unusable in the chat. */
+export const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
 }

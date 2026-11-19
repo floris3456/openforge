@@ -1,8 +1,10 @@
 export * as PacerOffer from "./offer.js"
 
 import type { ToolDefinition } from "@opencode/ai/effect"
+import type { Permission } from "../permission.js"
 import type { CodeModeCatalog } from "../codemode/catalog.js"
 import { CodeModeTool } from "../codemode/tool.js"
+import { whollyDisabled } from "../tool.js"
 import type { PacerTools } from "./tools.js"
 
 // What a request offers of CPP's tools, given the tools the agent may use and the chat's list: the one place that
@@ -30,6 +32,11 @@ export function codemode(known: PacerTools.Known) {
 /** Whether the chat runs Code Mode: its definitions hold `execute`, which a registry leaves out when Code Mode is denied. */
 export function executes(definitions: ReadonlyArray<{ readonly name: string }>) {
   return definitions.some((item) => item.name === CodeModeTool.name)
+}
+
+/** `executes` from a chat's rules, before its definitions exist: a registry keeps `execute` unless it is denied. */
+export function executesUnder(rules: Permission.Ruleset) {
+  return !whollyDisabled("execute", rules)
 }
 
 /**

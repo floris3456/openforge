@@ -416,4 +416,19 @@ export const firstUserMessage = Effect.fn("SessionHistory.firstUserMessage")(fun
   return row && Schema.is(Schema.String)(row.text) ? { id: row.id, text: row.text } : undefined
 })
 
+/** Whether the chat's history holds a model answer, as a list read's `continues` asks: a chat with none is new. */
+export const answered = Effect.fn("SessionHistory.answered")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const row = yield* db
+    .select({ one: sql`1` })
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant")))
+    .limit(1)
+    .get()
+    .pipe(Effect.orDie)
+  return row !== undefined
+})
+
 export * as SessionHistory from "./history.js"

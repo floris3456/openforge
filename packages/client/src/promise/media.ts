@@ -18,8 +18,8 @@ export function mediaHashFromUri(uri: string | undefined): string | undefined {
 }
 
 /**
- * Opts a client into the experimental `experimental-media-uri` capability: while `experimental.media_blob` is on,
- * stored media comes back as `media:<hash>` refs, whose bytes `experimental.media.get` reads.
+ * Opts a client into the experimental `experimental-media-uri` capability: stored media comes back as `media:<hash>`
+ * refs, whose bytes `experimental.media.get` reads.
  *
  * Only the message and inbox reads can return refs, so only they carry the capability.
  * A custom header makes a cross-origin request preflighted, which every other request must keep avoiding.

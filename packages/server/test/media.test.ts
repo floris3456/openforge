@@ -59,7 +59,7 @@ const assistant: SessionMessageInfo = {
   time: { created: 110, completed: 120 },
 }
 
-const serve = (database: string, mediaBlob: boolean) =>
+const serve = (database: string) =>
   ServerFetch.make({
     app: { version: "test" },
     database: { path: database },
@@ -67,7 +67,6 @@ const serve = (database: string, mediaBlob: boolean) =>
     config: {
       directory: path.dirname(database),
       project: false,
-      content: JSON.stringify(mediaBlob ? { experimental: { media_blob: true } } : {}),
     },
     models: { fetch: false },
     fs: { filewatcher: false },
@@ -85,21 +84,34 @@ const client = (handler: (request: Request) => Promise<Response>, capabilities?:
 const media = (base64: string) => `media:${hash(base64)}`
 const route = (base64: string) => `http://opencode.local/api/experimental/media/${hash(base64)}`
 
-it.live("serves stored media as refs only to clients that opt in while experimental.media_blob is on", () =>
+it.live("serves stored media as refs only to clients that opt in", () =>
   Effect.gen(function* () {
     // Acquired first so it is removed after the servers below are released; Windows can't delete an open db.
     const dir = (yield* tmpdirScoped("opencode-media-wire-")).path
     yield* Effect.gen(function* () {
       const database = path.join(dir, "opencode.db")
-      const handler = yield* serve(database, true)
+      const handler = yield* serve(database)
       const plain = client(handler)
       const opted = client(handler, "other, Experimental-Media-URI")
       const sessionID = Session.ID.create()
 
       yield* Effect.promise(async () => {
         const template = await plain.session.create({ title: "Media wire" })
-        // With the flag on, import stores the media as blobs.
+        // Import stores the media as blobs.
         await plain.experimental.session.import({ info: { ...template, id: sessionID }, messages: [user, assistant] })
+
+        // The database keeps only each blob's reference; its bytes are a file named by their hash beside it.
+        const stored = new Sqlite(database, { readonly: true })
+        expect(stored.query("SELECT hash, length(data) AS size FROM blob ORDER BY hash").all()).toEqual(
+          [png, text, svg, html]
+            .map((item) => ({ hash: hash(item), size: 0 }))
+            .toSorted((a, b) => a.hash.localeCompare(b.hash)),
+        )
+        stored.close()
+        for (const item of [png, text, svg, html])
+          expect(
+            (await fs.readFile(path.join(dir, "media", hash(item).slice(0, 2), hash(item)))).toString("base64"),
+          ).toBe(item)
 
         // Without the capability, reads stay byte-for-byte what was imported.
         expect((await plain.message.list({ sessionID, order: "asc" })).data).toEqual([user, assistant])
@@ -265,22 +277,11 @@ it.live("serves stored media as refs only to clients that opt in while experimen
           files: [placeholder],
         })
       })
-
-      // Another server over the same database without the flag: opted-in clients get bytes, and the route still
-      // serves what stored messages reference.
-      const disabled = yield* serve(database, false)
-      yield* Effect.promise(async () => {
-        expect((await disabled(new Request(route(png)))).status).toBe(200)
-        expect(
-          (await client(disabled, "experimental-media-uri").message.list({ sessionID, order: "asc" })).data.slice(0, 2),
-        ).toEqual([user, assistant])
-        expect((await handler(new Request(route(png)))).status).toBe(200)
-      })
     })
   }).pipe(Effect.scoped),
 )
 
-it.live("follows experimental.media_blob from the session's project config and serves only referenced blobs", () =>
+it.live("serves only referenced blobs to a session in a project", () =>
   Effect.gen(function* () {
     const dir = (yield* tmpdirScoped("opencode-media-project-")).path
     yield* Effect.gen(function* () {
@@ -290,9 +291,7 @@ it.live("follows experimental.media_blob from the session's project config and s
       yield* Effect.promise(async () => {
         await fs.mkdir(global, { recursive: true })
         await fs.mkdir(project, { recursive: true })
-        await fs.writeFile(path.join(project, "opencode.json"), JSON.stringify({ experimental: { media_blob: true } }))
       })
-      // The flag lives only in the project's config; the server's cwd and global config leave it off.
       const handler = yield* ServerFetch.make({
         app: { version: "test" },
         database: { path: database },

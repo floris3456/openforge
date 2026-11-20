@@ -18,7 +18,6 @@ import { PluginHooks } from "./plugin/hooks.js"
 import { Database } from "./database/database.js"
 import { SessionProjector } from "./session/projector.js"
 import { SessionMessageTable } from "./session/sql.js"
-import { SessionBlob } from "./session/blob.js"
 import { SessionSchema } from "./session/schema.js"
 import { RelativePath } from "./schema.js"
 import { Agent } from "@opencode/schema/agent"
@@ -152,11 +151,11 @@ export interface Interface {
     sessionID: SessionSchema.ID
     messageID: SessionMessage.ID
   }) => Effect.Effect<SessionMessage.Info | undefined>
-  /** Experimental: {@link Interface.messages} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  /** Experimental: {@link Interface.messages} with files stored in `blob` left as `media:` refs. */
   readonly messagesWithRefs: (
     input: SessionStore.MessagesInput,
   ) => Effect.Effect<SessionMessage.MediaInfo[], NotFoundError | MessageDecodeError>
-  /** Experimental: {@link Interface.message} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  /** Experimental: {@link Interface.message} with files stored in `blob` left as `media:` refs. */
   readonly messageWithRefs: (input: {
     sessionID: SessionSchema.ID
     messageID: SessionMessage.ID
@@ -180,7 +179,7 @@ export interface Interface {
    * unhandled compaction barriers.
    */
   readonly inbox: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.Info[], NotFoundError>
-  /** Experimental: {@link Interface.inbox} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  /** Experimental: {@link Interface.inbox} with files stored in `blob` left as `media:` refs. */
   readonly inboxWithRefs: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.MediaInfo[], NotFoundError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
@@ -291,7 +290,6 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const kv = yield* KV.Service
     const sessions = yield* Session.make()
-    const mediaBlob = (session: SessionSchema.Info) => SessionBlob.enabledFor(instances, session)
     const isDurableSessionEvent = (item: Bus.LogItem): item is SessionEvent.DurableEvent =>
       Object.hasOwn(SessionEvent.Durable.cases, item.type)
 
@@ -380,16 +378,12 @@ const layer = Layer.effect(
         // The fork adopts the parent's newest instruction values rather than the
         // values in effect at the boundary; copied history may contain frozen
         // instruction-update text the initial baseline already reflects.
-        // The parent's location, not the caller's, decides whether the copy's media is stored as blobs.
-        const media = yield* mediaBlob(parent)
-        yield* bus
-          .publish(SessionEvent.Forked, {
-            sessionID,
-            parentID: parent.id,
-            boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
-            ...inherited,
-          })
-          .pipe(Effect.provideService(SessionBlob.ForkMedia, media))
+        yield* bus.publish(SessionEvent.Forked, {
+          sessionID,
+          parentID: parent.id,
+          boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
+          ...inherited,
+        })
         const forked = yield* result.get(sessionID).pipe(Effect.orDie)
         yield* Effect.gen(function* () {
           yield* Plugin.awaitActivation
@@ -455,14 +449,12 @@ const layer = Layer.effect(
       }),
       message: (input) => sessions.forSession(input.sessionID).message(input.messageID),
       messagesWithRefs: Effect.fn("Session.messagesWithRefs")(function* (input) {
-        const session = yield* result.get(input.sessionID)
-        if (!(yield* mediaBlob(session))) return yield* store.messages(input)
+        yield* result.get(input.sessionID)
         return yield* store.messagesWithRefs(input)
       }),
       messageWithRefs: Effect.fn("Session.messageWithRefs")(function* (input) {
         const session = yield* result.get(input.sessionID).pipe(Effect.option)
         if (Option.isNone(session)) return undefined
-        if (!(yield* mediaBlob(session.value))) return yield* result.message(input)
         const stored = yield* store.messageWithRefs(input.messageID)
         return stored?.sessionID === input.sessionID ? stored.message : undefined
       }),
@@ -483,8 +475,7 @@ const layer = Layer.effect(
       }),
       inbox: (sessionID) => sessions.forSession(sessionID).inbox(),
       inboxWithRefs: Effect.fn("Session.inboxWithRefs")(function* (sessionID) {
-        const session = yield* result.get(sessionID)
-        if (!(yield* mediaBlob(session))) return yield* result.inbox(sessionID)
+        yield* result.get(sessionID)
         return yield* SessionInbox.listWithRefs(db, sessionID)
       }),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),

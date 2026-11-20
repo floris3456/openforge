@@ -56,9 +56,9 @@ const ORIGINAL_REF = SessionMessage.ID.make("msg_image_bank")
 const numbering = Semaphore.makeUnsafe(1)
 
 /**
- * Fits arriving images to the model, keeps each original in the chat's bank whatever `experimental.media_blob` says,
- * and numbers them in the order given. An image the chat already holds keeps its number and line, so showing one again
- * repeats it exactly. One that can't be decoded is undefined.
+ * Fits arriving images to the model, keeps each original in the chat's bank, and numbers them in the order given. An
+ * image the chat already holds keeps its number and line, so showing one again repeats it exactly. One that can't be
+ * decoded is undefined.
  */
 export const arrive = Effect.fnUntraced(function* (
   db: DatabaseService,

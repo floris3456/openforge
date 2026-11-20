@@ -19162,13 +19162,13 @@
               "codemode_vm": {
                 "type": "boolean"
               },
+              "media_blob": {
+                "type": "boolean"
+              },
               "all_flags": {
                 "type": "boolean"
               },
               "todo": {
-                "type": "boolean"
-              },
-              "media_blob": {
                 "type": "boolean"
               },
               "automations": {

@@ -1,6 +1,6 @@
 export * as ConfigFlag from "./flag.js"
 
-/** The `OPENCODE_FLAGS` entry that enables all flags except opt-in-only flags, as in `all,-media_blob`. */
+/** The `OPENCODE_FLAGS` entry that enables all flags except opt-in-only flags, as in `all,-todo`. */
 export const wildcard = "all"
 
 /**
@@ -9,7 +9,6 @@ export const wildcard = "all"
  */
 export const registry = {
   todo: "Enable the experimental todowrite tool.",
-  media_blob: "Store new session media once in a deduplicated blob table instead of inline in every message row.",
   automations:
     "Run a prompt or Code Mode action on a timer, or on a connected MCP server's push event when mcp_events is enabled.",
   artifacts: "Enable experimental artifacts backed by pluggable providers.",

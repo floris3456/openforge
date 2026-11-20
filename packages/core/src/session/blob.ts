@@ -2,14 +2,13 @@ export * as SessionBlob from "./blob.js"
 
 import { createHash } from "node:crypto"
 import { and, eq, exists, gte, inArray, notExists, type SQL, sql } from "drizzle-orm"
-import { Cause, Context, Effect, Option, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { map } from "effect/Array"
 import type { Attachment, FileAttachment } from "@opencode/schema/prompt"
 import type { Tool } from "@opencode/schema/tool"
 import { DatabaseBatch } from "../database/batch.js"
 import type { Database } from "../database/database.js"
-import { Flag } from "../flag.js"
-import type { Instance } from "../instance/service.js"
+import { MediaFiles } from "../media/files.js"
 import type { SessionMessage } from "./message.js"
 import type { SessionSchema } from "./schema.js"
 import { BlobRefTable, BlobTable, SessionInboxTable, SessionMessageTable } from "./sql.js"
@@ -112,13 +111,30 @@ const load = Effect.fnUntraced(function* (db: DatabaseService, hashes: ReadonlyS
       .where(inArray(BlobTable.hash, batch))
       .all()
       .pipe(Effect.orDie)
-    for (const blob of found) blobs.set(blob.hash, view(blob.data).toString("base64"))
+    const bytes = yield* Effect.forEach(found, (blob) => bytesOf(db, blob), { concurrency: 8 })
+    found.forEach((blob, index) => {
+      const data = bytes[index]
+      if (data) blobs.set(blob.hash, data.toString("base64"))
+    })
   }
   return blobs
 })
 
 const view = (data: Uint8Array) =>
   Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+
+/**
+ * openforge (spec pictures-files): a row's bytes, or its file's once they moved there (the row's are then empty).
+ * Undefined when the file can't be read, which reads as the unavailable placeholder.
+ */
+const bytesOf = (db: DatabaseService, blob: { readonly hash: string; readonly data: Uint8Array }) => {
+  const folder = MediaFiles.folder(db)
+  if (blob.data.byteLength > 0 || !folder) return Effect.succeed<Buffer | undefined>(view(blob.data))
+  return Effect.promise(() => MediaFiles.read(folder, blob.hash)).pipe(
+    Effect.map((data) => data && view(data)),
+    Effect.tap((data) => (data ? Effect.void : Effect.logWarning("a picture's file is missing", { hash: blob.hash }))),
+  )
+}
 
 /** Restores inline media for the refs in `session_message` rows. Rows without refs are returned untouched. */
 export const hydrate = Effect.fnUntraced(function* (db: DatabaseService, rows: ReadonlyArray<MessageRow>) {
@@ -240,7 +256,9 @@ export const read = Effect.fnUntraced(function* (db: DatabaseService, hash: stri
     )
     .get()
     .pipe(Effect.orDie)
-  return blob && { mime: blob.mime, data: view(blob.data) }
+  if (!blob) return undefined
+  const data = yield* bytesOf(db, { hash, data: blob.data })
+  return data && { mime: blob.mime, data }
 })
 
 /** A blob's hash is the lowercase hex SHA-256 of its raw bytes. */
@@ -257,35 +275,6 @@ export interface Owner {
 type Pending = Map<string, typeof BlobTable.$inferInsert>
 type AssistantPart = SessionMessage.Assistant["content"][number]
 
-/** Reads the `media_blob` flag from the Flag.Service in scope on every call; without one, it is off. */
-export const enabled = Effect.gen(function* () {
-  const flag = yield* Effect.serviceOption(Flag.Service)
-  if (Option.isNone(flag)) return false
-  return yield* flag.value.enabled("media_blob")
-})
-
-/**
- * {@link Flag.enabled} for `media_blob` as `session`'s location configures it, where its media is written. Off when
- * that location can't boot or load its config, which surfaces as defects too, so a broken location never fails the caller.
- */
-export const enabledFor = (instances: Instance.Interface, session: SessionSchema.Info): Effect.Effect<boolean> =>
-  Flag.enabled("media_blob").pipe(
-    instances.provide(session),
-    Effect.catchCause((cause) =>
-      Cause.hasInterrupts(cause)
-        ? Effect.failCause(Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)))
-        : Effect.logWarning("could not resolve experimental.media_blob; keeping media inline", { cause }).pipe(
-            Effect.as(false),
-          ),
-    ),
-  )
-
-/**
- * Whether a fork's projection stores the child's copied media as blobs. `Session.fork` sets it from the parent's
- * location; the projection ignores the caller's own config, and a replayed fork without it copies media inline.
- */
-export const ForkMedia = Context.Reference<boolean>("@opencode/SessionBlob/ForkMedia", { defaultValue: () => false })
-
 const DATA_URI = /^data:[^,]*;base64,(.*)$/s
 
 function take(pending: Pending, raw: Buffer, mime: string) {
@@ -294,16 +283,23 @@ function take(pending: Pending, raw: Buffer, mime: string) {
   return SessionStored.ref(hash)
 }
 
+// openforge (spec pictures-files): media becomes a ref only when reading the ref gives back exactly the text it
+// replaces, so what the model is sent for it never changes by a byte; anything else stays inline.
 function fileRef(pending: Pending, file: SessionStored.File): SessionStored.File {
   if (isFileRef(file)) return file
   const { data, ...rest } = file
-  return { ...rest, uri: take(pending, Buffer.from(data, "base64"), file.mime) }
+  const raw = Buffer.from(data, "base64")
+  if (raw.toString("base64") !== data) return file
+  return { ...rest, uri: take(pending, raw, file.mime) }
 }
 
 function toolRef(pending: Pending, item: Tool.Content): Tool.Content {
   if (item.type !== "file") return item
   const data = DATA_URI.exec(item.uri)?.[1]
-  return data === undefined ? item : { ...item, uri: take(pending, Buffer.from(data, "base64"), item.mime) }
+  if (data === undefined) return item
+  const raw = Buffer.from(data, "base64")
+  if (`data:${item.mime};base64,${raw.toString("base64")}` !== item.uri) return item
+  return { ...item, uri: take(pending, raw, item.mime) }
 }
 
 function toolPartRefs(pending: Pending, part: AssistantPart): AssistantPart {
@@ -313,20 +309,34 @@ function toolPartRefs(pending: Pending, part: AssistantPart): AssistantPart {
   return { ...part, state: { ...part.state, content: map(content, (item) => toolRef(pending, item)) } }
 }
 
-/** Inserts blobs, keeping any that already exist. */
+/**
+ * Inserts blobs, keeping any that already exist. openforge (spec pictures-files): with a media folder their bytes go to
+ * its files and the rows keep only the reference. The rows go in first and the files after, so a removal of a file
+ * that no row named any more sees this save touch or write it.
+ */
 export const save = Effect.fnUntraced(function* (
   db: DatabaseService,
   blobs: ReadonlyArray<typeof BlobTable.$inferInsert>,
 ) {
-  for (const batch of DatabaseBatch.insertBatches(BlobTable, blobs))
+  const folder = MediaFiles.folder(db)
+  const rows = folder ? blobs.map((blob) => ({ ...blob, data: EMPTY })) : blobs
+  for (const batch of DatabaseBatch.insertBatches(BlobTable, rows))
     yield* db.insert(BlobTable).values(batch).onConflictDoNothing().run().pipe(Effect.orDie)
+  if (folder)
+    yield* Effect.forEach(blobs, (blob) => Effect.promise(() => MediaFiles.put(folder, blob.hash, blob.data)), {
+      concurrency: 4,
+      discard: true,
+    })
 })
+
+/** A row's bytes once they are in its file. */
+export const EMPTY = Buffer.alloc(0)
 
 /** {@link externalize} for a user message or pending inbox user payload. */
 export const externalizePayload = Effect.fnUntraced(function* <
   T extends { readonly files?: ReadonlyArray<SessionStored.File> },
 >(db: DatabaseService, input: T): Effect.fn.Return<T> {
-  if (input.files === undefined || !(yield* enabled)) return input
+  if (input.files === undefined) return input
   const pending: Pending = new Map()
   const files = input.files.map((file) => fileRef(pending, file))
   if (pending.size === 0) return input
@@ -335,15 +345,15 @@ export const externalizePayload = Effect.fnUntraced(function* <
 })
 
 /**
- * With `experimental.media_blob` on, moves inline user files and tool `data:` files into `blob` and returns the
- * message to store with refs in their place. Existing refs pass through.
+ * Moves inline user files and tool `data:` files into `blob` and returns the message to store with refs in their
+ * place. Existing refs pass through.
  */
 export const externalize = Effect.fnUntraced(function* (
   db: DatabaseService,
   message: SessionMessage.Info | SessionStored.User,
 ) {
   if (message.type === "user") return yield* externalizePayload(db, message)
-  if (message.type !== "assistant" || !(yield* enabled)) return message
+  if (message.type !== "assistant") return message
   const pending: Pending = new Map()
   const content = message.content.map((part) => toolPartRefs(pending, part))
   if (pending.size === 0) return message
@@ -353,7 +363,6 @@ export const externalize = Effect.fnUntraced(function* (
 
 /** {@link externalize} for one assistant part. Returns the same part when nothing moved. */
 export const externalizePart = Effect.fnUntraced(function* (db: DatabaseService, part: AssistantPart) {
-  if (!(yield* enabled)) return part
   const pending: Pending = new Map()
   const stored = toolPartRefs(pending, part)
   if (pending.size === 0) return part
@@ -375,8 +384,8 @@ function storedPartRefs(pending: Pending, part: Part): Part {
 }
 
 /**
- * Moves a stored row's inline media into blobs whatever the flag says, for offline backfills. Returns the row to
- * store (the same object when nothing moved), the blobs to insert, and every hash the row then names.
+ * Moves a stored row's inline media into blobs, for backfills and copies. Returns the row to store (the same object
+ * when nothing moved), the blobs to insert, and every hash the row then names.
  */
 export function split<T extends MessageRow["data"] | InboxRow["payload"] | Part>(data: T) {
   const pending: Pending = new Map()
@@ -395,7 +404,7 @@ export function split<T extends MessageRow["data"] | InboxRow["payload"] | Part>
 
 /**
  * {@link split} for a message row copied into another session by a fork: saves the moved blobs and returns the row
- * to store. Callers check {@link ForkMedia} and record the copy's refs.
+ * to store. Callers record the copy's refs.
  */
 export const externalizeRow = Effect.fnUntraced(function* (db: DatabaseService, data: MessageRow["data"]) {
   const result = split(data)

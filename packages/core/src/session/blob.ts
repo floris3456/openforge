@@ -9,6 +9,7 @@ import type { Tool } from "@opencode/schema/tool"
 import { DatabaseBatch } from "../database/batch.js"
 import type { Database } from "../database/database.js"
 import { MediaFiles } from "../media/files.js"
+import { PictureRemoved } from "@opencode/util/picture-removed"
 import type { SessionMessage } from "./message.js"
 import type { SessionSchema } from "./schema.js"
 import { BlobRefTable, BlobTable, SessionInboxTable, SessionMessageTable } from "./sql.js"
@@ -284,9 +285,10 @@ function take(pending: Pending, raw: Buffer, mime: string) {
 }
 
 // openforge (spec pictures-files): media becomes a ref only when reading the ref gives back exactly the text it
-// replaces, so what the model is sent for it never changes by a byte; anything else stays inline.
+// replaces, so what the model is sent for it never changes by a byte; anything else stays inline. So does a removed
+// picture's placeholder, which clients recognize by its text.
 function fileRef(pending: Pending, file: SessionStored.File): SessionStored.File {
-  if (isFileRef(file)) return file
+  if (isFileRef(file) || PictureRemoved.is(file.data)) return file
   const { data, ...rest } = file
   const raw = Buffer.from(data, "base64")
   if (raw.toString("base64") !== data) return file
@@ -370,7 +372,8 @@ export const externalizePart = Effect.fnUntraced(function* (db: DatabaseService,
   return stored
 })
 
-const hashesOf = (data: Refs) => {
+/** Every blob hash a stored row names. */
+export const hashesOf = (data: Refs) => {
   const hashes = new Set<string>()
   collect(data, hashes)
   return hashes
@@ -460,7 +463,18 @@ export const recordHashes = Effect.fnUntraced(function* (
 /** Records the refs a rewritten message names and releases the ones it no longer does. */
 export const syncRefs = Effect.fnUntraced(function* (db: DatabaseService, owner: Owner, data: Refs) {
   yield* recordRefs(db, owner, data)
-  const present = hashesOf(data)
+  yield* releaseStale(db, owner, hashesOf(data))
+})
+
+/**
+ * Releases `owner`'s refs to blobs outside `present`. openforge (spec pictures-files): returns the hashes whose blob went
+ * with them, whose files the caller may then delete.
+ */
+export const releaseStale = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  owner: Pick<Owner, "sessionID" | "messageID">,
+  present: ReadonlySet<string>,
+) {
   const own = [eq(BlobRefTable.session_id, owner.sessionID), eq(BlobRefTable.message_id, owner.messageID)] as const
   if (present.size === 0) return yield* release(db, ...own)
   const stale = (yield* db
@@ -469,11 +483,13 @@ export const syncRefs = Effect.fnUntraced(function* (db: DatabaseService, owner:
     .where(and(...own))
     .all()
     .pipe(Effect.orDie)).flatMap((ref) => (present.has(ref.hash) ? [] : [ref.hash]))
+  const gone: string[] = []
   for (const batch of DatabaseBatch.batches(stale, 1, own.length))
-    yield* release(db, ...own, inArray(BlobRefTable.hash, batch))
+    gone.push(...(yield* release(db, ...own, inArray(BlobRefTable.hash, batch))))
+  return gone
 })
 
-/** Deletes the matching refs, then every blob among theirs that no ref names anymore. */
+/** Deletes the matching refs, then every blob among theirs that no ref names anymore; returns those blobs' hashes. */
 const release = Effect.fnUntraced(function* (db: DatabaseService, ...where: readonly [SQL, ...SQL[]]) {
   const released = yield* db
     .delete(BlobRefTable)
@@ -481,22 +497,30 @@ const release = Effect.fnUntraced(function* (db: DatabaseService, ...where: read
     .returning({ hash: BlobRefTable.hash })
     .all()
     .pipe(Effect.orDie)
+  const gone: string[] = []
   for (const batch of DatabaseBatch.batches([...new Set(released.map((ref) => ref.hash))], 1))
-    yield* db
-      .delete(BlobTable)
-      .where(
-        and(
-          inArray(BlobTable.hash, batch),
-          notExists(
-            db
-              .select({ one: sql`1` })
-              .from(BlobRefTable)
-              .where(eq(BlobRefTable.hash, BlobTable.hash)),
+    gone.push(
+      ...(yield* db
+        .delete(BlobTable)
+        .where(
+          and(
+            inArray(BlobTable.hash, batch),
+            notExists(
+              db
+                .select({ one: sql`1` })
+                .from(BlobRefTable)
+                .where(eq(BlobRefTable.hash, BlobTable.hash)),
+            ),
           ),
-        ),
-      )
-      .run()
-      .pipe(Effect.orDie)
+        )
+        .returning({ hash: BlobTable.hash })
+        .all()
+        .pipe(
+          Effect.orDie,
+          Effect.map((rows) => rows.map((row) => row.hash)),
+        )),
+    )
+  return gone
 })
 
 /** Releases the blobs a removed message or cancelled inbox row referenced. */

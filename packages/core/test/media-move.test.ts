@@ -3,15 +3,19 @@ import { createHash } from "node:crypto"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
-import { DateTime, Effect, Exit, Layer, Schema } from "effect"
+import { DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { SessionContinuity } from "@opencode/core/continuity"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { ImageBank } from "@opencode/core/image/bank"
+import { ImageTable } from "@opencode/core/image/sql"
 import { KV } from "@opencode/core/kv"
 import { MediaFiles } from "@opencode/core/media/files"
 import { MediaKeeper } from "@opencode/core/media/keeper"
+import { MediaClearedTable } from "@opencode/core/media/sql"
 import { MediaMove } from "@opencode/core/media/move"
 import { Model } from "@opencode/core/model"
 import { Project } from "@opencode/core/project"
@@ -32,6 +36,7 @@ import {
 import { SessionStore } from "@opencode/core/session/store"
 import { Tool } from "@opencode/schema/tool"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { PictureRemoved } from "@opencode/util/picture-removed"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 
@@ -99,112 +104,131 @@ const layer = (file: string) =>
     SessionContinuity.node.replace(SessionContinuity.noopLayer),
   ])
 
-const seed = Effect.gen(function* () {
-  const db = (yield* Database.Service).db
-  yield* db
-    .insert(ProjectTable)
-    .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
-    .run()
-    .pipe(Effect.orDie)
-  yield* db
-    .insert(SessionTable)
-    .values({
-      id: sessionID,
-      project_id: Project.ID.global,
-      slug: "s",
-      directory: "/project",
-      title: "s",
-      version: "t",
-    })
-    .run()
-    .pipe(Effect.orDie)
-  yield* db
-    .insert(BlobTable)
-    .values([
-      ...originals.map((data) => ({
-        hash: hash(data),
-        mime: "image/png",
-        bytes: data.byteLength,
-        data,
-        time_created: 1,
-      })),
-      { ...corrupt, mime: "image/png", bytes: corrupt.data.byteLength, time_created: 1 },
-    ])
-    .run()
-    .pipe(Effect.orDie)
-  yield* db
-    .insert(BlobRefTable)
-    .values(
-      [...originals.map(hash), corrupt.hash].map((item) => ({
+/** The chat's rows, its last change at `updated` (now when not given). */
+const seed = (updated?: number) =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "s",
+        directory: "/project",
+        title: "s",
+        version: "t",
+        ...(updated === undefined ? {} : { time_updated: updated }),
+      })
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(ImageTable)
+      .values(
+        originals.map((data, index) => ({
+          session_id: sessionID,
+          number: index + 1,
+          hash: hash(data),
+          name: `original ${index + 1}`,
+          width: 10,
+          height: 10,
+          shown_width: 10,
+          shown_height: 10,
+        })),
+      )
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(BlobTable)
+      .values([
+        ...originals.map((data) => ({
+          hash: hash(data),
+          mime: "image/png",
+          bytes: data.byteLength,
+          data,
+          time_created: 1,
+        })),
+        { ...corrupt, mime: "image/png", bytes: corrupt.data.byteLength, time_created: 1 },
+      ])
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(BlobRefTable)
+      .values(
+        [...originals.map(hash), corrupt.hash].map((item) => ({
+          session_id: sessionID,
+          message_id: SessionMessage.ID.make("msg_image_bank"),
+          hash: item,
+          seq: 0,
+        })),
+      )
+      .run()
+      .pipe(Effect.orDie)
+    const split = SessionMessage.ID.make("msg_move_split")
+    yield* db
+      .insert(SessionMessageTable)
+      .values([
+        {
+          id: SessionMessage.ID.make("msg_move_user"),
+          session_id: sessionID,
+          type: "user",
+          seq: 1,
+          time_created: 1,
+          time_updated: 1,
+          data: {
+            text: "look",
+            files: [{ data: person.toString("base64"), mime: "image/png", source: { type: "inline" }, name: "me.png" }],
+            time: { created: 1 },
+          },
+        },
+        assistant(SessionMessage.ID.make("msg_move_inline"), 2, [
+          tool("call_fitted", [
+            { type: "text", text: "[Image 1: fitted]" },
+            { type: "file", uri: `data:image/png;base64,${fitted.toString("base64")}`, mime: "image/png" },
+            { type: "file", uri: mismatched, mime: "image/png" },
+          ]),
+        ]),
+        assistant(split, 3, []),
+      ])
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(SessionPartTable)
+      .values({
+        message_id: split,
         session_id: sessionID,
-        message_id: SessionMessage.ID.make("msg_image_bank"),
-        hash: item,
-        seq: 0,
-      })),
-    )
-    .run()
-    .pipe(Effect.orDie)
-  const split = SessionMessage.ID.make("msg_move_split")
-  yield* db
-    .insert(SessionMessageTable)
-    .values([
-      {
-        id: SessionMessage.ID.make("msg_move_user"),
+        ordinal: 0,
+        type: "tool",
+        call_id: "call_part",
+        time_created: 3,
+        time_updated: 3,
+        data: tool("call_part", [
+          { type: "file", uri: `data:image/png;base64,${part.toString("base64")}`, mime: "image/png" },
+        ]),
+      })
+      .run()
+      .pipe(Effect.orDie)
+    yield* db
+      .insert(SessionInboxTable)
+      .values({
+        id: SessionMessage.ID.make("msg_move_queued"),
         session_id: sessionID,
         type: "user",
-        seq: 1,
-        time_created: 1,
-        time_updated: 1,
-        data: {
-          text: "look",
-          files: [{ data: person.toString("base64"), mime: "image/png", source: { type: "inline" }, name: "me.png" }],
-          time: { created: 1 },
+        payload: {
+          text: "later",
+          files: [{ data: queued.toString("base64"), mime: "image/png", source: { type: "inline" }, name: "q.png" }],
         },
-      },
-      assistant(SessionMessage.ID.make("msg_move_inline"), 2, [
-        tool("call_fitted", [
-          { type: "text", text: "[Image 1: fitted]" },
-          { type: "file", uri: `data:image/png;base64,${fitted.toString("base64")}`, mime: "image/png" },
-          { type: "file", uri: mismatched, mime: "image/png" },
-        ]),
-      ]),
-      assistant(split, 3, []),
-    ])
-    .run()
-    .pipe(Effect.orDie)
-  yield* db
-    .insert(SessionPartTable)
-    .values({
-      message_id: split,
-      session_id: sessionID,
-      ordinal: 0,
-      type: "tool",
-      call_id: "call_part",
-      time_created: 3,
-      time_updated: 3,
-      data: tool("call_part", [
-        { type: "file", uri: `data:image/png;base64,${part.toString("base64")}`, mime: "image/png" },
-      ]),
-    })
-    .run()
-    .pipe(Effect.orDie)
-  yield* db
-    .insert(SessionInboxTable)
-    .values({
-      id: SessionMessage.ID.make("msg_move_queued"),
-      session_id: sessionID,
-      type: "user",
-      payload: {
-        text: "later",
-        files: [{ data: queued.toString("base64"), mime: "image/png", source: { type: "inline" }, name: "q.png" }],
-      },
-      delivery: "queue",
-      enqueued_seq: 4,
-      time_created: 4,
-    })
-    .run()
-    .pipe(Effect.orDie)
-})
+        delivery: "queue",
+        enqueued_seq: 4,
+        time_created: 4,
+      })
+      .run()
+      .pipe(Effect.orDie)
+  })
 
 /** What a reader gets: the chat's messages and its queued prompts, with every picture inline. */
 const reads = Effect.gen(function* () {
@@ -271,7 +295,7 @@ describe("MediaMove", () => {
     withDatabase((_, folder) =>
       Effect.gen(function* () {
         const db = (yield* Database.Service).db
-        yield* seed
+        yield* seed()
         const before = yield* reads
 
         expect(yield* MediaMove.run(db, folder, Effect.void)).toEqual({ blobs: 2, rows: 4 })
@@ -288,7 +312,7 @@ describe("MediaMove", () => {
     withDatabase((_, folder) =>
       Effect.gen(function* () {
         const db = (yield* Database.Service).db
-        yield* seed
+        yield* seed()
         const before = yield* reads
         // A crash had left one picture's file whole and another's half written.
         const first = hash(originals[0]!)
@@ -319,7 +343,7 @@ describe("MediaMove", () => {
     withDatabase((file, folder) =>
       Effect.gen(function* () {
         const db = (yield* Database.Service).db
-        yield* seed
+        yield* seed()
         const moved = [...originals, fitted, person, part, queued]
         // ReleaseDatabase.copy (packages/cli/src/upgrade/database.ts) copies with this statement.
         const copy = Effect.fnUntraced(function* (name: string) {
@@ -353,31 +377,180 @@ describe("MediaMove", () => {
       }),
     ),
   )
+})
 
-  it.live("the service moves once per database and marks it done", () =>
-    withDatabase((_, folder) =>
-      Effect.gen(function* () {
-        const db = (yield* Database.Service).db
-        const keeper = yield* MediaKeeper.Service
-        const kv = yield* KV.Service
-        yield* seed
+const DAY = 24 * 60 * 60 * 1000
+const warmID = Session.ID.make("ses_media_warm")
+const warmPicture = bytes(37, 8_000)
 
-        yield* keeper.run
+/** Polls in real time until `check` holds, while the keeper works on its own fiber. */
+const until = (check: Effect.Effect<boolean>) =>
+  Effect.gen(function* () {
+    const deadline = performance.now() + 10_000
+    while (!(yield* check)) {
+      if (performance.now() > deadline) return yield* Effect.die(new Error("it never happened within 10s"))
+      yield* TestClock.withLive(Effect.sleep("10 millis"))
+    }
+  })
 
-        yield* expectMoved(folder)
-        expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 2, rows: 4 })
-        // Marked done, a later start doesn't scan again.
-        const later = bytes(31, 1_000)
-        yield* db
-          .insert(BlobTable)
-          .values({ hash: hash(later), mime: "image/png", bytes: later.byteLength, data: later, time_created: 1 })
-          .run()
-          .pipe(Effect.orDie)
-        yield* keeper.run
-        expect(
-          yield* db.all<{ size: number }>(sql`SELECT length(data) AS size FROM blob WHERE hash = ${hash(later)}`),
-        ).toEqual([{ size: later.byteLength }])
-      }),
-    ),
+describe("MediaKeeper", () => {
+  it.effect(
+    "removes the pictures of a chat untouched for 30 days at open, of the next one when it turns 30 days old, and moves the rest once",
+    () =>
+      withDatabase((_, folder) =>
+        Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const keeper = yield* MediaKeeper.Service
+          const kv = yield* KV.Service
+          // The files written now are 40 days older than the keeper's clock.
+          const now = Date.now() + 40 * DAY
+          yield* TestClock.setTime(now)
+          yield* seed(now - 31 * DAY)
+          // A chat touched 29 days ago that holds one of the cold chat's originals and a picture of its own.
+          yield* db
+            .insert(SessionTable)
+            .values({
+              id: warmID,
+              project_id: Project.ID.global,
+              slug: "w",
+              directory: "/project",
+              title: "w",
+              version: "t",
+              time_updated: now - 29 * DAY,
+            })
+            .run()
+            .pipe(Effect.orDie)
+          yield* db
+            .insert(BlobRefTable)
+            .values({
+              session_id: warmID,
+              message_id: SessionMessage.ID.make("msg_image_bank"),
+              hash: hash(originals[0]!),
+              seq: 0,
+            })
+            .run()
+            .pipe(Effect.orDie)
+          yield* db
+            .insert(SessionMessageTable)
+            .values({
+              id: SessionMessage.ID.make("msg_warm_user"),
+              session_id: warmID,
+              type: "user",
+              seq: 1,
+              time_created: 1,
+              time_updated: 1,
+              data: {
+                text: "mine",
+                files: [
+                  {
+                    data: warmPicture.toString("base64"),
+                    mime: "image/png",
+                    source: { type: "inline" },
+                    name: "w.png",
+                  },
+                ],
+                time: { created: 1 },
+              },
+            })
+            .run()
+            .pipe(Effect.orDie)
+          const store = yield* SessionStore.Service
+          const warmBefore = yield* store.messages({ sessionID: warmID, order: "asc" })
+          const cleared = (id: Session.ID) =>
+            db
+              .select()
+              .from(MediaClearedTable)
+              .all()
+              .pipe(
+                Effect.orDie,
+                Effect.map((rows) => rows.some((row) => row.session_id === id)),
+              )
+
+          const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          yield* until(kv.get(MediaKeeper.MOVED).pipe(Effect.map((value) => value !== undefined)))
+
+          // The cold chat: each picture is the placeholder, in the model's view as in its rows.
+          expect(yield* cleared(sessionID)).toBe(true)
+          const after = yield* reads
+          expect(after.messages).toMatchObject([
+            {
+              type: "user",
+              files: [{ data: PictureRemoved.data, mime: "text/plain", name: "me.png", source: { type: "inline" } }],
+            },
+            {
+              content: [
+                {
+                  state: {
+                    content: [
+                      { type: "text", text: "[Image 1: fitted]" },
+                      { type: "text", text: PictureRemoved.text },
+                      { type: "text", text: PictureRemoved.text },
+                    ],
+                  },
+                },
+              ],
+            },
+            { content: [{ state: { content: [{ type: "text", text: PictureRemoved.text }] } }] },
+          ])
+          expect(after.inbox).toMatchObject([
+            { payload: { files: [{ data: PictureRemoved.data, mime: "text/plain", name: "q.png" }] } },
+          ])
+          expect(yield* db.select({ hash: ImageTable.hash }).from(ImageTable).all().pipe(Effect.orDie)).toEqual([
+            { hash: "" },
+            { hash: "" },
+          ])
+          // image.show of its numbers says the picture was removed.
+          expect(yield* ImageBank.get(db, sessionID, 1)).toMatchObject({ image: { number: 1 }, original: undefined })
+          // Its last change stays when it was: the removal doesn't touch the chat.
+          expect(
+            (yield* db.select().from(SessionTable).all().pipe(Effect.orDie)).map((row) => [row.id, row.time_updated]),
+          ).toEqual([
+            [sessionID, now - 31 * DAY],
+            [warmID, now - 29 * DAY],
+          ])
+          // The original the warm chat holds stays, as a file; nothing else of the cold chat's pictures is left.
+          expect(
+            yield* db
+              .all<{ hash: string; size: number }>(sql`SELECT hash, length(data) AS size FROM blob ORDER BY hash`)
+              .pipe(Effect.orDie),
+          ).toEqual(
+            [
+              { hash: hash(originals[0]!), size: 0 },
+              { hash: hash(warmPicture), size: 0 },
+            ].toSorted((a, b) => a.hash.localeCompare(b.hash)),
+          )
+          expect(yield* store.messages({ sessionID: warmID, order: "asc" })).toEqual(warmBefore)
+          const files = () =>
+            Effect.promise(() => MediaFiles.list(folder)).pipe(Effect.map((list) => list.hashes.toSorted()))
+          expect(yield* files()).toEqual([hash(originals[0]!), hash(warmPicture)].toSorted())
+
+          // A day later the warm chat turns 30 days old, and the timer set for that moment removes its pictures too.
+          yield* TestClock.adjust(DAY + 1)
+          yield* until(cleared(warmID))
+          expect(yield* store.messages({ sessionID: warmID, order: "asc" })).toMatchObject([
+            { files: [{ data: PictureRemoved.data, mime: "text/plain", name: "w.png" }] },
+          ])
+          yield* until(files().pipe(Effect.map((list) => list.length === 0)))
+          expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
+          yield* Fiber.interrupt(running)
+
+          // The move ran once: a later start doesn't scan again, while it still goes through chats.
+          const later = bytes(31, 1_000)
+          yield* db
+            .insert(BlobTable)
+            .values({ hash: hash(later), mime: "image/png", bytes: later.byteLength, data: later, time_created: 1 })
+            .run()
+            .pipe(Effect.orDie)
+          yield* db.delete(MediaClearedTable).run().pipe(Effect.orDie)
+          const again = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          yield* until(cleared(sessionID))
+          yield* Fiber.interrupt(again)
+          expect(
+            yield* db
+              .all<{ size: number }>(sql`SELECT length(data) AS size FROM blob WHERE hash = ${hash(later)}`)
+              .pipe(Effect.orDie),
+          ).toEqual([{ size: later.byteLength }])
+        }),
+      ),
   )
 })

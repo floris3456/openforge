@@ -160,10 +160,13 @@ export const fork = Effect.fnUntraced(function* (
     .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
+  // openforge (spec pictures-files): an image whose original went after 30 days untouched has none to keep.
+  const kept = [...new Set(images.flatMap((image) => (image.hash === "" ? [] : [image.hash])))]
+  if (kept.length === 0) return
   yield* db
     .insert(BlobRefTable)
     .values(
-      [...new Set(images.map((image) => image.hash))].map((hash) => ({
+      kept.map((hash) => ({
         session_id: sessionID,
         message_id: ORIGINAL_REF,
         hash,
@@ -185,7 +188,7 @@ export const list = (db: DatabaseService, sessionID: SessionSchema.ID) =>
     .all()
     .pipe(Effect.orDie)
 
-/** The chat's image `number` with its original. */
+/** The chat's image `number` with its original, which is undefined once the chat's pictures were removed. */
 export const get = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID, number: number) {
   const image = yield* db
     .select()
@@ -194,6 +197,8 @@ export const get = Effect.fnUntraced(function* (db: DatabaseService, sessionID: 
     .get()
     .pipe(Effect.orDie)
   if (!image) return undefined
+  // openforge (spec pictures-files): its original went with the chat's pictures after 30 days untouched.
+  if (image.hash === "") return { image, original: undefined }
   const original = yield* SessionBlob.read(db, image.hash)
   return original && { image, original }
 })

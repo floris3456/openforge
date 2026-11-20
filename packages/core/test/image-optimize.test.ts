@@ -449,7 +449,7 @@ describe("arrival in a chat", () => {
       expect(blob).toMatchObject({ mime: "image/png", width: 4000, height: 3000, bytes: photo.length })
       expect(Buffer.from(blob!.data).equals(photo)).toBe(true)
       const found = yield* ImageBank.get(db, session.id, 1)
-      expect(found?.original.data.equals(photo)).toBe(true)
+      expect(found?.original?.data.equals(photo)).toBe(true)
       expect(found?.image).toMatchObject({ name: "photo.png", width: 4000, height: 3000, shown_width: 2212 })
       // Shown again: the same number, line and bytes.
       const again = yield* ImageBank.arriveContent(db, session.id, opus, "image", [
@@ -505,10 +505,10 @@ describe("forks", () => {
       // Image 1 is in the fork's history; image 2 came after the boundary.
       expect((yield* ImageBank.list(db, childID)).map((image) => image.number)).toEqual([1])
       const found = yield* ImageBank.get(db, childID, 1)
-      expect(found?.original.data.equals(Buffer.from(sources[0]))).toBe(true)
+      expect(found?.original?.data.equals(Buffer.from(sources[0]))).toBe(true)
       // The fork keeps it with the parent gone.
       yield* bus.publish(SessionEvent.Deleted, { sessionID: session.id })
-      expect((yield* ImageBank.get(db, childID, 1))?.original.data.equals(Buffer.from(sources[0]))).toBe(true)
+      expect((yield* ImageBank.get(db, childID, 1))?.original?.data.equals(Buffer.from(sources[0]))).toBe(true)
     }),
   )
 })

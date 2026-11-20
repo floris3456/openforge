@@ -4,6 +4,7 @@ import { isUtf8 } from "node:buffer"
 import path from "path"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
+import { PictureRemoved } from "@opencode/util/picture-removed"
 import { isRecord } from "@opencode/util/record"
 import { Effect, Stream } from "effect"
 import { Environment } from "../../environment/index.js"
@@ -48,6 +49,7 @@ export const Plugin = {
       if (!chat) return yield* notSent(`${written} is not an image of this chat`)
       const found = yield* ImageBank.get(chat.db, chat.sessionID, number)
       if (!found) return yield* notSent(`${written} is not an image of this chat`)
+      if (!found.original) return yield* notSent(PictureRemoved.shown(written))
       yield* calls
         .upload(found.original.data, found.original.mime, found.image.hash)
         .pipe(Effect.mapError((error) => notSent(`${written} could not be uploaded (${uploadReason(error)})`)))

@@ -420,11 +420,8 @@ test("concurrent service processes elect one server", async () => {
     expect(new URL(info.url).port).toBe(String(port))
     expect((await Bun.file(config).json()).password).toBe(info.password)
     expect(await Bun.file(registration + ".lock").exists()).toBe(false)
-    expect(
-      await fetch(new URL("/api/info", info.url), {
-        headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
-      }).then((response) => response.json()),
-    ).toMatchObject({
+    // The winner registers when it listens, before its boot ends; until then /api/info answers 503 with less.
+    expect(await waitForReady(info)).toMatchObject({
       version: info.version,
       pid: info.pid,
       hostname: os.hostname(),
@@ -793,6 +790,19 @@ async function waitForInfo(file: string, accept: (info: Info) => boolean = () =>
     await Bun.sleep(50)
   }
   throw new Error("Timed out waiting for service registration")
+}
+
+async function waitForReady(info: Info) {
+  const deadline = Date.now() + 30_000
+  while (true) {
+    const response = await fetch(new URL("/api/info", info.url), {
+      headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
+    }).catch(() => undefined)
+    if (response?.status === 200) return response.json()
+    await response?.body?.cancel()
+    if (Date.now() >= deadline) throw new Error(`Service not ready: /api/info answered ${response?.status}`)
+    await Bun.sleep(50)
+  }
 }
 
 async function waitForFailed(info: Info) {

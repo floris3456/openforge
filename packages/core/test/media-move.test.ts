@@ -712,7 +712,10 @@ describe("MediaKeeper", () => {
             )
             .pipe(Effect.exit)
           if (exit._tag === "Success") outcome.ok++
-          else outcome.failed.push(String(Cause.squash(exit.cause)))
+          else
+            outcome.failed.push(
+              Bun.inspect(Cause.squash(exit.cause)).match(/SQLITE_\w+/)?.[0] ?? Cause.pretty(exit.cause),
+            )
         }
         yield* Fiber.interrupt(running)
 

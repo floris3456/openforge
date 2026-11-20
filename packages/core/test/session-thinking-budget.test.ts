@@ -90,6 +90,10 @@ describe("SessionThinkingBudget.keep", () => {
       expect(
         yield* budgets(peaks.map((peak) => SessionThinkingBudget.keep(step(manual, peak), chat(peak, threshold)))),
       ).toEqual([16_000, 11_952, 11_952, 11_952])
+      // At 172k a step's output limit has 26,000 left, as it keeps 1% of the window free: 10,952.
+      expect(yield* budgets([SessionThinkingBudget.keep(step(manual, 166_500), chat(166_500, 172_000))])).toEqual([
+        10_952,
+      ])
     }),
   )
 

@@ -1,7 +1,7 @@
 export * as MediaKeeper from "./keeper.js"
 
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { inArray } from "drizzle-orm"
+import { inArray, sql } from "drizzle-orm"
 import { Clock, Context, Duration, Effect, Layer } from "effect"
 import { SessionContinuity } from "../continuity.js"
 import { DatabaseBatch } from "../database/batch.js"
@@ -54,10 +54,20 @@ const layer = Layer.effect(
       expire: (now) => MediaExpiry.run(db, folder, now, MediaGate.here(between)),
       move: () => (folder ? MediaMove.run(db, folder, MediaGate.here(between)) : Effect.succeed({ blobs: 0, rows: 0 })),
     }
+    const handOverCheckpoints = Effect.acquireRelease(
+      db.get<{ wal_autocheckpoint: number }>(sql`PRAGMA wal_autocheckpoint`).pipe(
+        Effect.tap(() => db.run(sql`PRAGMA wal_autocheckpoint = 0`)),
+        Effect.orDie,
+      ),
+      (previous) =>
+        db.run(sql.raw(`PRAGMA wal_autocheckpoint = ${previous?.wal_autocheckpoint ?? 1000}`)).pipe(Effect.ignore),
+    )
     const rows = Effect.gen(function* () {
       if (!folder || !database) return here
-      // Its writes hold the service's connection, the way a transaction of the service's holds it.
+      // Its writes hold the service's connection, the way a transaction of the service's holds it, and it makes the
+      // checkpoints the service's connection would, off the service's thread, until the round ends.
       return yield* MediaWorker.open({ database, folder }, db.$client.reserve).pipe(
+        Effect.tap(() => handOverCheckpoints),
         Effect.catch((error) =>
           Effect.logWarning("the media keeper works on the service's thread: its worker didn't start", {
             cause: String(error.cause),

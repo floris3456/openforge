@@ -731,4 +731,53 @@ describe("MediaKeeper", () => {
       }),
     ),
   )
+
+  // A checkpoint syncs the database file, which on a busy disk held the service's thread for seconds while the move
+  // wrote its files: for the round, the worker checkpoints and the service's connection makes none, then makes them
+  // again.
+  it.live("hands the database's checkpoints to its worker for the round", () =>
+    withDatabase(() =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const keeper = yield* MediaKeeper.Service
+        const kv = yield* KV.Service
+        const autocheckpoint = db.get<{ wal_autocheckpoint: number }>(sql`PRAGMA wal_autocheckpoint`).pipe(
+          Effect.orDie,
+          Effect.map((row) => row?.wal_autocheckpoint),
+        )
+        yield* seed()
+        yield* db
+          .insert(SessionMessageTable)
+          .values(
+            Array.from({ length: 100 }, (_, index) =>
+              assistant(SessionMessage.ID.make(`msg_move_checkpoint_${index}`), 100 + index, [
+                tool(`call_checkpoint_${index}`, [
+                  {
+                    type: "file",
+                    uri: `data:image/png;base64,${bytes(300 + index, 16_000).toString("base64")}`,
+                    mime: "image/png",
+                  },
+                ]),
+              ]),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        expect(yield* autocheckpoint).toBe(1000)
+
+        const seen = new Set<number | undefined>()
+        const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+        const deadline = performance.now() + 60_000
+        while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+          if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+          seen.add(yield* autocheckpoint)
+          yield* Effect.sleep("5 millis")
+        }
+        yield* until(autocheckpoint.pipe(Effect.map((value) => value === 1000)))
+        yield* Fiber.interrupt(running)
+
+        expect(seen.has(0)).toBe(true)
+      }),
+    ),
+  )
 })

@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads"
 import { sqliteLayer } from "#sqlite"
-import { Cause, Deferred, Effect, Exit, Logger, Queue } from "effect"
+import { Cause, Deferred, Effect, Exit, Logger, Queue, Schedule } from "effect"
 import type { LogLevel } from "effect"
 import { EffectDrizzleSqlite } from "../database/drizzle.js"
 import { MediaExpiry } from "./expiry.js"
@@ -15,7 +15,9 @@ import { MediaMove } from "./move.js"
 // slows it. Around each write it asks for the database (Lock) and waits for Locked, which the service sends once it
 // holds its own connection, until Unlock (MediaGate). The service starts it with `workerData` and sends one request at
 // a time; Stop ends the request under way between two statements and closes the connection, so the worker never
-// leaves a transaction or a lock behind.
+// leaves a transaction or a lock behind. While it runs, it checkpoints the database and the service's connection
+// doesn't (MediaKeeper): a checkpoint syncs the database file, which on a busy disk took the service's thread seconds
+// while the move wrote its files.
 
 export type Start = { readonly database: string; readonly folder: string }
 export type Request =
@@ -33,6 +35,9 @@ export type Reply =
   | { readonly _tag: "Moved"; readonly moved: MediaMove.Moved }
   | { readonly _tag: "Log"; readonly level: LogLevel.Severity; readonly message: ReadonlyArray<unknown> }
   | { readonly _tag: "Failed"; readonly message: string }
+
+/** How often the worker checkpoints the database while it runs. */
+const CHECKPOINT_MILLIS = 500
 
 const port = parentPort
 if (port) {
@@ -55,6 +60,11 @@ if (port) {
     // The service's connection ran the migrations and set the file's journal mode; these two are per connection.
     yield* db.run("PRAGMA synchronous = NORMAL")
     yield* db.run("PRAGMA foreign_keys = ON")
+    yield* db.run("PRAGMA wal_autocheckpoint = 0")
+    // PASSIVE waits for no reader or writer, so the service's statements go on beside it.
+    yield* db
+      .run("PRAGMA wal_checkpoint(PASSIVE)")
+      .pipe(Effect.ignore, Effect.repeat(Schedule.spaced(CHECKPOINT_MILLIS)), Effect.forkScoped)
     MediaFiles.register(db, start.folder, start.database)
     const requests = yield* Queue.unbounded<Request>()
     // The service's answers, Go and Locked: the worker waits for one at a time.

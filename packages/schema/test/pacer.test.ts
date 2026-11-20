@@ -171,7 +171,7 @@ describe("pacer shapes", () => {
       model: "model-a",
       verdict: "partial",
       tokens: 18_000,
-      cause: "prefix · tools",
+      cause: "The tool list changed since the step before.",
       missCost: Money.USD.make(0.12),
       at: 980_000,
     }
@@ -184,7 +184,7 @@ describe("pacer shapes", () => {
       rootID: sessionID,
       model: "model-a",
       verdict: "miss",
-      cause: "unknown cause",
+      cause: "CLIProxyPacer didn't say why.",
       at: 1,
     }
     expect(Object.keys(Schema.encodeSync(Pacer.Notice)(bare)).toSorted()).toEqual([

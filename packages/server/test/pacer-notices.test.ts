@@ -146,7 +146,7 @@ it.live("tells every subscriber of a new notice and of its dismissal, and lists 
       model: "model-a",
       verdict: "miss",
       tokens: 152_000,
-      cause: "prefix-changed · system",
+      cause: "The system prompt changed since the step before.",
       at,
     })
     for (const subscriber of [first, second]) {

@@ -217,7 +217,7 @@ test("a cache notice shows in the corner over the chat, waits behind a dialog, a
   setup.mockInput.pressKey("x", { ctrl: true })
   setup.mockInput.pressKey("o")
   const opened = await setup.waitForFrame((frame) => frame.includes("compared with req_prev"), { maxPasses: 100 })
-  expect(opened).toContain("miss · prefix changed · system changed")
+  expect(opened).toContain("Cache miss. The system prompt changed since the step before.")
   expect(opened).not.toContain("Cache miss · 152K")
   expect(
     fake.calls.filter((call) => call.method === "POST" && call.path.startsWith("notices/")).map((call) => call.path),
@@ -255,7 +255,7 @@ test("a cache notice of another chat, opened by key or by click, opens that chat
       (frame) => frame.includes("Latest reply") && frame.includes("compared with req_prev"),
       { maxPasses: 200 },
     )
-    expect(opened).toContain("miss · prefix changed · system changed")
+    expect(opened).toContain("Cache miss. The system prompt changed since the step before.")
     expect(opened).not.toContain("Other chat's reply")
     expect(opened).not.toContain("Cache miss · 152K")
     expect(

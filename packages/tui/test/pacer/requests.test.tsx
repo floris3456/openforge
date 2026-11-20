@@ -418,7 +418,7 @@ describe("what changed", () => {
     console.log(`What changed: on screen ${(drawn.at - start).toFixed(1)} ms after Ctrl+Enter (CPP at ${FAR} ms)`)
     expect(drawn.at - start).toBeLessThan(100)
     expect(setup.fake.since(start)).toEqual([])
-    expect(detail).toContain("miss · prefix changed · system changed")
+    expect(detail).toContain("Cache miss. The system prompt changed since the step before.")
     expect(detail).toContain("98.1K tokens written again · the miss cost $0.41")
     expect(detail).toContain("changed  system     messages[0].content[0]  12.3K chars  You are openforge")
     expect(detail).toContain("45 unchanged")
@@ -582,7 +582,7 @@ describe("a request asked for from outside the tab", () => {
     const drawn = recorder.frames.find((frame) => frame.text.includes("compared with req_prev"))!
     console.log(`A request asked for: what changed on screen ${(drawn.at - start).toFixed(1)} ms after`)
     expect(drawn.at - start).toBeLessThan(100)
-    expect(detail).toContain("miss · prefix changed · system changed")
+    expect(detail).toContain("Cache miss. The system prompt changed since the step before.")
     expect(setup.fake.since(start)).toEqual([])
     expect(setup.pacer.reveal()).toBeUndefined()
     // Back, the cursor is on its row, not on the newest.

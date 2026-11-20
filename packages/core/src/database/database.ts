@@ -34,12 +34,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/st
 // Only a database file the user opens imports their legacy auth.json; in-memory and injected databases belong to
 // embedders and tests, which must not pick up the user's credentials.
 // openforge (spec pictures-files): a database file keeps its pictures' bytes as files in `media`, a folder beside it.
-const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentials = false, media?: string) =>
+const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentials = false, file?: string) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
       const db = yield* makeDatabase
-      if (media) MediaFiles.register(db, media)
+      if (file) MediaFiles.register(db, MediaFiles.folderFor(file), file)
       // An injected Durable Object client may run under a non-workerd module condition in tests.
       const durableObject = EffectDrizzleSqlite.managesTransactionsNatively(db.$client)
 
@@ -77,7 +77,7 @@ export function layer(options: Options = { path: ":memory:" }) {
       const provide = (filename: string) =>
         (filename === ":memory:"
           ? databaseLayer(Semaphore.make(1))
-          : databaseLayer(Effect.succeed(lockFor(filename)), true, MediaFiles.folderFor(filename))
+          : databaseLayer(Effect.succeed(lockFor(filename)), true, filename)
         ).pipe(Layer.provide(sqliteLayer({ filename })))
       const filename = options.path ?? ":memory:"
       if (filename === ":memory:") return provide(filename)

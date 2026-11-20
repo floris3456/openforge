@@ -9,7 +9,8 @@ import {
   ToolDefinition,
   type LLMRequest,
 } from "@opencode/ai/effect"
-import { OpenAIChat } from "@opencode/ai/protocols"
+import { AnthropicMessages, OpenAIChat } from "@opencode/ai/protocols"
+import { compileRequest } from "@opencode/ai/testing"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { llmClient } from "@opencode/core/effect/app-node-platform"
@@ -33,6 +34,7 @@ import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { SessionThinkingBudget } from "@opencode/core/session/thinking-budget"
 import { Session } from "@opencode/core/session"
 import { Location } from "@opencode/core/location"
 import { Project } from "@opencode/core/project"
@@ -1856,6 +1858,61 @@ it.effect("a background summary starts when the latest response already passed t
     const summarized = JSON.stringify(requests[0].messages)
     expect(summarized).toContain("Third question")
     expect(summarized).not.toContain("Third answer")
+  }),
+)
+
+// openforge: a summary continues its step's prompt, so it sends that step's manual thinking budget, which a changed one
+// would miss the cache of (`SessionThinkingBudget`).
+it.effect("a background summary sends the manual thinking budget of the step whose prompt it continues", () =>
+  Effect.gen(function* () {
+    requests = []
+    const compaction = yield* SessionCompaction.Service
+    const builder = yield* SessionModelRequest.Service
+    const session = yield* insertSession(Session.ID.make("ses_precompute_budget"))
+    const claude = SessionRunnerModel.resolved(
+      LanguageModel.make({
+        id: "claude-sonnet-4-5",
+        provider: "test",
+        route: AnthropicMessages.route,
+        options: { providerOptions: { thinking: { type: "enabled", budgetTokens: 16_000 } } },
+      }),
+      { capabilities: { tools: true, input: ["text"], output: ["text"] }, cost, limit: resolved.limit },
+    )
+    const answer = (text: string, input: number) => ({ ...measured(text, input), model: claude.ref })
+    // The latest answer measured past where a background summary starts, 1,500 before the 170k threshold.
+    const near = [
+      textUser("First question"),
+      answer("First answer", 167_000),
+      textUser("Second question"),
+      answer("Second answer", 169_000),
+    ]
+    const context = { ...loaded(session, near), model: claude }
+    // The step that wrote the latest answer, with what the runner gives it.
+    const before = { ...context, messages: near.slice(0, -1) }
+    const step = yield* builder.primary({
+      ...before,
+      agent: before.agent.id,
+      ...SessionModelRequest.baseTranscript({ ...before, agent: before.agent.info }),
+      inputTokens: SessionCompaction.estimatePrompt(before),
+      peak: SessionThinkingBudget.peak(before.messages, claude.ref),
+      threshold: compaction.threshold(claude.limit),
+    })
+
+    yield* compaction.precompute(Effect.succeed(context))
+    yield* compaction.compact({
+      reason: "auto",
+      context: { ...context, messages: [...near, textUser("Third question"), answer("Third answer", 182_000)] },
+    })
+
+    const budget = (request: LLMRequest) =>
+      compileRequest(request).pipe(
+        Effect.map((compiled) => (compiled.body as { thinking?: { budget_tokens?: number } }).thinking?.budget_tokens),
+      )
+    // The most that fits at the 170k compaction point: half of 198,000 - 170,000 less the 4,096 margin.
+    expect(compaction.threshold(claude.limit)).toBe(170_000)
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("Second answer")
+    expect(yield* budget(step.request)).toBe(11_952)
+    expect(yield* budget(requests[0]!)).toBe(11_952)
   }),
 )
 

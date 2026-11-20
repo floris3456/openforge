@@ -16,6 +16,7 @@ import { KV } from "@opencode/core/kv"
 import { MediaFiles } from "@opencode/core/media/files"
 import { MediaKeeper } from "@opencode/core/media/keeper"
 import { MediaClearedTable } from "@opencode/core/media/sql"
+import { MediaExpiry } from "@opencode/core/media/expiry"
 import { MediaMove } from "@opencode/core/media/move"
 import { Model } from "@opencode/core/model"
 import { Project } from "@opencode/core/project"
@@ -34,6 +35,11 @@ import {
   SessionTable,
 } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { toLLMMessages } from "@opencode/core/session/runner/to-llm-message"
+import { ai } from "@opencode/ai/effect"
+import { AnthropicMessages } from "@opencode/ai/protocols"
+import { Auth } from "@opencode/ai/route"
+import { compileRequest } from "@opencode/ai/testing"
 import { Tool } from "@opencode/schema/tool"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { PictureRemoved } from "@opencode/util/picture-removed"
@@ -92,7 +98,7 @@ function tool(id: string, content: readonly [Item, ...Item[]]) {
     type: "tool" as const,
     id,
     name: "screenshot",
-    executed: true,
+    executed: false,
     state: { status: "completed" as const, input: {}, content },
     time: { created: 2, ran: 2, completed: 2 },
   }
@@ -380,6 +386,53 @@ describe("MediaMove", () => {
 })
 
 const DAY = 24 * 60 * 60 * 1000
+
+// What the model is sent: the chat's context lowered as the runner lowers it, compiled into Anthropic's request body.
+const claude = AnthropicMessages.route
+  .with({ endpoint: { baseURL: "https://api.anthropic.test/v1/" }, auth: Auth.header("x-api-key", "test") })
+  .model({ id: "claude-opus-4-8" })
+const body = Effect.gen(function* () {
+  const store = yield* SessionStore.Service
+  const messages = toLLMMessages(yield* store.context(sessionID), {
+    id: Model.ID.make("claude-opus-4-8"),
+    providerID: Provider.ID.make("anthropic"),
+  })
+  return JSON.stringify((yield* compileRequest(ai.request({ model: claude, messages, cache: "auto" }))).body)
+})
+
+describe("what the model is sent", () => {
+  it.live("is the same bytes for a chat's pictures before and after the move", () =>
+    withDatabase((_, folder) =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        yield* seed()
+        const before = yield* body
+        for (const data of [fitted, person, part]) expect(before).toContain(data.toString("base64"))
+
+        yield* MediaMove.run(db, folder, Effect.void)
+
+        expect(yield* body).toBe(before)
+      }),
+    ),
+  )
+
+  it.live("for a chat whose pictures were removed is the placeholder where each was, and it compiles", () =>
+    withDatabase((_, folder) =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const now = Date.now()
+        yield* seed(now - 31 * DAY)
+
+        yield* MediaExpiry.run(db, folder, now, Effect.void)
+
+        const sent = yield* body
+        for (const data of [fitted, person, part, ...originals]) expect(sent).not.toContain(data.toString("base64"))
+        expect(sent).not.toContain(mismatched)
+        expect(sent.split(PictureRemoved.text).length - 1).toBe(4)
+      }),
+    ),
+  )
+})
 const warmID = Session.ID.make("ses_media_warm")
 const warmPicture = bytes(37, 8_000)
 

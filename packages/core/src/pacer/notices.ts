@@ -43,12 +43,14 @@ export interface Interface {
    * Looks at request rows the connection read. Each miss or partial reuse of a step or a compaction becomes a notice,
    * told as `pacer.notice.added`, when `chat` names the chat by CPP's UUID; one of a chat it doesn't name waits until
    * {@link Interface.named} names it. Rows CPP received before this service started, or longer ago than `LIFETIME_MS`,
-   * raise none, and neither do the losses that are expected ({@link EXPECTED}).
+   * raise none, and neither do the losses that are expected ({@link EXPECTED}). `copies` holds the requests the rows'
+   * `cache_copy` name, by CPP's number, as the connection read them.
    */
   readonly read: (
     rows: ReadonlyArray<PacerWire.Row>,
     chat: (uuid: string) => SessionID | undefined,
     context: PacerWire.Context,
+    copies?: ReadonlyMap<number, NonNullable<Pacer.Request["copy"]>>,
   ) => Effect.Effect<void>
   /** This service holds the chat CPP knows as `uuid` now: its rows that waited raise their notices. */
   readonly named: (uuid: string, sessionID: SessionID) => Effect.Effect<void>
@@ -103,7 +105,7 @@ export const make = Effect.gen(function* () {
       model: request.model,
       verdict: request.verdict === "partial" ? "partial" : "miss",
       ...(request.rewritten !== undefined ? { tokens: request.rewritten } : {}),
-      cause: Pacer.causeText(request) || "unknown cause",
+      cause: Pacer.causeWords(request).full,
       ...(request.missCost !== undefined ? { missCost: request.missCost } : {}),
       at: request.at,
     } satisfies Pacer.Notice
@@ -143,13 +145,14 @@ export const make = Effect.gen(function* () {
         if (entry) entry.dismissed = true
         yield* bus.publish(Pacer.Event.NoticeDismissed, { requestID })
       }),
-    read: (rows, chat, context) =>
+    read: (rows, chat, context, copies) =>
       Effect.gen(function* () {
         const found: Found[] = []
         for (const row of rows.toSorted((a, b) => a.id - b.id)) {
           const uuid = row.session_ext?.toLowerCase()
           if (!uuid) continue
-          const request = PacerWire.request(row, {}, context)
+          const copy = row.cache_copy == null ? undefined : copies?.get(row.cache_copy)
+          const request = PacerWire.request(row, {}, context, copy)
           if (request.kind !== "step" && request.kind !== "compaction") continue
           if (request.verdict !== "miss" && request.verdict !== "partial") continue
           if (request.cause !== undefined && EXPECTED.has(request.cause)) continue

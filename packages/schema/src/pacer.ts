@@ -350,10 +350,30 @@ export const Request = Schema.Struct({
   verdict: Schema.String.pipe(optional),
   /** The verdict is a miss as CPP counts them (`miss` or `partial`): shown as a warning. */
   miss: Schema.Boolean,
-  /** Why the cache missed. */
+  /**
+   * CPP's cause of a miss, as it sent it: `expired`, `compaction`, `summary-request`, `account-changed`,
+   * `model-changed`, `lifetime-changed`, `prefix-changed`, `server-layout`, `provider` or `unknown`, or one added
+   * later. {@link causeWords} says it in words.
+   */
   cause: Schema.String.pipe(optional),
-  /** The first part of the prompt that changed, as the verdict names it. */
+  /** The first part of the prompt that changed, as the verdict names it: `system[0]`, `tools`, `messages[3]`, … */
   changedPart: Schema.String.pipe(optional),
+  /**
+   * Who changed the prompt of a `prefix-changed` miss, when CPP could tell: openforge, or CLIProxyPacer, whose secret
+   * hiding made every change.
+   */
+  changedBy: Schema.Literals(["openforge", "cliproxypacer"]).pipe(optional),
+  /**
+   * For a miss CPP blames on the provider, the older request of the chat whose whole prompt its cache read equals: the
+   * provider served it from a cache that had not seen the chat's latest prompt. Absent when CPP named none, or that
+   * request couldn't be read.
+   */
+  copy: Schema.Struct({
+    /** That request's `Request.id`. */
+    id: Schema.String,
+    /** When CPP received it, held as `Request.at`. */
+    at: Instant,
+  }).pipe(optional),
   /** Tokens written to the cache again that it should have read. */
   rewritten: NonNegativeInt.pipe(optional),
   /** What the miss cost beyond a hit. */
@@ -361,11 +381,92 @@ export const Request = Schema.Struct({
 }).annotate({ identifier: "Pacer.Request" })
 
 /**
- * Why a request missed the cache, as the Requests tab says it after the verdict: CPP's cause and the first part of the
- * prompt that changed, each when CPP gave it; empty when it gave neither.
+ * Why a request missed the cache, in words: the one wording of every screen that shows a miss's cause. `short` follows
+ * the verdict in the Requests tab's column (`partial: new system prompt`), at most 19 cells, so that it fits the 28 the
+ * column keeps; `full` is a sentence of at most 60 cells, the room of a cache notice's card, for the card, a row's help
+ * and the head of what changed. A message is named by its place in the prompt as sent to the provider, counting from 1:
+ * message 4 is `messages[3]`. A cause openforge doesn't know shows as CPP sent it.
  */
-export const causeText = (request: Pick<Request, "cause" | "changedPart">) =>
-  [request.cause, request.changedPart].filter((part) => part !== undefined && part !== "").join(" · ")
+export function causeWords(request: Pick<Request, "cause" | "changedPart" | "changedBy" | "copy">) {
+  // A changed part without a cause is still a part that changed.
+  const cause = request.cause || (request.changedPart ? "prefix-changed" : undefined)
+  if (cause === undefined) return { short: "cause unknown", full: "CLIProxyPacer didn't say why." }
+  if (cause === "prefix-changed") return changeWords(request.changedPart, request.changedBy)
+  if (cause === "server-layout") {
+    const message = messageNumber(request.changedPart)
+    return {
+      short: "proxy's layout",
+      full:
+        message === undefined
+          ? "CLIProxyPacer's layout of the prompt broke the cache."
+          : `CLIProxyPacer's layout of message ${message} broke the cache.`,
+    }
+  }
+  if (cause === "provider")
+    return request.copy
+      ? {
+          short: "provider's old copy",
+          full: `The provider read an older copy of the chat, from ${clockSeconds(request.copy.at)}.`,
+        }
+      : { short: "provider's fault", full: "Nothing sent changed; the provider didn't reuse its cache." }
+  const fixed = CAUSES.get(cause)
+  if (fixed) return fixed
+  return {
+    short: [cause, request.changedPart].filter(Boolean).join(" · "),
+    full: `CLIProxyPacer gave the cause ${cause}${request.changedPart ? `, at ${request.changedPart}` : ""}.`,
+  }
+}
+
+const CAUSES = new Map([
+  ["expired", { short: "cache expired", full: "The chat was idle longer than its cache lasts." }],
+  ["compaction", { short: "chat compacted", full: "The chat was compacted: a summary replaced its history." }],
+  ["summary-request", { short: "summary mismatch", full: "CLIProxyPacer's summary request didn't match the cache." }],
+  ["account-changed", { short: "another account", full: "It went to another account, which had no cache of this chat." }],
+  ["model-changed", { short: "model switched", full: "Another model ran in between; each model has its own cache." }],
+  ["lifetime-changed", { short: "longer cache time", full: "The cache was set to last longer: it was all written again." }],
+  ["unknown", { short: "cause unknown", full: "CLIProxyPacer couldn't tell why: one prompt wasn't kept." }],
+])
+
+/** A `prefix-changed` miss: the part that changed, and who changed it when CPP could tell. */
+function changeWords(changedPart: string | undefined, by: Request["changedBy"]) {
+  const part = partWords(changedPart)
+  if (by === "openforge") return { short: part.short, full: `openforge changed ${part.noun}.` }
+  if (by === "cliproxypacer") return { short: part.short, full: `CLIProxyPacer's redaction changed ${part.noun}.` }
+  return { short: part.short, full: `${part.noun[0]!.toUpperCase()}${part.noun.slice(1)} changed since the step before.` }
+}
+
+/**
+ * A changed part in words (spec of CPP's verdicts: DESIGN.md, "Cache verdicts", Changed part): an array's item
+ * (`system[0]`, `tools[3]`, `messages[12]`, `input[4]`, `contents[2]`, `request.` before them where the format wraps its
+ * request), or the first envelope member that differs (`system` as a string, `instructions`, `model`, …).
+ */
+function partWords(changedPart: string | undefined) {
+  if (!changedPart) return { short: "prompt changed", noun: "the prompt" }
+  const message = messageNumber(changedPart)
+  if (message !== undefined) return { short: `message ${message} changed`, noun: `message ${message} of the prompt` }
+  const name = changedPart.replace(/^request\./, "").replace(/\[\d+\]$/, "")
+  if (["system", "instructions", "systemInstruction", "system_instruction"].includes(name))
+    return { short: "new system prompt", noun: "the system prompt" }
+  if (name === "tools") return { short: "new tool list", noun: "the tool list" }
+  if (["messages", "input", "contents"].includes(name)) return { short: "messages changed", noun: "the messages" }
+  if (name === "model") return { short: "model name changed", noun: "the model's name" }
+  if (name === "prompt_cache_key") return { short: "new cache key", noun: "the cache key" }
+  if (["thinking", "reasoning", "reasoning_effort"].includes(name))
+    return { short: "thinking changed", noun: "the thinking setting" }
+  return { short: "setting changed", noun: `the setting ${name}` }
+}
+
+/** The message a part names, counting from 1: 4 for `messages[3]`, `input[3]` or `request.contents[3]`. */
+function messageNumber(changedPart: string | undefined) {
+  const found = changedPart?.match(/^(?:request\.)?(?:messages|input|contents)\[(\d+)\]$/)
+  return found ? Number(found[1]) + 1 : undefined
+}
+
+/** 14:02:13 on this machine's clock, as the Requests tab writes a request's time. */
+function clockSeconds(at: number) {
+  const date = new Date(at)
+  return [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":")
+}
 
 /** Which of a chat's requests to list: all, or only misses (`miss` and `partial`). */
 export const Filter = Schema.Literals(["all", "misses"]).annotate({ identifier: "Pacer.Filter" })
@@ -450,7 +551,7 @@ export const Notice = Schema.Struct({
   verdict: Schema.Literals(["miss", "partial"]),
   /** The tokens not reused (`Request.rewritten`); absent when CPP didn't count them. */
   tokens: NonNegativeInt.pipe(optional),
-  /** Why, as the Requests tab says it ({@link causeText}); `unknown cause` when CPP gave no cause. */
+  /** Why, in a sentence: {@link causeWords}' `full`, as a row's help and what changed say it. */
   cause: Schema.String,
   /** What the miss cost beyond a hit (`Request.missCost`). */
   missCost: Money.USD.pipe(optional),

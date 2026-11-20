@@ -882,7 +882,8 @@ export const layer = Layer.effect(
       yield* requestsUpdated(named)
       // More rows than one read takes: every TUI reads again.
       if (typeof answer.next === "string") yield* bus.publish(Pacer.Event.RequestsUpdated, {})
-      yield* notices.read(rows, (uuid) => byUuid.get(uuid), yield* context())
+      const now = yield* context()
+      yield* notices.read(rows, (uuid) => byUuid.get(uuid), now, yield* copies(rows, now))
     })
 
     const readState = Effect.gen(function* () {
@@ -1404,9 +1405,14 @@ export const layer = Layer.effect(
       if (heldRows.has(row.id)) heldAt.set(row.id, at)
       return at
     }
-    /** A request row in openforge's shape, at its held time. */
-    const shape = (row: PacerWire.Row, sender: PacerWire.Sender, context: PacerWire.Context): Pacer.Request => ({
-      ...PacerWire.request(row, sender, context),
+    /** A request row in openforge's shape, at its held time, with the copy it read among `copied` ({@link copies}). */
+    const shape = (
+      row: PacerWire.Row,
+      sender: PacerWire.Sender,
+      context: PacerWire.Context,
+      copied: ReadonlyMap<number, NonNullable<Pacer.Request["copy"]>>,
+    ): Pacer.Request => ({
+      ...PacerWire.request(row, sender, context, row.cache_copy == null ? undefined : copied.get(row.cache_copy)),
       at: rowAt(row, context),
     })
 
@@ -1427,6 +1433,26 @@ export const layer = Layer.effect(
       const held = heldRows.get(id)
       return held ? Effect.succeed(held) : oneRow(id).pipe(Effect.orElseSucceed(() => undefined))
     }
+
+    /**
+     * The older requests whose prompts the `provider` misses among `rows` read (`cache_copy`), by CPP's number, at their
+     * held times: among `rows`, held, else read. CPP names them only by number, and a miss's words say when that
+     * request was; one that can't be read is left out.
+     */
+    const copies = Effect.fnUntraced(function* (rows: ReadonlyArray<PacerWire.Row>, context: PacerWire.Context) {
+      const among = new Map(rows.map((row) => [row.id, row]))
+      const found = yield* Effect.forEach(
+        new Set(rows.flatMap((row) => (row.cache_copy == null ? [] : [row.cache_copy]))),
+        (id) => {
+          const row = among.get(id)
+          return row ? Effect.succeed(row) : baseRow(id)
+        },
+        { concurrency: READERS },
+      )
+      return new Map(
+        found.flatMap((row) => (row ? [[row.id, { id: PacerWire.requestID(row), at: rowAt(row, context) }] as const] : [])),
+      )
+    })
 
     const readSettings = get("/pacer/v1/settings", PacerWire.Settings).pipe(
       Effect.map(PacerWire.settings),
@@ -1525,8 +1551,9 @@ export const layer = Layer.effect(
           const listed = PacerWire.rows(answer.items)
           keepRows(listed)
           const sender = yield* senders(chat, listed)
+          const copied = yield* copies(listed, now)
           return {
-            items: listed.map((row) => shape(row, sender(row), now)),
+            items: listed.map((row) => shape(row, sender(row), now, copied)),
             ...(answer.next ? { cursor: answer.next } : {}),
             asOf: now.now,
           }
@@ -1565,7 +1592,7 @@ export const layer = Layer.effect(
           const now = yield* context()
           const change = PacerWire.promptChange(
             prompt,
-            shape(row, sender(row), now),
+            shape(row, sender(row), now, yield* copies([row], now)),
             base && { id: PacerWire.requestID(base), at: rowAt(base, now) },
             now,
           )

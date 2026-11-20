@@ -186,13 +186,8 @@ export const create = (
         const collected = (yield* Ref.get(files))
           .toSorted((left, right) => left.index - right.index)
           .flatMap((item) => item.files)
-        const output = formatResult(result)
-        // A reported tool's answer reaches the model even when the script does not return it, once per answer.
-        const reported = (yield* Ref.get(answers))
-          .filter((answer) => !output.includes(answer.text))
-          .map((answer) => `${toolExpression(answer.path)}(…) answered:\n${answer.text}`)
         const value: typeof ExecuteOutput.Type = {
-          output: [output, ...reported].filter((part) => part !== "").join("\n\n"),
+          output: formatResult(result, yield* Ref.get(answers)),
           toolCalls,
           files: collected,
           ...(result.ok ? {} : { error: true }),
@@ -471,7 +466,10 @@ function displayInput(input: unknown): Record<string, typeof Schema.Json.Type> |
   return input as Record<string, typeof Schema.Json.Type>
 }
 
-function formatResult(result: CodeMode.Result) {
+function formatResult(
+  result: CodeMode.Result,
+  answers: ReadonlyArray<{ readonly path: string; readonly text: string }>,
+) {
   const output = result.ok
     ? formatValue(result.value)
     : [result.error.message, ...(result.error.suggestions ?? []).filter((hint) => !result.error.message.includes(hint))]
@@ -484,7 +482,21 @@ function formatResult(result: CodeMode.Result) {
   const logs = result.logs && result.logs.length > 0 ? `Logs:\n${result.logs.join("\n")}` : undefined
   // A program that only logs returns undefined (sent as null); a "null" line before its logs says nothing.
   const value = result.ok && result.value === null && (warnings || logs) ? undefined : output
-  return [value, warnings, logs].filter((part) => part !== undefined && part !== "").join("\n\n")
+  const text = [value, warnings, logs].filter((part) => part !== undefined && part !== "").join("\n\n")
+  // A reported tool's answer reaches the model even when the script does not return it, once per answer, in call
+  // order. One returned inside an array or object is there JSON-escaped.
+  const missing = answers.filter(
+    (answer) => !text.includes(answer.text) && !text.includes(JSON.stringify(answer.text).slice(1, -1)),
+  )
+  if (missing.length === 0) return text
+  const listed = (items: typeof answers) =>
+    items.map((answer) => `${toolExpression(answer.path)}(…) answered:\n${answer.text}`)
+  // A script that returns one call's answer as it is gets every answer in call order in its place.
+  const parts =
+    result.ok && answers.some((answer) => answer.text === result.value)
+      ? [...listed(answers), warnings, logs]
+      : [value, warnings, logs, ...listed(missing)]
+  return parts.filter((part) => part !== undefined && part !== "").join("\n\n")
 }
 
 // Compact JSON: indentation adds tokens on every later step without helping the model. Clients pretty-print it.

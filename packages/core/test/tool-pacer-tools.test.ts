@@ -553,6 +553,38 @@ describe("PacerToolsPlugin in Code Mode", () => {
     }),
   )
 
+  it.effect("a reported answer returned in an array or object comes once, and answers keep their call order", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({
+        read: false,
+        catalog: catalogOf(true, { moon_phase: { ...placed, reported: true, definition } }),
+      })
+      yield* waitForCodeModeTool(h.registry, "moon_phase")
+      // A newline and quotes, which JSON escapes inside an array or object.
+      const moon = (day: string) => `Moon on ${day}:\n"full"`
+      h.cpp.answers.call = (request) =>
+        Response.json({ text: moon(request.body.includes("Tuesday") ? "Tuesday" : "Monday"), data: null, error: null })
+      const listed = yield* script(
+        h.registry,
+        'return [await tools.moon_phase({ day: "Monday" }), await tools.moon_phase({ day: "Tuesday" })]',
+      )
+      expect(listed.content).toEqual([{ type: "text", text: JSON.stringify([moon("Monday"), moon("Tuesday")]) }])
+      const kept = yield* script(h.registry, 'return { first: await tools.moon_phase({ day: "Monday" }) }')
+      expect(kept.content).toEqual([{ type: "text", text: JSON.stringify({ first: moon("Monday") }) }])
+      // Only the last call's answer returned: both answers, in the order of their calls.
+      const last = yield* script(
+        h.registry,
+        'await tools.moon_phase({ day: "Monday" }); return await tools.moon_phase({ day: "Tuesday" })',
+      )
+      expect(last.content).toEqual([
+        {
+          type: "text",
+          text: `tools.moon_phase(…) answered:\n${moon("Monday")}\n\ntools.moon_phase(…) answered:\n${moon("Tuesday")}`,
+        },
+      ])
+    }),
+  )
+
   it.effect("an unreported tool's answer is lost when the script does not return it", () =>
     Effect.gen(function* () {
       const h = yield* setup({ read: false, catalog: catalogOf(true, { moon_phase: { ...placed, definition } }) })

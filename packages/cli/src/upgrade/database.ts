@@ -25,6 +25,20 @@ export const copy = Effect.fn("upgrade.database.copy")(function* (database: stri
   return true
 })
 
+/**
+ * openforge (spec pictures-files): puts the `copy` just made in place of `database` when it is less than half its size,
+ * so the pages rows let go of, such as the pictures that moved to files, go back to the disk. Every process using the
+ * database must have stopped. The sizes before and after, or undefined when the database stays as it is.
+ */
+export const shrink = Effect.fn("upgrade.database.shrink")(function* (copy: string, database: string) {
+  const fs = yield* FileSystem.FileSystem
+  const from = Number((yield* fs.stat(database)).size)
+  const to = Number((yield* fs.stat(copy)).size)
+  if (to * 2 >= from) return undefined
+  yield* restore(copy, database)
+  return { from, to }
+})
+
 /** Puts `source` in place of `database`. Every process using the database must have stopped. */
 export const restore = Effect.fn("upgrade.database.restore")(function* (source: string, database: string) {
   const fs = yield* FileSystem.FileSystem

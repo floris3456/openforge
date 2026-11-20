@@ -62,9 +62,9 @@ describe("Flag.resolve", () => {
 
   test("config overrides the default and OPENCODE_FLAGS overrides config", () => {
     const entries = [document({ todo: true, automations: false })]
-    const flags = Flag.resolve({ entries, channel: "dev", overrides: " media_blob , -todo,unknown_flag" })
+    const flags = Flag.resolve({ entries, channel: "dev", overrides: " video_generate , -todo,unknown_flag" })
     expect(
-      [flags.todo, flags.automations, flags.media_blob, flags.artifacts].map((flag) => [flag.enabled, flag.source]),
+      [flags.todo, flags.automations, flags.video_generate, flags.artifacts].map((flag) => [flag.enabled, flag.source]),
     ).toEqual([
       [false, "env"],
       [false, "config"],
@@ -96,13 +96,13 @@ describe("Flag.resolve", () => {
   })
 
   test("OPENCODE_FLAGS=all skips opt-in-only flags, and a -key in the same list still wins", () => {
-    const entries = [document({ media_blob: false })]
+    const entries = [document({ video_generate: false })]
     expect(Flag.resolve({ entries, channel: "latest", overrides: "all" })).toEqual(
       implicit({ enabled: true, source: "env" }),
     )
-    expect(Flag.resolve({ entries: [], channel: "latest", overrides: " -media_blob , all, " })).toEqual({
+    expect(Flag.resolve({ entries: [], channel: "latest", overrides: " -video_generate , all, " })).toEqual({
       ...implicit({ enabled: true, source: "env" }),
-      media_blob: { enabled: false, source: "env" },
+      video_generate: { enabled: false, source: "env" },
     })
     expect(Flag.resolve({ entries, channel: "latest", overrides: "-all" })).toEqual(
       Flag.resolve({ entries, channel: "latest" }),
@@ -110,10 +110,10 @@ describe("Flag.resolve", () => {
   })
 
   test("experimental.all_flags skips opt-in-only flags and yields to OPENCODE_FLAGS and per-flag settings", () => {
-    const entries = [document({ all_flags: true, media_blob: false })]
+    const entries = [document({ all_flags: true, video_generate: false })]
     expect(Flag.resolve({ entries, channel: "latest", overrides: "-artifacts" })).toEqual({
       ...implicit({ enabled: true, source: "config" }),
-      media_blob: { enabled: false, source: "config" },
+      video_generate: { enabled: false, source: "config" },
       artifacts: { enabled: false, source: "env" },
     })
   })

@@ -67,6 +67,7 @@ import m64 from "./migration/20261116120000_openforge_namespace.js"
 import m65 from "./migration/20261116121524_prompt_start_parts.js"
 import m66 from "./migration/20261116181958_automation_event_position.js"
 import m67 from "./migration/20261116213417_automation_active_index.js"
+import m68 from "./migration/20261120181245_media_files.js"
 
 export const migrations = [
   m00,
@@ -137,4 +138,5 @@ export const migrations = [
   m65,
   m66,
   m67,
+  m68,
 ] satisfies DatabaseMigration.Migration[]

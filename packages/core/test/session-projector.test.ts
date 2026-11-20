@@ -72,9 +72,7 @@ const experimental = (flags: ConstructorParameters<typeof ConfigExperimental.Inf
   Flag.testLayer([
     new Document({ type: "document", info: new Info({ experimental: new ConfigExperimental.Info(flags) }) }),
   ])
-const mediaBlob = experimental({ media_blob: true })
 const partRows = experimental({ part_rows: true })
-const mediaBlobPartRows = experimental({ media_blob: true, part_rows: true })
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -1443,15 +1441,17 @@ describe("SessionProjector", () => {
     }),
   )
 
-  it.effect("keeps media inline unless experimental.media_blob is on", () =>
+  it.effect("keeps media inline when its ref would not read back as the same text", () =>
     Effect.gen(function* () {
       const db = yield* seedSession()
       const inbox = yield* SessionInbox.Service
       const id = SessionMessage.ID.make("msg_media_inline")
+      // "QR==" sets bits Base64 leaves unused: it decodes to the byte of "QQ==", which is what a ref would read back.
+      const file = { ...attachment("shot.png"), data: "QR==" }
       yield* inbox.admit({
         id,
         sessionID,
-        item: { type: "user", payload: { text: "inline", files: [attachment("shot.png")] }, delivery: "queue" },
+        item: { type: "user", payload: { text: "inline", files: [file] }, delivery: "queue" },
       })
 
       const row = yield* db
@@ -1460,13 +1460,13 @@ describe("SessionProjector", () => {
         .where(eq(SessionInboxTable.id, id))
         .get()
         .pipe(Effect.orDie)
-      expect(row?.payload).toEqual({ text: "inline", files: [attachment("shot.png")] })
+      expect(row?.payload).toEqual({ text: "inline", files: [file] })
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
     }),
   )
 
-  it.effect("stores media once and refs it from inbox, message, and tool rows when experimental.media_blob is on", () =>
+  it.effect("stores media once and refs it from inbox, message, and tool rows", () =>
     Effect.gen(function* () {
       const db = yield* seedSession()
       const bus = yield* Bus.Service
@@ -1559,7 +1559,7 @@ describe("SessionProjector", () => {
         { message: assistantMessageID, hash, seq: 0 },
         { message: id, hash, seq: delivered.durable?.seq },
       ])
-    }).pipe(Effect.provide(mediaBlobPartRows)),
+    }).pipe(Effect.provide(partRows)),
   )
 
   it.effect("deletes a cancelled inbox row's blob refs and blobs", () =>
@@ -1578,7 +1578,7 @@ describe("SessionProjector", () => {
       yield* inbox.cancel({ id, sessionID })
       expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect("deletes reverted messages' blob refs and the blobs only they referenced", () =>
@@ -1611,7 +1611,7 @@ describe("SessionProjector", () => {
       expect(yield* db.select({ hash: BlobTable.hash }).from(BlobTable).all().pipe(Effect.orDie)).toEqual([
         { hash: SessionBlob.hashBytes(png) },
       ])
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect("keeps a blob while a fork references it and deletes it with the last session", () =>
@@ -1645,7 +1645,7 @@ describe("SessionProjector", () => {
       yield* bus.publish(SessionEvent.Deleted, { sessionID: childID })
       expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect("keeps a tool part's blob while a fork references it", () =>
@@ -1691,7 +1691,7 @@ describe("SessionProjector", () => {
 
       yield* bus.publish(SessionEvent.Deleted, { sessionID: childID })
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect("releases a tool's blob when a content update drops its ref", () =>
@@ -1721,7 +1721,7 @@ describe("SessionProjector", () => {
       yield* bus.publish(SessionEvent.MessageContentUpdated, { sessionID, messageID: assistantMessageID, content: [] })
       expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect(
@@ -2220,35 +2220,7 @@ describe("SessionProjector", () => {
       expect(withoutIDs(yield* store.messages({ sessionID: childID, order: "asc" }))).toEqual(
         withoutIDs(parentMessages),
       )
-    }).pipe(Effect.provideService(SessionBlob.ForkMedia, true)),
-  )
-
-  it.effect("copies inline parent media inline into a fork unless the parent's location stores media as blobs", () =>
-    Effect.gen(function* () {
-      const db = yield* seedSession()
-      const bus = yield* Bus.Service
-      const store = yield* SessionStore.Service
-      const childID = Session.ID.make("ses_media_inline_fork_off")
-      const boundary = yield* seedInlineMedia(db)
-      const parentRows = yield* messageRows(db, sessionID)
-
-      yield* bus.publish(SessionEvent.Forked, {
-        sessionID: childID,
-        parentID: sessionID,
-        boundary: { type: "through", messageID: boundary },
-      })
-
-      const childRows = yield* messageRows(db, childID)
-      expect((yield* SessionHistory.withParts(db, childRows)).map((row) => row.data)).toEqual(
-        (yield* SessionHistory.withParts(db, parentRows)).map((row) => row.data),
-      )
-      expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-      expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
-      expect(withoutIDs(yield* store.messages({ sessionID: childID, order: "asc" }))).toEqual(
-        withoutIDs(yield* store.messages({ sessionID, order: "asc" })),
-      )
-      // The caller's own config doesn't decide: Session.fork sets ForkMedia from the parent's location.
-    }).pipe(Effect.provide(mediaBlob)),
+    }),
   )
 
   it.effect("reads a split message an older build added inline content to as its parts then that content", () =>
@@ -2347,7 +2319,7 @@ describe("SessionProjector", () => {
       ).toEqual([{ session: childID, message: childRows[0]!.id, hash: SessionBlob.hashBytes(png) }])
       yield* bus.publish(SessionEvent.Deleted, { sessionID })
       expect(withoutIDs(yield* store.messages({ sessionID: childID, order: "asc" }))).toEqual(withoutIDs(parent))
-    }).pipe(Effect.provideService(SessionBlob.ForkMedia, true)),
+    }),
   )
 
   it.effect("deletes a reverted message's session_part rows and the blobs only they referenced", () =>
@@ -2378,7 +2350,7 @@ describe("SessionProjector", () => {
       expect(yield* db.select().from(SessionPartTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobRefTable).all().pipe(Effect.orDie)).toEqual([])
       expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-    }).pipe(Effect.provide(mediaBlobPartRows)),
+    }).pipe(Effect.provide(partRows)),
   )
 
   it.effect("moves a legacy inline media message's rewritten content to session_part with its media as a blob", () =>
@@ -2430,7 +2402,7 @@ describe("SessionProjector", () => {
           },
         ],
       })
-    }).pipe(Effect.provide(mediaBlobPartRows)),
+    }).pipe(Effect.provide(partRows)),
   )
 
   durableIt.effect("forks and reads a long session in statements under 100 bound parameters", () =>
@@ -2483,7 +2455,7 @@ describe("SessionProjector", () => {
           .pipe(Effect.orDie),
       ).toEqual([])
       expect(withoutIDs(yield* store.messages({ sessionID: childID, order: "asc" }))).toEqual(withoutIDs(parent))
-    }).pipe(Effect.provideService(SessionBlob.ForkMedia, true)),
+    }),
   )
 
   it.effect(

@@ -199,7 +199,6 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
 
   const forkedID = (seq: number) => SessionMessage.ID.make(`${SessionMessage.ID.fromEvent(event.id)}_${seq}`)
   // The child stores the parent's inline media as blobs; the parent's rows are never rewritten.
-  const media = yield* SessionBlob.ForkMedia
   let cursor = -1
   while (copiedSeq !== undefined) {
     const rows = yield* db
@@ -232,7 +231,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
           time_created: row.time_created,
           time_updated: row.time_updated,
           // Split parents' envelopes carry no content, so only unsplit parents' inline media moves here.
-          data: media ? yield* SessionBlob.externalizeRow(db, row.data) : row.data,
+          data: yield* SessionBlob.externalizeRow(db, row.data),
         }
         // A summary references messages it kept (the first, an unread step, the first no request carried), which the
         // fork copied under new IDs.
@@ -289,8 +288,8 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
       ).pipe(Effect.map((batches) => batches.flat()))
       const partValues: Array<typeof SessionPartTable.$inferInsert> = yield* Effect.forEach(storedParts, (part) =>
         Effect.gen(function* () {
-          const data = media ? SessionBlob.split(part.data) : undefined
-          if (data?.moved) yield* SessionBlob.save(db, data.blobs)
+          const data = SessionBlob.split(part.data)
+          if (data.moved) yield* SessionBlob.save(db, data.blobs)
           return {
             message_id: idMap.get(part.message_id)!,
             session_id: event.data.sessionID,
@@ -299,7 +298,7 @@ const projectFork = Effect.fn("SessionProjector.projectFork")(function* (
             call_id: part.call_id,
             time_created: part.time_created,
             time_updated: part.time_updated,
-            data: data?.data ?? part.data,
+            data: data.data,
           }
         }),
       )

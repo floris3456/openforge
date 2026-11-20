@@ -89,16 +89,8 @@ const runChannel = (channel: "dev" | "latest") =>
     })
     yield* sessions.wait(session.id)
 
-    const blobs = yield* db
-      .select({ hash: BlobTable.hash })
-      .from(BlobTable)
-      .all()
-      .pipe(Effect.orDie)
-    const rows = yield* db
-      .select()
-      .from(SessionMessageTable)
-      .all()
-      .pipe(Effect.orDie)
+    const blobs = yield* db.select({ hash: BlobTable.hash }).from(BlobTable).all().pipe(Effect.orDie)
+    const rows = yield* db.select().from(SessionMessageTable).all().pipe(Effect.orDie)
     const userRow = rows.find((row) => row.id === admitted.id)
 
     return {
@@ -107,20 +99,14 @@ const runChannel = (channel: "dev" | "latest") =>
     }
   }).pipe(Effect.provideService(Flag.Overrides, undefined), Effect.scoped)
 
-it.live("enables media_blob by default on dev builds", () =>
-  Effect.gen(function* () {
-    expect(yield* runChannel("dev")).toEqual({
-      blobs: [{ hash: pngHash }],
-      userFiles: [{ uri: SessionStored.ref(pngHash), mime: "image/png", name: "shot.png", source: { type: "inline" } }],
-    })
-  }),
-)
-
-it.live("keeps media_blob off by default on latest builds", () =>
-  Effect.gen(function* () {
-    expect(yield* runChannel("latest")).toEqual({
-      blobs: [],
-      userFiles: [{ data: pngBase64, mime: "image/png", name: "shot.png", source: { type: "inline" } }],
-    })
-  }),
-)
+for (const channel of ["dev", "latest"] as const)
+  it.live(`stores media as a blob on ${channel} builds`, () =>
+    Effect.gen(function* () {
+      expect(yield* runChannel(channel)).toEqual({
+        blobs: [{ hash: pngHash }],
+        userFiles: [
+          { uri: SessionStored.ref(pngHash), mime: "image/png", name: "shot.png", source: { type: "inline" } },
+        ],
+      })
+    }),
+  )

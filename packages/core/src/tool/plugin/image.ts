@@ -8,6 +8,7 @@ import { Config } from "../../config.js"
 import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import { ImageBank } from "../../image/bank.js"
 import { ImageFit } from "../../image/fit.js"
+import { PictureRemoved } from "@opencode/util/picture-removed"
 
 // The image bank's tool (spec images): `image.show` lists a chat's images, shows one again whole, or zooms into a region
 // of its full-resolution original. Registered only while Settings › Session "Optimize images" is on; a Code Mode tool in
@@ -84,13 +85,14 @@ export const Plugin = {
                       : images
                           .map(
                             (image) =>
-                              `Image ${image.number}: ${image.name}, ${image.width}×${image.height}, shown at ${image.shown_width}×${image.shown_height}`,
+                              `Image ${image.number}: ${image.name}, ${image.width}×${image.height}, shown at ${image.shown_width}×${image.shown_height}${image.hash === "" ? " (removed: this chat was untouched for 30 days)" : ""}`,
                           )
                           .join("\n"),
                 }
               }
               const found = yield* ImageBank.get(chat.db, chat.sessionID, input.id)
               if (!found) return yield* failure(`This chat has no image ${input.id}.`)
+              if (!found.original) return { content: `${PictureRemoved.shown(`Image ${input.id}`)}.` }
               const zoom = input.zoom
               if (!zoom)
                 return {

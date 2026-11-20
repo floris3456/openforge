@@ -12,7 +12,6 @@ import { App } from "../app.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { DatabaseBatch } from "../database/batch.js"
-import { Instance } from "../instance/service.js"
 import { Location } from "../location.js"
 import { Project } from "../project.js"
 import { upsertProject } from "../project/sql.js"
@@ -52,7 +51,6 @@ const layer = Layer.effect(
     const app = yield* App.Service
     const bus = yield* Bus.Service
     const { db } = yield* Database.Service
-    const instances = yield* Instance.Service
     const projects = yield* Project.Service
     const sessions = yield* Session.Service
     const encodeMessage = Schema.encodeSync(SessionMessage.Info)
@@ -94,16 +92,9 @@ const layer = Layer.effect(
           }
         })
         // Only inline media the import carries becomes blobs, and only its blobs get refs: refs it carried in
-        // could otherwise keep or expose blobs it never held. The destination's config is loaded only when needed.
+        // could otherwise keep or expose blobs it never held.
         const split = messages.map((message) => SessionBlob.split(message.data))
-        const media =
-          split.some((row) => row.moved) &&
-          (yield* SessionBlob.enabledFor(instances, {
-            ...input.data.info,
-            projectID: project.id,
-            location: input.location,
-            subpath,
-          }))
+        const media = split.some((row) => row.moved)
         yield* bus
           .publish(
             SessionEvent.Created,
@@ -198,7 +189,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [App.node, Bus.node, Database.node, Instance.node, Project.node, Session.node],
+  deps: [App.node, Bus.node, Database.node, Project.node, Session.node],
 })
 
 function isSettled(message: SessionMessage.Info) {

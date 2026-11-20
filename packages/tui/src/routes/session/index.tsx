@@ -61,7 +61,7 @@ import { useDialog } from "../../ui/dialog"
 import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { TodoItem } from "../../component/todo-item"
-import { chatImages, toolImages, userImages, viewerImages, type ChatImage } from "../../image/chat"
+import { chatImages, isRemovedPicture, toolImages, userImages, viewerImages, type ChatImage } from "../../image/chat"
 import { ChatImageLine } from "../../image/line"
 import { DialogImage } from "../../image/viewer"
 import { statusLabel } from "../../component/dialog-workspace-file-changes"
@@ -2424,7 +2424,7 @@ function UserMessage(props: { message: SessionMessageUser }) {
   // Opted-in reads leave stored files as `media:` refs, a PromptAttachment variant the generated message type omits.
   const files = createMemo(() => deduplicateVisibleImages<PromptAttachment>(props.message.files ?? []))
   // openforge (spec image-view): an attached image shows as the line the model got, instead of a file chip.
-  const others = createMemo(() => files().filter((file) => !file.mime.startsWith("image/")))
+  const others = createMemo(() => files().filter((file) => !file.mime.startsWith("image/") && !isRemovedPicture(file)))
   const images = createMemo(() => userImages(props.message))
   const skills = createMemo(() => props.message.skills ?? [])
   const themes = useThemes()

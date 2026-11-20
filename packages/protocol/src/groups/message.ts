@@ -67,7 +67,7 @@ export const PublicSessionMessage = Schema.Union([
 
 /**
  * Experimental: {@link PublicSessionMessage} as sent to clients that opt in with `X-OpenCode-Capabilities:
- * experimental-media-uri` while `experimental.media_blob` is on. User files stored in `blob` stay `media:` refs.
+ * experimental-media-uri`. User files stored in `blob` stay `media:` refs.
  */
 export const PublicMediaSessionMessage = Schema.Union([
   SessionMessage.AgentSelected,

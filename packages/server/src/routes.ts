@@ -46,6 +46,7 @@ import { PacerAttention } from "@opencode/core/pacer/attention"
 import { AutoUpdate } from "./auto-update"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Automation } from "@opencode/core/automation"
+import { MediaKeeper } from "@opencode/core/media/keeper"
 import { PluginUpdate } from "@opencode/core/plugin/update"
 import { SdkPlugins } from "@opencode/core/plugin/sdk"
 import { WellKnown } from "@opencode/core/wellknown"
@@ -116,6 +117,8 @@ const applicationServiceNodes = [
   PacerAttention.node,
   PacerIdle.node,
   AutoUpdate.node,
+  // openforge: its work on the media files runs in the server process (spec pictures-files).
+  MediaKeeper.node,
 ] as const
 const applicationServices = LayerNode.group(applicationServiceNodes)
 

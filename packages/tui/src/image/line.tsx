@@ -8,6 +8,13 @@ import { dataBytes, fallbackLine, type ChatImage } from "./chat"
 /** An image's line in the chat, which opens the viewer when clicked. */
 export function ChatImageLine(props: { image: ChatImage; onOpen: () => void }) {
   const theme = useTheme()
+  // openforge (spec pictures-files): a removed picture's placeholder, muted, opens nothing.
+  if (props.image.removed)
+    return (
+      <text fg={theme.text.muted} wrapMode="word">
+        {props.image.line}
+      </text>
+    )
   const [hover, setHover] = createSignal(false)
   const size = createImageSize(() => (props.image.line === undefined ? props.image.uri : undefined))
   const text = createMemo(() => props.image.line ?? fallbackLine(props.image.name, size()))

@@ -1,4 +1,5 @@
 import { ImageLine } from "@opencode/util/image-line"
+import { PictureRemoved } from "@opencode/util/picture-removed"
 import {
   mediaHashFromUri,
   type PromptAttachment,
@@ -24,7 +25,20 @@ export type ChatImage = {
   readonly uri: string
   readonly name?: string
   readonly line?: string
+  /**
+   * openforge (spec pictures-files): the picture went once its chat was untouched for 30 days; it shows as the
+   * placeholder text where its line was, `uri` is empty, and the viewer skips it.
+   */
+  readonly removed?: true
 }
+
+const removedImage = (key: string, name: string | undefined): ChatImage => ({
+  key,
+  uri: "",
+  ...(name !== undefined && { name }),
+  line: PictureRemoved.text,
+  removed: true,
+})
 
 /** An attached image's line is in its message's `metadata.imageLines`, by file index (set on arrival). */
 export function userImages(message: SessionMessageUser): ChatImage[] {
@@ -32,8 +46,9 @@ export function userImages(message: SessionMessageUser): ChatImage[] {
   const files: readonly PromptAttachment[] = message.files ?? []
   const lines = message.metadata?.imageLines
   return deduplicateVisibleImages<PromptAttachment>(files).flatMap((file) => {
-    if (!file.mime.startsWith("image/")) return []
     const index = files.indexOf(file)
+    if (isRemovedPicture(file)) return [removedImage(`${message.id}:${index}`, file.name)]
+    if (!file.mime.startsWith("image/")) return []
     const line = Array.isArray(lines) ? lines[index] : undefined
     return [
       {
@@ -50,6 +65,8 @@ export function userImages(message: SessionMessageUser): ChatImage[] {
 export function toolImages(part: SessionMessageAssistantTool): ChatImage[] {
   const content = toolDisplayContent(part.state)
   return content.flatMap((item, index) => {
+    if (item.type === "text" && item.text === PictureRemoved.text)
+      return [removedImage(`${part.id}:${index}`, undefined)]
     if (item.type !== "file" || !item.mime.startsWith("image/")) return []
     // An emptied `data:` URI is a payload the store dropped while previews were off.
     const inline = item.uri.startsWith("data:image/") && !item.uri.endsWith(",")
@@ -66,13 +83,20 @@ export function toolImages(part: SessionMessageAssistantTool): ChatImage[] {
   })
 }
 
-/** Every image of a chat, in order: what left and right go through in the viewer. */
+/** Every image of a chat still there, in order: what left and right go through in the viewer. */
 export function chatImages(messages: readonly SessionMessageInfo[]): ChatImage[] {
-  return messages.flatMap((message) => {
-    if (message.type === "user") return userImages(message)
-    if (message.type !== "assistant") return []
-    return message.content.flatMap((part) => (part.type === "tool" ? toolImages(part) : []))
-  })
+  return messages
+    .flatMap((message) => {
+      if (message.type === "user") return userImages(message)
+      if (message.type !== "assistant") return []
+      return message.content.flatMap((part) => (part.type === "tool" ? toolImages(part) : []))
+    })
+    .filter((image) => !image.removed)
+}
+
+/** A person's attached picture that went once its chat was untouched for 30 days: a text file of its placeholder. */
+export function isRemovedPicture(file: PromptAttachment) {
+  return file.mime === "text/plain" && "data" in file && PictureRemoved.is(file.data)
 }
 
 /** The line an image without one shows: its name and size. */

@@ -43,8 +43,6 @@ import { tmpdirScoped } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 import { Config } from "@opencode/core/config"
 import { Flag } from "@opencode/core/flag"
-import { Document, Info } from "@opencode/schema/config"
-import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { SessionStored } from "@opencode/core/session/stored"
 import { SessionBlob } from "@opencode/core/session/blob"
 import { SessionTransfer } from "@opencode/core/session/transfer"
@@ -80,12 +78,6 @@ const execution = Layer.succeed(
 const mediaDirectory = "/media"
 // A location whose instance fails to boot, the way a bad config or unreadable directory does: as a defect.
 const brokenDirectory = "/broken"
-const mediaBlob = Flag.testLayer([
-  new Document({
-    type: "document",
-    info: new Info({ experimental: new ConfigExperimental.Info({ media_blob: true }) }),
-  }),
-])
 const locations = makeGlobalNode({
   service: LocationServiceMap.Service,
   layer: Layer.effect(
@@ -103,7 +95,7 @@ const locations = makeGlobalNode({
               replacements: [
                 App.node.replace(Layer.succeed(App.Service, app)),
                 Bus.node.replace(Layer.succeed(Bus.Service, bus)),
-                Config.node.replace(ref.directory === mediaDirectory ? mediaBlob : Config.testLayer([])),
+                Config.node.replace(Config.testLayer([])),
               ],
             }),
             Layer.mock(Image.Service, {
@@ -145,7 +137,6 @@ const harness = (channel?: string) =>
     ),
   )
 const it = harness()
-const devIt = harness("dev")
 const sessionID = Session.ID.make("ses_prompt_test")
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 const messageID = SessionMessage.ID.create()
@@ -587,7 +578,7 @@ describe("Session.prompt", () => {
     }),
   )
 
-  it.effect("stores media refs at admission when the session's config enables media_blob", () =>
+  it.effect("stores media refs at admission", () =>
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
@@ -628,7 +619,7 @@ describe("Session.prompt", () => {
     }),
   )
 
-  it.effect("forks a session's inline media into blobs when its location enables media_blob", () =>
+  it.effect("forks a session's inline media into blobs", () =>
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
@@ -642,20 +633,7 @@ describe("Session.prompt", () => {
     }),
   )
 
-  it.effect(
-    "forks inline media inline when the parent's location doesn't enable media_blob, whatever the caller's",
-    () =>
-      Effect.gen(function* () {
-        yield* setup
-        const { db } = yield* Database.Service
-        const child = yield* forkInlineParent("ses_fork_plain", "/project").pipe(Effect.provide(mediaBlob))
-
-        expect(child.data).toMatchObject({ files: [{ data: pngBase64, mime: "image/png" }] })
-        expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
-      }),
-  )
-
-  it.effect("forks and imports with media inline when the location's instance can't boot", () =>
+  it.effect("forks and imports with media as blobs when the location's instance can't boot", () =>
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
@@ -670,11 +648,12 @@ describe("Session.prompt", () => {
         location: { directory: AbsolutePath.make(brokenDirectory) },
       })
 
-      expect(child.data).toMatchObject({ files: [{ data: pngBase64, mime: "image/png" }] })
+      const hash = SessionBlob.hashBytes(Buffer.from(pngBase64, "base64"))
+      expect(child.data).toMatchObject({ files: [{ uri: SessionStored.ref(hash), mime: "image/png" }] })
       expect(yield* session.messages({ sessionID: imported.id, order: "asc" })).toEqual(
         mediaMessages("ses_import_broken"),
       )
-      expect(yield* db.select().from(BlobTable).all().pipe(Effect.orDie)).toEqual([])
+      expect(yield* db.select({ hash: BlobTable.hash }).from(BlobTable).all().pipe(Effect.orDie)).toEqual([{ hash }])
     }),
   )
 
@@ -711,7 +690,7 @@ describe("Session.prompt", () => {
     }),
   )
 
-  devIt.effect("admits and imports media into blobs by default on a dev-channel server with no config", () =>
+  it.effect("admits and imports media into blobs on a server with no config", () =>
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
@@ -744,7 +723,7 @@ describe("Session.prompt", () => {
     }),
   )
 
-  it.effect("imports media into blobs only where the location enables media_blob", () =>
+  it.effect("imports media into blobs in every location", () =>
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
@@ -776,17 +755,20 @@ describe("Session.prompt", () => {
         { files: [{ uri, mime: "image/png", name: "shot.png" }] },
         { content: [{ state: { content: [{ type: "file", uri, mime: "image/png" }] } }] },
       ])
-      expect(JSON.stringify(mediaRows)).not.toContain(pngBase64)
-      expect(JSON.stringify(yield* rows(plain.id))).toContain(pngBase64)
+      const plainRows = yield* rows(plain.id)
+      expect(JSON.stringify([...mediaRows, ...plainRows])).not.toContain(pngBase64)
       expect(yield* db.select({ hash: BlobTable.hash }).from(BlobTable).all().pipe(Effect.orDie)).toEqual([{ hash }])
       expect(
         yield* db
           .select({ session: BlobRefTable.session_id, message: BlobRefTable.message_id, seq: BlobRefTable.seq })
           .from(BlobRefTable)
-          .orderBy(BlobRefTable.seq)
+          .orderBy(BlobRefTable.session_id, BlobRefTable.seq)
           .all()
           .pipe(Effect.orDie),
-      ).toEqual(mediaRows.map((row) => ({ session: media.id, message: row.id, seq: row.seq })))
+      ).toEqual([
+        ...mediaRows.map((row) => ({ session: media.id, message: row.id, seq: row.seq })),
+        ...plainRows.map((row) => ({ session: plain.id, message: row.id, seq: row.seq })),
+      ])
       expect(yield* session.messages({ sessionID: media.id, order: "asc" })).toEqual(messages("ses_import_media"))
       expect(yield* session.messages({ sessionID: plain.id, order: "asc" })).toEqual(messages("ses_import_plain"))
     }),

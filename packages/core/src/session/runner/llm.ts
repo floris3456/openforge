@@ -388,6 +388,7 @@ const layer = Layer.effect(
             webSocket: "session",
             inputTokens: estimate,
             peak: SessionThinkingBudget.peak(loaded.messages, loaded.model.ref),
+            threshold: compaction.threshold(loaded.model.limit),
             autoCompaction: compaction.auto(),
             images: loaded.images,
             pins: loaded.pins,

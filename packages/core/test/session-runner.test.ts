@@ -163,14 +163,21 @@ const recoveryModel = testModel("recovery", { context: 200_000, output: 1_000 })
 const fittedOutputModel = testModel("fitted-output", { context: 100_000, output: 64_000 })
 const smallWindowModel = testModel("small-window", { context: 64_000, output: 16_000 })
 const largeOutputModel = testModel("large-output", { context: 1_000_000, output: 1_000_000 })
-// A Claude model with a manual thinking budget, as its variant sets one; it compacts at 172k of its 200k window.
-const manualBudgetModel = LanguageModel.make({
-  id: "claude-sonnet-4-5",
-  provider: "anthropic",
-  route: AnthropicMessages.route,
-  options: { providerOptions: { thinking: { type: "enabled", budgetTokens: 16_000 } } },
-})
-modelLimits.set("claude-sonnet-4-5", { context: 200_000, output: 32_000, compact: 172_000 })
+/**
+ * A Claude model with a manual thinking budget, as its variant sets one. On its 200k window a chat compacts at 170k,
+ * with 15% of the window kept free.
+ */
+const manualBudget = (id: string, budgetTokens: number, output: number) => {
+  modelLimits.set(id, { context: 200_000, output })
+  return LanguageModel.make({
+    id,
+    provider: "anthropic",
+    route: AnthropicMessages.route,
+    options: { providerOptions: { thinking: { type: "enabled", budgetTokens } } },
+  })
+}
+const manualBudgetModel = manualBudget("claude-sonnet-4-5", 16_000, 32_000)
+const largeBudgetModel = manualBudget("claude-sonnet-4-5-max", 31_999, 64_000)
 /** The thinking budget a request sends, as its route writes it on the wire. */
 const sentBudget = (request: LLMRequest) =>
   compileRequest(request).pipe(
@@ -4802,10 +4809,32 @@ describe("SessionRunnerLLM", () => {
     yield* s.runPrompt("Fifth")
 
     expect(s.requests.map(isSummaryRequest)).toEqual([false, false, false, false, true, false])
-    // The chat's budget while the window has room for it; once the room its largest measured prompt leaves gets too
-    // small, half of it, once, which the steps keep while it fits and the summary sends as the last step did; after
-    // the summary, the chat's own again.
-    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 16_000, 8_000, 8_000, 8_000, 16_000])
+    // The chat's budget while the window has room for it. Once the room its largest measured prompt leaves gets too
+    // small, the most that still fits at the compaction point, once: half of what a step's output limit leaves at
+    // 170k (198,000 - 170,000) less the 4,096 margin. The steps keep it and the summary sends it as the last step did;
+    // after the summary, the chat's own again.
+    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 16_000, 11_952, 11_952, 11_952, 16_000])
+  })
+
+  scenario("changes a large manual thinking budget only once before the chat compacts", function* (s) {
+    s.currentModel = largeBudgetModel
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ background: false }))
+    for (const [prompt, measured] of [
+      ["First", 120_000],
+      ["Second", 131_000],
+      ["Third", 150_000],
+      ["Fourth", 165_000],
+    ] as const) {
+      yield* s.llm.push(TestLLM.textWithUsage(`${prompt} answer`, `text-large-${prompt}`, measured))
+      yield* s.runPrompt(prompt)
+    }
+    yield* s.llm.push(TestLLM.text("Fifth answer", "text-large-fifth"))
+    yield* s.runPrompt("Fifth")
+
+    // 31,999 under a 64,000 output limit, until the room left after 131,000 can't hold twice it; then the budget that
+    // fits at 170k, kept to the end.
+    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([31_999, 31_999, 11_952, 11_952, 11_952])
   })
 
   scenario("keeps a lowered manual thinking budget when a later step measures smaller", function* (s) {
@@ -4820,7 +4849,7 @@ describe("SessionRunnerLLM", () => {
     yield* s.llm.push(TestLLM.text("Third answer", "text-smaller-third"))
     yield* s.runPrompt("Third")
 
-    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 8_000, 8_000])
+    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 11_952, 11_952])
   })
 
   scenario("publishes the original overflow when recovery summarization fails", function* (s) {

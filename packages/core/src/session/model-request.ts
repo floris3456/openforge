@@ -122,6 +122,11 @@ export interface Input {
    * budget (`SessionThinkingBudget.peak`).
    */
   readonly peak?: number
+  /**
+   * openforge: the prompt size at which the chat compacts automatically (`SessionCompaction.threshold`), which a manual
+   * thinking budget that no longer fits is fitted to.
+   */
+  readonly threshold?: number
   /** Whether the chat compacts automatically, which a step tells a proxy that asks for compactions. */
   readonly autoCompaction?: boolean
   /** openforge: the model's entry when the chat gets optimized images (`ImageBank`). */
@@ -566,6 +571,7 @@ export const layer = Layer.effect(
           ? SessionThinkingBudget.keep(built, {
               limit: model.limit,
               peak: input.peak,
+              threshold: input.threshold,
               output: outputLimit(model.limit),
               headroom: WINDOW_HEADROOM,
             })

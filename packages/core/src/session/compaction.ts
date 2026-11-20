@@ -114,6 +114,11 @@ export interface Interface extends State.Transformable<Editor> {
   /** Whether automatic compaction is on; a step tells a proxy that asks for compactions which asks it acts on. */
   readonly auto: () => boolean
   /**
+   * openforge: the prompt size at which a chat on a model with `limit` compacts automatically; undefined while
+   * automatic compaction is off, or when nothing limits the model's prompt.
+   */
+  readonly threshold: (limit: SessionContext.Loaded["model"]["limit"]) => number | undefined
+  /**
    * Starts a background summary when the context nears the threshold. Never waits for it. Loads `context` only when
    * background summaries are on. `estimate`, when given, is `estimatePrompt` of the loaded context.
    */
@@ -338,6 +343,12 @@ export const layer = Layer.effect(
         },
       }),
     })
+
+    const threshold = (limit: SessionContext.Loaded["model"]["limit"]) => {
+      const settings = state.get()
+      const ceiling = settings.auto ? calculateCeiling(limit, settings.buffer) : Number.POSITIVE_INFINITY
+      return Number.isFinite(ceiling) ? ceiling : undefined
+    }
 
     const resolveModel = (context: SessionContext.Loaded, model: Model.Ref, agent: Agent.ID = context.agent.id) =>
       models
@@ -744,6 +755,7 @@ export const layer = Layer.effect(
       const chat = {
         limit: context.model.limit,
         peak: SessionThinkingBudget.peak(reply < 0 ? source : source.slice(0, reply), context.model.ref),
+        threshold: threshold(context.model.limit),
         output: SessionModelRequest.outputLimit(context.model.limit),
         headroom: SessionModelRequest.WINDOW_HEADROOM,
       }
@@ -1222,6 +1234,7 @@ export const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       auto: () => state.get().auto,
+      threshold,
       // A manual compaction settles through its `/compact` inbox item, which the runner owns.
       compact: (trigger) =>
         compact(trigger).pipe(

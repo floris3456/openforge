@@ -1895,6 +1895,7 @@ it.effect("a background summary sends the manual thinking budget of the step who
       ...SessionModelRequest.baseTranscript({ ...before, agent: before.agent.info }),
       inputTokens: SessionCompaction.estimatePrompt(before),
       peak: SessionThinkingBudget.peak(before.messages, claude.ref),
+      threshold: compaction.threshold(claude.limit),
     })
 
     yield* compaction.precompute(Effect.succeed(context))
@@ -1907,9 +1908,11 @@ it.effect("a background summary sends the manual thinking budget of the step who
       compileRequest(request).pipe(
         Effect.map((compiled) => (compiled.body as { thinking?: { budget_tokens?: number } }).thinking?.budget_tokens),
       )
+    // The most that fits at the 170k compaction point: half of 198,000 - 170,000 less the 4,096 margin.
+    expect(compaction.threshold(claude.limit)).toBe(170_000)
     expect(JSON.stringify(requests[0]?.messages)).not.toContain("Second answer")
-    expect(yield* budget(step.request)).toBe(8_000)
-    expect(yield* budget(requests[0]!)).toBe(8_000)
+    expect(yield* budget(step.request)).toBe(11_952)
+    expect(yield* budget(requests[0]!)).toBe(11_952)
   }),
 )
 

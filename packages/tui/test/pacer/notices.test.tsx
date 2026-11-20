@@ -167,7 +167,8 @@ describe("the cards (section 3)", () => {
           title: "Write the docs",
           agent: "docs",
           model: "claude-haiku-4-5",
-          cause: "partial reuse · tools",
+          // A sentence of the 60 cells a card has room for.
+          cause: "It went to another account, which had no cache of this chat.",
         }),
       ],
     })
@@ -175,10 +176,10 @@ describe("the cards (section 3)", () => {
     const line = (text: string) => frame.split("\n").find((line) => line.includes(text))!
     expect(line(TITLE)).toMatch(/Cache miss · 152K tokens not reused +just now × +┃/)
     expect(frame).toContain("Fix the flaky test · build · claude-opus-4-5")
-    expect(frame).toContain("prefix changed · system")
+    expect(frame).toContain("The system prompt changed since the step before.")
     expect(line("Partial cache reuse")).toMatch(/Partial cache reuse · 18K tokens not reused +just now × +┃/)
     expect(frame).toContain("Write the docs · docs · claude-haiku-4-5")
-    expect(frame).toContain("partial reuse · tools")
+    expect(frame).toContain("┃ It went to another account, which had no cache of this chat. ┃")
     // Newest first.
     expect(frame.indexOf(TITLE)).toBeLessThan(frame.indexOf("Partial cache reuse"))
     expect(edgeOf(setup, TITLE)).toEqual(setup.theme.text.feedback.error.base.toInts())
@@ -305,7 +306,7 @@ describe("open and dismiss (section 3)", () => {
     const frame = await setup.frame((frame) => frame.includes("compared with req_prev"))
     expect(setup.route.data).toEqual({ type: "session", sessionID: CHAT })
     expect(frame).toContain("transcript of ses_chat")
-    expect(frame).toContain("miss · prefix changed · system changed")
+    expect(frame).toContain("Cache miss. The system prompt changed since the step before.")
     expect(frame).toContain("98.1K tokens written again · the miss cost $0.41")
     await until(() => dismissals(setup).length === 1, 5_000, "the dismissal")
     expect(dismissals(setup)).toEqual(["notices/req_3/dismiss"])

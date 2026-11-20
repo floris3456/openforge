@@ -766,14 +766,14 @@ export function requestKind(request: PacerRequest) {
   return request.kind
 }
 
-/** The verdict column: the verdict, a miss's cause and the part that changed, or why it failed. */
+/** The verdict column: the verdict and a miss's cause in a few words (`partial: new system prompt`), or why it failed. */
 export function requestVerdict(request: PacerRequest) {
   if (request.refusal !== undefined) return `refused: ${request.refusal}`
   if (request.failed) return `failed ${request.status}`
   if (request.verdict === undefined) return ""
   if (!request.miss) return request.verdict
   // One wording with the cache notices, which the service builds.
-  return [request.verdict, Pacer.causeText(request)].filter((part) => part !== "").join(" · ")
+  return `${request.verdict}: ${Pacer.causeWords(request).short}`
 }
 
 /**
@@ -782,15 +782,18 @@ export function requestVerdict(request: PacerRequest) {
  */
 export function requestHelp(request: PacerRequest) {
   const cells = requestCells(request)
+  // As the column: a failure or a refusal says so instead.
+  const miss = request.miss && !request.failed && request.refusal === undefined
   return [
     [
       `${cells.time} · ${cells.kind} · ${cells.model}`,
       `Account: ${cells.account}`,
       `Read from / written to the cache: ${cells.cache} tokens`,
-      `Verdict: ${cells.verdict || "none yet"}`,
+      `Verdict: ${(miss ? request.verdict : cells.verdict) || "none yet"}`,
+      ...(miss ? [`Why: ${Pacer.causeWords(request).full}`] : []),
       ...(cells.cost ? [`Cost: ${cells.cost}`] : []),
     ].join("\n"),
-    "Each row is one request this chat or one of its subagents sent through CLIProxyPacer, newest first. Read/write is how many prompt tokens the provider read from its cache and wrote to it. The verdict says whether the cache was reused, partly reused or missed, and for a miss what caused it.",
+    "Each row is one request this chat or one of its subagents sent through CLIProxyPacer, newest first. Read/write is how many prompt tokens the provider read from its cache and wrote to it. The verdict says whether the cache was reused, partly reused or missed, and for a miss what caused it. A miss names a message by its place in the prompt as sent to the provider, counting from 1: message 4 is messages[3] in what changed.",
     "A narrow window drops the model, account and read/write columns and cuts long values; this help shows them in full. Enter moves the chat to where the request ended; Ctrl+Enter shows what changed in its prompt. The records come from CLIProxyPacer and show only while it answers.",
   ].join("\n\n")
 }
@@ -929,10 +932,10 @@ function padStart(text: string, size: number) {
 /** What changed in a request's prompt (section 7): the lines above its items, then one line per item. */
 export function promptChangeLines(change: PacerPromptChange) {
   const request = change.request
-  const verdict = [request.verdict ?? (request.failed ? `failed ${request.status}` : "no verdict"), request.cause]
-    .concat(request.changedPart === undefined ? [] : [`${request.changedPart} changed`])
-    .filter((part): part is string => part !== undefined && part !== "")
-    .join(" · ")
+  const verdict =
+    request.verdict === "miss" || request.verdict === "partial"
+      ? `${missKind(request.verdict)}. ${Pacer.causeWords(request).full}`
+      : (request.verdict ?? (request.failed ? `failed ${request.status}` : "no verdict"))
   const cost = [
     request.rewritten === undefined ? undefined : `${Locale.number(request.rewritten)} tokens written again`,
     request.missCost === undefined ? undefined : `the miss cost ${formatCost(request.missCost)}`,
@@ -993,8 +996,13 @@ function trimTokens(value: number) {
 
 /** A card's first line: `Cache miss · 152K tokens not reused`, or without a count when the row has none. */
 export function noticeTitle(notice: { readonly verdict: "miss" | "partial"; readonly tokens?: number }) {
-  const kind = notice.verdict === "miss" ? "Cache miss" : "Partial cache reuse"
+  const kind = missKind(notice.verdict)
   return notice.tokens === undefined ? kind : `${kind} · ${formatTokens(notice.tokens)} tokens not reused`
+}
+
+/** What a miss verdict is, in words: a card's title and the head of what changed say it. */
+function missKind(verdict: "miss" | "partial") {
+  return verdict === "miss" ? "Cache miss" : "Partial cache reuse"
 }
 
 /** A card's age at `now`: `just now`, then `3 min ago`. */

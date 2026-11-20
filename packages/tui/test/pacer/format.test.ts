@@ -18,9 +18,11 @@ import {
   promptChangeLines,
   promptlessLines,
   requestHeader,
+  requestHelp,
   requestLayout,
   requestRow,
   requestTone,
+  requestVerdict,
   usageAccounts,
   usageCountdown,
   usageGroupName,
@@ -1183,7 +1185,7 @@ describe("a row of the Requests tab (section 7)", () => {
     expect(row({ kind: "ping" })).toContain(" ping ")
   })
 
-  test("a miss shows as a warning, with its cause and the part that changed", () => {
+  test("a miss shows as a warning, with its cause in a few words", () => {
     const text = requestRow(miss(0, { at }), requestLayout(110, [miss(0, { at })]))
     expect(cells(text)).toEqual([
       "14:02:13",
@@ -1191,7 +1193,7 @@ describe("a row of the Requests tab (section 7)", () => {
       "claude-opus-4-5",
       "max-2",
       "0/98.1K",
-      "miss · prefix changed · system",
+      "miss: new system prompt",
       "$0.0123",
     ])
     expect(requestTone(miss(0))).toBe("warning")
@@ -1240,29 +1242,39 @@ describe("a row of the Requests tab (section 7)", () => {
         "claude-sonnet-4-5",
         "claude-apikey",
         "0/98.1K",
-        "miss · provider",
+        "miss: provider's fault",
         "$0.0123",
       ])
     }
   })
 
   test("a narrow window drops the model, then the account, then the cache, only when they don't fit, and cuts last", () => {
-    // The tab at 80 columns: no model, the rest whole.
-    const at80 = table(live, 70)
-    expect(at80.join("\n")).not.toContain("…")
-    expect(cells(at80[0]!)).toEqual(["time", "kind", "account", "read/write", "verdict", "cost"])
-    expect(cells(at80[3]!)).toEqual(["14:02:13", "step", "claude-apikey", "0/98.1K", "miss · provider", "$0.0123"])
-    // At 60: no account either.
-    const at60 = table(live, 50)
-    expect(cells(at60[0]!)).toEqual(["time", "kind", "verdict", "cost"])
-    expect(cells(at60[3]!)).toEqual(["14:02:13", "step", "miss · provider", "$0.0123"])
-    // In that order: at 53 the account would fit where the read and write no longer do, and still goes first.
-    expect(cells(table(live, 53)[0]!)).toEqual(["time", "kind", "verdict", "cost"])
-    for (const line of at80) expect(line).toHaveLength(70)
-    for (const line of at60) expect(line).toHaveLength(50)
+    // The tab at 87 columns: no model, the rest whole. (A miss's cause in words takes 7 cells more than CPP's
+    // `provider` did, so each width below is 7 more than when the column showed CPP's codes.)
+    const at87 = table(live, 77)
+    expect(at87.join("\n")).not.toContain("…")
+    expect(cells(at87[0]!)).toEqual(["time", "kind", "account", "read/write", "verdict", "cost"])
+    expect(cells(at87[3]!)).toEqual([
+      "14:02:13",
+      "step",
+      "claude-apikey",
+      "0/98.1K",
+      "miss: provider's fault",
+      "$0.0123",
+    ])
+    // At 67: no account either.
+    const at67 = table(live, 57)
+    expect(cells(at67[0]!)).toEqual(["time", "kind", "verdict", "cost"])
+    expect(cells(at67[3]!)).toEqual(["14:02:13", "step", "miss: provider's fault", "$0.0123"])
+    // In that order: at 60 the account would fit where the read and write no longer do, and still goes first.
+    expect(cells(table(live, 60)[0]!)).toEqual(["time", "kind", "verdict", "cost"])
+    expect(cells(table(live, 61)[0]!)).toEqual(["time", "kind", "read/write", "verdict", "cost"])
+    for (const line of at87) expect(line).toHaveLength(77)
+    for (const line of at67) expect(line).toHaveLength(57)
 
-    // A long verdict keeps room for its cause before a column is added, and what doesn't fit is cut, not dropped.
-    const rows = [request(0, { at }), miss(1, { at })]
+    // A long verdict keeps room for its cause before a column is added, and what doesn't fit is cut, not dropped: a
+    // cause openforge doesn't know, as CLIProxyPacer sent it.
+    const rows = [request(0, { at }), miss(1, { at, cause: "upstream-evicted", changedPart: "tools" })]
     expect(requestLayout(110, rows)).toEqual({
       width: 110,
       kind: 10,
@@ -1278,7 +1290,7 @@ describe("a row of the Requests tab (section 7)", () => {
       "claude-opus…",
       "max-2",
       "0/98.1K",
-      "miss · prefix changed · syst…",
+      "miss: upstream-evicted · too…",
       "$0.0123",
     ])
     expect(cells(table(rows, 80)[2]!)).toEqual([
@@ -1286,20 +1298,20 @@ describe("a row of the Requests tab (section 7)", () => {
       "step",
       "max-2",
       "0/98.1K",
-      "miss · prefix changed · system",
+      "miss: upstream-evicted · tools",
       "$0.0123",
     ])
     expect(cells(table(rows, 70)[2]!)).toEqual([
       "14:02:13",
       "step",
       "0/98.1K",
-      "miss · prefix changed · system",
+      "miss: upstream-evicted · tools",
       "$0.0123",
     ])
-    expect(cells(table(rows, 60)[2]!)).toEqual(["14:02:13", "step", "miss · prefix changed · system", "$0.0123"])
+    expect(cells(table(rows, 60)[2]!)).toEqual(["14:02:13", "step", "miss: upstream-evicted · tools", "$0.0123"])
     const narrow = table(rows, 50)[2]!
     expect(narrow).toHaveLength(50)
-    expect(cells(narrow)).toEqual(["14:02:13", "step", "miss · prefix changed · …", "$0.0123"])
+    expect(cells(narrow)).toEqual(["14:02:13", "step", "miss: upstream-evicted ·…", "$0.0123"])
   })
 
   test("room to spare widens the columns to their usual widths first, so a longer value arriving later fits", () => {
@@ -1327,6 +1339,116 @@ describe("a row of the Requests tab (section 7)", () => {
       "$0.0123",
     ])
   })
+
+  /** Every miss CLIProxyPacer judges, as a miss and as a partial reuse, with the parts and copies it names. */
+  const causes = (["miss", "partial"] as const).flatMap((verdict) =>
+    [
+      { cause: "expired" },
+      { cause: "compaction" },
+      { cause: "summary-request" },
+      { cause: "account-changed" },
+      { cause: "model-changed" },
+      { cause: "lifetime-changed", changedPart: "system[0]" },
+      { cause: "prefix-changed", changedPart: "system[2]" },
+      { cause: "prefix-changed", changedPart: "tools[14]" },
+      { cause: "prefix-changed", changedPart: "messages[998]", changedBy: "openforge" as const },
+      { cause: "prefix-changed", changedPart: "prompt_cache_key" },
+      { cause: "prefix-changed", changedPart: "temperature" },
+      { cause: "prefix-changed" },
+      { cause: "server-layout", changedPart: "messages[1]" },
+      { cause: "provider" },
+      { cause: "provider", copy: { id: "req_old", at } },
+      { cause: "unknown" },
+      { cause: undefined },
+    ].map((extra) => miss(0, { at, verdict, changedPart: undefined, ...extra })),
+  )
+
+  test("a miss's cause in a few words, each within the 28 cells the verdict keeps, so a narrow tab shows it whole", () => {
+    expect(causes.map(requestVerdict).slice(0, 17)).toEqual([
+      "miss: cache expired",
+      "miss: chat compacted",
+      "miss: summary mismatch",
+      "miss: another account",
+      "miss: model switched",
+      "miss: cache length raised",
+      "miss: new system prompt",
+      "miss: new tool list",
+      "miss: message 999 changed",
+      "miss: new cache key",
+      "miss: setting changed",
+      "miss: prompt changed",
+      "miss: proxy's layout",
+      "miss: provider's fault",
+      "miss: provider's old copy",
+      "miss: cause unknown",
+      "miss: cause unknown",
+    ])
+    for (const one of causes) {
+      const verdict = requestVerdict(one)
+      expect(stringWidth(verdict)).toBeLessThanOrEqual(28)
+      // The tab at 63 columns: the time, the kind, the verdict's 28 and the cost; nothing cut.
+      const line = requestRow(one, requestLayout(53, causes))
+      expect(line).toContain(` ${verdict} `)
+      expect(line).not.toContain("…")
+    }
+    expect(requestLayout(53, causes).verdict).toBe(28)
+  })
+
+  test("a cause openforge doesn't know shows as CLIProxyPacer sent it, with the part it names", () => {
+    expect(requestVerdict(miss(0, { cause: "cache-evicted", changedPart: undefined }))).toBe("miss: cache-evicted")
+    expect(requestVerdict(miss(0, { verdict: "partial", cause: "cache-evicted", changedPart: "messages[2]" }))).toBe(
+      "partial: cache-evicted · messages[2]",
+    )
+  })
+})
+
+describe("a request's help (spec row-help)", () => {
+  const at = new Date(2026, 10, 6, 14, 2, 13).getTime()
+  const head = (one: PacerRequest) => requestHelp(one).split("\n\n")[0]!.split("\n")
+
+  test("a miss: its verdict, then why in a sentence; which numbering a message's place uses", () => {
+    expect(head(miss(0, { at, cause: "prefix-changed", changedPart: "messages[3]", changedBy: "openforge" }))).toEqual([
+      "14:02:13 · step · claude-opus-4-5",
+      "Account: max-2",
+      "Read from / written to the cache: 0/98.1K tokens",
+      "Verdict: miss",
+      "Why: openforge changed message 4 of the prompt.",
+      "Cost: $0.0123",
+    ])
+    expect(requestHelp(miss(0))).toContain(
+      "A miss names a message by its place in the prompt as sent to the provider, counting from 1: message 4 is messages[3] in what changed.",
+    )
+    expect(head(miss(0, { verdict: "partial", cause: "unknown", changedPart: undefined }))).toContain(
+      "Why: CLIProxyPacer couldn't tell why: one prompt wasn't kept.",
+    )
+  })
+
+  test("a hit, a failure and a refusal say no why", () => {
+    expect(head(request(0, { at }))).toContain("Verdict: hit")
+    expect(head(miss(0, { at, failed: true, status: 529 }))).toContain("Verdict: failed 529")
+    expect(head(request(0, { at, verdict: undefined }))).toContain("Verdict: none yet")
+    for (const one of [request(0), miss(0, { failed: true, status: 529 }), request(0, { refusal: "model_cooldown" })])
+      expect(requestHelp(one)).not.toContain("Why:")
+  })
+})
+
+describe("a provider's miss that read an older copy of the chat", () => {
+  const copied = new Date(2026, 10, 6, 14, 1, 2).getTime()
+  const one = miss(3, {
+    verdict: "partial",
+    cause: "provider",
+    changedPart: undefined,
+    copy: { id: "req_old", at: copied },
+  })
+
+  test("says so in the column, and when that copy was in the help and what changed", () => {
+    expect(requestVerdict(one)).toBe("partial: provider's old copy")
+    expect(requestHelp(one)).toContain("Why: The provider read an older copy of the chat, from 14:01:02.")
+    expect(promptChangeLines(promptChange(one)).head[0]).toEqual({
+      text: "Partial cache reuse. The provider read an older copy of the chat, from 14:01:02.",
+      tone: "warning",
+    })
+  })
 })
 
 describe("what changed (section 7)", () => {
@@ -1336,7 +1458,7 @@ describe("what changed (section 7)", () => {
     })
     const lines = promptChangeLines(change)
     expect(lines.head.map((line) => line.text)).toEqual([
-      "miss · prefix changed · system changed",
+      "Cache miss. The system prompt changed since the step before.",
       "98.1K tokens written again · the miss cost $0.41",
       "compared with req_prev of 14:01:02",
     ])

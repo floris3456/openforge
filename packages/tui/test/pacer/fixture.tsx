@@ -154,7 +154,7 @@ export function miss(index: number, extra: Partial<PacerRequest> = {}) {
   return request(index, {
     verdict: "miss",
     miss: true,
-    cause: "prefix changed",
+    cause: "prefix-changed",
     changedPart: "system",
     rewritten: 98_100,
     missCost: 0.41 as PacerRequest["cost"],
@@ -174,7 +174,7 @@ export function notice(index: number, extra: Partial<PacerNotice> = {}): PacerNo
     model: "claude-opus-4-5",
     verdict: "miss",
     tokens: 152_340,
-    cause: "prefix changed · system",
+    cause: "The system prompt changed since the step before.",
     missCost: 0.41 as PacerNotice["missCost"],
     at: NOW - index * 1000,
     ...extra,

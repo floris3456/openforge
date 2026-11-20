@@ -1195,6 +1195,8 @@ export type PacerRequest = {
   miss: boolean
   cause?: string
   changedPart?: string
+  changedBy?: "openforge" | "cliproxypacer"
+  copy?: { id: string; at: number }
   rewritten?: number
   missCost?: MoneyUSD
 }

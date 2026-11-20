@@ -171,8 +171,14 @@ const Row = Schema.Struct({
   cache_shortfall: maybe(Schema.Number),
   miss_cost: maybe(Schema.Number),
   changed_part: maybe(Schema.String),
+  /** Who changed a `prefix-changed` miss's prompt: `client` or `cpp` (its secret hiding); since CPP 2026-11-16. */
+  changed_by: maybe(Schema.String),
   /** The numeric id of the request the verdict compared with. */
   cache_base: maybe(Schema.Number),
+  /**
+   * The numeric id of the older request of the chat whose whole prompt a `provider` miss read; since CPP 2026-11-19.
+   */
+  cache_copy: maybe(Schema.Number),
   refusal: maybe(Schema.String),
   /** The chat's ID as the client sent it. */
   session_ext: maybe(Schema.String),
@@ -495,8 +501,10 @@ export interface Sender {
 export const requestID = (row: Pick<Row, "id" | "ext" | "kind">) =>
   row.ext && kinds[row.kind ?? -1] !== "search" ? row.ext : Pacer.rowRequestID(row.id)
 
-/** A request row in openforge's shape. */
-export function request(row: Row, sender: Sender, context: Context): Pacer.Request {
+/**
+ * A request row in openforge's shape. `copy` is the request its `cache_copy` names, as read: CPP gives only its number.
+ */
+export function request(row: Row, sender: Sender, context: Context, copy?: Pacer.Request["copy"]): Pacer.Request {
   const verdict = row.cache_verdict ?? undefined
   const subagent = row.subagent === true
   return {
@@ -524,6 +532,9 @@ export function request(row: Row, sender: Sender, context: Context): Pacer.Reque
     miss: verdict === "miss" || verdict === "partial",
     ...(row.cache_cause ? { cause: row.cache_cause } : {}),
     ...(row.changed_part ? { changedPart: row.changed_part } : {}),
+    ...(row.changed_by === "client" ? { changedBy: "openforge" as const } : {}),
+    ...(row.changed_by === "cpp" ? { changedBy: "cliproxypacer" as const } : {}),
+    ...(copy ? { copy } : {}),
     ...(typeof row.cache_shortfall === "number" && row.cache_shortfall > 0
       ? { rewritten: count(row.cache_shortfall) }
       : {}),

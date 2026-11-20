@@ -2594,6 +2594,61 @@ describe("PacerConnection reads", () => {
     }),
   )
 
+  it.effect(
+    "names the older request a provider's miss read, at its time: read by its number, then held; and who changed a prompt",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const parent = yield* chat(h)
+        const uuid = PacerSessionID.make(parent)
+        h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+        h.cpp.rows = [
+          row(1, { session_ext: uuid }),
+          row(2, { session_ext: uuid }),
+          row(3, {
+            session_ext: uuid,
+            cache_verdict: "partial",
+            cache_cause: "provider",
+            cache_base: 2,
+            cache_copy: 1,
+          }),
+          // A copy CPP no longer lists.
+          row(4, { session_ext: uuid, cache_verdict: "miss", cache_cause: "provider", cache_copy: 404 }),
+          row(5, { session_ext: uuid, cache_verdict: "miss", cache_cause: "prefix-changed", changed_by: "client" }),
+          row(6, { session_ext: uuid, cache_verdict: "miss", cache_cause: "prefix-changed", changed_by: "cpp" }),
+        ]
+        h.cpp.prompts.set("req-3", { kept: true, previous: 2, rows: [] })
+        // The reads of one request, by number or ID, in any order: those of one page go together.
+        const one = () =>
+          seen(h, "/pacer/v1/monitor/requests")
+            .flatMap((item) => item.query.getAll("request"))
+            .toSorted()
+
+        // The misses alone: the copy, a hit, is on no page read yet, so it is read by its number.
+        const misses = yield* h.connection.requests(parent, { filter: "misses" })
+        expect(one()).toEqual(["1", "404"])
+        const copy = misses.items.find((item) => item.id === "req-3")?.copy
+        expect(copy?.id).toBe("req-1")
+        expect(misses.items.find((item) => item.id === "req-4")).not.toHaveProperty("copy")
+        expect(misses.items.map((item) => [item.id, item.changedBy])).toEqual([
+          ["req-6", "cliproxypacer"],
+          ["req-5", "openforge"],
+          ["req-4", undefined],
+          ["req-3", undefined],
+        ])
+
+        // Every request: the copy on the page, at the time it was held at.
+        const all = yield* h.connection.requests(parent, { filter: "all" })
+        expect(all.items.find((item) => item.id === "req-3")?.copy).toEqual(copy)
+        expect(all.items.find((item) => item.id === "req-1")?.at).toBe(copy?.at)
+        // What changed: the copy held, so the only reads more are the prompt's and its own row's.
+        const change = yield* h.connection.prompt("req-3")
+        expect(change?.request.copy).toEqual(copy)
+        expect(one()).toEqual(["1", "404", "404", "req-3"])
+      }),
+  )
+
   it.effect("a request's time never changes once answered, as the offset to CPP's clock narrows", () =>
     Effect.gen(function* () {
       // Found in a load run: the TUI's newest row read 09:20:42, the same request on the page read a moment later
@@ -2924,7 +2979,7 @@ describe("PacerConnection cache notices", () => {
             model: "model-a",
             verdict: "partial",
             tokens: 18_000,
-            cause: "provider",
+            cause: "Nothing sent changed; the provider didn't reuse its cache.",
             at: 0,
           },
           {
@@ -2934,11 +2989,47 @@ describe("PacerConnection cache notices", () => {
             model: "model-a",
             verdict: "miss",
             tokens: 152_000,
-            cause: "prefix-changed · system",
+            cause: "The system prompt changed since the step before.",
             at: 0,
           },
         ])
       }),
+  )
+
+  it.effect("a provider's miss's notice says when the older copy it read was: read by its number when not held", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const added = yield* listen(h)
+      yield* online(h)
+      const id = yield* chat(h)
+      yield* step(h, id)
+      yield* until("held", () => h.lookups.count >= 1)
+      const uuid = PacerSessionID.make(id)
+      h.cpp.rows = [row(1, { session_ext: uuid })]
+      h.cpp.notice("request", { keys: [1], at: 1 })
+      yield* until("read", () => seen(h, "/pacer/v1/monitor/requests").length === 1)
+      // The next notice's rows: a hit, and a miss that read the first row's prompt, which none of them is.
+      h.cpp.rows = [
+        ...h.cpp.rows,
+        row(2, { session_ext: uuid }),
+        row(3, { session_ext: uuid, cache_verdict: "miss", cache_cause: "provider", cache_copy: 1 }),
+      ]
+      h.cpp.notice("request", { keys: [1], at: 2 })
+      yield* until("noticed", () => added.length === 1)
+      yield* settle
+
+      expect(seen(h, "/pacer/v1/monitor/requests").map((item) => item.query.toString())).toEqual([
+        "limit=50&from=0",
+        "after=1&limit=500&from=0",
+        "request=1&limit=1&from=0",
+      ])
+      // At the time the Requests tab lists that request at.
+      h.cpp.views.set(uuid, chatView(uuid, h.cpp.time(), { session_id: 7 }))
+      const listed = yield* h.connection.requests(id, { filter: "all" })
+      const copy = { id: "req-1", at: listed.items.find((item) => item.id === "req-1")!.at }
+      expect(added[0]?.cause).toBe(Pacer.causeWords({ cause: "provider", copy }).full)
+      expect(added[0]?.cause).toStartWith("The provider read an older copy of the chat, from ")
+    }),
   )
 
   it.effect("raises a notice for a row read after a reconnect, while it is within the lifetime", () =>

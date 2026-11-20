@@ -24188,6 +24188,24 @@
           "changedPart": {
             "type": "string"
           },
+          "changedBy": {
+            "type": "string",
+            "enum": ["openforge", "cliproxypacer"]
+          },
+          "copy": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "at": {
+                "type": "number",
+                "description": "Milliseconds since the Unix epoch, on the service's clock"
+              }
+            },
+            "required": ["id", "at"],
+            "additionalProperties": false
+          },
           "rewritten": {
             "type": "integer",
             "minimum": 0,

@@ -304,6 +304,30 @@ describe("PacerWire", () => {
     })
   })
 
+  test("reads who changed a prompt and the older copy a provider's miss read, as the caller read that request", () => {
+    // CPP's `changed_by` (2026-11-16) and `cache_copy` (2026-11-19): its docs/pacer/API.md, monitor/requests.
+    const shaped = PacerWire.rows([
+      {
+        id: 5,
+        at: 1,
+        ext: "req-5",
+        kind: 0,
+        cache_verdict: "miss",
+        cache_cause: "prefix-changed",
+        changed_by: "client",
+      },
+      { id: 6, at: 2, ext: "req-6", kind: 0, cache_verdict: "miss", cache_cause: "prefix-changed", changed_by: "cpp" },
+      { id: 7, at: 3, ext: "req-7", kind: 0, cache_verdict: "miss", cache_cause: "prefix-changed", changed_by: "who" },
+      { id: 8, at: 4, ext: "req-8", kind: 0, cache_verdict: "partial", cache_cause: "provider", cache_copy: 2 },
+    ]).map((row) =>
+      PacerWire.request(row, {}, { offset: 0, now: 0 }, row.cache_copy ? { id: "req-2", at: 2 } : undefined),
+    )
+    expect(shaped.map((request) => request.changedBy)).toEqual(["openforge", "cliproxypacer", undefined, undefined])
+    expect("changedBy" in shaped[2]!).toBeFalse()
+    expect(shaped.map((request) => request.copy)).toEqual([undefined, undefined, undefined, { id: "req-2", at: 2 }])
+    expect("copy" in shaped[0]!).toBeFalse()
+  })
+
   test("a web tool call goes by its row, with or without a request ID; any other row with an ID keeps it", () => {
     // Spec cliproxypacer-step-2, the decision of 2026-11-07: every short call's row of a chat went by the same empty
     // ID. A call CPP ran as a job carries its job ID (2026-11-09, run/evidence/cpp-web-tools/tui-1), which names no

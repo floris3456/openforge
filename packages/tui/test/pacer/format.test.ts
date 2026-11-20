@@ -1254,7 +1254,14 @@ describe("a row of the Requests tab (section 7)", () => {
     const at87 = table(live, 77)
     expect(at87.join("\n")).not.toContain("…")
     expect(cells(at87[0]!)).toEqual(["time", "kind", "account", "read/write", "verdict", "cost"])
-    expect(cells(at87[3]!)).toEqual(["14:02:13", "step", "claude-apikey", "0/98.1K", "miss: provider's fault", "$0.0123"])
+    expect(cells(at87[3]!)).toEqual([
+      "14:02:13",
+      "step",
+      "claude-apikey",
+      "0/98.1K",
+      "miss: provider's fault",
+      "$0.0123",
+    ])
     // At 67: no account either.
     const at67 = table(live, 57)
     expect(cells(at67[0]!)).toEqual(["time", "kind", "verdict", "cost"])
@@ -1363,7 +1370,7 @@ describe("a row of the Requests tab (section 7)", () => {
       "miss: summary mismatch",
       "miss: another account",
       "miss: model switched",
-      "miss: longer cache time",
+      "miss: cache length raised",
       "miss: new system prompt",
       "miss: new tool list",
       "miss: message 999 changed",
@@ -1427,7 +1434,12 @@ describe("a request's help (spec row-help)", () => {
 
 describe("a provider's miss that read an older copy of the chat", () => {
   const copied = new Date(2026, 10, 6, 14, 1, 2).getTime()
-  const one = miss(3, { verdict: "partial", cause: "provider", changedPart: undefined, copy: { id: "req_old", at: copied } })
+  const one = miss(3, {
+    verdict: "partial",
+    cause: "provider",
+    changedPart: undefined,
+    copy: { id: "req_old", at: copied },
+  })
 
   test("says so in the column, and when that copy was in the help and what changed", () => {
     expect(requestVerdict(one)).toBe("partial: provider's old copy")

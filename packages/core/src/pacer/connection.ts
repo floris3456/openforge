@@ -1450,7 +1450,9 @@ export const layer = Layer.effect(
         { concurrency: READERS },
       )
       return new Map(
-        found.flatMap((row) => (row ? [[row.id, { id: PacerWire.requestID(row), at: rowAt(row, context) }] as const] : [])),
+        found.flatMap((row) =>
+          row ? [[row.id, { id: PacerWire.requestID(row), at: rowAt(row, context) }] as const] : [],
+        ),
       )
     })
 

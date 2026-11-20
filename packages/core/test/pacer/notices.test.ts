@@ -237,7 +237,7 @@ describe("PacerNotices", () => {
           ["req-13", "CLIProxyPacer couldn't tell why: one prompt wasn't kept."],
           ["req-12", "Nothing sent changed; the provider didn't reuse its cache."],
           ["req-11", "CLIProxyPacer's layout of message 3 broke the cache."],
-          ["req-10", "The cache was set to last longer: it was all written again."],
+          ["req-10", "The cache length was raised, so it was all written again."],
           ["req-9", "Another model ran in between; each model has its own cache."],
           ["req-8", "It went to another account, which had no cache of this chat."],
           ["req-7", "The tool list changed since the step before."],
@@ -346,30 +346,32 @@ describe("PacerNotices", () => {
       }),
   )
 
-  it.effect("says who changed the prompt, and when the older copy a provider's miss read was, as the connection read it", () =>
-    Effect.gen(function* () {
-      const h = yield* setup()
-      const chat = PacerSessionID.make(yield* h.chat())
-      const copied = new Date(2026, 10, 19, 14, 2, 11).getTime()
-      yield* h.read(
-        [
-          row(1, chat, { cache_cause: "prefix-changed", changed_part: "messages[3]", changed_by: "client" }),
-          row(2, chat, { cache_cause: "prefix-changed", changed_part: "system", changed_by: "cpp" }),
-          row(3, chat, { cache_verdict: "partial", cache_cause: "provider", cache_copy: 77 }),
-          // CPP named a copy the connection couldn't read.
-          row(4, chat, { cache_cause: "provider", cache_copy: 78 }),
-        ],
-        new Map([[77, { id: "req-77", at: copied }]]),
-      )
-      yield* settle
+  it.effect(
+    "says who changed the prompt, and when the older copy a provider's miss read was, as the connection read it",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const chat = PacerSessionID.make(yield* h.chat())
+        const copied = new Date(2026, 10, 19, 14, 2, 11).getTime()
+        yield* h.read(
+          [
+            row(1, chat, { cache_cause: "prefix-changed", changed_part: "messages[3]", changed_by: "client" }),
+            row(2, chat, { cache_cause: "prefix-changed", changed_part: "system", changed_by: "cpp" }),
+            row(3, chat, { cache_verdict: "partial", cache_cause: "provider", cache_copy: 77 }),
+            // CPP named a copy the connection couldn't read.
+            row(4, chat, { cache_cause: "provider", cache_copy: 78 }),
+          ],
+          new Map([[77, { id: "req-77", at: copied }]]),
+        )
+        yield* settle
 
-      expect((yield* h.list()).map((notice) => [notice.requestID, notice.cause])).toEqual([
-        ["req-4", "Nothing sent changed; the provider didn't reuse its cache."],
-        ["req-3", "The provider read an older copy of the chat, from 14:02:11."],
-        ["req-2", "CLIProxyPacer's redaction changed the system prompt."],
-        ["req-1", "openforge changed message 4 of the prompt."],
-      ])
-    }),
+        expect((yield* h.list()).map((notice) => [notice.requestID, notice.cause])).toEqual([
+          ["req-4", "Nothing sent changed; the provider didn't reuse its cache."],
+          ["req-3", "The provider read an older copy of the chat, from 14:02:11."],
+          ["req-2", "CLIProxyPacer's redaction changed the system prompt."],
+          ["req-1", "openforge changed message 4 of the prompt."],
+        ])
+      }),
   )
 
   it.effect(

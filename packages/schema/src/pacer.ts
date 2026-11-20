@@ -421,9 +421,15 @@ const CAUSES = new Map([
   ["expired", { short: "cache expired", full: "The chat was idle longer than its cache lasts." }],
   ["compaction", { short: "chat compacted", full: "The chat was compacted: a summary replaced its history." }],
   ["summary-request", { short: "summary mismatch", full: "CLIProxyPacer's summary request didn't match the cache." }],
-  ["account-changed", { short: "another account", full: "It went to another account, which had no cache of this chat." }],
+  [
+    "account-changed",
+    { short: "another account", full: "It went to another account, which had no cache of this chat." },
+  ],
   ["model-changed", { short: "model switched", full: "Another model ran in between; each model has its own cache." }],
-  ["lifetime-changed", { short: "longer cache time", full: "The cache was set to last longer: it was all written again." }],
+  [
+    "lifetime-changed",
+    { short: "cache length raised", full: "The cache length was raised, so it was all written again." },
+  ],
   ["unknown", { short: "cause unknown", full: "CLIProxyPacer couldn't tell why: one prompt wasn't kept." }],
 ])
 
@@ -432,7 +438,10 @@ function changeWords(changedPart: string | undefined, by: Request["changedBy"]) 
   const part = partWords(changedPart)
   if (by === "openforge") return { short: part.short, full: `openforge changed ${part.noun}.` }
   if (by === "cliproxypacer") return { short: part.short, full: `CLIProxyPacer's redaction changed ${part.noun}.` }
-  return { short: part.short, full: `${part.noun[0]!.toUpperCase()}${part.noun.slice(1)} changed since the step before.` }
+  return {
+    short: part.short,
+    full: `${part.noun[0]!.toUpperCase()}${part.noun.slice(1)} changed since the step before.`,
+  }
 }
 
 /**

@@ -240,8 +240,8 @@ describe("a miss's cause in words", () => {
       full: "Another model ran in between; each model has its own cache.",
     })
     expect(words("lifetime-changed", { changedPart: "system[0]" })).toEqual({
-      short: "longer cache time",
-      full: "The cache was set to last longer: it was all written again.",
+      short: "cache length raised",
+      full: "The cache length was raised, so it was all written again.",
     })
     expect(words("prefix-changed", { changedPart: "system[1]" })).toEqual({
       short: "new system prompt",

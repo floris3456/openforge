@@ -2606,7 +2606,13 @@ describe("PacerConnection reads", () => {
         h.cpp.rows = [
           row(1, { session_ext: uuid }),
           row(2, { session_ext: uuid }),
-          row(3, { session_ext: uuid, cache_verdict: "partial", cache_cause: "provider", cache_base: 2, cache_copy: 1 }),
+          row(3, {
+            session_ext: uuid,
+            cache_verdict: "partial",
+            cache_cause: "provider",
+            cache_base: 2,
+            cache_copy: 1,
+          }),
           // A copy CPP no longer lists.
           row(4, { session_ext: uuid, cache_verdict: "miss", cache_cause: "provider", cache_copy: 404 }),
           row(5, { session_ext: uuid, cache_verdict: "miss", cache_cause: "prefix-changed", changed_by: "client" }),

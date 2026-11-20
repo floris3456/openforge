@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
-import { DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -14,6 +14,7 @@ import { ImageBank } from "@opencode/core/image/bank"
 import { ImageTable } from "@opencode/core/image/sql"
 import { KV } from "@opencode/core/kv"
 import { MediaFiles } from "@opencode/core/media/files"
+import { MediaGate } from "@opencode/core/media/gate"
 import { MediaKeeper } from "@opencode/core/media/keeper"
 import { MediaClearedTable } from "@opencode/core/media/sql"
 import { MediaExpiry } from "@opencode/core/media/expiry"
@@ -304,12 +305,12 @@ describe("MediaMove", () => {
         yield* seed()
         const before = yield* reads
 
-        expect(yield* MediaMove.run(db, folder, Effect.void)).toEqual({ blobs: 2, rows: 4 })
+        expect(yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))).toEqual({ blobs: 2, rows: 4 })
 
         yield* expectMoved(folder)
         expect(yield* reads).toEqual(before)
         // Nothing is left to move.
-        expect(yield* MediaMove.run(db, folder, Effect.void)).toEqual({ blobs: 0, rows: 0 })
+        expect(yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))).toEqual({ blobs: 0, rows: 0 })
       }),
     ),
   )
@@ -333,11 +334,11 @@ describe("MediaMove", () => {
         const stopAt = (n: number) => Effect.suspend(() => (++calls.count === n ? Effect.interrupt : Effect.void))
         for (const n of [2, 4]) {
           calls.count = 0
-          const stopped = yield* MediaMove.run(db, folder, stopAt(n)).pipe(Effect.exit)
+          const stopped = yield* MediaMove.run(db, folder, MediaGate.here(stopAt(n))).pipe(Effect.exit)
           expect(Exit.hasInterrupts(stopped)).toBe(true)
           expect(yield* reads).toEqual(before)
         }
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         yield* expectMoved(folder)
         expect(yield* reads).toEqual(before)
@@ -371,7 +372,7 @@ describe("MediaMove", () => {
         const before = yield* copy("before.db")
         expect(before.pictures).toBe(moved.length)
 
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         const after = yield* copy("after.db")
         expect(after.pictures).toBe(0)
@@ -409,7 +410,7 @@ describe("what the model is sent", () => {
         const before = yield* body
         for (const data of [fitted, person, part]) expect(before).toContain(data.toString("base64"))
 
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         expect(yield* body).toBe(before)
       }),
@@ -423,7 +424,7 @@ describe("what the model is sent", () => {
         const now = Date.now()
         yield* seed(now - 31 * DAY)
 
-        yield* MediaExpiry.run(db, folder, now, Effect.void)
+        yield* MediaExpiry.run(db, folder, now, MediaGate.here(Effect.void))
 
         const sent = yield* body
         for (const data of [fitted, person, part, ...originals]) expect(sent).not.toContain(data.toString("base64"))
@@ -663,6 +664,61 @@ describe("MediaKeeper", () => {
         for (const data of [...large, original])
           expect((yield* Effect.promise(() => readFile(MediaFiles.file(folder, hash(data))))).equals(data)).toBe(true)
         expect(gaps.longest).toBeLessThan(50)
+      }),
+    ),
+  )
+
+  // The worker writes over a connection of its own. A transaction of the service's that read before one of its writes
+  // committed and writes after it would fail with SQLITE_BUSY_SNAPSHOT, so each of the worker's writes waits until it
+  // holds the service's connection. Each transaction here reads, waits 3 ms and writes, while the worker moves 200 rows.
+  it.live("never makes a transaction of the service's fail while it moves on its worker", () =>
+    withDatabase(() =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const keeper = yield* MediaKeeper.Service
+        const kv = yield* KV.Service
+        yield* seed()
+        yield* db
+          .insert(SessionMessageTable)
+          .values(
+            Array.from({ length: 200 }, (_, index) =>
+              assistant(SessionMessage.ID.make(`msg_move_many_${index}`), 100 + index, [
+                tool(`call_many_${index}`, [
+                  {
+                    type: "file",
+                    uri: `data:image/png;base64,${bytes(100 + index, 16_000).toString("base64")}`,
+                    mime: "image/png",
+                  },
+                ]),
+              ]),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        yield* db.run(sql`CREATE TABLE service_writes (n INTEGER)`).pipe(Effect.orDie)
+
+        const outcome = { ok: 0, failed: [] as string[] }
+        const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+        const deadline = performance.now() + 60_000
+        while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+          if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+          const exit = yield* db
+            .transaction(() =>
+              Effect.gen(function* () {
+                yield* db.get(sql`SELECT count(*) FROM service_writes`)
+                yield* Effect.sleep("3 millis")
+                yield* db.run(sql`INSERT INTO service_writes VALUES (1)`)
+              }),
+            )
+            .pipe(Effect.exit)
+          if (exit._tag === "Success") outcome.ok++
+          else outcome.failed.push(String(Cause.squash(exit.cause)))
+        }
+        yield* Fiber.interrupt(running)
+
+        expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 2, rows: 204 })
+        expect(outcome.failed.slice(0, 3)).toEqual([])
+        expect(outcome.ok).toBeGreaterThan(0)
       }),
     ),
   )

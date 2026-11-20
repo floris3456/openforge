@@ -14,6 +14,7 @@ import { Effect, Layer } from "effect"
 import { Global } from "@opencode/util/global"
 import { Database } from "../src/database/database"
 import { MediaFiles } from "../src/media/files"
+import { MediaGate } from "../src/media/gate"
 import { MediaMove } from "../src/media/move"
 
 const args = process.argv.slice(2)
@@ -194,7 +195,7 @@ const moved = await Effect.runPromise(
       const folder = MediaFiles.folder(db)
       if (!folder) throw new Error("no media folder")
       const started = performance.now()
-      const result = yield* MediaMove.run(db, folder, Effect.void)
+      const result = yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
       return { ...result, ms: Math.round(performance.now() - started) }
     }).pipe(Effect.provide(Database.layer({ path: database }))),
   ).pipe(Effect.provideService(Global.Service, global)),

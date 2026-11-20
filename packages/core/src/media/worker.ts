@@ -1,12 +1,13 @@
 export * as MediaWorker from "./worker.js"
 
 import type { Worker } from "node:worker_threads"
-import { Effect, Queue, Schema } from "effect"
+import { Effect, Exit, Queue, Schema, Scope } from "effect"
 import type { Reply, Request, Start } from "./media-worker.js"
 import type { MediaMove } from "./move.js"
 
 // openforge (task ze433w6fask0): the service's side of media-worker.ts, which does the media keeper's work on the rows
-// on a thread of its own. Here only its questions are answered (Between, with `between`) and its log lines logged.
+// on a thread of its own. Here only its questions are answered, Between with `between` and Lock with `hold`, and its log
+// lines logged.
 
 export class UnavailableError extends Schema.TaggedError<UnavailableError>()("MediaWorker.UnavailableError", {
   cause: Schema.Defect(),
@@ -22,18 +23,25 @@ export interface Handle {
   readonly move: (between: Effect.Effect<void>) => Effect.Effect<MediaMove.Moved>
 }
 
-/** Starts the worker on `start.database` and stops it when the scope closes. */
-export const open = Effect.fnUntraced(function* (start: Start, url = new URL("./media-worker.js", import.meta.url)) {
+/**
+ * Starts the worker on `start.database` and stops it when the scope closes. `hold`, in a scope, holds the service's
+ * connection to that database: none of the service's statements runs until the scope closes (MediaGate).
+ */
+export const open = Effect.fnUntraced(function* (
+  start: Start,
+  hold: Effect.Effect<unknown, unknown, Scope.Scope>,
+  url = new URL("./media-worker.js", import.meta.url),
+) {
   const worker = yield* Effect.acquireRelease(spawn(start, url), stop)
   return {
     expire: (now, between) =>
-      request(worker, { _tag: "Expire", now }, between).pipe(
+      request(worker, { _tag: "Expire", now }, between, hold).pipe(
         Effect.flatMap((reply) =>
           reply._tag === "Expired" ? Effect.succeed(reply.next) : Effect.die(new Error(`unexpected ${reply._tag}`)),
         ),
       ),
     move: (between) =>
-      request(worker, { _tag: "Move" }, between).pipe(
+      request(worker, { _tag: "Move" }, between, hold).pipe(
         Effect.flatMap((reply) =>
           reply._tag === "Moved" ? Effect.succeed(reply.moved) : Effect.die(new Error(`unexpected ${reply._tag}`)),
         ),
@@ -88,7 +96,12 @@ type Event =
   | { readonly _tag: "Error"; readonly error: Error }
 
 /** Sends one request and answers the worker's questions until its reply. */
-const request = (worker: Worker, message: Request, between: Effect.Effect<void>) =>
+const request = (
+  worker: Worker,
+  message: Request,
+  between: Effect.Effect<void>,
+  hold: Effect.Effect<unknown, unknown, Scope.Scope>,
+) =>
   Effect.gen(function* () {
     const events = yield* Queue.unbounded<Event>()
     const onMessage = (reply: Reply) => Queue.offerUnsafe(events, reply)
@@ -98,12 +111,31 @@ const request = (worker: Worker, message: Request, between: Effect.Effect<void>)
       Effect.sync(() => worker.on("message", onMessage).on("exit", onExit).on("error", onError)),
       () => Effect.sync(() => worker.off("message", onMessage).off("exit", onExit).off("error", onError)),
     )
+    // The scope that holds the service's connection from Lock to Unlock; closed too when the request ends without one.
+    const held: { scope?: Scope.Closeable } = {}
+    const release = Effect.suspend(() => {
+      const scope = held.scope
+      held.scope = undefined
+      return scope ? Scope.close(scope, Exit.void) : Effect.void
+    })
+    yield* Effect.addFinalizer(() => release)
     worker.postMessage(message)
     while (true) {
       const event = yield* Queue.take(events)
       if (event._tag === "Between") {
         yield* between
         worker.postMessage({ _tag: "Go" } satisfies Request)
+        continue
+      }
+      if (event._tag === "Lock") {
+        const scope = yield* Scope.make()
+        held.scope = scope
+        yield* Scope.provide(hold, scope).pipe(Effect.orDie)
+        worker.postMessage({ _tag: "Locked" } satisfies Request)
+        continue
+      }
+      if (event._tag === "Unlock") {
+        yield* release
         continue
       }
       if (event._tag === "Log") {

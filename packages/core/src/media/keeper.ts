@@ -10,6 +10,7 @@ import { KV } from "../kv.js"
 import { BlobTable } from "../session/sql.js"
 import { MediaExpiry } from "./expiry.js"
 import { MediaFiles } from "./files.js"
+import { MediaGate } from "./gate.js"
 import { MediaMove } from "./move.js"
 import { MediaWorker } from "./worker.js"
 
@@ -50,12 +51,13 @@ const layer = Layer.effect(
     // A round's work on the rows (task ze433w6fask0): on a worker thread over a connection of its own, so that it
     // never holds the service's thread; here when the database is no file or the worker can't start.
     const here: MediaWorker.Handle = {
-      expire: (now) => MediaExpiry.run(db, folder, now, between),
-      move: () => (folder ? MediaMove.run(db, folder, between) : Effect.succeed({ blobs: 0, rows: 0 })),
+      expire: (now) => MediaExpiry.run(db, folder, now, MediaGate.here(between)),
+      move: () => (folder ? MediaMove.run(db, folder, MediaGate.here(between)) : Effect.succeed({ blobs: 0, rows: 0 })),
     }
     const rows = Effect.gen(function* () {
       if (!folder || !database) return here
-      return yield* MediaWorker.open({ database, folder }).pipe(
+      // Its writes hold the service's connection, the way a transaction of the service's holds it.
+      return yield* MediaWorker.open({ database, folder }, db.$client.reserve).pipe(
         Effect.catch((error) =>
           Effect.logWarning("the media keeper works on the service's thread: its worker didn't start", {
             cause: String(error.cause),

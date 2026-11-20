@@ -13,6 +13,7 @@ import type { SessionSchema } from "../session/schema.js"
 import { SessionInboxTable, SessionMessageTable, SessionPartTable, SessionTable } from "../session/sql.js"
 import type { SessionStored } from "../session/stored.js"
 import { MediaFiles } from "./files.js"
+import type { MediaGate } from "./gate.js"
 import { MediaClearedTable } from "./sql.js"
 
 // openforge (spec pictures-files): a chat untouched for 30 days loses its pictures. Each picture in its messages, tool
@@ -35,13 +36,14 @@ const PAGE = 50
 
 /**
  * Removes the pictures of every chat whose last change is `AGE` before `now` and that wasn't gone through since. Returns
- * when the next chat turns `AGE` old, or undefined when no chat will. `between` runs before each chat.
+ * when the next chat turns `AGE` old, or undefined when no chat will. `gate.between` runs before each chat, and
+ * `gate.write` around each of its writes.
  */
 export const run = Effect.fnUntraced(function* (
   db: DatabaseService,
   folder: string | undefined,
   now: number,
-  between: Effect.Effect<void>,
+  gate: MediaGate.Interface,
 ) {
   const cutoff = now - AGE
   const due = yield* db
@@ -57,8 +59,8 @@ export const run = Effect.fnUntraced(function* (
     .all()
     .pipe(Effect.orDie)
   for (const chat of due) {
-    yield* between
-    yield* clear(db, folder, chat, now)
+    yield* gate.between
+    yield* clear(db, folder, chat, now, gate)
   }
   const next = yield* db
     .select({ at: min(SessionTable.time_updated) })
@@ -75,6 +77,7 @@ const clear = Effect.fnUntraced(function* (
   folder: string | undefined,
   chat: { readonly id: SessionSchema.ID; readonly time_updated: number },
   since: number,
+  gate: MediaGate.Interface,
 ) {
   const gone: string[] = []
   const cursor = { seq: -1 }
@@ -92,7 +95,7 @@ const clear = Effect.fnUntraced(function* (
       .all()
       .pipe(Effect.orDie)
     if (page.length === 0) break
-    for (const row of page) if (row.found) gone.push(...(yield* clearMessage(db, row.id)))
+    for (const row of page) if (row.found) gone.push(...(yield* gate.write(clearMessage(db, row.id))))
     cursor.seq = page.at(-1)!.seq
     yield* Effect.yieldNow
   }
@@ -102,22 +105,24 @@ const clear = Effect.fnUntraced(function* (
     .where(eq(SessionInboxTable.session_id, chat.id))
     .all()
     .pipe(Effect.orDie)
-  for (const row of inbox) gone.push(...(yield* clearInbox(db, row.id)))
+  for (const row of inbox) gone.push(...(yield* gate.write(clearInbox(db, row.id))))
   gone.push(
-    ...(yield* db
-      .transaction(() =>
-        Effect.gen(function* () {
-          // A number of the bank whose original went keeps its name and sizes; `image.show` says it was removed.
-          yield* db.update(ImageTable).set({ hash: "" }).where(eq(ImageTable.session_id, chat.id)).run()
-          yield* db
-            .insert(MediaClearedTable)
-            .values({ session_id: chat.id, time_updated: chat.time_updated })
-            .onConflictDoUpdate({ target: MediaClearedTable.session_id, set: { time_updated: chat.time_updated } })
-            .run()
-          return yield* SessionBlob.releaseStale(db, { sessionID: chat.id, messageID: BANK }, new Set())
-        }),
-      )
-      .pipe(Effect.orDie)),
+    ...(yield* gate.write(
+      db
+        .transaction(() =>
+          Effect.gen(function* () {
+            // A number of the bank whose original went keeps its name and sizes; `image.show` says it was removed.
+            yield* db.update(ImageTable).set({ hash: "" }).where(eq(ImageTable.session_id, chat.id)).run()
+            yield* db
+              .insert(MediaClearedTable)
+              .values({ session_id: chat.id, time_updated: chat.time_updated })
+              .onConflictDoUpdate({ target: MediaClearedTable.session_id, set: { time_updated: chat.time_updated } })
+              .run()
+            return yield* SessionBlob.releaseStale(db, { sessionID: chat.id, messageID: BANK }, new Set())
+          }),
+        )
+        .pipe(Effect.orDie),
+    )),
   )
   if (folder)
     yield* Effect.forEach(new Set(gone), (hash) => Effect.promise(() => MediaFiles.remove(folder, hash, since)), {

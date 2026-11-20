@@ -6,6 +6,7 @@ import type { Database } from "../database/database.js"
 import { SessionBlob } from "../session/blob.js"
 import { BlobTable, SessionInboxTable, SessionMessageTable, SessionPartTable } from "../session/sql.js"
 import { MediaFiles } from "./files.js"
+import type { MediaGate } from "./gate.js"
 
 // openforge (spec pictures-files): moves the media a database from before files holds in its rows into files, one row
 // at a time. A row lets go of its bytes only once their file is whole on disk, so a stop at any point loses nothing and
@@ -26,21 +27,21 @@ export interface Moved {
 
 /**
  * Moves every `blob` row's bytes into its file, then the media inline in messages, assistant parts and queued prompts.
- * `between` runs before each row, so the service can hold the move while it is paused.
+ * `gate.between` runs before each row, and `gate.write` around each row's write.
  */
-export const run = Effect.fnUntraced(function* (db: DatabaseService, folder: string, between: Effect.Effect<void>) {
+export const run = Effect.fnUntraced(function* (db: DatabaseService, folder: string, gate: MediaGate.Interface) {
   const blobs = yield* scan(db, "blob", sql`length(data) > 0`, (rowid) =>
-    between.pipe(Effect.andThen(moveBlob(db, folder, rowid))),
+    gate.between.pipe(Effect.andThen(moveBlob(db, folder, rowid, gate))),
   )
   const found = sql`(instr(data, ';base64,') > 0 OR instr(data, '"data":"') > 0)`
   const messages = yield* scan(db, "session_message", found, (rowid) =>
-    between.pipe(Effect.andThen(moveMessage(db, folder, rowid))),
+    gate.between.pipe(Effect.andThen(moveMessage(db, folder, rowid, gate))),
   )
   const parts = yield* scan(db, "session_part", found, (rowid) =>
-    between.pipe(Effect.andThen(movePart(db, folder, rowid))),
+    gate.between.pipe(Effect.andThen(movePart(db, folder, rowid, gate))),
   )
   const inbox = yield* scan(db, "session_inbox", sql`instr(payload, '"data":"') > 0`, (rowid) =>
-    between.pipe(Effect.andThen(moveInbox(db, folder, rowid))),
+    gate.between.pipe(Effect.andThen(moveInbox(db, folder, rowid, gate))),
   )
   return { blobs, rows: messages + parts + inbox } satisfies Moved
 })
@@ -69,7 +70,12 @@ const scan = Effect.fnUntraced(function* (
   }
 })
 
-const moveBlob = Effect.fnUntraced(function* (db: DatabaseService, folder: string, rowid: number) {
+const moveBlob = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  folder: string,
+  rowid: number,
+  gate: MediaGate.Interface,
+) {
   const blob = yield* db
     .select({ hash: BlobTable.hash, data: BlobTable.data })
     .from(BlobTable)
@@ -85,19 +91,26 @@ const moveBlob = Effect.fnUntraced(function* (db: DatabaseService, folder: strin
     return 0
   }
   yield* Effect.promise(() => MediaFiles.put(folder, blob.hash, blob.data))
-  yield* db
-    .update(BlobTable)
-    .set({ data: SessionBlob.EMPTY })
-    .where(and(eq(BlobTable.hash, blob.hash), sql`length(${BlobTable.data}) > 0`))
-    .run()
-    .pipe(Effect.orDie)
+  yield* gate.write(
+    db
+      .update(BlobTable)
+      .set({ data: SessionBlob.EMPTY })
+      .where(and(eq(BlobTable.hash, blob.hash), sql`length(${BlobTable.data}) > 0`))
+      .run()
+      .pipe(Effect.orDie),
+  )
   return 1
 })
 
 // A row's media is written to its files before the transaction, which holds the database; the transaction then
 // rewrites the row only if nothing changed it meanwhile. Files of a row left as it was are swept a day later.
 
-const moveMessage = Effect.fnUntraced(function* (db: DatabaseService, folder: string, rowid: number) {
+const moveMessage = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  folder: string,
+  rowid: number,
+  gate: MediaGate.Interface,
+) {
   const row = yield* db
     .select({
       id: SessionMessageTable.id,
@@ -115,25 +128,32 @@ const moveMessage = Effect.fnUntraced(function* (db: DatabaseService, folder: st
   const split = SessionBlob.split(row.data)
   if (!split.moved) return 0
   yield* write(folder, split.blobs)
-  return yield* db
-    .transaction(() =>
-      Effect.gen(function* () {
-        const updated = yield* db
-          .update(SessionMessageTable)
-          .set({ data: split.data, time_updated: row.time_updated })
-          .where(and(sql`rowid = ${rowid}`, sql`data = ${row.text}`))
-          .returning({ id: SessionMessageTable.id })
-          .get()
-        if (!updated) return 0
-        yield* SessionBlob.save(db, split.blobs)
-        yield* SessionBlob.recordRefs(db, { sessionID: row.session_id, messageID: row.id, seq: row.seq }, split.data)
-        return 1
-      }),
-    )
-    .pipe(Effect.orDie)
+  return yield* gate.write(
+    db
+      .transaction(() =>
+        Effect.gen(function* () {
+          const updated = yield* db
+            .update(SessionMessageTable)
+            .set({ data: split.data, time_updated: row.time_updated })
+            .where(and(sql`rowid = ${rowid}`, sql`data = ${row.text}`))
+            .returning({ id: SessionMessageTable.id })
+            .get()
+          if (!updated) return 0
+          yield* SessionBlob.save(db, split.blobs)
+          yield* SessionBlob.recordRefs(db, { sessionID: row.session_id, messageID: row.id, seq: row.seq }, split.data)
+          return 1
+        }),
+      )
+      .pipe(Effect.orDie),
+  )
 })
 
-const movePart = Effect.fnUntraced(function* (db: DatabaseService, folder: string, rowid: number) {
+const movePart = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  folder: string,
+  rowid: number,
+  gate: MediaGate.Interface,
+) {
   const row = yield* db
     .select({
       message_id: SessionPartTable.message_id,
@@ -152,25 +172,32 @@ const movePart = Effect.fnUntraced(function* (db: DatabaseService, folder: strin
   const split = SessionBlob.split(row.data)
   if (!split.moved) return 0
   yield* write(folder, split.blobs)
-  return yield* db
-    .transaction(() =>
-      Effect.gen(function* () {
-        const updated = yield* db
-          .update(SessionPartTable)
-          .set({ data: split.data, time_updated: row.time_updated })
-          .where(and(sql`rowid = ${rowid}`, sql`data = ${row.text}`))
-          .returning({ id: SessionPartTable.message_id })
-          .get()
-        if (!updated) return 0
-        yield* SessionBlob.save(db, split.blobs)
-        yield* SessionBlob.recordRefs(db, { sessionID: row.session_id, messageID: row.message_id, seq }, split.data)
-        return 1
-      }),
-    )
-    .pipe(Effect.orDie)
+  return yield* gate.write(
+    db
+      .transaction(() =>
+        Effect.gen(function* () {
+          const updated = yield* db
+            .update(SessionPartTable)
+            .set({ data: split.data, time_updated: row.time_updated })
+            .where(and(sql`rowid = ${rowid}`, sql`data = ${row.text}`))
+            .returning({ id: SessionPartTable.message_id })
+            .get()
+          if (!updated) return 0
+          yield* SessionBlob.save(db, split.blobs)
+          yield* SessionBlob.recordRefs(db, { sessionID: row.session_id, messageID: row.message_id, seq }, split.data)
+          return 1
+        }),
+      )
+      .pipe(Effect.orDie),
+  )
 })
 
-const moveInbox = Effect.fnUntraced(function* (db: DatabaseService, folder: string, rowid: number) {
+const moveInbox = Effect.fnUntraced(function* (
+  db: DatabaseService,
+  folder: string,
+  rowid: number,
+  gate: MediaGate.Interface,
+) {
   const row = yield* db
     .select({
       id: SessionInboxTable.id,
@@ -187,26 +214,28 @@ const moveInbox = Effect.fnUntraced(function* (db: DatabaseService, folder: stri
   const split = SessionBlob.split(row.payload)
   if (!split.moved) return 0
   yield* write(folder, split.blobs)
-  return yield* db
-    .transaction(() =>
-      Effect.gen(function* () {
-        const updated = yield* db
-          .update(SessionInboxTable)
-          .set({ payload: split.data })
-          .where(and(sql`rowid = ${rowid}`, sql`payload = ${row.text}`))
-          .returning({ id: SessionInboxTable.id })
-          .get()
-        if (!updated) return 0
-        yield* SessionBlob.save(db, split.blobs)
-        yield* SessionBlob.recordRefs(
-          db,
-          { sessionID: row.session_id, messageID: row.id, seq: row.enqueued_seq },
-          split.data,
-        )
-        return 1
-      }),
-    )
-    .pipe(Effect.orDie)
+  return yield* gate.write(
+    db
+      .transaction(() =>
+        Effect.gen(function* () {
+          const updated = yield* db
+            .update(SessionInboxTable)
+            .set({ payload: split.data })
+            .where(and(sql`rowid = ${rowid}`, sql`payload = ${row.text}`))
+            .returning({ id: SessionInboxTable.id })
+            .get()
+          if (!updated) return 0
+          yield* SessionBlob.save(db, split.blobs)
+          yield* SessionBlob.recordRefs(
+            db,
+            { sessionID: row.session_id, messageID: row.id, seq: row.enqueued_seq },
+            split.data,
+          )
+          return 1
+        }),
+      )
+      .pipe(Effect.orDie),
+  )
 })
 
 const write = (folder: string, blobs: ReadonlyArray<typeof BlobTable.$inferInsert>) =>

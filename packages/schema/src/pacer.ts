@@ -445,7 +445,7 @@ function changeWords(changedPart: string | undefined, by: Request["changedBy"]) 
 }
 
 /**
- * A changed part in words (spec of CPP's verdicts: DESIGN.md, "Cache verdicts", Changed part): an array's item
+ * A changed part in words (CLIProxyPacer's docs/pacer/DESIGN.md, "Cache verdicts", Changed part): an array's item
  * (`system[0]`, `tools[3]`, `messages[12]`, `input[4]`, `contents[2]`, `request.` before them where the format wraps its
  * request), or the first envelope member that differs (`system` as a string, `instructions`, `model`, …).
  */

@@ -30,14 +30,17 @@ const WRITING = ".partial"
 const REMOVING = ".removing"
 
 /**
- * Makes sure the file of `hash` holds `bytes`. An existing one is only touched, so a removal that is about to delete
- * it keeps it; a missing one is written whole under another name, synced, renamed, and its folder synced, so once this
- * returns the bytes are on disk.
+ * Makes sure the file of `hash` holds `bytes`. An existing one of their size is only touched, so a removal that is
+ * about to delete it keeps it; any other is written whole under another name, synced, renamed, and its folder synced,
+ * so once this returns the bytes are on disk.
  */
 export async function put(folder: string, hash: string, bytes: Uint8Array) {
   const target = file(folder, hash)
   const now = new Date()
-  if (await utimes(target, now, now).then(() => true, missing)) return
+  const kept = await utimes(target, now, now)
+    .then(() => stat(target))
+    .catch(missing)
+  if (kept && kept.size === bytes.byteLength) return
   const directory = path.dirname(target)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporary = `${target}.${randomUUID()}${WRITING}`
@@ -109,7 +112,7 @@ export const removeLeftover = (leftover: string, before: number) =>
   )
 
 // Only a missing file is an answer; any other failure (a full disk, no permission) is one.
-function missing(error: NodeJS.ErrnoException) {
+function missing(error: NodeJS.ErrnoException): false {
   if (error.code === "ENOENT") return false
   throw error
 }

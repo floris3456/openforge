@@ -152,6 +152,45 @@ describe("switch steps", () => {
     }),
   )
 
+  // openforge (spec pictures-files): rows that let go of their pictures leave their pages free in the live file.
+  it.live("puts the copy in place of a database that is mostly free space, and leaves any other", () =>
+    Effect.gen(function* () {
+      const directory = yield* root
+      const database = path.join(directory, "opencode.db")
+      const copy = path.join(directory, "releases", "0.1.0", "opencode.db")
+      yield* Effect.sync(() => {
+        using db = new Database(database)
+        db.run("PRAGMA journal_mode = WAL")
+        db.run("CREATE TABLE picture (id INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+        db.run(
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400) INSERT INTO picture (data) SELECT randomblob(8000) FROM n",
+        )
+      })
+      const shrink = () =>
+        Effect.gen(function* () {
+          yield* ReleaseDatabase.copy(database, copy)
+          return yield* ReleaseDatabase.shrink(copy, database)
+        }).pipe(Effect.provide(layer(directory)))
+      // Full: the copy is about as large, so the database stays.
+      expect(yield* shrink()).toBeUndefined()
+
+      yield* Effect.sync(() => {
+        using db = new Database(database)
+        db.run("UPDATE picture SET data = x'' WHERE id > 1")
+      })
+      const before = (yield* Effect.promise(() => fs.stat(database))).size
+      const shrunk = yield* shrink()
+      expect(shrunk).toEqual({ from: before, to: (yield* Effect.promise(() => fs.stat(copy))).size })
+      expect(shrunk!.to * 4).toBeLessThan(shrunk!.from)
+      expect((yield* Effect.promise(() => fs.stat(database))).size).toBe(shrunk!.to)
+      using shrunkDatabase = new Database(database, { readonly: true })
+      expect(shrunkDatabase.query("SELECT count(*) AS rows, sum(length(data)) AS bytes FROM picture").get()).toEqual({
+        rows: 400,
+        bytes: 8000,
+      })
+    }),
+  )
+
   it.live("reads the migration journal of a database", () =>
     Effect.gen(function* () {
       const directory = yield* root
@@ -234,6 +273,31 @@ describe("switch", () => {
       const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
       expect(log).toContain("0.1.0 -> 0.1.1: pausing the background service (at most 2m)")
       expect(log).toContain("0.1.0 -> 0.1.1: paused; 1 chat(s) rest")
+    }),
+  )
+
+  it.live("replaces a database that is mostly free space with its copy, which keeps every row", () =>
+    Effect.gen(function* () {
+      const test = yield* installed("0.1.0", { version: "0.1.1" })
+      yield* Effect.sync(() => {
+        using db = new Database(test.switching.database)
+        db.run("CREATE TABLE picture (id INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+        db.run(
+          "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400) INSERT INTO picture (data) SELECT randomblob(8000) FROM n",
+        )
+        db.run("UPDATE picture SET data = x''")
+      })
+      const before = (yield* Effect.promise(() => fs.stat(test.switching.database))).size
+
+      const result = yield* ReleaseSwitch.run(test.switching, { from: "0.1.0", to: "0.1.1" }).pipe(test.provide)
+
+      expect(result).toEqual({ type: "switched", from: "0.1.0", to: "0.1.1" })
+      expect((yield* Effect.promise(() => fs.stat(test.switching.database))).size * 4).toBeLessThan(before)
+      expect(migrations(test.switching.database)).toEqual(["m-0.1.0", "m-0.1.1"])
+      using live = new Database(test.switching.database, { readonly: true })
+      expect(live.query("SELECT count(*) AS rows FROM picture").get()).toEqual({ rows: 400 })
+      const log = yield* Effect.promise(() => fs.readFile(test.switching.log, "utf8"))
+      expect(log).toContain("0.1.0 -> 0.1.1: the database had mostly free space; its copy replaced it")
     }),
   )
 

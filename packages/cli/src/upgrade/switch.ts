@@ -5,7 +5,8 @@
 //   2. If that takes longer than 2 minutes the service opens again by itself, and the switch tries again once the work
 //      it reported has finished.
 //   3. Stop the service.
-//   4. Copy the database next to the release it leaves, point `current` at the new release and start it paused.
+//   4. Copy the database next to the release it leaves (the copy replaces it too when it is mostly free space), point
+//      `current` at the new release and start it paused.
 //   5. Check within 10 s that it answers with the new version, reads its database and reaches the tool runners.
 //   6. Resume it: every chat continues where it rested.
 // If anything fails after the stop it points `current` back, restores the copy, and starts and resumes the old
@@ -147,6 +148,14 @@ export const run = Effect.fn("upgrade.switch.run")(function* (
           const progress = { copied: false, starting: false }
           const switched = yield* Effect.gen(function* () {
             progress.copied = yield* ReleaseDatabase.copy(target.database, copyOf(target, input.from))
+            const shrunk =
+              progress.copied && !input.restore
+                ? yield* ReleaseDatabase.shrink(copyOf(target, input.from), target.database)
+                : undefined
+            if (shrunk)
+              yield* log(
+                `the database had mostly free space; its copy replaced it (${shrunk.from} -> ${shrunk.to} bytes)`,
+              )
             if (input.restore) {
               yield* ReleaseDatabase.restore(input.restore, target.database)
               yield* log(

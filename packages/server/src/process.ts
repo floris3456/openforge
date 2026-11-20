@@ -7,6 +7,7 @@ import { SessionContinuity } from "@opencode/core/continuity"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { ShellRunner } from "@opencode/core/shell/runner"
 import { Automation } from "@opencode/core/automation"
+import { MediaKeeper } from "@opencode/core/media/keeper"
 import { InstallationEvent } from "@opencode/schema/installation-event"
 import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
@@ -131,6 +132,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     // A paused start runs nothing until it is resumed.
     yield* Effect.forkIn(
       continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, Automation.Service).run)),
+      applicationScope,
+    )
+    // openforge: stored media moves into files only once the service runs (spec pictures-files).
+    yield* Effect.forkIn(
+      continuity.awaitOpen.pipe(Effect.andThen(Context.get(context, MediaKeeper.Service).run)),
       applicationScope,
     )
     // openforge: automatic updates check only once the service runs (spec auto-update).

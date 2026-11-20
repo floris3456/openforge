@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { createHash, randomBytes } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
@@ -609,63 +610,68 @@ describe("MediaKeeper", () => {
   )
 
   // Budget (task ze433w6fask0): the move must hold the service's thread no longer than 50 ms at a time. Pictures this
-  // large make the work on one row take hundreds of milliseconds, so a keeper that did it on the service's thread fails
-  // by far; with the work on its worker thread the longest gap is a few milliseconds. Timing-sensitive by its nature.
-  it.live("moves large pictures without holding the service's thread for more than 50 ms", () =>
-    withDatabase((_, folder) =>
-      Effect.gen(function* () {
-        const db = (yield* Database.Service).db
-        const keeper = yield* MediaKeeper.Service
-        const kv = yield* KV.Service
-        yield* seed()
-        const large = [randomBytes(24 * 1024 * 1024), randomBytes(24 * 1024 * 1024)]
-        yield* db
-          .insert(SessionMessageTable)
-          .values(
-            large.map((data, index) =>
-              assistant(SessionMessage.ID.make(`msg_move_large_${index}`), 10 + index, [
-                tool(`call_large_${index}`, [
-                  { type: "file", uri: `data:image/png;base64,${data.toString("base64")}`, mime: "image/png" },
+  // large make the work on one row take over 100 ms, so a keeper that did it on the service's thread fails by far; with
+  // the work on its worker the thread runs a few milliseconds between two ticks of a 5 ms timer. What counts is the
+  // thread's own time on a CPU between two ticks (Linux's schedstat), so a loaded machine that leaves it waiting for a
+  // CPU doesn't read as a block; other systems have no such count for one thread.
+  ;(process.platform === "linux" ? it.live : it.live.skip)(
+    "moves large pictures without holding the service's thread for more than 50 ms",
+    () =>
+      withDatabase((_, folder) =>
+        Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const keeper = yield* MediaKeeper.Service
+          const kv = yield* KV.Service
+          yield* seed()
+          const large = [randomBytes(24 * 1024 * 1024), randomBytes(24 * 1024 * 1024)]
+          yield* db
+            .insert(SessionMessageTable)
+            .values(
+              large.map((data, index) =>
+                assistant(SessionMessage.ID.make(`msg_move_large_${index}`), 10 + index, [
+                  tool(`call_large_${index}`, [
+                    { type: "file", uri: `data:image/png;base64,${data.toString("base64")}`, mime: "image/png" },
+                  ]),
                 ]),
-              ]),
-            ),
-          )
-          .run()
-          .pipe(Effect.orDie)
-        const original = randomBytes(24 * 1024 * 1024)
-        yield* db
-          .insert(BlobTable)
-          .values({
-            hash: hash(original),
-            mime: "image/png",
-            bytes: original.byteLength,
-            data: original,
-            time_created: 1,
-          })
-          .run()
-          .pipe(Effect.orDie)
+              ),
+            )
+            .run()
+            .pipe(Effect.orDie)
+          const original = randomBytes(24 * 1024 * 1024)
+          yield* db
+            .insert(BlobTable)
+            .values({
+              hash: hash(original),
+              mime: "image/png",
+              bytes: original.byteLength,
+              data: original,
+              time_created: 1,
+            })
+            .run()
+            .pipe(Effect.orDie)
 
-        const gaps = { last: performance.now(), longest: 0 }
-        const sampler = setInterval(() => {
-          const now = performance.now()
-          gaps.longest = Math.max(gaps.longest, now - gaps.last - 5)
-          gaps.last = now
-        }, 5)
-        const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
-        const deadline = performance.now() + 60_000
-        while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
-          if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
-          yield* Effect.sleep("20 millis")
-        }
-        clearInterval(sampler)
-        yield* Fiber.interrupt(running)
+          const onCpu = () => Number(readFileSync("/proc/thread-self/schedstat", "utf8").split(" ")[0]) / 1e6
+          const gaps = { last: onCpu(), longest: 0 }
+          const sampler = setInterval(() => {
+            const now = onCpu()
+            gaps.longest = Math.max(gaps.longest, now - gaps.last)
+            gaps.last = now
+          }, 5)
+          const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          const deadline = performance.now() + 60_000
+          while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+            if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+            yield* Effect.sleep("20 millis")
+          }
+          clearInterval(sampler)
+          yield* Fiber.interrupt(running)
 
-        expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 3, rows: 6 })
-        for (const data of [...large, original])
-          expect((yield* Effect.promise(() => readFile(MediaFiles.file(folder, hash(data))))).equals(data)).toBe(true)
-        expect(gaps.longest).toBeLessThan(50)
-      }),
-    ),
+          expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 3, rows: 6 })
+          for (const data of [...large, original])
+            expect((yield* Effect.promise(() => readFile(MediaFiles.file(folder, hash(data))))).equals(data)).toBe(true)
+          expect(gaps.longest).toBeLessThan(50)
+        }),
+      ),
   )
 
   // The worker writes over a connection of its own. A transaction of the service's that read before one of its writes

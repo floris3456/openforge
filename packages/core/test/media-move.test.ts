@@ -734,9 +734,9 @@ describe("MediaKeeper", () => {
 
   // A checkpoint syncs the database file, which on a busy disk held the service's thread for seconds while the move
   // wrote its files: for the round, the worker checkpoints and the service's connection makes none, then makes them
-  // again.
+  // again, and the WAL is left small.
   it.live("hands the database's checkpoints to its worker for the round", () =>
-    withDatabase(() =>
+    withDatabase((file) =>
       Effect.gen(function* () {
         const db = (yield* Database.Service).db
         const keeper = yield* MediaKeeper.Service
@@ -777,6 +777,9 @@ describe("MediaKeeper", () => {
         yield* Fiber.interrupt(running)
 
         expect(seen.has(0)).toBe(true)
+        // A checkpoint beside the service's readers can't let the WAL start over; the worker truncates it at the end
+        // (3.4 MB here without that).
+        expect(Bun.file(`${file}-wal`).size).toBeLessThan(1024 * 1024)
       }),
     ),
   )

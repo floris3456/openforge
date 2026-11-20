@@ -17,7 +17,9 @@ import { MediaMove } from "./move.js"
 // a time; Stop ends the request under way between two statements and closes the connection, so the worker never
 // leaves a transaction or a lock behind. While it runs, it checkpoints the database and the service's connection
 // doesn't (MediaKeeper): a checkpoint syncs the database file, which on a busy disk took the service's thread seconds
-// while the move wrote its files.
+// while the move wrote its files. A checkpoint beside the service's readers can't let the WAL start over, so it grows
+// while the worker writes (to 925 MB in 180 s of the move beside 10 chats); the worker truncates it while it holds the
+// service's connection, when it passes WAL_LIMIT and when a request ends.
 
 export type Start = { readonly database: string; readonly folder: string }
 export type Request =
@@ -38,6 +40,9 @@ export type Reply =
 
 /** How often the worker checkpoints the database while it runs. */
 const CHECKPOINT_MILLIS = 500
+
+/** The WAL's size past which the worker truncates it. */
+const WAL_LIMIT = 256 * 1024 * 1024
 
 const port = parentPort
 if (port) {
@@ -77,21 +82,33 @@ if (port) {
       Queue.offerUnsafe(request._tag === "Go" || request._tag === "Locked" ? answers : requests, request)
     })
     const ask = (question: Reply) => Effect.sync(() => post(question)).pipe(Effect.andThen(Queue.take(answers)))
+    // While the worker holds the service's connection no reader uses the WAL, so TRUNCATE neither waits nor fails.
+    const truncate = db.run("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.ignore)
+    const wal = `${start.database}-wal`
+    const write: MediaGate.Interface["write"] = (effect) =>
+      Effect.acquireUseRelease(
+        ask({ _tag: "Lock" }),
+        () => effect,
+        () => Effect.sync(() => post({ _tag: "Unlock" })),
+      )
     const gate: MediaGate.Interface = {
       between: ask({ _tag: "Between" }).pipe(Effect.asVoid),
       write: (effect) =>
-        Effect.acquireUseRelease(
-          ask({ _tag: "Lock" }),
-          () => effect,
-          () => Effect.sync(() => post({ _tag: "Unlock" })),
-        ),
+        write(effect.pipe(Effect.tap(() => (Bun.file(wal).size > WAL_LIMIT ? truncate : Effect.void)))),
     }
     post({ _tag: "Ready" })
     while (true) {
       const request = yield* Queue.take(requests)
-      if (request._tag === "Expire")
-        post({ _tag: "Expired", next: yield* MediaExpiry.run(db, start.folder, request.now, gate) })
-      if (request._tag === "Move") post({ _tag: "Moved", moved: yield* MediaMove.run(db, start.folder, gate) })
+      if (request._tag === "Expire") {
+        const next = yield* MediaExpiry.run(db, start.folder, request.now, gate)
+        yield* write(truncate)
+        post({ _tag: "Expired", next })
+      }
+      if (request._tag === "Move") {
+        const moved = yield* MediaMove.run(db, start.folder, gate)
+        yield* write(truncate)
+        post({ _tag: "Moved", moved })
+      }
     }
   })
   void Effect.runPromise(

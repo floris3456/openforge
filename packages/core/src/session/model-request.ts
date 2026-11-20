@@ -58,6 +58,7 @@ import { SessionProxyRequest } from "./proxy-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionSystemPrompt } from "./system-prompt.js"
+import { SessionThinkingBudget } from "./thinking-budget.js"
 import { systemReminder, toLLMMessages } from "./runner/to-llm-message.js"
 import type { SessionMessage } from "./message.js"
 
@@ -74,7 +75,7 @@ const ESTIMATE_ERROR = 0.15
 // Share of the window a turn leaves unused when its output limit is fitted to the room left. Providers count a few
 // tokens more than we do (chat template, tool schemas), and strict ones reject input plus output past the window.
 // Compaction sizes its summary against its own reserve instead.
-const WINDOW_HEADROOM = 0.01
+export const WINDOW_HEADROOM = 0.01
 // Never ask for less; only reachable with automatic compaction off, since it keeps the window from filling this far.
 const OUTPUT_TOKEN_MIN = 1_024
 
@@ -116,6 +117,11 @@ export interface Input {
   readonly webSocket?: "session"
   /** Prompt size, measured by the provider or estimated. The default output limit leaves room for it. */
   readonly inputTokens?: { readonly measured: number; readonly estimated: number }
+  /**
+   * openforge: the chat's largest measured size since its latest compaction, by which a step keeps its manual thinking
+   * budget (`SessionThinkingBudget.peak`).
+   */
+  readonly peak?: number
   /** Whether the chat compacts automatically, which a step tells a proxy that asks for compactions. */
   readonly autoCompaction?: boolean
   /** openforge: the model's entry when the chat gets optimized images (`ImageBank`). */
@@ -430,9 +436,10 @@ export const layer = Layer.effect(
       const parts = legacy === undefined ? input.system : [...input.system]
       // Hooks see the default output limit and may change or remove it. Titles and generate keep the provider default,
       // because their reasoning is hard to budget.
+      const fitted = outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM)
       const options =
         kind === "primary"
-          ? { maxTokens: outputLimit(model.limit, input.inputTokens, WINDOW_HEADROOM) }
+          ? { maxTokens: fitted }
           : kind === "compaction"
             ? { maxTokens: outputLimit(model.limit, input.inputTokens) }
             : {}
@@ -517,7 +524,7 @@ export const layer = Layer.effect(
       )
       // openforge: optimized images are never cut (ImageBudget).
       const images = input.images
-      const base = ai.request({
+      const built = ai.request({
         model: model.model,
         headers: {
           "x-opencode-session-id": session.id,
@@ -553,6 +560,16 @@ export const layer = Layer.effect(
         ...generation,
         providerOptions: Object.keys(providerOptions).length === 0 ? undefined : providerOptions,
       })
+      // openforge: a step keeps the chat's manual thinking budget while it fits, unless a hook set its output limit.
+      const base =
+        kind === "primary" && generation.maxTokens === fitted
+          ? SessionThinkingBudget.keep(built, {
+              limit: model.limit,
+              peak: input.peak,
+              output: outputLimit(model.limit),
+              headroom: WINDOW_HEADROOM,
+            })
+          : built
 
       const baseURL = base.model.route.endpoint.baseURL
       const modelHook = yield* hooks.trigger("session", "model.request", {

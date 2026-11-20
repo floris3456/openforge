@@ -39,6 +39,7 @@ import { SessionRunnerModel } from "./runner/model.js"
 import { SessionRunnerRetry } from "./runner/retry.js"
 import { toLLMMessages } from "./runner/to-llm-message.js"
 import { SessionRecentText } from "./recent-text.js"
+import { SessionThinkingBudget } from "./thinking-budget.js"
 import { contentFilterError, toSessionError } from "./to-session-error.js"
 import { SessionUsage } from "./usage.js"
 
@@ -736,23 +737,39 @@ export const layer = Layer.effect(
       const prepared = yield* prepare(context, messages, measured ? Math.min(budget, total(measured)) : budget)
       // The reply to the last step that ran on this conversation, unless a background summary leaves it out.
       const last = context.messages.findLast((message) => message.type === "assistant")?.id
+      // openforge: the summary sends the thinking budget of the step whose request it continues, as the history before
+      // that step's reply gives it (`SessionThinkingBudget`).
+      const source = background?.messages ?? context.messages
+      const reply = source.findIndex((message) => message.id === last)
+      const chat = {
+        limit: context.model.limit,
+        peak: SessionThinkingBudget.peak(reply < 0 ? source : source.slice(0, reply), context.model.ref),
+        output: SessionModelRequest.outputLimit(context.model.limit),
+        headroom: SessionModelRequest.WINDOW_HEADROOM,
+      }
 
       // Hooks saw the request without the summary prompt, so it is appended here. A reply that ignores the
       // template gets one reminder before it counts as a failure.
       const send = (request: LLMRequest, size?: Estimate) =>
         Effect.gen(function* () {
-          const prompted = fitOutput(
-            { ...request, messages: [...stepBreakpoint(request, last).messages, Message.user(prompt)] },
-            context.model.limit,
-            size && { ...size, estimated: size.estimated + Token.estimate(prompt) },
+          const prompted = SessionThinkingBudget.keep(
+            fitOutput(
+              { ...request, messages: [...stepBreakpoint(request, last).messages, Message.user(prompt)] },
+              context.model.limit,
+              size && { ...size, estimated: size.estimated + Token.estimate(prompt) },
+            ),
+            chat,
           )
           const reply = yield* stream(context, prompted, prepared.options, background)
           if (filled(reply.text)) return reply
 
-          const nudged = fitOutput(
-            { ...prompted, messages: [...prompted.messages, Message.user(NUDGE)] },
-            context.model.limit,
-            size && { ...size, estimated: size.estimated + Token.estimate(prompt) + Token.estimate(NUDGE) },
+          const nudged = SessionThinkingBudget.keep(
+            fitOutput(
+              { ...prompted, messages: [...prompted.messages, Message.user(NUDGE)] },
+              context.model.limit,
+              size && { ...size, estimated: size.estimated + Token.estimate(prompt) + Token.estimate(NUDGE) },
+            ),
+            chat,
           )
           const retry = yield* stream(context, nudged, prepared.options, background)
           if (filled(retry.text)) return retry

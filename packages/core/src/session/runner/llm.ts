@@ -21,6 +21,7 @@ import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
 import { SessionStore } from "../store.js"
 import { SessionMessageTable } from "../sql.js"
+import { SessionThinkingBudget } from "../thinking-budget.js"
 import { SessionTitle } from "../title.js"
 import { toSessionError } from "../to-session-error.js"
 import { DrainResult, Service, type Interface } from "./index.js"
@@ -386,6 +387,7 @@ const layer = Layer.effect(
             toolChoice: stepLimitReached ? "none" : undefined,
             webSocket: "session",
             inputTokens: estimate,
+            peak: SessionThinkingBudget.peak(loaded.messages, loaded.model.ref),
             autoCompaction: compaction.auto(),
             images: loaded.images,
             pins: loaded.pins,

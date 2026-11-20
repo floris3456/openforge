@@ -163,6 +163,19 @@ const recoveryModel = testModel("recovery", { context: 200_000, output: 1_000 })
 const fittedOutputModel = testModel("fitted-output", { context: 100_000, output: 64_000 })
 const smallWindowModel = testModel("small-window", { context: 64_000, output: 16_000 })
 const largeOutputModel = testModel("large-output", { context: 1_000_000, output: 1_000_000 })
+// A Claude model with a manual thinking budget, as its variant sets one; it compacts at 172k of its 200k window.
+const manualBudgetModel = LanguageModel.make({
+  id: "claude-sonnet-4-5",
+  provider: "anthropic",
+  route: AnthropicMessages.route,
+  options: { providerOptions: { thinking: { type: "enabled", budgetTokens: 16_000 } } },
+})
+modelLimits.set("claude-sonnet-4-5", { context: 200_000, output: 32_000, compact: 172_000 })
+/** The thinking budget a request sends, as its route writes it on the wire. */
+const sentBudget = (request: LLMRequest) =>
+  compileRequest(request).pipe(
+    Effect.map((compiled) => (compiled.body as { thinking?: { budget_tokens?: number } }).thinking?.budget_tokens),
+  )
 
 test("calculates step cost using the matching context tier", () => {
   expect(
@@ -4744,6 +4757,70 @@ describe("SessionRunnerLLM", () => {
     expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
     expect(s.requests[0]?.maxTokens).toBe(16_000)
     expect(s.requests[1]?.maxTokens).toBe(16_000)
+  })
+
+  scenario("sends a manual thinking budget as it always has while the chat is far from its window", function* (s) {
+    s.currentModel = manualBudgetModel
+    for (const [prompt, measured] of [
+      ["First", 50_000],
+      ["Second", 100_000],
+      ["Third", 150_000],
+    ] as const) {
+      yield* s.llm.push(TestLLM.textWithUsage(`${prompt} answer`, `text-far-${prompt}`, measured))
+      yield* s.runPrompt(prompt)
+    }
+
+    // The model's own option is the budget, fitted by its route; the step's request adds none of its own.
+    expect(s.requests.map((request) => request.providerOptions?.thinking)).toEqual([undefined, undefined, undefined])
+    for (const request of s.requests)
+      expect((yield* compileRequest(request)).body).toMatchObject({
+        max_tokens: 32_000,
+        thinking: { type: "enabled", budget_tokens: 16_000 },
+      })
+  })
+
+  // Anthropic renders a manual thinking budget into the prompt, so a changed budget misses every cached message. The
+  // route fits the budget under half the output limit, which shrinks with each step as the chat nears its window.
+  scenario("keeps a manual thinking budget near the window while it fits, and the summary sends it too", function* (s) {
+    s.currentModel = manualBudgetModel
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ background: false }))
+    for (const [prompt, measured] of [
+      ["First", 160_000],
+      ["Second", 166_500],
+      ["Third", 168_500],
+      ["Fourth", 173_000],
+    ] as const) {
+      yield* s.llm.push(TestLLM.textWithUsage(`${prompt} answer`, `text-budget-${prompt}`, measured))
+      yield* s.runPrompt(prompt)
+    }
+    // The last answer measured past the compaction point, so the next prompt compacts first.
+    yield* s.llm.push(
+      TestLLM.text("## Objective\n- Keep the budget", "text-budget-summary"),
+      TestLLM.text("Continued", "text-budget-final"),
+    )
+    yield* s.runPrompt("Fifth")
+
+    expect(s.requests.map(isSummaryRequest)).toEqual([false, false, false, false, true, false])
+    // The chat's budget while the window has room for it; once the room its largest measured prompt leaves gets too
+    // small, half of it, once, which the steps keep while it fits and the summary sends as the last step did; after
+    // the summary, the chat's own again.
+    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 16_000, 8_000, 8_000, 8_000, 16_000])
+  })
+
+  scenario("keeps a lowered manual thinking budget when a later step measures smaller", function* (s) {
+    s.currentModel = manualBudgetModel
+    const compaction = yield* SessionCompaction.Service
+    yield* compaction.transform((editor) => editor.configure({ background: false }))
+    yield* s.llm.push(TestLLM.textWithUsage("First answer", "text-smaller-first", 168_000))
+    yield* s.runPrompt("First")
+    // The provider counts less on the next step, as when it drops earlier thinking from a model's context.
+    yield* s.llm.push(TestLLM.textWithUsage("Second answer", "text-smaller-second", 158_000))
+    yield* s.runPrompt("Second")
+    yield* s.llm.push(TestLLM.text("Third answer", "text-smaller-third"))
+    yield* s.runPrompt("Third")
+
+    expect(yield* Effect.forEach(s.requests, sentBudget)).toEqual([16_000, 8_000, 8_000])
   })
 
   scenario("publishes the original overflow when recovery summarization fails", function* (s) {

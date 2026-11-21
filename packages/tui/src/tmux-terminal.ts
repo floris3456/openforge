@@ -21,6 +21,11 @@ export type TmuxClient = {
   readonly termtype: string
   /** Whether tmux passes this pane's sequences through to the terminal (`allow-passthrough` isn't `off`). */
   readonly passthrough: boolean
+  /**
+   * Whether the terminal said it draws Kitty graphics, when it was asked itself through tmux's passthrough
+   * (./tmux-passthrough); undefined when tmux was asked.
+   */
+  readonly graphics?: boolean
   /** That client's cell in pixels, or another client's of the same tmux when it doesn't know its own. */
   readonly cell?: { readonly width: number; readonly height: number }
 }

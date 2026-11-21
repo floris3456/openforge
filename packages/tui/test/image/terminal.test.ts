@@ -3,11 +3,13 @@ import { EventEmitter } from "node:events"
 import { deflateSync } from "node:zlib"
 import { imageID, passthrough, remove, transmit } from "../../src/image/placeholder"
 import { createImageTerminal, DEFAULT_CELL, type ImageOutput } from "../../src/image/terminal"
+import { QUESTION } from "../../src/tmux-passthrough"
 import type { TmuxClient } from "../../src/tmux-terminal"
 
 // openforge (spec image-view, Proof): inside tmux with a terminal that draws placeholders, images go through the
 // renderer's ordered output, wrapped for tmux; they go again after a resize or a focus change, and are deleted when
-// they go. Everywhere else nothing is sent.
+// they go. A TUI that can't ask tmux asks the terminal behind it through the passthrough. Everywhere else nothing is
+// sent.
 
 const ghostty: TmuxClient = { termtype: "ghostty 1.4.0", passthrough: true, cell: { width: 19, height: 42 } }
 const number = { index: 110, high: 3 }
@@ -17,12 +19,28 @@ const image = {
   rows: 1,
 }
 
-function fixture(input: { client?: TmuxClient; ansi256?: boolean; ask?: () => Promise<TmuxClient | undefined> } = {}) {
+function fixture(
+  input: {
+    client?: TmuxClient
+    ansi256?: boolean
+    ask?: () => Promise<TmuxClient | undefined>
+    /** Whether OpenTUI knows it runs inside tmux; so whenever tmux's client is given. */
+    multiplexer?: "tmux" | "none"
+    passthroughMs?: number
+  } = {},
+) {
+  const client = "client" in input ? input.client : ghostty
+  const handlers: ((sequence: string) => boolean)[] = []
   const renderer = Object.assign(new EventEmitter(), {
-    capabilities: { ansi256: input.ansi256 ?? true },
+    capabilities: {
+      ansi256: input.ansi256 ?? true,
+      multiplexer: input.multiplexer ?? (client ? "tmux" : "none"),
+    },
     resolution: null as { width: number; height: number } | null,
     terminalWidth: 100,
     terminalHeight: 30,
+    prependInputHandler: (handler: (sequence: string) => boolean) => handlers.unshift(handler),
+    removeInputHandler: (handler: (sequence: string) => boolean) => handlers.splice(handlers.indexOf(handler), 1),
   })
   const written: string[] = []
   const output: ImageOutput = {
@@ -35,17 +53,23 @@ function fixture(input: { client?: TmuxClient; ansi256?: boolean; ask?: () => Pr
   const terminal = createImageTerminal({
     renderer,
     output,
-    client: "client" in input ? input.client : ghostty,
+    client,
     ask: input.ask,
     settleMs: 1,
+    passthroughMs: input.passthroughMs ?? 60_000,
   })
   // The settle delay, then every write it led to.
   const settle = async () => {
     await Bun.sleep(5)
     await terminal.drained()
   }
-  return { renderer, written, terminal, output, settle }
+  /** Input coming back from the terminal, as OpenTUI hands it to its handlers. */
+  const answer = (sequences: readonly string[]) => sequences.forEach((sequence) => handlers.some((h) => h(sequence)))
+  return { renderer, written, terminal, output, settle, answer }
 }
+
+/** The answers of Ghostty 1.4 with 19×42 cells, as tmux hands them to the pane. */
+const GHOSTTY = ["\x1b_Gi=7254017;OK\x1b\\", "\x1b[6;42;19t", "\x1bP>|ghostty 1.4.0-arch1.1\x1b\\"]
 
 const expected = (id: number) => transmit(id, image.pixels, image.columns, image.rows).map(passthrough)
 
@@ -182,11 +206,15 @@ describe("the client attached now", () => {
 })
 
 describe("the cell size", () => {
-  test("inside tmux, tmux's client's (or another client's), else 9×20, whatever pixel size tmux makes up", () => {
+  test("inside tmux, tmux's client's (or another client's), else the renderer's unless tmux made it up, else 9×20", () => {
     expect(fixture().terminal.cell()).toEqual({ width: 19, height: 42 })
     const { renderer, terminal } = fixture({ client: { ...ghostty, cell: undefined } })
+    expect(terminal.cell()).toEqual(DEFAULT_CELL)
+    // 16×32 a cell is what tmux answers for a window none of whose clients told it their cell.
     renderer.resolution = { width: 1600, height: 960 }
     expect(terminal.cell()).toEqual(DEFAULT_CELL)
+    renderer.resolution = { width: 1900, height: 1260 }
+    expect(terminal.cell()).toEqual({ width: 19, height: 42 })
     expect(DEFAULT_CELL).toEqual({ width: 9, height: 20 })
   })
 
@@ -195,5 +223,100 @@ describe("the cell size", () => {
     expect(terminal.cell()).toEqual(DEFAULT_CELL)
     renderer.resolution = { width: 1000, height: 600 }
     expect(terminal.cell()).toEqual({ width: 10, height: 20 })
+  })
+})
+
+describe("a TUI that can't ask tmux (no TMUX, as through docker exec)", () => {
+  const behind = { client: undefined, multiplexer: "tmux" } as const
+
+  test("asks the terminal behind tmux at once, and with Ghostty 1.4's answers draws placeholders at its cell", async () => {
+    const { terminal, written, answer, settle } = fixture(behind)
+    expect(terminal.placeholders).toBe(false)
+    answer(GHOSTTY)
+    await terminal.drained()
+    expect(written).toEqual([passthrough(QUESTION)])
+    expect(terminal.placeholders).toBe(true)
+    expect(terminal.cell()).toEqual({ width: 19, height: 42 })
+    written.length = 0
+    terminal.show(number, image)
+    await settle()
+    expect(written).toEqual(expected(imageID(number, "index")))
+  })
+
+  test("a terminal that doesn't answer keeps the blocks, its cell the renderer's unless tmux made it up", async () => {
+    const { terminal, renderer, written } = fixture({ ...behind, passthroughMs: 1 })
+    await terminal.drained()
+    expect(written).toEqual([passthrough(QUESTION)])
+    expect(terminal.placeholders).toBe(false)
+    expect(terminal.cell()).toEqual(DEFAULT_CELL)
+    renderer.resolution = { width: 1600, height: 960 }
+    expect(terminal.cell()).toEqual(DEFAULT_CELL)
+    renderer.resolution = { width: 1900, height: 1260 }
+    expect(terminal.cell()).toEqual({ width: 19, height: 42 })
+  })
+
+  test.each([
+    ["Ghostty 1.3", ["\x1b_Gi=7254017;OK\x1b\\", "\x1bP>|ghostty 1.3.1\x1b\\"]],
+    ["a refused Kitty query", ["\x1b_Gi=7254017;ENOTSUPPORTED:off\x1b\\", "\x1bP>|ghostty 1.4.0\x1b\\"]],
+    ["no Kitty answer", ["\x1bP>|kitty(0.36.4)\x1b\\"]],
+    ["WezTerm", ["\x1b_Gi=7254017;OK\x1b\\", "\x1bP>|WezTerm 20240203-110809-5046fc22\x1b\\"]],
+  ])("%s keeps the blocks", async (_, answers) => {
+    const { terminal, answer } = fixture(behind)
+    answer(answers)
+    await terminal.drained()
+    expect(terminal.placeholders).toBe(false)
+  })
+
+  test("kitty 0.28 or later draws placeholders too", async () => {
+    const { terminal, answer } = fixture(behind)
+    answer(["\x1b_Gi=7254017;OK\x1b\\", "\x1bP>|kitty(0.36.4)\x1b\\"])
+    await terminal.drained()
+    expect(terminal.placeholders).toBe(true)
+  })
+
+  test("asks once OpenTUI learns it runs inside tmux, from tmux's answer to its XTVERSION", async () => {
+    const { terminal, renderer, written, answer, settle } = fixture({ client: undefined })
+    await settle()
+    expect(written).toEqual([])
+    renderer.capabilities.multiplexer = "tmux"
+    renderer.emit("capabilities")
+    answer(GHOSTTY)
+    await terminal.drained()
+    expect(written).toEqual([passthrough(QUESTION)])
+    expect(terminal.placeholders).toBe(true)
+  })
+
+  test.each(["resize", "focus"])("asks again after a %s: another client's terminal and cell", async (event) => {
+    const { terminal, renderer, written, answer, settle } = fixture(behind)
+    answer(GHOSTTY)
+    await terminal.drained()
+    written.length = 0
+    renderer.emit(event)
+    // The question goes once the settle delay is over; the answers come after it.
+    const deadline = Date.now() + 2_000
+    while (written.length === 0 && Date.now() < deadline) await Bun.sleep(1)
+    answer(["\x1b_Gi=7254017;OK\x1b\\", "\x1b[6;37;18t", "\x1bP>|ghostty 1.4.0\x1b\\"])
+    await settle()
+    expect(written).toEqual([passthrough(QUESTION)])
+    expect(terminal.cell()).toEqual({ width: 18, height: 37 })
+  })
+
+  test("a pane that lost focus asks nothing on a resize, and keeps what it knew", async () => {
+    const { terminal, renderer, written, answer, settle } = fixture(behind)
+    answer(GHOSTTY)
+    await terminal.drained()
+    written.length = 0
+    renderer.emit("blur")
+    renderer.emit("resize", 120, 40)
+    await settle()
+    expect(written).toEqual([])
+    expect(terminal.placeholders).toBe(true)
+  })
+
+  test("outside tmux nothing is asked", async () => {
+    const { written, settle, renderer } = fixture({ client: undefined })
+    await settle()
+    expect(written).toEqual([])
+    expect(renderer.listenerCount("resize")).toBe(0)
   })
 })

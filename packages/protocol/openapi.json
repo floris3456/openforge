@@ -23993,6 +23993,9 @@
           "model": {
             "type": "string"
           },
+          "provider": {
+            "type": "string"
+          },
           "verdict": {
             "type": "string",
             "enum": ["miss", "partial"]
@@ -24005,6 +24008,9 @@
           "cause": {
             "type": "string"
           },
+          "causeCode": {
+            "type": "string"
+          },
           "missCost": {
             "$ref": "#/components/schemas/Money.USD"
           },
@@ -24013,7 +24019,7 @@
             "description": "Milliseconds since the Unix epoch, on the service's clock"
           }
         },
-        "required": ["requestID", "sessionID", "rootID", "model", "verdict", "cause", "at"],
+        "required": ["requestID", "sessionID", "rootID", "model", "provider", "verdict", "cause", "at"],
         "additionalProperties": false
       },
       "Pacer.Pings": {

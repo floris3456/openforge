@@ -593,9 +593,11 @@ export type PacerNotice = {
   title?: string
   agent?: AgentID
   model: string
+  provider: string
   verdict: "miss" | "partial"
   tokens?: number
   cause: string
+  causeCode?: string
   missCost?: MoneyUSD
   at: number
 }

@@ -307,7 +307,8 @@ CLIProxyPacer. Each TUI shows the cards its own settings let through:
       "lifetime": 15,
       "minimum": 0,
       "kinds": "all",
-      "dismiss": "every-tui"
+      "dismiss": "every-tui",
+      "muted": [{ "provider": "commandcode", "model": "deepseek-v4.1-flash" }]
     }
   }
 }
@@ -323,11 +324,12 @@ CLIProxyPacer. Each TUI shows the cards its own settings let through:
 | `cliproxypacer.notices.minimum`  | `0`, `1000`, `10000`, `50000`, or `100000` | Sets the fewest tokens not reused that show a card; `0`, the default, shows any loss.                                                  |
 | `cliproxypacer.notices.kinds`    | `all` or `misses`                          | Shows misses and partial reuse, or misses only. `all` by default.                                                                      |
 | `cliproxypacer.notices.dismiss`  | `every-tui` or `this-tui`                  | Removes an opened or dismissed card from every TUI, or only from this one, which keeps it dismissed for a day. `every-tui` by default. |
+| `cliproxypacer.notices.muted`    | `{ provider, model }` list                 | Hides the cards of losses the provider caused on these [muted models](/cli/cliproxypacer#muted-models). None by default.               |
 
 </div>
 
-**Settings** shows the same six rows under CLIProxyPacer while CLIProxyPacer answers. Its other CLIProxyPacer rows, such
-as **Compact cold chats first**, are CLIProxyPacer's settings for all your chats, kept by CLIProxyPacer and not in
+**Settings** shows the same seven rows under CLIProxyPacer while CLIProxyPacer answers. Its other CLIProxyPacer rows,
+such as **Compact cold chats first**, are CLIProxyPacer's settings for all your chats, kept by CLIProxyPacer and not in
 `cli.json`: see [CLIProxyPacer settings](/cli/cliproxypacer#settings).
 
 ## Terminal

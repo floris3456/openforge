@@ -1,5 +1,6 @@
 import type { CliRenderer } from "@opentui/core"
 import { batch, createContext, createSignal, useContext, type ParentProps } from "solid-js"
+import { createTmuxPassthrough } from "../tmux-passthrough"
 import { showsPlaceholders, type TmuxClient } from "../tmux-terminal"
 import { imageIDs, passthrough, remove, transmit, type ImageNumber, type Pixels } from "./placeholder"
 
@@ -7,7 +8,9 @@ import { imageIDs, passthrough, remove, transmit, type ImageNumber, type Pixels 
 // graphics through Unicode placeholders, images go to it through the renderer's own ordered output, so a frame is never
 // cut by them, and again whenever the terminal may have lost them: a resize (a client of another size attached) and a
 // focus change (a client attached, or the window or pane switched back). Then tmux is asked again, so the images follow
-// the client attached now: its terminal and its cell size. Everywhere else OpenTUI draws images itself.
+// the client attached now: its terminal and its cell size. A TUI that can't ask tmux (no TMUX, as through `docker exec`
+// or ssh from a tmux pane) asks the terminal behind it instead, through tmux's passthrough (../tmux-passthrough), at
+// once and then on the same events. Everywhere else OpenTUI draws images itself.
 
 export type Cell = { readonly width: number; readonly height: number }
 
@@ -34,25 +37,37 @@ export const DEFAULT_CELL: Cell = { width: 9, height: 20 }
 /** How long after a resize or focus change the images go again, so a burst of them sends once. */
 const SETTLE_MS = 50
 
-/** What of the renderer the image terminal reads: its resize and focus events, its colours and its pixel size. */
+/** The cell tmux gives a window none of whose clients told it theirs (`DEFAULT_XPIXEL`, `DEFAULT_YPIXEL`). */
+const MADE_UP_CELL: Cell = { width: 16, height: 32 }
+
+type Event = "resize" | "focus" | "blur" | "capabilities"
+
+/**
+ * What of the renderer the image terminal reads: its resize, focus and capability events, its colours, whether it
+ * runs inside tmux, its pixel size, and its input, where answers through tmux's passthrough come back.
+ */
 type Renderer = {
-  on(event: "resize" | "focus", listener: () => void): unknown
-  off(event: "resize" | "focus", listener: () => void): unknown
-  readonly capabilities: Pick<NonNullable<CliRenderer["capabilities"]>, "ansi256"> | null
+  on(event: Event, listener: () => void): unknown
+  off(event: Event, listener: () => void): unknown
+  readonly capabilities: Pick<NonNullable<CliRenderer["capabilities"]>, "ansi256" | "multiplexer"> | null
   readonly resolution: { readonly width: number; readonly height: number } | null
   readonly terminalWidth: number
   readonly terminalHeight: number
+  prependInputHandler(handler: (sequence: string) => boolean): void
+  removeInputHandler(handler: (sequence: string) => boolean): void
 }
 
 export function createImageTerminal(input: {
   readonly renderer: Renderer
   readonly output?: ImageOutput
-  /** What tmux said about its client when the TUI started; undefined outside tmux. */
+  /** What tmux said about its client when the TUI started; undefined outside tmux, or when tmux couldn't be asked. */
   readonly client?: TmuxClient
   /** Asks tmux again, when the terminal may have changed. */
   readonly ask?: () => Promise<TmuxClient | undefined>
   /** How long after a resize or focus change the images go again; tests shorten it. */
   readonly settleMs?: number
+  /** How long a question through tmux's passthrough waits for its answers; tests shorten it. */
+  readonly passthroughMs?: number
 }): ImageTerminal & { readonly drained: () => Promise<void>; readonly dispose: () => void } {
   const output = input.output
   const [client, setClient] = createSignal(input.client)
@@ -61,25 +76,28 @@ export function createImageTerminal(input: {
   let queue = Promise.resolve()
   let timer: ReturnType<typeof setTimeout> | undefined
   let again: Promise<void> = Promise.resolve()
+  let through: ReturnType<typeof createTmuxPassthrough> | undefined
 
   const placeholders = () => {
     const current = client()
-    return Boolean(output && current?.passthrough && showsPlaceholders(current.termtype))
+    return Boolean(output && current?.passthrough && current.graphics !== false && showsPlaceholders(current.termtype))
   }
 
   const cell = () => {
     version()
     const known = client()?.cell
     if (known) return known
-    // Inside tmux the terminal's pixel size is tmux's answer, which is made up (16×32 a cell) for a client that doesn't
-    // tell it its own, as one that came in by `docker exec` doesn't; another client's, asked above, or 9×20 then.
-    if (input.client) return DEFAULT_CELL
     const resolution = input.renderer.resolution
     const columns = input.renderer.terminalWidth
     const rows = input.renderer.terminalHeight
-    if (resolution && resolution.width > 0 && resolution.height > 0 && columns > 0 && rows > 0)
-      return { width: resolution.width / columns, height: resolution.height / rows }
-    return DEFAULT_CELL
+    if (!resolution || resolution.width <= 0 || resolution.height <= 0 || columns <= 0 || rows <= 0) return DEFAULT_CELL
+    const found = { width: resolution.width / columns, height: resolution.height / rows }
+    // Inside tmux the terminal's pixel size is tmux's answer: real once a client told tmux its cell (tmux 3.6 and later
+    // ask a terminal whose pty doesn't say), made up for a window whose clients didn't, as ones that came in by
+    // `docker exec` to an older tmux.
+    const inside = input.client !== undefined || through !== undefined
+    if (inside && found.width === MADE_UP_CELL.width && found.height === MADE_UP_CELL.height) return DEFAULT_CELL
+    return found
   }
 
   const send = (sequences: readonly string[]) => {
@@ -103,7 +121,7 @@ export function createImageTerminal(input: {
   }
 
   const resend = async () => {
-    const next = input.ask ? await input.ask() : undefined
+    const next = await (through ? through.ask() : input.ask?.())
     const before = { placeholders: placeholders(), cell: cell() }
     batch(() => {
       if (next) setClient(next)
@@ -124,10 +142,30 @@ export function createImageTerminal(input: {
     }, input.settleMs ?? SETTLE_MS)
   }
 
-  // Inside tmux only, where the client attached may change.
-  if (input.client && output) {
+  const watch = () => {
     input.renderer.on("resize", changed)
     input.renderer.on("focus", changed)
+  }
+
+  // Without tmux's answer, once OpenTUI knows it runs inside tmux (from TERM, or from tmux's own answer to XTVERSION,
+  // which can come after the start), the terminal behind tmux is asked through the passthrough, at once.
+  const enter = () => {
+    if (through || input.renderer.capabilities?.multiplexer !== "tmux") return
+    input.renderer.off("capabilities", enter)
+    through = createTmuxPassthrough({
+      renderer: input.renderer,
+      send: (sequence) => send([sequence]),
+      limitMs: input.passthroughMs,
+    })
+    watch()
+    again = resend()
+  }
+
+  // Inside tmux only, where the client attached may change.
+  if (input.client && output) watch()
+  if (!input.client && output) {
+    input.renderer.on("capabilities", enter)
+    enter()
   }
 
   return {
@@ -141,6 +179,8 @@ export function createImageTerminal(input: {
     drained: () => again.then(() => queue),
     dispose: () => {
       if (timer) clearTimeout(timer)
+      through?.dispose()
+      input.renderer.off("capabilities", enter)
       input.renderer.off("resize", changed)
       input.renderer.off("focus", changed)
     },

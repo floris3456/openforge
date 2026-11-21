@@ -299,8 +299,11 @@ describe("PacerNotices", () => {
             title: "A chat",
             agent: Agent.ID.make("build"),
             model: "upstream-b",
+            provider: "prova",
             verdict: "partial",
             cause: "The system prompt changed since the step before.",
+            // A changed part without a cause: a changed prefix, as the words say.
+            causeCode: "prefix-changed",
             at: 1_000_003,
           },
           {
@@ -310,6 +313,7 @@ describe("PacerNotices", () => {
             title: "A chat",
             agent: Agent.ID.make("build"),
             model: "model-a",
+            provider: "prova",
             verdict: "miss",
             cause: "CLIProxyPacer didn't say why.",
             at: 1_000_002,
@@ -321,9 +325,11 @@ describe("PacerNotices", () => {
             title: "Leaf",
             agent: Agent.ID.make("explore"),
             model: "model-a",
+            provider: "prova",
             verdict: "miss",
             tokens: 152_000,
             cause: "The tool list changed since the step before.",
+            causeCode: "prefix-changed",
             missCost: Money.USD.make(0.0070656),
             at: 1_000_001,
           },
@@ -336,7 +342,9 @@ describe("PacerNotices", () => {
         expect(Object.keys((yield* h.list())[0]).toSorted()).toEqual([
           "at",
           "cause",
+          "causeCode",
           "model",
+          "provider",
           "requestID",
           "rootID",
           "sessionID",
@@ -371,6 +379,43 @@ describe("PacerNotices", () => {
           ["req-2", "CLIProxyPacer's redaction changed the system prompt."],
           ["req-1", "openforge changed message 4 of the prompt."],
         ])
+      }),
+  )
+
+  it.effect(
+    "names the provider that served the request and CLIProxyPacer's cause as it sent it, by which a TUI mutes a model",
+    () =>
+      Effect.gen(function* () {
+        // Spec cliproxypacer-cache-notices, section 4: a muted model hides the losses its provider caused, which a TUI
+        // tells by the notice's provider, model and cause code.
+        const h = yield* setup()
+        const chat = PacerSessionID.make(yield* h.chat())
+        const flash = { provider: "commandcode", alias: "deepseek-v4.1-flash" }
+        yield* h.read([
+          row(1, chat, { ...flash, cache_cause: "provider" }),
+          row(2, chat, { ...flash, cache_cause: "unknown" }),
+          row(3, chat, { ...flash, cache_cause: null }),
+          row(4, chat, { ...flash, cache_cause: "prefix-changed", changed_part: "system" }),
+          // A changed part without a cause is a changed prefix, as its words say.
+          row(5, chat, { ...flash, cache_cause: null, changed_part: "tools" }),
+          row(6, chat, { ...flash, cache_cause: "server-layout", changed_part: "messages[2]" }),
+          row(7, chat, { provider: "opencode-go", alias: "deepseek-v4.1-flash", cache_cause: "provider" }),
+        ])
+        yield* settle
+
+        expect(
+          (yield* h.list()).map((notice) => [notice.requestID, notice.provider, notice.model, notice.causeCode]),
+        ).toEqual([
+          ["req-7", "opencode-go", "deepseek-v4.1-flash", "provider"],
+          ["req-6", "commandcode", "deepseek-v4.1-flash", "server-layout"],
+          ["req-5", "commandcode", "deepseek-v4.1-flash", "prefix-changed"],
+          ["req-4", "commandcode", "deepseek-v4.1-flash", "prefix-changed"],
+          ["req-3", "commandcode", "deepseek-v4.1-flash", undefined],
+          ["req-2", "commandcode", "deepseek-v4.1-flash", "unknown"],
+          ["req-1", "commandcode", "deepseek-v4.1-flash", "provider"],
+        ])
+        // No cause: the key is left out, as the encoded notice omits it.
+        expect(Object.keys((yield* h.list())[4]!)).not.toContain("causeCode")
       }),
   )
 

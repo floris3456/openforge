@@ -94,6 +94,7 @@ const missRow = (id: number, uuid: string, at: number): PacerWire.Row => ({
   id,
   at,
   ext: `req-${id}`,
+  provider: "prova",
   alias: "model-a",
   kind: 0,
   status: 200,
@@ -144,9 +145,11 @@ it.live("tells every subscriber of a new notice and of its dismissal, and lists 
       rootID: sessionID,
       title: "A chat",
       model: "model-a",
+      provider: "prova",
       verdict: "miss",
       tokens: 152_000,
       cause: "The system prompt changed since the step before.",
+      causeCode: "prefix-changed",
       at,
     })
     for (const subscriber of [first, second]) {

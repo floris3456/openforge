@@ -7,6 +7,7 @@ import { useOptionalAttention } from "../context/attention"
 import { ClientContext } from "../context/client"
 import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
+import { DialogMuted, mutedSummary, type MutedModel } from "../pacer/muted"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogSelect, DialogSelectChoice } from "../ui/dialog-select"
 import { useToast } from "../ui/toast"
@@ -558,6 +559,21 @@ export const settings: Setting[] = [
     labels: ["in every TUI", "only in this TUI"],
     keywords: ["cache miss", "notices", "dismiss", "every tui"],
   },
+  // openforge (2026-11-21): muted models, a list that Enter opens in its own picker.
+  {
+    title: "Muted models",
+    category: "CLIProxyPacer",
+    path: ["cliproxypacer", "notices", "muted"],
+    description: "Models of a provider whose cache misses show no card when the provider caused them",
+    help: "A muted model of a provider shows no cache notice for a loss the provider caused: nothing openforge sent changed, yet the provider didn't reuse its cache, or CLIProxyPacer couldn't tell why. A loss openforge, CLIProxyPacer or the chat caused (a changed prompt, another account or model) still shows a card, and the Requests tab still lists every request. Enter opens the list: the muted models first, then every model CLIProxyPacer serves, under its provider; Enter mutes or unmutes one. In a chat's Requests tab, \"mute model\" mutes the model of the request under the cursor.",
+    default: [],
+    format: (value) => mutedSummary(value as readonly MutedModel[]),
+    keywords: ["cache miss", "notices", "mute", "provider", "model", "hide"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogMuted onClose={() => dialog.replace(() => <DialogConfig current="cliproxypacer.notices.muted" />)} />
+      )),
+  },
   {
     title: "Automatic updates",
     category: "Updates",
@@ -768,6 +784,8 @@ export function DialogConfig(props: { current?: string }) {
     setting.path.join(".") === "theme.name"
       ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
       : setting.values
+  // A list, such as Muted models, has no value to step to: it changes in its own picker only, which Enter opens.
+  const list = (setting: Setting) => !values(setting) && setting.step === undefined
   const display = (setting: Setting) => {
     if (setting.update && updateStatus()?.unavailable) return "unavailable"
     const current = value(setting)
@@ -802,6 +820,7 @@ export function DialogConfig(props: { current?: string }) {
     if (unavailable) return toast.show({ variant: "info", message: unavailable })
     const current = value(setting)
     const choices = values(setting)
+    if (list(setting)) return
     const next = choices
       ? choices[(choices.indexOf(current) + direction + choices.length) % choices.length]
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
@@ -869,11 +888,15 @@ export function DialogConfig(props: { current?: string }) {
       filterThreshold={0.7}
       onMove={(option) => setSelected(option.value)}
       onSelect={(option) => {
-        const open = settings[option.value].open
-        if (newDesigns() && open) return open(dialog)
+        const setting = settings[option.value]
+        if (setting.open && (newDesigns() || list(setting))) return setting.open(dialog)
         void change(1, option.value)
       }}
-      footerHints={newDesigns() ? [] : [{ title: "change", label: "←/→" }]}
+      footerHints={
+        newDesigns()
+          ? []
+          : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
+      }
       bindings={[
         {
           bind: "left",

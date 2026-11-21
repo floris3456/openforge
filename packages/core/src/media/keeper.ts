@@ -1,7 +1,7 @@
 export * as MediaKeeper from "./keeper.js"
 
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
-import { inArray } from "drizzle-orm"
+import { inArray, sql } from "drizzle-orm"
 import { Clock, Context, Duration, Effect, Layer } from "effect"
 import { SessionContinuity } from "../continuity.js"
 import { DatabaseBatch } from "../database/batch.js"
@@ -10,7 +10,9 @@ import { KV } from "../kv.js"
 import { BlobTable } from "../session/sql.js"
 import { MediaExpiry } from "./expiry.js"
 import { MediaFiles } from "./files.js"
+import { MediaGate } from "./gate.js"
 import { MediaMove } from "./move.js"
+import { MediaWorker } from "./worker.js"
 
 // openforge (spec pictures-files): the background work on a database's media, in the service.
 
@@ -38,6 +40,7 @@ const layer = Layer.effect(
     const kv = yield* KV.Service
     const continuity = yield* SessionContinuity.Service
     const folder = MediaFiles.folder(db)
+    const database = MediaFiles.database(db)
     const between = continuity.awaitOpen
 
     const logged = <A>(what: string, effect: Effect.Effect<A>) =>
@@ -45,21 +48,51 @@ const layer = Layer.effect(
         Effect.catchCause((cause) => Effect.logError(`could not ${what}`, { cause }).pipe(Effect.as(undefined))),
       )
 
-    // Before the move, so the pictures of chats already 30 days old are never written to files.
-    const expire = Effect.gen(function* () {
-      const now = yield* Clock.currentTimeMillis
-      return yield* MediaExpiry.run(db, folder, now, between)
+    // A round's work on the rows (task ze433w6fask0): on a worker thread over a connection of its own, so that it
+    // never holds the service's thread; here when the database is no file or the worker can't start.
+    const here: MediaWorker.Handle = {
+      expire: (now) => MediaExpiry.run(db, folder, now, MediaGate.here(between)),
+      move: () => (folder ? MediaMove.run(db, folder, MediaGate.here(between)) : Effect.succeed({ blobs: 0, rows: 0 })),
+    }
+    const handOverCheckpoints = Effect.acquireRelease(
+      db.get<{ wal_autocheckpoint: number }>(sql`PRAGMA wal_autocheckpoint`).pipe(
+        Effect.tap(() => db.run(sql`PRAGMA wal_autocheckpoint = 0`)),
+        Effect.orDie,
+      ),
+      (previous) =>
+        db.run(sql.raw(`PRAGMA wal_autocheckpoint = ${previous?.wal_autocheckpoint ?? 1000}`)).pipe(Effect.ignore),
+    )
+    const rows = Effect.gen(function* () {
+      if (!folder || !database) return here
+      // Its writes hold the service's connection, the way a transaction of the service's holds it, and it makes the
+      // checkpoints the service's connection would, off the service's thread, until the round ends.
+      return yield* MediaWorker.open({ database, folder }, db.$client.reserve).pipe(
+        Effect.tap(() => handOverCheckpoints),
+        Effect.catch((error) =>
+          Effect.logWarning("the media keeper works on the service's thread: its worker didn't start", {
+            cause: String(error.cause),
+          }).pipe(Effect.as(here)),
+        ),
+      )
     })
 
-    const move = Effect.gen(function* () {
-      if (!folder || (yield* kv.get(MOVED)) !== undefined) return
-      const started = yield* Clock.currentTimeMillis
-      yield* Effect.logInfo("moving stored media out of the database into files", { folder })
-      const moved = yield* MediaMove.run(db, folder, between)
-      const at = yield* Clock.currentTimeMillis
-      yield* kv.set(MOVED, { at, ...moved })
-      yield* Effect.logInfo("moved stored media into files", { ...moved, ms: at - started })
-    })
+    // Before the move, so the pictures of chats already 30 days old are never written to files.
+    const expire = (work: MediaWorker.Handle) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        return yield* work.expire(now, between)
+      })
+
+    const move = (work: MediaWorker.Handle) =>
+      Effect.gen(function* () {
+        if (!folder || (yield* kv.get(MOVED)) !== undefined) return
+        const started = yield* Clock.currentTimeMillis
+        yield* Effect.logInfo("moving stored media out of the database into files", { folder })
+        const moved = yield* work.move(between)
+        const at = yield* Clock.currentTimeMillis
+        yield* kv.set(MOVED, { at, ...moved })
+        yield* Effect.logInfo("moved stored media into files", { ...moved, ms: at - started })
+      })
 
     const sweep = Effect.gen(function* () {
       if (!folder) return
@@ -90,8 +123,14 @@ const layer = Layer.effect(
         const state = { first: true }
         // No polling: each round sleeps until the next chat turns 30 days old, or 30 days with no chat to wait for.
         while (true) {
-          const next = yield* logged("remove the pictures of chats untouched for 30 days", expire)
-          if (state.first) yield* logged("move stored media into files", move)
+          const next = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const work = yield* rows
+              const next = yield* logged("remove the pictures of chats untouched for 30 days", expire(work))
+              if (state.first) yield* logged("move stored media into files", move(work))
+              return next
+            }),
+          )
           state.first = false
           yield* logged("delete leftover media files", sweep)
           const now = yield* Clock.currentTimeMillis

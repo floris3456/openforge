@@ -1,9 +1,10 @@
 import { describe, expect } from "bun:test"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
-import { DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -14,6 +15,7 @@ import { ImageBank } from "@opencode/core/image/bank"
 import { ImageTable } from "@opencode/core/image/sql"
 import { KV } from "@opencode/core/kv"
 import { MediaFiles } from "@opencode/core/media/files"
+import { MediaGate } from "@opencode/core/media/gate"
 import { MediaKeeper } from "@opencode/core/media/keeper"
 import { MediaClearedTable } from "@opencode/core/media/sql"
 import { MediaExpiry } from "@opencode/core/media/expiry"
@@ -304,12 +306,12 @@ describe("MediaMove", () => {
         yield* seed()
         const before = yield* reads
 
-        expect(yield* MediaMove.run(db, folder, Effect.void)).toEqual({ blobs: 2, rows: 4 })
+        expect(yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))).toEqual({ blobs: 2, rows: 4 })
 
         yield* expectMoved(folder)
         expect(yield* reads).toEqual(before)
         // Nothing is left to move.
-        expect(yield* MediaMove.run(db, folder, Effect.void)).toEqual({ blobs: 0, rows: 0 })
+        expect(yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))).toEqual({ blobs: 0, rows: 0 })
       }),
     ),
   )
@@ -333,11 +335,11 @@ describe("MediaMove", () => {
         const stopAt = (n: number) => Effect.suspend(() => (++calls.count === n ? Effect.interrupt : Effect.void))
         for (const n of [2, 4]) {
           calls.count = 0
-          const stopped = yield* MediaMove.run(db, folder, stopAt(n)).pipe(Effect.exit)
+          const stopped = yield* MediaMove.run(db, folder, MediaGate.here(stopAt(n))).pipe(Effect.exit)
           expect(Exit.hasInterrupts(stopped)).toBe(true)
           expect(yield* reads).toEqual(before)
         }
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         yield* expectMoved(folder)
         expect(yield* reads).toEqual(before)
@@ -371,7 +373,7 @@ describe("MediaMove", () => {
         const before = yield* copy("before.db")
         expect(before.pictures).toBe(moved.length)
 
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         const after = yield* copy("after.db")
         expect(after.pictures).toBe(0)
@@ -409,7 +411,7 @@ describe("what the model is sent", () => {
         const before = yield* body
         for (const data of [fitted, person, part]) expect(before).toContain(data.toString("base64"))
 
-        yield* MediaMove.run(db, folder, Effect.void)
+        yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
 
         expect(yield* body).toBe(before)
       }),
@@ -423,7 +425,7 @@ describe("what the model is sent", () => {
         const now = Date.now()
         yield* seed(now - 31 * DAY)
 
-        yield* MediaExpiry.run(db, folder, now, Effect.void)
+        yield* MediaExpiry.run(db, folder, now, MediaGate.here(Effect.void))
 
         const sent = yield* body
         for (const data of [fitted, person, part, ...originals]) expect(sent).not.toContain(data.toString("base64"))
@@ -605,5 +607,180 @@ describe("MediaKeeper", () => {
           ).toEqual([{ size: later.byteLength }])
         }),
       ),
+  )
+
+  // Budget (task ze433w6fask0): the move must hold the service's thread no longer than 50 ms at a time. Pictures this
+  // large make the work on one row take over 100 ms, so a keeper that did it on the service's thread fails by far; with
+  // the work on its worker the thread runs a few milliseconds between two ticks of a 5 ms timer. What counts is the
+  // thread's own time on a CPU between two ticks (Linux's schedstat), so a loaded machine that leaves it waiting for a
+  // CPU doesn't read as a block; other systems have no such count for one thread.
+  ;(process.platform === "linux" ? it.live : it.live.skip)(
+    "moves large pictures without holding the service's thread for more than 50 ms",
+    () =>
+      withDatabase((_, folder) =>
+        Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const keeper = yield* MediaKeeper.Service
+          const kv = yield* KV.Service
+          yield* seed()
+          const large = [randomBytes(24 * 1024 * 1024), randomBytes(24 * 1024 * 1024)]
+          yield* db
+            .insert(SessionMessageTable)
+            .values(
+              large.map((data, index) =>
+                assistant(SessionMessage.ID.make(`msg_move_large_${index}`), 10 + index, [
+                  tool(`call_large_${index}`, [
+                    { type: "file", uri: `data:image/png;base64,${data.toString("base64")}`, mime: "image/png" },
+                  ]),
+                ]),
+              ),
+            )
+            .run()
+            .pipe(Effect.orDie)
+          const original = randomBytes(24 * 1024 * 1024)
+          yield* db
+            .insert(BlobTable)
+            .values({
+              hash: hash(original),
+              mime: "image/png",
+              bytes: original.byteLength,
+              data: original,
+              time_created: 1,
+            })
+            .run()
+            .pipe(Effect.orDie)
+
+          const onCpu = () => Number(readFileSync("/proc/thread-self/schedstat", "utf8").split(" ")[0]) / 1e6
+          const gaps = { last: onCpu(), longest: 0 }
+          const sampler = setInterval(() => {
+            const now = onCpu()
+            gaps.longest = Math.max(gaps.longest, now - gaps.last)
+            gaps.last = now
+          }, 5)
+          const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          const deadline = performance.now() + 60_000
+          while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+            if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+            yield* Effect.sleep("20 millis")
+          }
+          clearInterval(sampler)
+          yield* Fiber.interrupt(running)
+
+          expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 3, rows: 6 })
+          for (const data of [...large, original])
+            expect((yield* Effect.promise(() => readFile(MediaFiles.file(folder, hash(data))))).equals(data)).toBe(true)
+          expect(gaps.longest).toBeLessThan(50)
+        }),
+      ),
+  )
+
+  // The worker writes over a connection of its own. A transaction of the service's that read before one of its writes
+  // committed and writes after it would fail with SQLITE_BUSY_SNAPSHOT, so each of the worker's writes waits until it
+  // holds the service's connection. Each transaction here reads, waits 3 ms and writes, while the worker moves 200 rows.
+  it.live("never makes a transaction of the service's fail while it moves on its worker", () =>
+    withDatabase(() =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const keeper = yield* MediaKeeper.Service
+        const kv = yield* KV.Service
+        yield* seed()
+        yield* db
+          .insert(SessionMessageTable)
+          .values(
+            Array.from({ length: 200 }, (_, index) =>
+              assistant(SessionMessage.ID.make(`msg_move_many_${index}`), 100 + index, [
+                tool(`call_many_${index}`, [
+                  {
+                    type: "file",
+                    uri: `data:image/png;base64,${bytes(100 + index, 16_000).toString("base64")}`,
+                    mime: "image/png",
+                  },
+                ]),
+              ]),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        yield* db.run(sql`CREATE TABLE service_writes (n INTEGER)`).pipe(Effect.orDie)
+
+        const outcome = { ok: 0, failed: [] as string[] }
+        const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+        const deadline = performance.now() + 60_000
+        while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+          if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+          const exit = yield* db
+            .transaction(() =>
+              Effect.gen(function* () {
+                yield* db.get(sql`SELECT count(*) FROM service_writes`)
+                yield* Effect.sleep("3 millis")
+                yield* db.run(sql`INSERT INTO service_writes VALUES (1)`)
+              }),
+            )
+            .pipe(Effect.exit)
+          if (exit._tag === "Success") outcome.ok++
+          else
+            outcome.failed.push(
+              Bun.inspect(Cause.squash(exit.cause)).match(/SQLITE_\w+/)?.[0] ?? Cause.pretty(exit.cause),
+            )
+        }
+        yield* Fiber.interrupt(running)
+
+        expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 2, rows: 204 })
+        expect(outcome.failed.slice(0, 3)).toEqual([])
+        expect(outcome.ok).toBeGreaterThan(0)
+      }),
+    ),
+  )
+
+  // A checkpoint syncs the database file, which on a busy disk held the service's thread for seconds while the move
+  // wrote its files: for the round, the worker checkpoints and the service's connection makes none, then makes them
+  // again, and the WAL is left small.
+  it.live("hands the database's checkpoints to its worker for the round", () =>
+    withDatabase((file) =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const keeper = yield* MediaKeeper.Service
+        const kv = yield* KV.Service
+        const autocheckpoint = db.get<{ wal_autocheckpoint: number }>(sql`PRAGMA wal_autocheckpoint`).pipe(
+          Effect.orDie,
+          Effect.map((row) => row?.wal_autocheckpoint),
+        )
+        yield* seed()
+        yield* db
+          .insert(SessionMessageTable)
+          .values(
+            Array.from({ length: 100 }, (_, index) =>
+              assistant(SessionMessage.ID.make(`msg_move_checkpoint_${index}`), 100 + index, [
+                tool(`call_checkpoint_${index}`, [
+                  {
+                    type: "file",
+                    uri: `data:image/png;base64,${bytes(300 + index, 16_000).toString("base64")}`,
+                    mime: "image/png",
+                  },
+                ]),
+              ]),
+            ),
+          )
+          .run()
+          .pipe(Effect.orDie)
+        expect(yield* autocheckpoint).toBe(1000)
+
+        const seen = new Set<number | undefined>()
+        const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+        const deadline = performance.now() + 60_000
+        while ((yield* kv.get(MediaKeeper.MOVED)) === undefined) {
+          if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 60 s"))
+          seen.add(yield* autocheckpoint)
+          yield* Effect.sleep("5 millis")
+        }
+        yield* until(autocheckpoint.pipe(Effect.map((value) => value === 1000)))
+        yield* Fiber.interrupt(running)
+
+        expect(seen.has(0)).toBe(true)
+        // A checkpoint beside the service's readers can't let the WAL start over; the worker truncates it at the end
+        // (3.4 MB here without that).
+        expect(Bun.file(`${file}-wal`).size).toBeLessThan(1024 * 1024)
+      }),
+    ),
   )
 })

@@ -3,7 +3,9 @@
 // (21,282 JPEG of 365 KB, 10,658 PNG of 903 KB on average), 25,869 of 161,423 assistant rows holding fitted pictures
 // inline (6.6 GB of Base64), 2,019 small user rows, 589 chats. The copy is `ReleaseDatabase.copy`'s two statements
 // (packages/cli/src/upgrade/database.ts); the move is the service's own (MediaMove).
-//   bun run script/benchmark-pictures.ts <empty directory> [--scale 1]
+// With --seed-only it stops once the database is seeded, its pictures still in rows: the seed of the move's load
+// measurement (task ze433w6fask0, run/evidence/pictures-files/move-load/harness).
+//   bun run script/benchmark-pictures.ts <empty directory> [--scale 1] [--seed-only]
 import { Database as Sqlite } from "bun:sqlite"
 import { createHash, randomBytes } from "node:crypto"
 import { copyFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises"
@@ -12,6 +14,7 @@ import { Effect, Layer } from "effect"
 import { Global } from "@opencode/util/global"
 import { Database } from "../src/database/database"
 import { MediaFiles } from "../src/media/files"
+import { MediaGate } from "../src/media/gate"
 import { MediaMove } from "../src/media/move"
 
 const args = process.argv.slice(2)
@@ -160,6 +163,12 @@ batched(
 db.run("PRAGMA wal_checkpoint(TRUNCATE)")
 db.close()
 const seedMs = Math.round(performance.now() - seeded)
+if (args.includes("--seed-only")) {
+  console.log(
+    JSON.stringify({ scale, seed: { ms: seedMs, gb: Math.round(((await stat(database)).size / GB) * 100) / 100 } }),
+  )
+  process.exit(0)
+}
 
 /** A switch's copy: `VACUUM INTO`, then the copy in rollback-journal mode. */
 const copy = async (name: string) => {
@@ -186,7 +195,7 @@ const moved = await Effect.runPromise(
       const folder = MediaFiles.folder(db)
       if (!folder) throw new Error("no media folder")
       const started = performance.now()
-      const result = yield* MediaMove.run(db, folder, Effect.void)
+      const result = yield* MediaMove.run(db, folder, MediaGate.here(Effect.void))
       return { ...result, ms: Math.round(performance.now() - started) }
     }).pipe(Effect.provide(Database.layer({ path: database }))),
   ).pipe(Effect.provideService(Global.Service, global)),

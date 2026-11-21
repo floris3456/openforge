@@ -13,15 +13,18 @@ export const folderFor = (database: string) => {
   return path.join(path.dirname(database), name === "opencode" ? "media" : `${name}-media`)
 }
 
-// The folder of each database service's connection; one without a folder (in memory, a Durable Object) keeps bytes in
-// its rows.
-const folders = new WeakMap<object, string>()
+// The folder of each database service's connection, and its database file; one without a folder (in memory, a Durable
+// Object) keeps bytes in its rows.
+const folders = new WeakMap<object, { readonly folder: string; readonly database?: string }>()
 
-export const register = (db: object, folder: string) => {
-  folders.set(db, folder)
+export const register = (db: object, folder: string, database?: string) => {
+  folders.set(db, { folder, ...(database !== undefined && { database }) })
 }
 
-export const folder = (db: object): string | undefined => folders.get(db)
+export const folder = (db: object): string | undefined => folders.get(db)?.folder
+
+/** The database file of a connection with a folder, which a second connection opens (MediaWorker). */
+export const database = (db: object): string | undefined => folders.get(db)?.database
 
 export const file = (folder: string, hash: string) => path.join(folder, hash.slice(0, 2), hash)
 

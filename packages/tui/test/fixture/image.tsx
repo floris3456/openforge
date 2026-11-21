@@ -26,17 +26,19 @@ export function imageTerminal(input: {
   client?: TmuxClient
   ask?: () => Promise<TmuxClient | undefined>
 }) {
-  const renderer = Object.assign(new EventEmitter(), {
-    capabilities: { ansi256: true },
-    resolution: null,
-    terminalWidth: 100,
-    terminalHeight: 30,
-  })
   const client: TmuxClient | undefined =
     input.client ??
     (input.placeholders
       ? { termtype: "ghostty 1.4.0", passthrough: true, cell: input.cell ?? { width: 9, height: 20 } }
       : undefined)
+  const renderer = Object.assign(new EventEmitter(), {
+    capabilities: { ansi256: true, multiplexer: client ? ("tmux" as const) : ("none" as const) },
+    resolution: null,
+    terminalWidth: 100,
+    terminalHeight: 30,
+    prependInputHandler: () => {},
+    removeInputHandler: () => {},
+  })
   const sent: string[] = []
   const terminal = createImageTerminal({
     renderer,

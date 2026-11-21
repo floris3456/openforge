@@ -408,7 +408,7 @@ interface Harness {
   /** Catalog reads asked for; while `hold` is set, each waits for it. */
   readonly refreshes: { count: number; hold?: Deferred.Deferred<void> }
   readonly execution: { readonly active: Set<SessionID>; readonly woken: SessionID[] }
-  /** The real background jobs (`Job`), which the connection counts per chat. */
+  /** The real background jobs (`Job`), which leave a chat's ping duration alone. */
   readonly jobs: Job.Interface
   /** Every `pacer.*` event published since the harness started. */
   readonly published: Array<{ readonly type: string; readonly data: unknown }>
@@ -526,7 +526,6 @@ const harness = Effect.fnUntraced(function* () {
             }),
           ),
           Layer.succeed(Bus.Service, bus),
-          Layer.succeed(Job.Service, Context.get(context, Job.Service)),
           Layer.succeed(Session.Service, counted),
           Layer.succeed(PacerNotices.Service, notices),
           Layer.succeed(PacerAttention.Service, attention),
@@ -644,6 +643,42 @@ const chat = (h: Harness, parentID?: SessionID) =>
     parentID ? h.sessions.create({ parentID }) : h.sessions.create({ location: h.location }),
     (info) => info.id,
   )
+
+/** A view's fields saying CPP gives the chat `minutes` of pings without its own settings (`effective.inherited`). */
+const normalIs = (minutes: number): Json => ({
+  effective: {
+    pings_enabled: true,
+    compact_before_cold: false,
+    compact_cold_first: false,
+    inherited: {
+      pings_enabled: true,
+      ping_duration_ms: minutes * 60_000,
+      ping_interval_ms: 240_000,
+      cache_class: "5m",
+    },
+  },
+})
+
+/** The `pings.duration_minutes` the chat's settings were patched with, in order. */
+const durations = (h: Harness, sessionID: SessionID) =>
+  seen(h, viewPath(sessionID), "PATCH").map((item) => (item.body as Json)["pings.duration_minutes"])
+
+/** Calls of a step of the chat: a call's start, and its end. */
+const tools = (h: Harness, sessionID: SessionID, assistantMessageID: SessionMessage.ID) => ({
+  call: (id: string, name: string, input: Json) =>
+    Effect.gen(function* () {
+      yield* h.bus.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, id, name })
+      yield* h.bus.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, id, input, executed: false })
+    }),
+  done: (id: string) =>
+    h.bus.publish(SessionEvent.Tool.Success, {
+      sessionID,
+      assistantMessageID,
+      id,
+      content: [{ type: "text", text: "done" }],
+      executed: false,
+    }),
+})
 
 describe("PacerConnection states", () => {
   it.effect("is not set up without an endpoint, and on once CPP answers", () =>
@@ -1992,41 +2027,17 @@ describe("PacerConnection chats", () => {
   )
 
   it.effect(
-    "keeps a chat warm 4 hours while it waits on a foreground command or subagent, and an hour while a background job of it runs",
+    "keeps a chat warm 4 hours while it waits on a foreground command or subagent, and its normal duration while a background job of it runs",
     () =>
       Effect.gen(function* () {
         const h = yield* harness()
         yield* online(h)
         const id = yield* chat(h)
-        h.cpp.views.set(PacerSessionID.make(id), chatView(PacerSessionID.make(id), h.cpp.time()))
+        // CPP gives the chat 90 minutes without its own (Codex's on 2026-11-21): a wait's 4 hours are longer.
+        h.cpp.views.set(PacerSessionID.make(id), chatView(PacerSessionID.make(id), h.cpp.time(), normalIs(90)))
         const assistantMessageID = yield* step(h, id)
-        const call = (callID: string, name: string, input: Json) =>
-          Effect.gen(function* () {
-            yield* h.bus.publish(SessionEvent.Tool.Input.Started, {
-              sessionID: id,
-              assistantMessageID,
-              id: callID,
-              name,
-            })
-            yield* h.bus.publish(SessionEvent.Tool.Called, {
-              sessionID: id,
-              assistantMessageID,
-              id: callID,
-              input,
-              executed: false,
-            })
-          })
-        const done = (callID: string) =>
-          h.bus.publish(SessionEvent.Tool.Success, {
-            sessionID: id,
-            assistantMessageID,
-            id: callID,
-            content: [{ type: "text", text: "done" }],
-            executed: false,
-          })
-        const patches = () =>
-          seen(h, viewPath(id), "PATCH").map((item) => (item.body as Json)["pings.duration_minutes"])
-        // A job in the background, as the shell and subagent tools leave one: running until `end` is done.
+        const { call, done } = tools(h, id, assistantMessageID)
+        const patches = () => durations(h, id)
         const background = (jobID: string, recovery: Job.Recovery) =>
           Effect.gen(function* () {
             const end = yield* Deferred.make<string>()
@@ -2035,10 +2046,8 @@ describe("PacerConnection chats", () => {
             return Deferred.succeed(end, "done").pipe(Effect.andThen(h.jobs.wait({ id: jobID })))
           })
 
-        // A background call is no wait; once it has answered, its job counts: an hour.
+        // A background command is no wait, and its job running holds nothing: the chat keeps its normal duration.
         yield* call("server", "shell", { command: "bun run dev", background: true })
-        yield* settle
-        expect(patches()).toEqual([])
         const stopServer = yield* background("sh_server", {
           kind: "shell",
           sessionID: id,
@@ -2046,30 +2055,25 @@ describe("PacerConnection chats", () => {
           command: "bun run dev",
         })
         yield* done("server")
-        yield* until("an hour", () => patches().length === 1)
-        // A foreground wait beside it: 4 hours while any wait lasts, then back to the hour, the job still running.
+        yield* settle
+        expect(patches()).toEqual([])
+        // A foreground wait beside it: 4 hours while any wait lasts, then CPP's own again, the job still running.
         yield* call("sleep", "shell", { command: "sleep 600" })
-        yield* until("raised", () => patches().length === 2)
+        yield* until("raised", () => patches().length === 1)
         yield* call("agent", "subagent", { prompt: "look" })
         yield* done("sleep")
         yield* settle
-        expect(patches()).toEqual([60, 240])
+        expect(patches()).toEqual([240])
         yield* done("agent")
-        yield* until("back to the hour", () => patches().length === 3)
-        // The command ended: its notice wakes the chat, and the end of that run leaves CPP's own duration.
+        yield* until("cleared", () => patches().length === 2)
+        // The command ended: its notice wakes the chat, and the end of that run writes nothing.
         yield* stopServer
         yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
-        yield* until("cleared", () => patches().length === 4)
-        expect(patches()).toEqual([60, 240, 60, null])
-        // A run that ends with no job of the chat running writes nothing.
-        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
         yield* settle
-        expect(patches()).toHaveLength(4)
+        expect(patches()).toEqual([240, null])
 
-        // A background subagent is its parent's job; another chat's job is not.
+        // A background subagent is no wait either.
         const child = yield* chat(h, id)
-        const other = yield* chat(h)
-        yield* background("sh_other", { kind: "shell", sessionID: other, shellID: "sh_other", command: "sleep 3600" })
         const stopChild = yield* background(child, {
           kind: "subagent",
           parentSessionID: id,
@@ -2079,57 +2083,94 @@ describe("PacerConnection chats", () => {
         })
         yield* call("helper", "subagent", { prompt: "look", background: true })
         yield* done("helper")
-        yield* until("an hour for the subagent", () => patches().length === 5)
+        yield* settle
+        expect(patches()).toHaveLength(2)
 
-        // A run stopped while it waited waits no more, though the call's end is published only at its next run: back to
-        // the hour while the subagent runs.
+        // A run stopped while it waited waits no more, though the call's end is published only at its next run.
         yield* call("long", "shell", { command: "sleep 3600" })
-        yield* until("raised again", () => patches().length === 6)
+        yield* until("raised again", () => patches().length === 3)
         yield* h.bus.publish(SessionEvent.Execution.Interrupted, { sessionID: id, reason: "user" })
-        yield* until("the hour again", () => patches().length === 7)
+        yield* until("cleared again", () => patches().length === 4)
         yield* stopChild
         yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
-        yield* until("cleared again", () => patches().length === 8)
-        expect(patches().slice(4)).toEqual([60, 240, 60, null])
+        yield* settle
+        expect(patches()).toEqual([240, null, 240, null])
       }),
   )
 
-  it.effect("a duration of ours from an earlier process is checked against the chat's jobs when its view is read", () =>
+  it.effect("a wait keeps a chat's normal duration when it is longer than 4 hours", () =>
     Effect.gen(function* () {
       const h = yield* harness()
       yield* online(h)
-      const [idle, working, own] = yield* Effect.forEach([0, 1, 2], () => chat(h))
-      const view = (sessionID: SessionID, minutes: number) =>
+      const [unread, read] = yield* Effect.forEach([0, 1], () => chat(h))
+      for (const sessionID of [unread, read])
         h.cpp.views.set(
           PacerSessionID.make(sessionID),
-          chatView(PacerSessionID.make(sessionID), h.cpp.time(), {
-            settings: { "pings.enabled": null, "pings.duration_minutes": minutes, "cache.class": null, model: null },
-          }),
+          chatView(PacerSessionID.make(sessionID), h.cpp.time(), normalIs(300)),
         )
-      view(idle, 60)
-      view(working, 240)
-      // One set on CPP's own page stays.
-      view(own, 90)
-      const end = yield* Deferred.make<string>()
-      yield* h.jobs.start({
-        id: "sh_dev",
-        type: "shell",
-        recovery: { kind: "shell", sessionID: working, shellID: "sh_dev", command: "bun run dev" },
-        run: Deferred.await(end),
-      })
-      yield* h.jobs.background("sh_dev")
-      for (const sessionID of [idle, working, own]) yield* step(h, sessionID)
-      for (const sessionID of [idle, working, own]) yield* h.connection.chat(sessionID)
-      yield* until(
-        "both corrected",
-        () => seen(h, viewPath(idle), "PATCH").length + seen(h, viewPath(working), "PATCH").length === 2,
-      )
+      const steps = yield* Effect.forEach([unread, read], (sessionID) => step(h, sessionID))
+      yield* ask(h, read)
+
+      // Without its view held, a wait asks for 4 hours, and CPP's answer tells it the chat's normal 5 hours.
+      const first = tools(h, unread, steps[0])
+      yield* first.call("sleep", "shell", { command: "sleep 600" })
+      yield* until("raised to its normal", () => durations(h, unread).length === 2)
+      // With its view held, at once.
+      const second = tools(h, read, steps[1])
+      yield* second.call("sleep", "shell", { command: "sleep 600" })
+      yield* until("raised", () => durations(h, read).length === 1)
+      // A wait's end clears it: a duration equal to the chat's normal one is none of its own.
+      yield* first.done("sleep")
+      yield* second.done("sleep")
+      yield* until("cleared", () => durations(h, unread).length === 3 && durations(h, read).length === 2)
       yield* settle
-      expect(seen(h, viewPath(idle), "PATCH").map((item) => item.body)).toEqual([{ "pings.duration_minutes": null }])
-      expect(seen(h, viewPath(working), "PATCH").map((item) => item.body)).toEqual([{ "pings.duration_minutes": 60 }])
-      expect(seen(h, viewPath(own), "PATCH")).toEqual([])
-      yield* Deferred.succeed(end, "done")
+      expect(durations(h, unread)).toEqual([240, 300, null])
+      expect(durations(h, read)).toEqual([300, null])
     }),
+  )
+
+  it.effect(
+    "a duration of ours from an earlier openforge is cleared when the chat's view is read, a job running or not",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const [idle, working, waited, normal, own] = yield* Effect.forEach([0, 1, 2, 3, 4], () => chat(h))
+        const view = (sessionID: SessionID, minutes: number) =>
+          h.cpp.views.set(
+            PacerSessionID.make(sessionID),
+            chatView(PacerSessionID.make(sessionID), h.cpp.time(), {
+              settings: { "pings.enabled": null, "pings.duration_minutes": minutes, "cache.class": null, model: null },
+              ...normalIs(300),
+            }),
+          )
+        // The hour a background job held its chat at until 2026-11-21, with and without the job still running.
+        view(idle, 60)
+        view(working, 60)
+        // A wait's 4 hours, and a wait's longer normal duration.
+        view(waited, 240)
+        view(normal, 300)
+        // One set on CPP's own page stays.
+        view(own, 90)
+        const end = yield* Deferred.make<string>()
+        yield* h.jobs.start({
+          id: "sh_dev",
+          type: "shell",
+          recovery: { kind: "shell", sessionID: working, shellID: "sh_dev", command: "bun run dev" },
+          run: Deferred.await(end),
+        })
+        yield* h.jobs.background("sh_dev")
+        const all = [idle, working, waited, normal, own]
+        for (const sessionID of all) yield* step(h, sessionID)
+        for (const sessionID of all) yield* h.connection.chat(sessionID)
+        yield* until("all four cleared", () =>
+          [idle, working, waited, normal].every((sessionID) => durations(h, sessionID).length === 1),
+        )
+        yield* settle
+        for (const sessionID of [idle, working, waited, normal]) expect(durations(h, sessionID)).toEqual([null])
+        expect(seen(h, viewPath(own), "PATCH")).toEqual([])
+        yield* Deferred.succeed(end, "done")
+      }),
   )
 
   it.effect("compacts a chat CPP asks to, unless it runs, has queued input or a staged revert", () =>

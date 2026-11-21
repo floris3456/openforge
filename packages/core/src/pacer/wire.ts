@@ -56,6 +56,11 @@ export const View = Schema.Struct({
       compact_cold_first: maybe(Schema.Unknown),
       /** `compaction.writer` as it applies to the chat: `server`, `client`, or null while unset. */
       compaction_writer: maybe(Schema.Unknown),
+      /**
+       * What the chat would get without its own settings (since CPP 2026-11-10): its ping duration, whether or not
+       * pings are on, null without a provider.
+       */
+      inherited: maybe(Schema.Struct({ ping_duration_ms: maybe(Schema.Number) })),
     }),
   ),
   /** `size_tokens`: its size by its newest answered request, null while unknown; `threshold`: `warming.fresh_tokens`. */

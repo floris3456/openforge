@@ -86,14 +86,25 @@ if (port) {
       Queue.offerUnsafe(request._tag === "Go" || request._tag === "Locked" ? answers : requests, request)
     })
     const ask = (question: Reply) => Effect.sync(() => post(question)).pipe(Effect.andThen(Queue.take(answers)))
-    // While the worker holds the service's connection no reader uses the WAL, so TRUNCATE neither waits nor fails.
-    const truncate = db.run("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.ignore)
+    // TRUNCATE waits for every reader of the WAL, holding the database's writer lock meanwhile. While the worker holds
+    // the service's connection none of the service's readers is one, but another process's may be (a second server on
+    // the database, a copy): with no busy wait it checkpoints what it can and leaves the WAL for the next time.
+    const busy = yield* db.get<{ timeout: number }>("PRAGMA busy_timeout")
+    const truncate = db
+      .run("PRAGMA busy_timeout = 0")
+      .pipe(
+        Effect.andThen(db.run("PRAGMA wal_checkpoint(TRUNCATE)")),
+        Effect.ensuring(db.run(`PRAGMA busy_timeout = ${busy?.timeout ?? 5000}`).pipe(Effect.ignore)),
+        Effect.ignore,
+      )
     const wal = `${start.database}-wal`
+    // The wait for Locked stays interruptible: a service that stops never answers it, and Stop must still end the
+    // worker rather than keep that stop waiting. Once Locked came, Unlock follows whatever happens.
     const write: MediaGate.Interface["write"] = (effect) =>
-      Effect.acquireUseRelease(
-        ask({ _tag: "Lock" }),
-        () => effect,
-        () => Effect.sync(() => post({ _tag: "Unlock" })),
+      Effect.uninterruptibleMask((restore) =>
+        restore(ask({ _tag: "Lock" })).pipe(
+          Effect.andThen(restore(effect).pipe(Effect.ensuring(Effect.sync(() => post({ _tag: "Unlock" }))))),
+        ),
       )
     const gate: MediaGate.Interface = {
       between: ask({ _tag: "Between" }).pipe(Effect.asVoid),

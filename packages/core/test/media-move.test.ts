@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
-import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -20,6 +20,7 @@ import { MediaKeeper } from "@opencode/core/media/keeper"
 import { MediaClearedTable } from "@opencode/core/media/sql"
 import { MediaExpiry } from "@opencode/core/media/expiry"
 import { MediaMove } from "@opencode/core/media/move"
+import { MediaWorker } from "@opencode/core/media/worker"
 import { Model } from "@opencode/core/model"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -782,5 +783,88 @@ describe("MediaKeeper", () => {
         expect(Bun.file(`${file}-wal`).size).toBeLessThan(1024 * 1024)
       }),
     ),
+  )
+
+  // The worker truncates the WAL while it holds the service's connection, and a truncation waits for every reader of
+  // the WAL. Another process's read, here one held for 4 s, must hold neither the service's statements nor the round.
+  it.live(
+    "never holds the service's connection while another process reads the database",
+    () =>
+      withDatabase((file) =>
+        Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const keeper = yield* MediaKeeper.Service
+          const kv = yield* KV.Service
+          yield* seed()
+          const reader = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              Bun.spawn(
+                [
+                  process.execPath,
+                  "-e",
+                  `const { Database } = require("bun:sqlite")
+                  const db = new Database(${JSON.stringify(file)})
+                  db.run("BEGIN")
+                  db.query("SELECT count(*) FROM session_message").get()
+                  console.log("reading")
+                  await Bun.sleep(4000)
+                  db.run("COMMIT")`,
+                ],
+                { stdout: "pipe" },
+              ),
+            ),
+            (child) => Effect.sync(() => child.kill()),
+          )
+          yield* Effect.promise(() => reader.stdout.getReader().read())
+
+          const longest = { wait: 0 }
+          const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          const deadline = performance.now() + 30_000
+          while (true) {
+            if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 30 s"))
+            const started = performance.now()
+            const moved = yield* kv.get(MediaKeeper.MOVED)
+            yield* db.get(sql`SELECT 1`).pipe(Effect.orDie)
+            longest.wait = Math.max(longest.wait, performance.now() - started)
+            if (moved !== undefined) break
+            yield* Effect.sleep("5 millis")
+          }
+          yield* Fiber.interrupt(running)
+
+          expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 2 })
+          expect(longest.wait).toBeLessThan(1000)
+          // The round ended while the other process still read.
+          expect(reader.exitCode).toBeNull()
+        }).pipe(Effect.scoped),
+      ),
+    30_000,
+  )
+})
+
+describe("MediaWorker", () => {
+  // A service that stops while its worker waits for the service's connection never answers that wait: the worker must
+  // end on Stop rather than keep the service's stop, a release switch's, waiting for it.
+  it.live(
+    "stops at once while it waits for the service's connection",
+    () =>
+      withDatabase((file, folder) =>
+        Effect.gen(function* () {
+          yield* seed()
+          const asked = yield* Deferred.make<void>()
+          const closing = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const worker = yield* MediaWorker.open(
+                { database: file, folder },
+                Deferred.succeed(asked, undefined).pipe(Effect.andThen(Effect.never)),
+              )
+              yield* worker.expire(Date.now(), Effect.void).pipe(Effect.forkScoped)
+              yield* Deferred.await(asked)
+              return performance.now()
+            }),
+          )
+          expect(performance.now() - closing).toBeLessThan(1000)
+        }),
+      ),
+    30_000,
   )
 })

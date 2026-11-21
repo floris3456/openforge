@@ -115,7 +115,7 @@ test("under the new designs too: opened at a row, Enter flips it, and the row sa
   await setup.frame((frame) => row("Compact before cold", "on").test(frame))
 })
 
-test("one CLIProxyPacer heading over Needs attention's two rows, the cache notices' six and these two, all shown only while it answers", async () => {
+test("one CLIProxyPacer heading over Needs attention's two rows, the cache notices' seven and these two, all shown only while it answers", async () => {
   await using setup = await settings()
   setup.open()
   const lines = (await setup.frame((frame) => frame.includes("Compact cold chats first")))
@@ -133,6 +133,7 @@ test("one CLIProxyPacer heading over Needs attention's two rows, the cache notic
     "Cache notice minimum",
     "Cache notices for",
     "Opened cache notice disappears",
+    "Muted models",
     "Compact cold chats first",
     "Compact before cold",
   ])
@@ -235,6 +236,7 @@ test("Summaries written by and Keep my messages in summaries, after the other tw
     "Cache notice minimum",
     "Cache notices for",
     "Opened cache notice disappears",
+    "Muted models",
     "Compact cold chats first",
     "Compact before cold",
     "Summaries written by",

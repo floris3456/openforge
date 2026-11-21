@@ -16,6 +16,7 @@ import { errorMessage } from "../util/error"
 import { Locale } from "../util/locale"
 import { stringWidth } from "../util/string-width"
 import { noticeAge, noticesMore, noticesShown, noticeSubject, noticeTitle } from "./format"
+import { isMuted, providerCaused, type MutedModel } from "./muted"
 
 // Cache notices (spec cliproxypacer-cache-notices, sections 3 and 4): each miss or partial reuse of a chat's step on
 // CLIProxyPacer, as OpenCodePlus's cards stacked in the top-right corner of every TUI, over whatever is there and
@@ -38,9 +39,11 @@ export interface NoticeSettings {
   readonly minimum: number
   readonly kinds: "all" | "misses"
   readonly dismiss: "every-tui" | "this-tui"
+  /** Models of a provider whose losses the provider caused show no card. */
+  readonly muted: readonly MutedModel[]
 }
 
-/** This TUI's settings of the cache notices, with OpenCodePlus's defaults. */
+/** This TUI's settings of the cache notices, with OpenCodePlus's defaults; no model muted. */
 export function noticeSettings(config: NonNullable<Info["cliproxypacer"]>["notices"]): NoticeSettings {
   return {
     enabled: config?.enabled ?? true,
@@ -49,16 +52,20 @@ export function noticeSettings(config: NonNullable<Info["cliproxypacer"]>["notic
     minimum: config?.minimum ?? 0,
     kinds: config?.kinds ?? "all",
     dismiss: config?.dismiss ?? "every-tui",
+    muted: config?.muted ?? [],
   }
 }
 
 /**
  * The notices this TUI shows at `now`, newest first: those its settings let through, within their lifetime and not
  * dismissed in this TUI alone. `root` is the top chat of the one shown, for "this chat and its subagents"; a notice
- * without a count counts as any loss.
+ * without a count counts as any loss. A muted model's notice shows only when the provider didn't cause the loss.
  */
 export function visibleNotices<
-  Notice extends Pick<PacerNotice, "requestID" | "sessionID" | "rootID" | "verdict" | "tokens" | "at">,
+  Notice extends Pick<
+    PacerNotice,
+    "requestID" | "sessionID" | "rootID" | "model" | "provider" | "verdict" | "tokens" | "causeCode" | "at"
+  >,
 >(
   notices: readonly Notice[],
   settings: NoticeSettings,
@@ -74,6 +81,7 @@ export function visibleNotices<
       (settings.kinds === "all" || notice.verdict === "miss") &&
       (settings.from === "all" ||
         (input.root !== undefined && (notice.rootID === input.root || notice.sessionID === input.root))) &&
+      !(providerCaused(notice.causeCode) && isMuted(settings.muted, notice)) &&
       input.dismissed[notice.requestID] === undefined,
   )
 }

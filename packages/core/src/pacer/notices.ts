@@ -96,6 +96,7 @@ export const make = Effect.gen(function* () {
       rootID = parentID
       parentID = (yield* sessions.get(parentID).pipe(Effect.orElseSucceed(() => undefined)))?.parentID
     }
+    const causeCode = Pacer.causeCode(request)
     return {
       requestID: request.id,
       sessionID,
@@ -103,9 +104,11 @@ export const make = Effect.gen(function* () {
       ...(info.title ? { title: info.title } : {}),
       ...(info.agent ? { agent: info.agent } : {}),
       model: request.model,
+      provider: request.provider,
       verdict: request.verdict === "partial" ? "partial" : "miss",
       ...(request.rewritten !== undefined ? { tokens: request.rewritten } : {}),
       cause: Pacer.causeWords(request).full,
+      ...(causeCode ? { causeCode } : {}),
       ...(request.missCost !== undefined ? { missCost: request.missCost } : {}),
       at: request.at,
     } satisfies Pacer.Notice

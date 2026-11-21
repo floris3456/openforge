@@ -20,6 +20,7 @@ import {
   requestTone,
   type RequestLayout,
 } from "../../../pacer/format"
+import { useMuted } from "../../../pacer/muted"
 import { useDialog } from "../../../ui/dialog"
 import { openRowHelp } from "../../../ui/row-help"
 import { useToast } from "../../../ui/toast"
@@ -56,6 +57,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
   const shortcuts = Keymap.useShortcuts()
   const dimensions = useTerminalDimensions()
   const session = useContext(sessionContext)
+  const muted = useMuted()
   // The session route remounts on navigation, so the filter lives in TUI memory and only ctrl+a changes it.
   const [filter, updateFilter] = useStorage().memory("requests-filter", { initial: { misses: false } })
   const [view, setView] = createStore({
@@ -105,10 +107,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
         order: 1,
         hints: () => {
           if (view.detail !== undefined)
-            return [
-              { label: "back", shortcut: "esc" },
-              { label: "scroll", shortcut: "↑/↓" },
-            ]
+            return [{ label: "back", shortcut: "esc" }, { label: "scroll", shortcut: "↑/↓" }, ...muteHint()]
           return [
             ...(items().length
               ? [
@@ -120,6 +119,7 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
               label: `show ${filter.misses ? "all" : "misses"}`,
               shortcut: shortcuts.get("composer.request.toggle-misses") ?? "",
             },
+            ...muteHint(),
             ...(items().length ? [{ label: "help", shortcut: shortcuts.get("row.help") ?? "" }] : []),
           ]
         },
@@ -233,6 +233,24 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
     })
   })
 
+  // The request whose model the mute key mutes: the row under the cursor, or the one what changed shows, which a cache
+  // notice may have opened from outside the list.
+  const shownRequest = () => {
+    const detail = view.detail
+    if (detail === undefined) return selected()
+    return items().find((request) => request.id === detail) ?? props.pacer.held(detail)?.request
+  }
+  const muteHint = () => {
+    const request = shownRequest()
+    if (!request?.provider) return []
+    return [
+      {
+        label: muted.muted(request) ? "unmute model" : "mute model",
+        shortcut: shortcuts.get("composer.request.mute") ?? "",
+      },
+    ]
+  }
+
   const change = () => (view.detail === undefined ? undefined : props.pacer.held(view.detail))
   const lines = createMemo(() => {
     const detail = view.detail
@@ -321,12 +339,24 @@ function Requests(props: { pacer: Pacer; sessionID: string }) {
       },
     ],
   }))
-  // The same key shows what changed and goes back; Esc goes back too, before the composer's own Esc closes it.
+  // The same key shows what changed and goes back; Esc goes back too, before the composer's own Esc closes it. The mute
+  // key works in both.
   Keymap.createLayer(() => ({
     mode: "composer",
     enabled: () => active(),
     priority: 2,
-    commands: [{ id: "composer.request.detail", title: "Show what changed", group: "Composer", run: toggleDetail }],
+    commands: [
+      { id: "composer.request.detail", title: "Show what changed", group: "Composer", run: toggleDetail },
+      {
+        id: "composer.request.mute",
+        title: "Mute or unmute the request's model",
+        group: "Composer",
+        run() {
+          const request = shownRequest()
+          if (request?.provider) void muted.toggle(request, true)
+        },
+      },
+    ],
   }))
   Keymap.createLayer(() => ({
     mode: "composer",

@@ -21,7 +21,11 @@ const Pixels = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 const limits = Object.entries(ImageFit.MODELS)
   .map(([id, model]) => {
     const example = ImageFit.fit(16_000, 9_000, model)
-    return `${id}: long edge ${model.edge.toLocaleString("en-US")} px and ${model.tokens.toLocaleString("en-US")} visual tokens, ⌈w/28⌉×⌈h/28⌉, about ${((model.tokens * 784) / 1e6).toFixed(2)} MP, e.g. ${example.width}×${example.height}`
+    const square = ImageFit.fit(100_000, 100_000, model).width
+    const grid = model.grid
+    const columns = grid.row === 0 ? `⌈w/${grid.cell}⌉` : `(⌈w/${grid.cell}⌉+${grid.row})`
+    const count = `${columns}×⌈h/${grid.cell}⌉${grid.image === 0 ? "" : `+${grid.image}`}`
+    return `${id}: long edge ${model.edge.toLocaleString("en-US")} px and ${model.tokens.toLocaleString("en-US")} visual tokens, ${count}, about ${((square * square) / 1e6).toFixed(2)} MP, e.g. ${example.width}×${example.height}`
   })
   .join("; ")
 

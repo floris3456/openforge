@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { LLMClient, LLMEvent, Media, Message, ToolResultPart, type LLMRequest, type UserMessage } from "@opencode/ai/effect"
-import { AnthropicMessages, OpenAIChat } from "@opencode/ai/protocols"
+import { AnthropicMessages, OpenAIChat, OpenAICompatibleResponses } from "@opencode/ai/protocols"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
@@ -84,21 +84,25 @@ const noisy = () => {
 
 const base64Length = (bytes: number) => Math.ceil(bytes / 3) * 4
 const opus = ImageFit.MODELS["claude-opus-5-5"]
+const deepseek = ImageFit.MODELS["deepseek-v4.1-flash"]
+const MiB = 1024 * 1024
+/** CLIProxyPacer as a provider of Open Responses models, which it is for every model but Claude. */
+const cliproxypacer = { provider: "cliproxypacer", endpoint: { baseURL: "http://127.0.0.1:8317/v1" } }
 
 describe("the size rule, against Anthropic's table", () => {
   test("3840×2160 is shown at 2576×1449, 4,784 visual tokens", () => {
     expect(ImageFit.fit(3840, 2160, opus)).toEqual({ width: 2576, height: 1449 })
-    expect(ImageFit.tokens(2576, 1449)).toBe(4_784)
+    expect(ImageFit.tokens(2576, 1449, opus)).toBe(4_784)
   })
 
   test("1920×1080 stays as it is, 2,691 visual tokens", () => {
     expect(ImageFit.fit(1920, 1080, opus)).toEqual({ width: 1920, height: 1080 })
-    expect(ImageFit.tokens(1920, 1080)).toBe(2_691)
+    expect(ImageFit.tokens(1920, 1080, opus)).toBe(2_691)
   })
 
   test("4000×3000 is shown at 2212×1659, within 4,784 tokens", () => {
     expect(ImageFit.fit(4000, 3000, opus)).toEqual({ width: 2212, height: 1659 })
-    expect(ImageFit.tokens(2212, 1659)).toBeLessThanOrEqual(4_784)
+    expect(ImageFit.tokens(2212, 1659, opus)).toBeLessThanOrEqual(4_784)
   })
 
   test("an image is never enlarged", () => {
@@ -108,6 +112,42 @@ describe("the size rule, against Anthropic's table", () => {
   test("the scale a size is shown at", () => {
     expect(ImageFit.shownAs(1200, 900, opus)).toBe("shown at full resolution")
     expect(ImageFit.shownAs(4000, 3000, opus)).toBe("scaled to 2212×1659 (0.55×)")
+  })
+})
+
+// Expected values from DeepSeek's image token calculator (api-docs.deepseek.com, Token & Token Usage, V4.1).
+describe("the size rule, against DeepSeek's calculator", () => {
+  test("1300×1300 stays as it is, 994 visual tokens; 2000×2000 and 5000×5000 are shown at 1302×1302", () => {
+    expect(ImageFit.fit(1300, 1300, deepseek)).toEqual({ width: 1300, height: 1300 })
+    expect(ImageFit.tokens(1300, 1300, deepseek)).toBe(994)
+    expect(ImageFit.fit(2000, 2000, deepseek)).toEqual({ width: 1302, height: 1302 })
+    expect(ImageFit.fit(5000, 5000, deepseek)).toEqual({ width: 1302, height: 1302 })
+    expect(ImageFit.tokens(1302, 1302, deepseek)).toBe(994)
+    // A pixel more is a 32nd column and row: DeepSeek shrinks it back.
+    expect(ImageFit.tokens(1303, 1303, deepseek)).toBe(1_058)
+  })
+
+  test("3840×2160 is shown at 1722×969, 1,010 visual tokens, larger than DeepSeek's own 1708×966", () => {
+    expect(ImageFit.fit(3840, 2160, deepseek)).toEqual({ width: 1722, height: 969 })
+    expect(ImageFit.tokens(1722, 969, deepseek)).toBe(1_010)
+    expect(ImageFit.tokens(1723, 969, deepseek)).toBe(1_034)
+    expect(ImageFit.tokens(1708, 966, deepseek)).toBe(968)
+    expect(ImageFit.fit(1920, 1080, deepseek)).toEqual({ width: 1722, height: 969 })
+  })
+
+  test("4,096 px a side at most, which DeepSeek asks once a request holds 15 images", () => {
+    expect(ImageFit.fit(30_000, 40, deepseek)).toEqual({ width: 4096, height: 5 })
+    expect(ImageFit.fit(600, 9000, deepseek)).toEqual({ width: 273, height: 4096 })
+  })
+
+  test("an image is never enlarged; a small one counts as DeepSeek scales it up, to 544×544 px of area", () => {
+    expect(ImageFit.fit(300, 200, deepseek)).toEqual({ width: 300, height: 200 })
+    expect(ImageFit.tokens(100, 100, deepseek)).toBe(184)
+  })
+
+  test("the scale a size is shown at", () => {
+    expect(ImageFit.shownAs(1200, 900, deepseek)).toBe("shown at full resolution")
+    expect(ImageFit.shownAs(4000, 3000, deepseek)).toBe("scaled to 1512×1134 (0.38×)")
   })
 })
 
@@ -130,7 +170,7 @@ describe("conversion on arrival", () => {
   test("the highest quality within 120 base64 bytes per visual token", async () => {
     const source = await noisy()
     const converted = await ImageFit.convert(source, "image/png", opus)
-    const cap = opus.bytesPerToken * ImageFit.tokens(1200, 900)
+    const cap = opus.bytesPerToken * ImageFit.tokens(1200, 900, opus)
     expect(base64Length(converted!.data.length)).toBeLessThanOrEqual(cap)
     const qualities = [95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30]
     const sizes = await Promise.all(
@@ -140,6 +180,26 @@ describe("conversion on arrival", () => {
     )
     const chosen = sizes.findIndex((bytes) => Buffer.from(bytes).equals(Buffer.from(converted!.data)))
     // Below 95, and the quality one step higher would not have fit.
+    expect(chosen).toBeGreaterThan(0)
+    expect(base64Length(sizes[chosen - 1].length)).toBeGreaterThan(cap)
+  })
+
+  test("deepseek-v4.1-flash: sized to its rule, the highest quality within 270 base64 bytes per visual token", async () => {
+    const photo = await ImageFit.convert(await gradient(4000, 3000), "image/png", deepseek)
+    expect(photo!.shown).toEqual({ width: 1512, height: 1134 })
+    expect(await new Bun.Image(photo!.data).metadata()).toMatchObject({ width: 1512, height: 1134, format: "webp" })
+    const source = await noisy()
+    const converted = await ImageFit.convert(source, "image/png", deepseek)
+    // 1200×900 is 662 of DeepSeek's tokens: 178,740 bytes, the bytes a pixel Opus gets.
+    const cap = 270 * ImageFit.tokens(1200, 900, deepseek)
+    expect(cap).toBe(178_740)
+    expect(base64Length(converted!.data.length)).toBeLessThanOrEqual(cap)
+    const sizes = await Promise.all(
+      [95, 90, 85, 80, 75, 70].map((quality) =>
+        new Bun.Image(source).resize(1200, 900, { filter: "lanczos3" }).webp({ quality }).bytes(),
+      ),
+    )
+    const chosen = sizes.findIndex((bytes) => Buffer.from(bytes).equals(Buffer.from(converted!.data)))
     expect(chosen).toBeGreaterThan(0)
     expect(base64Length(sizes[chosen - 1].length)).toBeGreaterThan(cap)
   })
@@ -197,6 +257,24 @@ describe("zoom", () => {
       "The zoom must lie within the image as shown, 2212×1659 pixels.",
     )
   })
+  test("deepseek-v4.1-flash: a region is in pixels of the image as fitted to it, cut from the original", async () => {
+    const source = await gradient(4000, 3000)
+    const cut = await ImageFit.crop(source, { x: 100, y: 200, width: 300, height: 150 }, deepseek)
+    if (typeof cut === "string") throw new Error(cut)
+    // Shown at 1512×1134: one shown pixel is 4000/1512 original pixels across and 3000/1134 down.
+    expect(cut.shown).toEqual({ width: 1512, height: 1134 })
+    expect(cut.original).toEqual({
+      left: Math.floor((100 * 4000) / 1512),
+      top: Math.floor((200 * 3000) / 1134),
+      width: Math.ceil((400 * 4000) / 1512) - Math.floor((100 * 4000) / 1512),
+      height: Math.ceil((350 * 3000) / 1134) - Math.floor((200 * 3000) / 1134),
+    })
+    // That region, 795×397 of the original, is within what DeepSeek reads: shown at full resolution.
+    expect(ImageFit.shownAs(cut.original.width, cut.original.height, deepseek)).toBe("shown at full resolution")
+    expect(await ImageFit.crop(source, { x: 1300, y: 0, width: 300, height: 10 }, deepseek)).toBe(
+      "The zoom must lie within the image as shown, 1512×1134 pixels.",
+    )
+  })
 })
 
 const image = (bytes: number): UserMessage["content"][number] => ({
@@ -242,12 +320,28 @@ describe("requests", () => {
     const webp = Buffer.from(await new Bun.Image(await gradient(2212, 1659)).webp({ quality: 90 }).bytes())
     const png = Buffer.from(await gradient(1920, 1080))
     const jpeg = Buffer.from(await new Bun.Image(png).jpeg({ quality: 80 }).bytes())
-    expect(ImageFit.visualTokens(webp.toString("base64"), opus)).toBe(ImageFit.tokens(2212, 1659))
+    expect(ImageFit.visualTokens(webp.toString("base64"), opus)).toBe(ImageFit.tokens(2212, 1659, opus))
     expect(ImageFit.visualTokens(png.toString("base64"), opus)).toBe(2_691)
     expect(ImageFit.visualTokens(jpeg.toString("base64"), opus)).toBe(2_691)
     // Larger than the model reads: counted at the size it reads it at.
     expect(ImageFit.visualTokens(Buffer.from(await gradient(4000, 3000)).toString("base64"), opus)).toBe(
-      ImageFit.tokens(2212, 1659),
+      ImageFit.tokens(2212, 1659, opus),
+    )
+  })
+  test("deepseek-v4.1-flash: 600 images and 24 MiB of images a request, which leaves 8 MiB of Command Code's 32 MiB", () => {
+    expect(ImageFit.requestLimits(deepseek)).toEqual({ count: 600, bytes: 24 * MiB })
+    const history = [10 * MiB, 10 * MiB, 4 * MiB - 100, 200, 50].map((bytes) => Message.user([image(bytes)]))
+    const sent = ImageBudget.bound(history, ImageFit.requestLimits(deepseek))
+    expect(sent.slice(0, 3)).toEqual(history.slice(0, 3))
+    // Past 24 MiB, each is a note where it arrived, the small one after it too: nothing once sent changes.
+    expect(JSON.stringify(sent.slice(3)).match(/Image not shown/g)).toHaveLength(2)
+  })
+
+  test("deepseek-v4.1-flash: visual tokens count exactly, at the size DeepSeek reads", async () => {
+    const webp = Buffer.from(await new Bun.Image(await gradient(1722, 969)).webp({ quality: 90 }).bytes())
+    expect(ImageFit.visualTokens(webp.toString("base64"), deepseek)).toBe(1_010)
+    expect(ImageFit.visualTokens(Buffer.from(await gradient(4000, 3000)).toString("base64"), deepseek)).toBe(
+      ImageFit.tokens(1512, 1134, deepseek),
     )
   })
 })
@@ -258,6 +352,18 @@ describe("which chats", () => {
     expect(ImageFit.forModel({ model: pacer })).toBe(opus)
     expect(ImageFit.forModel({ model: AnthropicMessages.route.model({ id: "claude-sonnet-5" }) })).toBeUndefined()
     expect(ImageFit.forModel({ model: OpenAIChat.route.model({ id: "claude-opus-5-5" }) })).toBeUndefined()
+  })
+
+  test("deepseek-v4.1-flash on Open Responses, as CLIProxyPacer serves it under Command Code's ID; nothing else", () => {
+    const responses = OpenAICompatibleResponses.route.with(cliproxypacer)
+    const found = ImageFit.forModel({ model: responses.model({ id: "deepseek/deepseek-v4.1-flash" }) })
+    expect(found).toMatchObject({ protocol: "open-responses", edge: 4_096, tokens: 1_024 })
+    expect(found).toBe(deepseek)
+    expect(ImageFit.forModel({ model: responses.model({ id: "deepseek-v4.1-flash" }) })).toBe(found)
+    expect(ImageFit.forModel({ model: responses.model({ id: "deepseek-v4.1-flash-free" }) })).toBeUndefined()
+    expect(ImageFit.forModel({ model: responses.model({ id: "deepseek/deepseek-v4-flash" }) })).toBeUndefined()
+    // DeepSeek's own API speaks Chat Completions, with other limits.
+    expect(ImageFit.forModel({ model: OpenAIChat.route.model({ id: "deepseek-v4.1-flash" }) })).toBeUndefined()
   })
 
   test("the setting is off unless the last config that sets it turns it on", () => {
@@ -271,7 +377,10 @@ describe("which chats", () => {
 
   test("the tool states each model's zoom limits where the catalog shows them, the same text every time", () => {
     expect(ImageTool.ZOOM).toContain(
-      "claude-opus-5-5: long edge 2,576 px and 4,784 visual tokens, ⌈w/28⌉×⌈h/28⌉, about 3.75 MP, e.g. 2576×1449",
+      "claude-opus-5-5: long edge 2,576 px and 4,784 visual tokens, ⌈w/28⌉×⌈h/28⌉, about 3.73 MP, e.g. 2576×1449",
+    )
+    expect(ImageTool.ZOOM).toContain(
+      "deepseek-v4.1-flash: long edge 4,096 px and 1,024 visual tokens, (⌈w/42⌉+1)×⌈h/42⌉+2, about 1.70 MP, e.g. 1722×969",
     )
     expect(ImageTool.ZOOM).toContain("a larger region is scaled down to fit")
     // The catalog lists the first line, up to 120 characters, and the signature with `zoom`'s description.
@@ -292,19 +401,25 @@ const client = Layer.mock(LLMClient.Service)({
   },
   generate: () => Effect.die("unused"),
 })
+const facts = {
+  capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+  cost: [
+    {
+      input: Money.USDPerMillionTokens.make(1),
+      output: Money.USDPerMillionTokens.make(1),
+      cache: { read: Money.USDPerMillionTokens.make(1), write: Money.USDPerMillionTokens.make(1) },
+    },
+  ],
+  limit: { context: 1_000_000, output: 32_000 },
+}
 const resolved = SessionRunnerModel.resolved(
   AnthropicMessages.route.with({ provider: "anthropic" }).model({ id: "claude-opus-5-5" }),
-  {
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-    cost: [
-      {
-        input: Money.USDPerMillionTokens.make(1),
-        output: Money.USDPerMillionTokens.make(1),
-        cache: { read: Money.USDPerMillionTokens.make(1), write: Money.USDPerMillionTokens.make(1) },
-      },
-    ],
-    limit: { context: 1_000_000, output: 32_000 },
-  },
+  facts,
+)
+// As a chat on CLIProxyPacer has it: Command Code's ID, on Open Responses.
+const deepseekResolved = SessionRunnerModel.resolved(
+  OpenAICompatibleResponses.route.with(cliproxypacer).model({ id: "deepseek/deepseek-v4.1-flash" }),
+  facts,
 )
 const it = testEffect(
   AppNodeBuilder.build(
@@ -361,14 +476,21 @@ const storeMessages = (sessionID: Session.ID, messages: readonly SessionMessage.
     yield* Bus.reserveSequence(db, sessionID, messages.length)
   })
 
-const loaded = (session: Session.Info, messages: readonly SessionMessage.Info[]) => ({
+const loaded = (
+  session: Session.Info,
+  messages: readonly SessionMessage.Info[],
+  chat: { readonly model: SessionRunnerModel.Resolved; readonly images: ImageFit.Model } = {
+    model: resolved,
+    images: opus,
+  },
+) => ({
   session,
   messages,
-  model: resolved,
+  model: chat.model,
   agent: { id: Agent.defaultID, info: Agent.Info.default(Agent.defaultID) },
   initial: [{ key: Instructions.Key.make("test/session"), text: "Session instructions" }],
   tools: { definitions: [], execute: () => Effect.die("unused") },
-  images: opus,
+  images: chat.images,
 })
 
 const user = (text: string) =>
@@ -591,6 +713,84 @@ describe("before a step", () => {
   )
 })
 
+// DeepSeek's own limits, no test limits: what fills first is the 24 MiB of images, one image at most 270 × 1,024 bytes.
+describe("before a step, deepseek-v4.1-flash", () => {
+  const chat = { model: deepseekResolved, images: deepseek }
+  const shot = (n: number, bytes: number) => ({
+    line: `[Image ${n}: shot.png, 4000×3000, shown at 1512×1134; see it again or zoom with image.show]`,
+    data: "A".repeat(bytes),
+  })
+
+  it.effect("the image that leaves less than one full-size image of the 24 MiB gets one warning", () =>
+    withEnv({ OPENFORGE_TEST_IMAGE_LIMITS: undefined }, () =>
+      Effect.gen(function* () {
+        const session = yield* insertSession(Session.ID.make("ses_image_deepseek_warning"))
+        // 300,000 bytes left: room for one more image of 276,480 (270 bytes × 1,024 tokens).
+        const first = [user("look"), toolImages([shot(1, 12 * MiB), shot(2, 12 * MiB - 300_000)])]
+        const second = toolImages([shot(3, 30_000)])
+        yield* storeMessages(session.id, [...first, second])
+        const compaction = yield* SessionCompaction.Service
+        const bus = yield* Bus.Service
+        const store = yield* SessionStore.Service
+        const estimate = { measured: 0, estimated: 0 }
+        expect(yield* ImageBudget.before({ loaded: loaded(session, first, chat), estimate, compaction, bus })).toBe(
+          false,
+        )
+        // 270,000 left.
+        expect(
+          yield* ImageBudget.before({ loaded: loaded(session, [...first, second], chat), estimate, compaction, bus }),
+        ).toBe(true)
+        const after = yield* store.context(session.id)
+        expect(after.filter((message) => message.type === "synthetic")).toMatchObject([{ text: ImageBudget.WARNING }])
+        expect(yield* ImageBudget.before({ loaded: loaded(session, after, chat), estimate, compaction, bus })).toBe(
+          false,
+        )
+      }),
+    ),
+  )
+
+  it.effect(
+    "an image past the 24 MiB compacts first; the summary is written from what was sent, the image follows",
+    () =>
+      withEnv({ OPENFORGE_TEST_IMAGE_LIMITS: undefined }, () =>
+        Effect.gen(function* () {
+          requests = []
+          const session = yield* insertSession(Session.ID.make("ses_image_deepseek_limit"))
+          const messages = [
+            user("look"),
+            toolImages([shot(1, 12 * MiB), shot(2, 12 * MiB - 100)]),
+            user("and this"),
+            toolImages([shot(3, 200)]),
+          ]
+          yield* storeMessages(session.id, messages)
+          const compaction = yield* SessionCompaction.Service
+          const bus = yield* Bus.Service
+          const store = yield* SessionStore.Service
+          expect(
+            yield* ImageBudget.before({
+              loaded: loaded(session, messages, chat),
+              estimate: { measured: 0, estimated: 0 },
+              compaction,
+              bus,
+            }),
+          ).toBe(true)
+          expect(requests).toHaveLength(1)
+          expect(String(requests[0].model.id)).toBe("deepseek/deepseek-v4.1-flash")
+          const sent = JSON.stringify(requests[0].messages)
+          expect(sent.match(/data:image\/webp;base64/g)).toHaveLength(2)
+          expect(sent).toContain("Image not shown")
+          const after = yield* store.context(session.id)
+          expect(after.map((message) => message.type)).toEqual(["compaction", "user"])
+          const carried = after[1]
+          if (carried.type !== "user") throw new Error("expected the carried image")
+          expect(carried.files).toMatchObject([{ mime: "image/webp", data: "A".repeat(200) }])
+          const next = JSON.stringify(toLLMMessages(after, deepseekResolved.ref))
+          expect(next.indexOf("the summary")).toBeLessThan(next.indexOf("[Image 3: shot.png"))
+        }),
+      ),
+  )
+})
+
 describe("before a step, a prompt no request carried", () => {
   const shot = (n: number) => ({
     line: `[Image ${n}: shot.webp, 10×10, shown at 10×10; see it again or zoom with image]`,
@@ -651,6 +851,29 @@ describe("other chats", () => {
       expect(JSON.stringify((yield* prepare()).request.messages)).toContain("This image was removed")
       expect((yield* prepare(opus)).request.messages).toEqual(messages)
     }),
+  )
+
+  it.effect(
+    "a deepseek-v4.1-flash chat never cuts one either: images past its 24 MiB are notes where they arrive",
+    () =>
+      withEnv({ OPENFORGE_TEST_IMAGE_LIMITS: undefined }, () =>
+        Effect.gen(function* () {
+          const session = yield* insertSession(Session.ID.make("ses_image_deepseek_request"))
+          const prepared = yield* SessionModelRequest.Service
+          const messages = Array.from({ length: 6 }, () => Message.user([image(5 * MiB)]))
+          const sent = (yield* prepared.primary({
+            session,
+            agent: Agent.defaultID,
+            model: deepseekResolved,
+            system: [],
+            messages,
+            images: ImageFit.forModel(deepseekResolved),
+          })).request.messages
+          expect(sent.slice(0, 4)).toEqual(messages.slice(0, 4))
+          expect(JSON.stringify(sent.slice(4)).match(/Image not shown/g)).toHaveLength(2)
+          expect(JSON.stringify(sent)).not.toContain("This image was removed")
+        }),
+      ),
   )
 
   it.effect("estimate images at 1,500 tokens; a chat with optimized images counts them exactly", () =>

@@ -38,6 +38,7 @@ export function imageTerminal(input: {
     terminalHeight: 30,
     prependInputHandler: () => {},
     removeInputHandler: () => {},
+    keyInput: new EventEmitter(),
   })
   const sent: string[] = []
   const terminal = createImageTerminal({

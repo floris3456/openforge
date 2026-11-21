@@ -785,16 +785,22 @@ describe("muted models (section 4)", () => {
     await setup.frame((frame) => frame.includes("Lost by the provider"))
   })
 
-  test("the Settings row says none, the one muted, or how many; ←/→ leave it as it is", async () => {
+  test("the Settings row says none, the one muted, or how many; Enter opens it, ←/→ leave it as it is", async () => {
     await using setup = await cards({ height: 60, notices: [] })
     setup.dialog.replace(() => <DialogConfig current="cliproxypacer.notices.muted" />)
-    await setup.frame((frame) => /Muted models +none/.test(frame))
+    await setup.frame((frame) => /Muted models +none/.test(frame) && frame.includes("open enter"))
     await until(() => setup.app.renderer.currentFocusedRenderable !== null, 2_000, "the dialog's focus")
     setup.app.mockInput.pressArrow("right")
     setup.app.mockInput.pressArrow("left")
     await Bun.sleep(30)
     expect(setup.config().cliproxypacer).toBeUndefined()
-    await setup.configure((draft) => (draft.cliproxypacer = { notices: { muted: [FLASH, { provider: "claude", model: "claude-opus-4-5" }] } }))
+    // The row above steps through its values.
+    setup.app.mockInput.pressArrow("up")
+    await setup.frame((frame) => frame.includes("change ←/→") && !frame.includes("open enter"))
+    await setup.configure(
+      (draft) =>
+        (draft.cliproxypacer = { notices: { muted: [FLASH, { provider: "claude", model: "claude-opus-4-5" }] } }),
+    )
     await setup.frame((frame) => /Muted models +2 models/.test(frame))
   })
 })

@@ -565,7 +565,7 @@ export const settings: Setting[] = [
     category: "CLIProxyPacer",
     path: ["cliproxypacer", "notices", "muted"],
     description: "Models of a provider whose cache misses show no card when the provider caused them",
-    help: 'A muted model of a provider shows no cache notice for a loss the provider caused: nothing openforge sent changed, yet the provider didn\'t reuse its cache, or CLIProxyPacer couldn\'t tell why. A loss openforge, CLIProxyPacer or the chat caused (a changed prompt, another account or model) still shows a card, and the Requests tab still lists every request. Enter opens the list: the muted models first, then every model CLIProxyPacer serves, under its provider; Enter mutes or unmutes one. In a chat\'s Requests tab, "mute model" mutes the model of the request under the cursor.',
+    help: "A muted model of a provider shows no cache notice for a loss the provider caused: nothing openforge sent changed, yet the provider didn't reuse its cache, or CLIProxyPacer couldn't tell why. A loss openforge, CLIProxyPacer or the chat caused (a changed prompt, another account or model) still shows a card, and the Requests tab still lists every request. Enter opens the list: the muted models first, then every model CLIProxyPacer serves, under its provider; Enter mutes or unmutes one. In a chat's Requests tab, \"mute model\" mutes the model of the request under the cursor.",
     default: [],
     format: (value) => mutedSummary(value as readonly MutedModel[]),
     keywords: ["cache miss", "notices", "mute", "provider", "model", "hide"],
@@ -784,6 +784,8 @@ export function DialogConfig(props: { current?: string }) {
     setting.path.join(".") === "theme.name"
       ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
       : setting.values
+  // A list, such as Muted models, has no value to step to: it changes in its own picker only, which Enter opens.
+  const list = (setting: Setting) => !values(setting) && setting.step === undefined
   const display = (setting: Setting) => {
     if (setting.update && updateStatus()?.unavailable) return "unavailable"
     const current = value(setting)
@@ -818,8 +820,7 @@ export function DialogConfig(props: { current?: string }) {
     if (unavailable) return toast.show({ variant: "info", message: unavailable })
     const current = value(setting)
     const choices = values(setting)
-    // A list, such as Muted models, changes in its own picker only.
-    if (!choices && setting.step === undefined) return
+    if (list(setting)) return
     const next = choices
       ? choices[(choices.indexOf(current) + direction + choices.length) % choices.length]
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
@@ -888,12 +889,14 @@ export function DialogConfig(props: { current?: string }) {
       onMove={(option) => setSelected(option.value)}
       onSelect={(option) => {
         const setting = settings[option.value]
-        // A list has no value to step to: Enter opens its picker under either design.
-        if (setting.open && (newDesigns() || (!values(setting) && setting.step === undefined)))
-          return setting.open(dialog)
+        if (setting.open && (newDesigns() || list(setting))) return setting.open(dialog)
         void change(1, option.value)
       }}
-      footerHints={newDesigns() ? [] : [{ title: "change", label: "←/→" }]}
+      footerHints={
+        newDesigns()
+          ? []
+          : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
+      }
       bindings={[
         {
           bind: "left",

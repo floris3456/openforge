@@ -203,7 +203,9 @@ export const Info = Schema.Struct({
           muted: Schema.optional(
             Schema.Array(
               Schema.Struct({
-                provider: Schema.String.annotate({ description: "The provider, as CLIProxyPacer names it: commandcode" }),
+                provider: Schema.String.annotate({
+                  description: "The provider, as CLIProxyPacer names it: commandcode",
+                }),
                 model: Schema.String.annotate({ description: "The model, as CLIProxyPacer names it" }),
               }),
             ),

@@ -153,6 +153,7 @@ time      kind        model               account       read/write    verdict   
 | **Enter**                       | Moves the chat to where the request ended: the end of that step's reply. A subagent's request opens the subagent's chat there; a ping or a title goes to the reply before it. |
 | **Ctrl+Enter** or **Alt+Enter** | Shows what changed in the request's prompt, in place of the list. The same key or **Esc** goes back to the same row.                                                          |
 | **?**                           | Opens the request's help as a popup: every column of the row in full, which a narrow window drops or cuts, and what they mean. **Esc** or **?** goes back to the same row.    |
+| **M**                           | [Mutes](#muted-models) the request's model of its provider: its provider's own cache losses raise no card. On a muted one it unmutes. It works in what changed too.           |
 
 What changed shows CLIProxyPacer's verdict and its cause, how many tokens were written to the cache again and what the
 miss cost, and the request it was compared with. Below that come the parts of the prompt that changed, are new, or only
@@ -227,6 +228,7 @@ Each TUI shows the cards its own settings let through. They are rows of [Setting
 | Cache notice minimum           | any loss, 1K, 10K, 50K, 100K tokens    | any loss                 |
 | Cache notices for              | misses and partial reuse, misses only  | misses and partial reuse |
 | Opened cache notice disappears | in every TUI, only in this TUI         | in every TUI             |
+| Muted models                   | the models you muted                   | none                     |
 
 - With **Cache notices** off, the TUI reads and shows none.
 - **This chat and its subagents** shows the cards of the chat you look at, the chat it belongs to and their subagents.
@@ -236,10 +238,33 @@ Each TUI shows the cards its own settings let through. They are rows of [Setting
 - **Only in this TUI** keeps the dismissal in the TUI's own storage for a day. Every TUI on the same computer shares
   that storage; a TUI elsewhere keeps showing the card.
 
+### Muted models
+
+A model of a provider whose cache misses aren't your doing, such as Command Code's `deepseek-v4.1-flash`, can be
+muted. Its losses the provider caused then raise no card in this TUI:
+
+```text
+Nothing sent changed; the provider didn't reuse its cache.
+The provider read an older copy of the chat, from 02:01:32.
+CLIProxyPacer couldn't tell why: one prompt wasn't kept.
+```
+
+| To                | Do                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Mute a model      | Press **M** on one of its requests in the **Requests** tab, also in what changed, where an opened card lands. A toast says so. |
+| Unmute it         | **M** again on one of its requests, or **Enter** on it in **Settings › CLIProxyPacer › Muted models**.                         |
+| See what is muted | **Settings › CLIProxyPacer › Muted models**: the muted ones first, then every model CLIProxyPacer serves, under its provider.  |
+
+- A muted model still raises a card for a loss openforge, CLIProxyPacer or the chat caused: a changed prompt, another
+  account or model, a longer cache, CLIProxyPacer's layout or its summary request.
+- A model is muted for one provider: the same model through another provider still raises its cards.
+- The **Requests** tab still lists every request of a muted model, with its cause.
+- The list is this TUI's own, in `cli.json` ([`cliproxypacer.notices.muted`](/cli/config#cliproxypacer)).
+
 ## Settings
 
 Press **Ctrl+P**, then select **Open settings**. While CLIProxyPacer answers, **Settings** has a **CLIProxyPacer**
-section with ten rows. Change a row with **Enter** or **←/→**.
+section with eleven rows. Change a row with **Enter** or **←/→**; **Enter** on **Muted models** opens its list.
 
 ```text
 CLIProxyPacer
@@ -249,13 +274,14 @@ Cache notice lifetime           15 minutes
 Cache notice minimum            any loss
 Cache notices for               misses and partial reuse
 Opened cache notice disappears  in every TUI
+Muted models                    none
 Compact cold chats first        off
 Compact before cold             off
 Summaries written by            CLIProxyPacer
 Keep my messages in summaries   off
 ```
 
-- The first six are this TUI's own, for its [cache notices](#cache-notices), saved in `cli.json`.
+- The first seven are this TUI's own, for its [cache notices](#cache-notices), saved in `cli.json`.
 - The last four are CLIProxyPacer's settings for every chat on your client key, kept by CLIProxyPacer: see
   [Compaction asks](/providers#compaction-asks) and [Summaries](/providers#summaries).
 
@@ -267,7 +293,7 @@ Keep my messages in summaries   off
 | Keep my messages in summaries | on, off                  | off                                                 |
 
 - The section shows only while CLIProxyPacer answers. It hides while CLIProxyPacer isn't set up, is unreachable, or is a
-  proxy without the pacer; change the six notice rows in `cli.json` then.
+  proxy without the pacer; change the seven notice rows in `cli.json` then.
 - CLIProxyPacer's four rows are read from it when Settings opens, and show what applies to your chats: your key's own
   value, else the server's, else CLIProxyPacer's default. The two summaries rows show only when CLIProxyPacer lists
   those settings, which an older CLIProxyPacer doesn't.

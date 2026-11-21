@@ -41,8 +41,12 @@ export type Reply =
 /** How often the worker checkpoints the database while it runs. */
 const CHECKPOINT_MILLIS = 500
 
-/** The WAL's size past which the worker truncates it. */
-const WAL_LIMIT = 256 * 1024 * 1024
+/**
+ * The WAL's size past which the worker truncates it before the request ends. A truncation holds the service's
+ * connection while it syncs the database file, so this bounds a long move rather than setting a pace: 256 MB came
+ * every 50 s or so beside 10 chats.
+ */
+const WAL_LIMIT = 1024 * 1024 * 1024
 
 const port = parentPort
 if (port) {

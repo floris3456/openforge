@@ -226,10 +226,10 @@ export const settings: Setting[] = [
     service: true,
     description: "Fit images to the model, keep the originals, and let the model zoom and recall them",
     help: [
-      "Every image that reaches the chat (pasted, attached, or read by a tool) is converted once, on this machine, to the largest size the model reads without shrinking it itself, as WebP at the highest quality that keeps a full context of images within one request. The full-resolution original is kept with the chat.",
+      "Every image that reaches the chat (pasted, attached, or read by a tool) is converted once, on this machine, to the largest size the model reads without shrinking it itself, as WebP at the highest quality within the model's bytes per image. The full-resolution original is kept with the chat.",
       "Each image is numbered, with one line before it saying its name, original size and the size it is shown at. The model's image tool lists the chat's images, shows one again (also after a compaction), or zooms into a region of the original at full detail.",
       "Images are never changed or cut once sent, so the model's prompt cache keeps working. When the images sent leave room for less than one more full-size image, the chat says so once; the next image that would not fit compacts the chat first, and the image goes out after the summary.",
-      "For now this works only for claude-opus-5-5 (through Anthropic's Messages API, from any provider); other models keep today's handling. Kept in the service's global config.",
+      "For now this works for claude-opus-5-5 (through Anthropic's Messages API) and deepseek-v4.1-flash (through Open Responses, as CLIProxyPacer serves it), from any provider; other models keep today's handling. Kept in the service's global config.",
     ].join("\n\n"),
     default: false,
     values: [false, true],

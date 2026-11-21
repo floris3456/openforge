@@ -41,6 +41,7 @@ function fixture(
     terminalHeight: 30,
     prependInputHandler: (handler: (sequence: string) => boolean) => handlers.unshift(handler),
     removeInputHandler: (handler: (sequence: string) => boolean) => handlers.splice(handlers.indexOf(handler), 1),
+    keyInput: new EventEmitter(),
   })
   const written: string[] = []
   const output: ImageOutput = {
@@ -70,6 +71,14 @@ function fixture(
 
 /** The answers of Ghostty 1.4 with 19×42 cells, as tmux hands them to the pane. */
 const GHOSTTY = ["\x1b_Gi=7254017;OK\x1b\\", "\x1b[6;42;19t", "\x1bP>|ghostty 1.4.0-arch1.1\x1b\\"]
+/** Another client's: Ghostty 1.4 with 18×37 cells. */
+const MAC = ["\x1b_Gi=7254017;OK\x1b\\", "\x1b[6;37;18t", "\x1bP>|ghostty 1.4.0\x1b\\"]
+
+/** Waits for the question, which goes once the settle delay is over; the answers come after it. */
+async function asked(written: readonly string[]) {
+  const deadline = Date.now() + 2_000
+  while (written.length === 0 && Date.now() < deadline) await Bun.sleep(1)
+}
 
 const expected = (id: number) => transmit(id, image.pixels, image.columns, image.rows).map(passthrough)
 
@@ -286,19 +295,57 @@ describe("a TUI that can't ask tmux (no TMUX, as through docker exec)", () => {
     expect(terminal.placeholders).toBe(true)
   })
 
-  test.each(["resize", "focus"])("asks again after a %s: another client's terminal and cell", async (event) => {
+  // With tmux's focus-events the TUI knows when its pane is the active one, which gets the answers.
+  test.each([
+    ["a focus change", ["focus"]],
+    ["a resize while its pane has focus", ["focus", "resize"]],
+  ])("with focus events, asks again after %s: another client's terminal and cell", async (_, events) => {
     const { terminal, renderer, written, answer, settle } = fixture(behind)
     answer(GHOSTTY)
     await terminal.drained()
     written.length = 0
-    renderer.emit(event)
-    // The question goes once the settle delay is over; the answers come after it.
-    const deadline = Date.now() + 2_000
-    while (written.length === 0 && Date.now() < deadline) await Bun.sleep(1)
-    answer(["\x1b_Gi=7254017;OK\x1b\\", "\x1b[6;37;18t", "\x1bP>|ghostty 1.4.0\x1b\\"])
+    events.forEach((event) => renderer.emit(event))
+    await asked(written)
+    answer(MAC)
     await settle()
     expect(written).toEqual([passthrough(QUESTION)])
     expect(terminal.cell()).toEqual({ width: 18, height: 37 })
+  })
+
+  // Without them (the owner's tmux) a resize also comes to a pane that isn't the active one: a client of another size
+  // attaching resizes every window of the session. Its answers would be typed into the active pane's input.
+  test.each(["keypress", "paste"])(
+    "without focus events, a resize asks nothing until a %s in the pane, then asks once",
+    async (event) => {
+      const { terminal, renderer, written, answer, settle } = fixture({ ...behind, passthroughMs: 100 })
+      answer(GHOSTTY)
+      await terminal.drained()
+      written.length = 0
+      renderer.emit("resize", 120, 40)
+      await settle()
+      expect(written).toEqual([])
+      expect(terminal.placeholders).toBe(true)
+      expect(terminal.cell()).toEqual({ width: 19, height: 42 })
+      renderer.keyInput.emit(event, {})
+      renderer.keyInput.emit(event, {})
+      await asked(written)
+      answer(MAC)
+      await settle()
+      renderer.keyInput.emit(event, {})
+      await settle()
+      expect(written).toEqual([passthrough(QUESTION)])
+      expect(terminal.cell()).toEqual({ width: 18, height: 37 })
+    },
+  )
+
+  test("without focus events, keys ask nothing while no resize came", async () => {
+    const { terminal, renderer, written, answer, settle } = fixture(behind)
+    answer(GHOSTTY)
+    await terminal.drained()
+    written.length = 0
+    renderer.keyInput.emit("keypress", {})
+    await settle()
+    expect(written).toEqual([])
   })
 
   test("a pane that lost focus asks nothing on a resize, and keeps what it knew", async () => {

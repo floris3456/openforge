@@ -14,12 +14,19 @@ function fixture(limitMs = 1000) {
   const renderer = Object.assign(new EventEmitter(), {
     prependInputHandler: (handler: (sequence: string) => boolean) => handlers.unshift(handler),
     removeInputHandler: (handler: (sequence: string) => boolean) => handlers.splice(handlers.indexOf(handler), 1),
+    keyInput: new EventEmitter(),
   })
   const sent: string[] = []
-  const passthrough = createTmuxPassthrough({ renderer, send: (sequence) => sent.push(sequence), limitMs })
+  const woken: number[] = []
+  const passthrough = createTmuxPassthrough({
+    renderer,
+    send: (sequence) => sent.push(sequence),
+    again: () => woken.push(sent.length),
+    limitMs,
+  })
   /** Input as OpenTUI hands it to its handlers: whether one took it. */
   const input = (sequence: string) => handlers.some((handler) => handler(sequence))
-  return { renderer, sent, passthrough, input, handlers }
+  return { renderer, sent, woken, passthrough, input, handlers }
 }
 
 describe("asking the terminal behind tmux", () => {
@@ -99,7 +106,8 @@ describe("the input", () => {
     passthrough.dispose()
     expect(await answer).toBeUndefined()
     expect(handlers).toEqual([])
-    expect(renderer.listenerCount("focus") + renderer.listenerCount("blur")).toBe(0)
+    expect(renderer.listenerCount("focus") + renderer.listenerCount("blur") + renderer.listenerCount("resize")).toBe(0)
+    expect(renderer.keyInput.listenerCount("keypress") + renderer.keyInput.listenerCount("paste")).toBe(0)
   })
 })
 
@@ -119,6 +127,50 @@ describe("the pane", () => {
   })
 })
 
+describe("without tmux's focus events", () => {
+  // The owner's tmux has focus-events off: the TUI knows its pane is the active one when it starts, and when a key or a
+  // paste comes, which tmux sends to the active pane only; a resize comes to every window of the session.
+  test("it asks at start; after a resize nothing until a key, which asks again once", async () => {
+    const { passthrough, sent, woken, renderer, input } = fixture(100)
+    const first = passthrough.ask()
+    GHOSTTY.forEach(input)
+    await first
+    renderer.emit("resize")
+    expect(await passthrough.ask()).toBeUndefined()
+    expect(sent).toEqual([QUESTION])
+    renderer.keyInput.emit("keypress", {})
+    renderer.keyInput.emit("keypress", {})
+    expect(woken).toEqual([1])
+    const again = passthrough.ask()
+    expect(sent).toEqual([QUESTION, QUESTION])
+    GHOSTTY.forEach(input)
+    expect((await again)?.termtype).toBe("ghostty 1.4.0-arch1.1")
+  })
+
+  test("a paste shows the pane active too; keys without a resize wake nothing", () => {
+    const { woken, renderer } = fixture()
+    renderer.keyInput.emit("keypress", {})
+    expect(woken).toEqual([])
+    renderer.emit("resize")
+    renderer.keyInput.emit("paste", {})
+    expect(woken).toEqual([0])
+  })
+
+  test("once focus events come, they decide: a resize with focus asks, without focus it doesn't", async () => {
+    const { passthrough, sent, renderer, input } = fixture(60_000)
+    renderer.emit("focus")
+    renderer.emit("resize")
+    const answer = passthrough.ask()
+    expect(sent).toEqual([QUESTION])
+    GHOSTTY.forEach(input)
+    await answer
+    renderer.emit("blur")
+    renderer.emit("resize")
+    expect(await passthrough.ask()).toBeUndefined()
+    expect(sent).toEqual([QUESTION])
+  })
+})
+
 describe("in OpenTUI's input", () => {
   // The renderer's own parser hands each answer whole to the handler, as a reply and not as typed keys.
   test("the answers reach the handler whole, and none of them as keys", async () => {
@@ -126,7 +178,7 @@ describe("in OpenTUI's input", () => {
     setRendererCapabilities(setup.renderer, { multiplexer: "tmux", terminal: { name: "tmux", version: "3.8" } })
     const keys: string[] = []
     setup.renderer.keyInput.on("keypress", (key: { sequence: string }) => keys.push(key.sequence))
-    const passthrough = createTmuxPassthrough({ renderer: setup.renderer, send: () => {} })
+    const passthrough = createTmuxPassthrough({ renderer: setup.renderer, send: () => {}, again: () => {} })
     const answer = passthrough.ask()
     setup.renderer.stdin.emit("data", Buffer.from(GHOSTTY.join(""), "latin1"))
     expect(await answer).toEqual({
@@ -137,6 +189,23 @@ describe("in OpenTUI's input", () => {
     })
     setup.renderer.stdin.emit("data", Buffer.from("x"))
     expect(keys).toEqual(["x"])
+    passthrough.dispose()
+  })
+
+  test("after a resize, a key shows the pane active and a mouse wheel doesn't", async () => {
+    await using setup = await createTestRenderer({ width: 80, height: 24, kittyKeyboard: true, useMouse: true })
+    let woken = 0
+    const passthrough = createTmuxPassthrough({
+      renderer: setup.renderer,
+      send: () => {},
+      again: () => woken++,
+    })
+    setup.renderer.emit("resize", 100, 30)
+    // tmux sends a wheel to the pane under the pointer, active or not.
+    setup.renderer.stdin.emit("data", Buffer.from("\x1b[<64;10;5M"))
+    expect(woken).toBe(0)
+    setup.renderer.stdin.emit("data", Buffer.from("x"))
+    expect(woken).toBe(1)
     passthrough.dispose()
   })
 })

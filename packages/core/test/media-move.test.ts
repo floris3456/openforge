@@ -783,4 +783,59 @@ describe("MediaKeeper", () => {
       }),
     ),
   )
+
+  // The worker truncates the WAL while it holds the service's connection, and a truncation waits for every reader of
+  // the WAL. Another process's read, here one held for 4 s, must hold neither the service's statements nor the round.
+  it.live(
+    "never holds the service's connection while another process reads the database",
+    () =>
+      withDatabase((file) =>
+        Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const keeper = yield* MediaKeeper.Service
+          const kv = yield* KV.Service
+          yield* seed()
+          const reader = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              Bun.spawn(
+                [
+                  process.execPath,
+                  "-e",
+                  `const { Database } = require("bun:sqlite")
+                  const db = new Database(${JSON.stringify(file)})
+                  db.run("BEGIN")
+                  db.query("SELECT count(*) FROM session_message").get()
+                  console.log("reading")
+                  await Bun.sleep(4000)
+                  db.run("COMMIT")`,
+                ],
+                { stdout: "pipe" },
+              ),
+            ),
+            (child) => Effect.sync(() => child.kill()),
+          )
+          yield* Effect.promise(() => reader.stdout.getReader().read())
+
+          const longest = { wait: 0 }
+          const running = yield* keeper.run.pipe(Effect.forkChild({ startImmediately: true }))
+          const deadline = performance.now() + 30_000
+          while (true) {
+            if (performance.now() > deadline) return yield* Effect.die(new Error("the move didn't end within 30 s"))
+            const started = performance.now()
+            const moved = yield* kv.get(MediaKeeper.MOVED)
+            yield* db.get(sql`SELECT 1`).pipe(Effect.orDie)
+            longest.wait = Math.max(longest.wait, performance.now() - started)
+            if (moved !== undefined) break
+            yield* Effect.sleep("5 millis")
+          }
+          yield* Fiber.interrupt(running)
+
+          expect(yield* kv.get(MediaKeeper.MOVED)).toMatchObject({ blobs: 2 })
+          expect(longest.wait).toBeLessThan(1000)
+          // The round ended while the other process still read.
+          expect(reader.exitCode).toBeNull()
+        }).pipe(Effect.scoped),
+      ),
+    30_000,
+  )
 })

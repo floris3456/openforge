@@ -44,7 +44,8 @@ type Event = "resize" | "focus" | "blur" | "capabilities"
 
 /**
  * What of the renderer the image terminal reads: its resize, focus and capability events, its colours, whether it
- * runs inside tmux, its pixel size, and its input, where answers through tmux's passthrough come back.
+ * runs inside tmux, its pixel size, and its input, where answers through tmux's passthrough come back and keys show
+ * that its pane is the active one.
  */
 type Renderer = {
   on(event: Event, listener: () => void): unknown
@@ -55,6 +56,10 @@ type Renderer = {
   readonly terminalHeight: number
   prependInputHandler(handler: (sequence: string) => boolean): void
   removeInputHandler(handler: (sequence: string) => boolean): void
+  readonly keyInput: {
+    on(event: "keypress" | "paste", listener: () => void): unknown
+    off(event: "keypress" | "paste", listener: () => void): unknown
+  }
 }
 
 export function createImageTerminal(input: {
@@ -155,6 +160,7 @@ export function createImageTerminal(input: {
     through = createTmuxPassthrough({
       renderer: input.renderer,
       send: (sequence) => send([sequence]),
+      again: changed,
       limitMs: input.passthroughMs,
     })
     watch()

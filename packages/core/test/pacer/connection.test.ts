@@ -2977,9 +2977,11 @@ describe("PacerConnection cache notices", () => {
             sessionID: parent,
             rootID: parent,
             model: "model-a",
+            provider: "prova",
             verdict: "partial",
             tokens: 18_000,
             cause: "Nothing sent changed; the provider didn't reuse its cache.",
+            causeCode: "provider",
             at: 0,
           },
           {
@@ -2987,9 +2989,11 @@ describe("PacerConnection cache notices", () => {
             sessionID: child,
             rootID: parent,
             model: "model-a",
+            provider: "prova",
             verdict: "miss",
             tokens: 152_000,
             cause: "The system prompt changed since the step before.",
+            causeCode: "prefix-changed",
             at: 0,
           },
         ])

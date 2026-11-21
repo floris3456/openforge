@@ -200,6 +200,17 @@ export const Info = Schema.Struct({
             description:
               "Whether an opened or dismissed cache notice disappears from every TUI, or only from this one, which keeps it dismissed for a day",
           }),
+          muted: Schema.optional(
+            Schema.Array(
+              Schema.Struct({
+                provider: Schema.String.annotate({ description: "The provider, as CLIProxyPacer names it: commandcode" }),
+                model: Schema.String.annotate({ description: "The model, as CLIProxyPacer names it" }),
+              }),
+            ),
+          ).annotate({
+            description:
+              "Models of a provider whose cache losses the provider caused show no cache notice; losses openforge, CLIProxyPacer or the chat caused still show",
+          }),
         }),
       ).annotate({ description: "Cache notices" }),
     }),

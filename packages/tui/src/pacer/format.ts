@@ -302,9 +302,14 @@ const PLANS: Record<string, string> = {
 }
 const PLAN_ORDER = Object.keys(PLANS)
 
+/** A provider's name as people know it (`Command Code` for `commandcode`); one openforge doesn't know, as CPP sent it. */
+export function providerName(provider: string) {
+  return PROVIDERS[provider.toLowerCase()] ?? provider
+}
+
 /** A group's name (section 2): the provider's, then its plan's (`Claude Ultra`, `Antigravity Google AI Pro`). */
 export function usageGroupName(account: Pick<PacerAccount, "provider" | "plan" | "planName">) {
-  const provider = PROVIDERS[account.provider.toLowerCase()] ?? account.provider
+  const provider = providerName(account.provider)
   const plan = usagePlanName(account)
   return plan ? `${provider} ${plan}` : provider
 }

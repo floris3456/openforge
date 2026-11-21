@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
-import type { PacerNotice } from "@opencode/client"
+import type { PacerModels, PacerNotice, PacerRequest } from "@opencode/client"
 import type { KeymapCommand } from "@opencode/plugin/tui/context"
 import { ManualClock } from "@opentui/core/testing"
 import { readFileSync } from "fs"
@@ -14,6 +14,7 @@ import { useRoute } from "../../src/context/route"
 import { usePacerSession } from "../../src/pacer/jump"
 import { noticeSettings, PacerNotices, visibleNotices } from "../../src/pacer/notices"
 import { Composer } from "../../src/routes/session/composer"
+import { Toast } from "../../src/ui/toast"
 import { until } from "../fixture/wait"
 import {
   CHAT,
@@ -67,14 +68,19 @@ async function cards(
     width?: number
     height?: number
     config?: Parameters<typeof renderPacer>[0]["config"]
+    /** The chat's requests, newest first; request 3 is a miss by default, with what changed in it. */
+    requests?: PacerRequest[]
+    models?: PacerModels
   } = {},
 ) {
   const fake = pacerFake()
   fake.status = status(input.state ?? "on")
   fake.notices = input.notices ?? [notice(0)]
   fake.chats[CHAT] = chat()
-  fake.requests[CHAT] = Array.from({ length: 8 }, (_, index) => (index === 3 ? miss(3) : request(index)))
-  fake.prompts.req_3 = promptChange(miss(3))
+  fake.requests[CHAT] =
+    input.requests ?? Array.from({ length: 8 }, (_, index) => (index === 3 ? miss(3) : request(index)))
+  fake.prompts.req_3 = promptChange(fake.requests[CHAT].find((item) => item.id === "req_3") ?? miss(3))
+  fake.models = input.models ?? null
   let commands: readonly KeymapCommand[] = []
   function Commands() {
     const list = Keymap.useCommands()
@@ -101,6 +107,7 @@ async function cards(
             {(sessionID) => <Session sessionID={sessionID} />}
           </Show>
           <PacerNotices />
+          <Toast />
         </box>
       )
     },
@@ -396,10 +403,13 @@ describe("open and dismiss (section 3)", () => {
 })
 
 describe("settings (section 4)", () => {
-  test("six rows under CLIProxyPacer, with OpenCodePlus's choices and defaults", () => {
+  test("six rows under CLIProxyPacer, with OpenCodePlus's choices and defaults, then Muted models", () => {
     // The cold ask's rows share the heading (settings.test.tsx).
-    const rows = settings.filter((setting) => setting.path[0] === "cliproxypacer" && setting.path[1] === "notices")
-    expect(rows.every((setting) => setting.category === "CLIProxyPacer")).toBe(true)
+    const notices = settings.filter((setting) => setting.path[0] === "cliproxypacer" && setting.path[1] === "notices")
+    expect(notices.every((setting) => setting.category === "CLIProxyPacer")).toBe(true)
+    // The seventh, a list, opens its own picker (below).
+    expect(notices.map((setting) => setting.title).at(-1)).toBe("Muted models")
+    const rows = notices.slice(0, -1)
     const shown = (setting: (typeof rows)[number], value: unknown) =>
       setting.labels?.[setting.values!.indexOf(value)] ?? String(value)
     expect(
@@ -602,6 +612,190 @@ describe("settings (section 4)", () => {
     // The service still holds both, and the other TUI shows both.
     expect(setup.pacer.notices().map((notice) => notice.requestID)).toEqual(["req_3", "req_5"])
     expect(count(other.app.captureCharFrame(), TITLE)).toBe(2)
+  })
+})
+
+// Muted models (section 4; the owner, 2026-11-21: "we need a setting to exclude specific models from providers from
+// giving cache misses"): a provider's model whose losses the provider caused show no card.
+describe("muted models (section 4)", () => {
+  const FLASH = { provider: "commandcode", model: "deepseek-v4.1-flash" }
+  const PROVIDER_LOSS = "Nothing sent changed; the provider didn't reuse its cache."
+  const PROMPT_CHANGED = "The system prompt changed since the step before."
+  /** A notice of Command Code's DeepSeek V4.1 Flash whose loss the provider caused, unless `extra` says otherwise. */
+  const flash = (index: number, extra: Partial<PacerNotice> = {}) =>
+    notice(index, { ...FLASH, title: `Flash chat ${index}`, causeCode: "provider", cause: PROVIDER_LOSS, ...extra })
+  /** Request `index` of the chat on that model, a miss the provider caused. */
+  const flashMiss = (index: number) => miss(index, { ...FLASH, cause: "provider", changedPart: undefined })
+  const MODELS: PacerModels = {
+    items: [
+      { id: "deepseek-v4.1-flash", providers: ["commandcode", "opencode-go"] },
+      { id: "claude-opus-4-5", providers: ["claude"] },
+    ],
+  }
+  const visible = (notices: PacerNotice[], muted: { provider: string; model: string }[]) =>
+    visibleNotices(notices, { ...noticeSettings(undefined), muted }, { now: NOW, dismissed: {} }).map(
+      (notice) => notice.requestID,
+    )
+  const muted = (setup: Setup) => setup.config().cliproxypacer?.notices?.muted
+
+  test("a muted model hides the losses its provider caused, and only those; other models and providers still show", () => {
+    expect(noticeSettings(undefined).muted).toEqual([])
+    const notices = [
+      flash(0),
+      flash(1, { causeCode: "unknown", cause: "CLIProxyPacer couldn't tell why: one prompt wasn't kept." }),
+      flash(2, { causeCode: undefined, cause: "CLIProxyPacer didn't say why." }),
+      // What openforge, CLIProxyPacer or the chat caused.
+      flash(3, { causeCode: "prefix-changed", cause: PROMPT_CHANGED }),
+      flash(4, { causeCode: "server-layout" }),
+      flash(5, { causeCode: "summary-request" }),
+      flash(6, { causeCode: "account-changed" }),
+      flash(7, { causeCode: "model-changed" }),
+      flash(8, { causeCode: "lifetime-changed" }),
+      // The same model through another provider, and another model of the same provider.
+      flash(9, { provider: "opencode-go" }),
+      flash(10, { model: "deepseek-v4.1-pro" }),
+      // CLIProxyPacer's names in another case are the same.
+      flash(11, { provider: "CommandCode", model: "DeepSeek-V4.1-Flash" }),
+    ]
+    const all = notices.map((notice) => notice.requestID)
+    expect(visible(notices, [])).toEqual(all)
+    expect(visible(notices, [FLASH])).toEqual(["req_3", "req_4", "req_5", "req_6", "req_7", "req_8", "req_9", "req_10"])
+    // Another muted model leaves this one's cards.
+    expect(visible(notices, [{ provider: "commandcode", model: "deepseek-v4.1-pro" }])).toEqual(
+      all.filter((id) => id !== "req_10"),
+    )
+    // A notice without a provider, from a service before notices named it, is never muted.
+    const unnamed = { ...flash(0), provider: undefined } as unknown as PacerNotice
+    expect(visible([unnamed], [FLASH])).toEqual(["req_0"])
+  })
+
+  test("on screen: a muted model's provider loss shows no card; its changed prompt and another provider's loss do", async () => {
+    await using setup = await cards({
+      config: { cliproxypacer: { notices: { muted: [FLASH] } } },
+      notices: [
+        flash(0, { title: "Lost by the provider" }),
+        flash(1, { title: "Changed by openforge", causeCode: "prefix-changed", cause: PROMPT_CHANGED }),
+        flash(2, { title: "Through OpenCode Go", provider: "opencode-go" }),
+      ],
+    })
+    const frame = await setup.frame(
+      (frame) => frame.includes("Changed by openforge") && frame.includes("Through OpenCode Go"),
+    )
+    expect(frame).not.toContain("Lost by the provider")
+    expect(count(frame, "Cache miss")).toBe(2)
+  })
+
+  test("in the Requests tab the mute key mutes the model of the request a card opened at; again, it unmutes it", async () => {
+    await using setup = await cards({
+      route: OTHER,
+      requests: Array.from({ length: 8 }, (_, index) => (index === 3 ? flashMiss(3) : request(index))),
+      notices: [
+        flash(3, { title: "Lost by the provider" }),
+        flash(5, { title: "Lost again" }),
+        flash(6, { title: "Changed by openforge", causeCode: "prefix-changed", cause: PROMPT_CHANGED }),
+      ],
+    })
+    await setup.frame((frame) => frame.includes("Lost again"))
+    await click(setup, "Lost by the provider")
+    // On the card's request, what changed shows, and the key with it.
+    await setup.frame((frame) => frame.includes(`Cache miss. ${PROVIDER_LOSS}`) && frame.includes("mute model m"))
+    setup.app.mockInput.pressKey("m")
+    await setup.frame((frame) => frame.includes("unmute model m") && frame.includes("Muted Command Code"))
+    // The toast's text, wrapped on its two lines.
+    expect(setup.app.captureCharFrame()).toContain("Muted Command Code deepseek-v4.1-flash: a cache")
+    expect(setup.app.captureCharFrame()).toContain("miss the provider caused shows no card")
+    expect(muted(setup)).toEqual([FLASH])
+    // The toast lies over the cards until it is clicked away.
+    await click(setup, "Muted Command Code")
+    const frame = await setup.frame((frame) => !frame.includes("Muted Command Code") && frame.includes("Cache miss"))
+    expect(frame).not.toContain("Lost again")
+    expect(frame).toContain("Changed by openforge")
+    // The tab still lists the request, with its cause; the key there unmutes it, and the card is back.
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => frame.includes("provider's fault") && selectedRow(setup) === time(3))
+    setup.app.mockInput.pressKey("m")
+    await setup.frame((frame) => frame.includes("Unmuted Command Code deepseek-v4.1-flash: its cache"))
+    expect(muted(setup)).toEqual([])
+    await click(setup, "Unmuted Command Code")
+    await setup.frame((frame) => frame.includes("Lost again") && frame.includes("mute model m"))
+    expect(setup.app.captureCharFrame()).not.toContain("unmute model")
+  })
+
+  test("the key shows in the tab's hints on a request with a provider, and mutes the row under the cursor", async () => {
+    await using setup = await cards({
+      notices: [],
+      requests: [flashMiss(0), request(1)],
+    })
+    setup.pacer.openRequests(CHAT)
+    await setup.frame((frame) => frame.includes("read/write"))
+    const hints = await setup.frame((frame) => frame.includes("help ?"))
+    expect(hints).toContain("go to enter  what changed ctrl+enter  show misses ctrl+a  mute model m  help ?")
+    setup.app.mockInput.pressKey("m")
+    await until(() => muted(setup)?.length === 1, 5_000, "muted")
+    expect(muted(setup)).toEqual([FLASH])
+    // The next row is another model's.
+    setup.app.mockInput.pressArrow("down")
+    await setup.frame(() => selectedRow(setup) === time(1))
+    setup.app.mockInput.pressKey("m")
+    await until(() => muted(setup)?.length === 2, 5_000, "both muted")
+    expect(muted(setup)).toEqual([FLASH, { provider: "claude", model: "claude-opus-4-5" }])
+  })
+
+  test("Settings › CLIProxyPacer › Muted models lists the muted ones to unmute, and the models CLIProxyPacer serves to mute", async () => {
+    await using setup = await cards({
+      height: 60,
+      config: { cliproxypacer: { notices: { muted: [FLASH] } } },
+      models: MODELS,
+      notices: [flash(0, { title: "Lost by the provider" })],
+    })
+    await until(() => setup.pacer.models() !== undefined, 5_000, "the models read")
+    setup.dialog.replace(() => <DialogConfig current="cliproxypacer.notices.muted" />)
+    await setup.frame((frame) => /Muted models +Command Code deepseek-v4\.1-flash/.test(frame))
+    await until(() => setup.app.renderer.currentFocusedRenderable !== null, 2_000, "the dialog's focus")
+    setup.app.mockInput.pressEnter()
+    const list = await setup.frame((frame) => frame.includes("OpenCode Go") && frame.includes("unmute enter"))
+    // The muted one first; then each model CLIProxyPacer serves, under its provider, the muted one marked.
+    const lines = list.split("\n").map((line) => line.replace(/[┃│]/g, "").trim())
+    const rows = lines.slice(lines.findIndex((line) => line === "Muted"))
+    expect(rows.slice(0, 10)).toEqual([
+      "Muted",
+      expect.stringMatching(/^Command Code deepseek-v4\.1-flash +muted$/),
+      "",
+      "Claude",
+      "claude-opus-4-5",
+      "",
+      "Command Code",
+      expect.stringMatching(/^deepseek-v4\.1-flash +muted$/),
+      "",
+      "OpenCode Go",
+    ])
+    // Enter on the muted one unmutes it: it leaves Muted, and its card shows once Settings closes.
+    setup.app.mockInput.pressEnter()
+    await until(() => muted(setup)?.length === 0, 5_000, "unmuted")
+    await setup.frame((frame) => !/^ *Muted *$/m.test(frame) && !/ muted *$/m.test(frame))
+    // Enter on a model CLIProxyPacer serves mutes it.
+    await setup.frame((frame) => frame.includes("mute enter"))
+    setup.app.mockInput.pressEnter()
+    await until(() => muted(setup)?.length === 1, 5_000, "muted")
+    expect(muted(setup)).toEqual([{ provider: "claude", model: "claude-opus-4-5" }])
+    // Esc goes back to Settings, at the row, which names it.
+    setup.app.mockInput.pressEscape()
+    await setup.frame((frame) => /Muted models +Claude claude-opus-4-5/.test(frame))
+    setup.dialog.clear()
+    await setup.frame((frame) => frame.includes("Lost by the provider"))
+  })
+
+  test("the Settings row says none, the one muted, or how many; ←/→ leave it as it is", async () => {
+    await using setup = await cards({ height: 60, notices: [] })
+    setup.dialog.replace(() => <DialogConfig current="cliproxypacer.notices.muted" />)
+    await setup.frame((frame) => /Muted models +none/.test(frame))
+    await until(() => setup.app.renderer.currentFocusedRenderable !== null, 2_000, "the dialog's focus")
+    setup.app.mockInput.pressArrow("right")
+    setup.app.mockInput.pressArrow("left")
+    await Bun.sleep(30)
+    expect(setup.config().cliproxypacer).toBeUndefined()
+    await setup.configure((draft) => (draft.cliproxypacer = { notices: { muted: [FLASH, { provider: "claude", model: "claude-opus-4-5" }] } }))
+    await setup.frame((frame) => /Muted models +2 models/.test(frame))
   })
 })
 

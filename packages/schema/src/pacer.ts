@@ -388,8 +388,7 @@ export const Request = Schema.Struct({
  * message 4 is `messages[3]`. A cause openforge doesn't know shows as CPP sent it.
  */
 export function causeWords(request: Pick<Request, "cause" | "changedPart" | "changedBy" | "copy">) {
-  // A changed part without a cause is still a part that changed.
-  const cause = request.cause || (request.changedPart ? "prefix-changed" : undefined)
+  const cause = causeCode(request)
   if (cause === undefined) return { short: "cause unknown", full: "CLIProxyPacer didn't say why." }
   if (cause === "prefix-changed") return changeWords(request.changedPart, request.changedBy)
   if (cause === "server-layout") {
@@ -415,6 +414,14 @@ export function causeWords(request: Pick<Request, "cause" | "changedPart" | "cha
     short: [cause, request.changedPart].filter(Boolean).join(" · "),
     full: `CLIProxyPacer gave the cause ${cause}${request.changedPart ? `, at ${request.changedPart}` : ""}.`,
   }
+}
+
+/**
+ * CPP's cause of a miss as {@link causeWords} reads it: `Request.cause`, else `prefix-changed` when CPP named a changed
+ * part without a cause, since that is still a part that changed; undefined when CPP gave neither.
+ */
+export function causeCode(request: Pick<Request, "cause" | "changedPart">) {
+  return request.cause || (request.changedPart ? "prefix-changed" : undefined)
 }
 
 const CAUSES = new Map([
@@ -557,11 +564,18 @@ export const Notice = Schema.Struct({
   agent: Agent.ID.pipe(optional),
   /** The model the chat asked for, as `Request.model`. */
   model: Schema.String,
+  /** The provider of the account that served it, as `Request.provider`. */
+  provider: Schema.String,
   verdict: Schema.Literals(["miss", "partial"]),
   /** The tokens not reused (`Request.rewritten`); absent when CPP didn't count them. */
   tokens: NonNegativeInt.pipe(optional),
   /** Why, in a sentence: {@link causeWords}' `full`, as a row's help and what changed say it. */
   cause: Schema.String,
+  /**
+   * CPP's cause as it sent it ({@link causeCode}): `prefix-changed`, `provider`, `unknown`, …; absent when CPP gave
+   * none. A TUI tells by it who caused the loss.
+   */
+  causeCode: Schema.String.pipe(optional),
   /** What the miss cost beyond a hit (`Request.missCost`). */
   missCost: Money.USD.pipe(optional),
   /** When CPP received it, as `Request.at`. */

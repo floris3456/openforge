@@ -261,6 +261,7 @@ export const Definitions = {
   "composer.request.down": keybind("down", "Next request"),
   "composer.request.select": keybind("return", "Go to where the request ended"),
   "composer.request.detail": keybind("ctrl+return,alt+return", "Show what changed in the request's prompt"),
+  "composer.request.mute": keybind("m", "Mute or unmute cache notices of the request's provider and model"),
   "pacer.warming.toggle": keybind("<leader>k", "Switch cache warming for this chat"),
   "pacer.compact_before_cold.toggle": keybind("<leader>j", "Switch compact before cold for this chat"),
   "pacer.compact_cold_first.toggle": keybind("<leader>f", "Switch compact cold chats first for this chat"),

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs"
 import { readFile, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { asc, sql } from "drizzle-orm"
-import { Cause, DateTime, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/core/agent"
 import { Bus } from "@opencode/core/bus"
@@ -20,6 +20,7 @@ import { MediaKeeper } from "@opencode/core/media/keeper"
 import { MediaClearedTable } from "@opencode/core/media/sql"
 import { MediaExpiry } from "@opencode/core/media/expiry"
 import { MediaMove } from "@opencode/core/media/move"
+import { MediaWorker } from "@opencode/core/media/worker"
 import { Model } from "@opencode/core/model"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -835,6 +836,34 @@ describe("MediaKeeper", () => {
           // The round ended while the other process still read.
           expect(reader.exitCode).toBeNull()
         }).pipe(Effect.scoped),
+      ),
+    30_000,
+  )
+})
+
+describe("MediaWorker", () => {
+  // A service that stops while its worker waits for the service's connection never answers that wait: the worker must
+  // end on Stop rather than keep the service's stop, a release switch's, waiting for it.
+  it.live(
+    "stops at once while it waits for the service's connection",
+    () =>
+      withDatabase((file, folder) =>
+        Effect.gen(function* () {
+          yield* seed()
+          const asked = yield* Deferred.make<void>()
+          const closing = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const worker = yield* MediaWorker.open(
+                { database: file, folder },
+                Deferred.succeed(asked, undefined).pipe(Effect.andThen(Effect.never)),
+              )
+              yield* worker.expire(Date.now(), Effect.void).pipe(Effect.forkScoped)
+              yield* Deferred.await(asked)
+              return performance.now()
+            }),
+          )
+          expect(performance.now() - closing).toBeLessThan(1000)
+        }),
       ),
     30_000,
   )

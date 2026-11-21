@@ -98,11 +98,13 @@ if (port) {
         Effect.ignore,
       )
     const wal = `${start.database}-wal`
+    // The wait for Locked stays interruptible: a service that stops never answers it, and Stop must still end the
+    // worker rather than keep that stop waiting. Once Locked came, Unlock follows whatever happens.
     const write: MediaGate.Interface["write"] = (effect) =>
-      Effect.acquireUseRelease(
-        ask({ _tag: "Lock" }),
-        () => effect,
-        () => Effect.sync(() => post({ _tag: "Unlock" })),
+      Effect.uninterruptibleMask((restore) =>
+        restore(ask({ _tag: "Lock" })).pipe(
+          Effect.andThen(restore(effect).pipe(Effect.ensuring(Effect.sync(() => post({ _tag: "Unlock" }))))),
+        ),
       )
     const gate: MediaGate.Interface = {
       between: ask({ _tag: "Between" }).pipe(Effect.asVoid),

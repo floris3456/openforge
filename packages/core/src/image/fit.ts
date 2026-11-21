@@ -8,35 +8,65 @@ import type { SessionRunnerModel } from "../session/runner/model.js"
 export interface Model {
   /** The protocol its requests use; its limits hold there. */
   readonly protocol: string
-  /** Long edge and visual tokens (⌈w/28⌉ × ⌈h/28⌉) the model reads without downscaling. */
+  /** Long edge and visual tokens ({@link tokens}) the model reads without downscaling. */
   readonly edge: number
   readonly tokens: number
+  /** How it counts an image's visual tokens ({@link tokens}). */
+  readonly grid: Grid
   /** Images and base64 bytes one request carries at most. */
   readonly count: number
   readonly bytes: number
   /** Base64 bytes per image at most. */
   readonly imageBytes: number
-  /** Base64 bytes per visual token at most, so a context full of images stays under `bytes`. */
+  /** Base64 bytes per visual token at most: an image's share of `bytes`, and so its quality. */
   readonly bytesPerToken: number
 }
 
+/** ⌈h/cell⌉ × (⌈w/cell⌉ + row) + image tokens; an image of fewer than `least` pixels is first scaled up to that area. */
+export interface Grid {
+  readonly cell: number
+  readonly row: number
+  readonly image: number
+  readonly least: number
+}
+
 export const MODELS: Readonly<Record<string, Model>> = {
-  // Anthropic's Vision docs: 2,576 px and 4,784 visual tokens; 600 images and 128 MB a request, 10 MB an image. 120
-  // bytes a token keep a 1M context of images at 120 MB (spec images, Decided).
+  // Anthropic's Vision docs: 2,576 px and 4,784 visual tokens of 28 px; 600 images and 128 MB a request, 10 MB an
+  // image. 120 bytes a token keep a 1M context of images at 120 MB (spec images, Decided).
   "claude-opus-5-5": {
     protocol: "anthropic-messages",
     edge: 2_576,
     tokens: 4_784,
+    grid: { cell: 28, row: 0, image: 0, least: 0 },
     count: 600,
     bytes: 120_000_000,
     imageBytes: 10_000_000,
     bytesPerToken: 120,
   },
+  // DeepSeek's Vision guide and its image token calculator (V4.1: 14-px patches merged 3×3, a token ending each row
+  // and 2 an image, an image under 544×544 px scaled up to it): 1,024 tokens, about 1300×1300 px; 4,096 px a side once
+  // a request holds 15 images; 600 images, 32 MiB an image. Served by Command Code, whose Provider API refuses a body
+  // over 32 MiB, text and images together: 24 MiB of images leave 8 MiB for the rest (spec images, DeepSeek). 270
+  // bytes a 42-px token are Opus's 120 a 28-px one, the same bytes a pixel.
+  "deepseek-v4.1-flash": {
+    protocol: "open-responses",
+    edge: 4_096,
+    tokens: 1_024,
+    grid: { cell: 42, row: 1, image: 2, least: 544 * 544 },
+    count: 600,
+    bytes: 24 * 1024 * 1024,
+    imageBytes: 32 * 1024 * 1024,
+    bytesPerToken: 270,
+  },
 }
 
-/** The entry of a chat's model, when its route speaks the entry's protocol. */
+/**
+ * The entry of a chat's model, when its route speaks the entry's protocol: by its ID, or the ID's last segment, so a
+ * provider's prefix (`deepseek/deepseek-v4.1-flash` on CLIProxyPacer) names the same model.
+ */
 export const forModel = (model: Pick<SessionRunnerModel.Resolved, "model">) => {
-  const entry = MODELS[model.model.id]
+  const id = model.model.id
+  const entry = MODELS[id] ?? MODELS[id.split("/").at(-1) ?? id]
   return entry?.protocol === model.model.route.protocol ? entry : undefined
 }
 
@@ -55,7 +85,13 @@ export const available = typeof Bun !== "undefined" && typeof Bun.Image === "fun
 // The same bytes on macOS and Linux: Bun's own codecs and geometry, not the system's.
 if (available) Bun.Image.backend = "bun"
 
-export const tokens = (width: number, height: number) => Math.ceil(width / 28) * Math.ceil(height / 28)
+/** The visual tokens the model counts for an image of this size, by its {@link Grid}. */
+export const tokens = (width: number, height: number, model: Model) => {
+  const grid = model.grid
+  const up = width * height < grid.least ? Math.sqrt(grid.least / (width * height)) : 1
+  const rows = Math.ceil(Math.trunc(height * up) / grid.cell)
+  return rows * (Math.ceil(Math.trunc(width * up) / grid.cell) + grid.row) + grid.image
+}
 
 /** The largest aspect-preserving size the model reads without downscaling; never larger than the image. */
 export const fit = (width: number, height: number, model: Model) => {
@@ -65,13 +101,13 @@ export const fit = (width: number, height: number, model: Model) => {
   })
   const top = Math.min(1, model.edge / Math.max(width, height))
   const largest = size(top)
-  if (tokens(largest.width, largest.height) <= model.tokens) return largest
+  if (tokens(largest.width, largest.height, model) <= model.tokens) return largest
   // Bisect the scale: the token count only grows with it.
   const search = (low: number, high: number, steps: number): number => {
     if (steps === 0) return low
     const middle = (low + high) / 2
     const candidate = size(middle)
-    return tokens(candidate.width, candidate.height) <= model.tokens
+    return tokens(candidate.width, candidate.height, model) <= model.tokens
       ? search(middle, high, steps - 1)
       : search(low, middle, steps - 1)
   }
@@ -107,7 +143,7 @@ export const convert = async (source: Uint8Array, mime: string, model: Model): P
   const meta = await new Bun.Image(source).metadata().catch(() => undefined)
   if (!meta) return undefined
   const shown = fit(meta.width, meta.height, model)
-  const cap = Math.min(model.bytesPerToken * tokens(shown.width, shown.height), model.imageBytes)
+  const cap = Math.min(model.bytesPerToken * tokens(shown.width, shown.height, model), model.imageBytes)
   const encode = (quality: number) =>
     new Bun.Image(source).resize(shown.width, shown.height, { filter: "lanczos3" }).webp({ quality }).bytes()
   const pick = async (index: number): Promise<Uint8Array> => {
@@ -167,14 +203,14 @@ export const crop = async (source: Uint8Array, region: Region, model: Model) => 
 }
 
 /**
- * The visual tokens the model counts for an image: ⌈w/28⌉ × ⌈h/28⌉ of the size it reads it at, from the image's
+ * The visual tokens the model counts for an image ({@link tokens}) at the size it reads it at, from the image's
  * header. Undefined when the header can't be read.
  */
 export const visualTokens = (base64: string, model: Model) => {
   const size = dimensions(base64)
   if (!size) return undefined
   const shown = fit(size.width, size.height, model)
-  return tokens(shown.width, shown.height)
+  return tokens(shown.width, shown.height, model)
 }
 
 // Decodes only the bytes a header needs: base64 in whole 4-character groups around the wanted range.

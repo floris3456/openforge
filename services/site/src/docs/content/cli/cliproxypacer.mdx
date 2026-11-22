@@ -326,11 +326,16 @@ Compact cold chats first on for this chat
 
 What the two compaction asks do, and their limits, is on [Compaction asks](/providers#compaction-asks).
 
-**Warm while waiting** needs no switch. While a chat waits on a command in the foreground or on a subagent, openforge
-asks CLIProxyPacer to keep pinging it for up to 4 hours, and stops when the wait ends. While a command, subagent or image
-the chat started runs in the background, it asks for up to an hour instead, and goes back to CLIProxyPacer's default once
-the chat has answered the notice that it ended. Pings last that long after each reply, so a dev server left running in
-the background keeps its chat pinged for an hour after each reply.
+**Warm while working** needs no switch. While a chat waits on a command in the foreground or on a subagent, or a command,
+subagent or image it started still runs in the background after its reply, openforge tells CLIProxyPacer the chat is
+still active, again every 20 minutes while that work lasts, and that it is inactive once the last of it ends.
+CLIProxyPacer counts that work as the chat's use: its pings keep the cache warm through the work and for the chat's
+normal ping duration after it, with no ping duration of openforge's own. CLIProxyPacer stops counting work 12 hours
+after the chat's last message (its **Keep warm while working, at most** setting), so a dev server left running in the
+background doesn't keep its chat warm for ever; a chat openforge stopped telling about, because it quit, counts no more
+45 minutes after the last time it did. A CLIProxyPacer from before this (2026-11-22) refuses the signal: openforge then
+asks it to keep a chat waiting in the foreground pinged for 4 hours, or the chat's normal duration when that is longer,
+as before, and nothing for background work.
 
 ## Summaries
 

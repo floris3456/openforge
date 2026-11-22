@@ -1,13 +1,14 @@
 export * as PacerConnection from "./connection.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { Clock, Context, Effect, Exit, Layer, Option, Queue, Result, Schema, Stream } from "effect"
+import { Clock, Context, Effect, Exit, Layer, Option, Queue, Result, Schema, Scope, Stream } from "effect"
 import { makeParser } from "effect/encoding/Sse"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import type { Model } from "@opencode/schema/model"
 import { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
 import { Bus } from "../bus.js"
+import { Job } from "../job.js"
 import { Session } from "../session.js"
 import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
@@ -30,8 +31,9 @@ import { PacerWire } from "./wire.js"
 // event. All of CPP's reads and writes run beside the chats, never in a step's path: a chat with work is put on one
 // queue (once, however often it is marked), which `READERS` fibers drain; a chat's work runs in order and reads its
 // view only when one was asked for, at most once per drain, so a view asked for many times costs one read. A step
-// reads nothing. Notices coalesce the same way, one pending read per kind. Nothing runs on a timer while CPP is up:
-// when no chat runs, the only traffic is the open stream.
+// reads nothing. Notices coalesce the same way, one pending read per kind. Nothing runs on a timer while CPP is up but
+// a chat's activity, told again every `RENEW_MS` while its work lasts: when no chat runs, the only traffic is the open
+// stream.
 
 /** CPP can't answer now: it isn't set up, is unreachable, or has no pacer, and nothing read before can stand in. */
 export class Unavailable extends Schema.TaggedError<Unavailable>()("PacerConnection.Unavailable", {
@@ -113,8 +115,14 @@ export const SILENCE_MS = 60_000
 /** The meters are read again at most this often. */
 export const METERS_MS = 10_000
 /**
- * `pings.duration_minutes` while a chat waits on a foreground command or a subagent, or the chat's normal duration (what
- * CPP gives it without its own) when that is longer.
+ * A chat's `active` is told again this often while its work lasts: CPP ends an activity not renewed within 45 minutes,
+ * so a service that died keeps no chat warm.
+ */
+export const RENEW_MS = 20 * 60_000
+/**
+ * What a wait held its chat's `pings.duration_minutes` at until CPP took the chat's activity (2026-11-21), or the chat's
+ * normal duration (what CPP gives it without its own) when that is longer. Still held for a CPP that refuses the activity
+ * events; a chat still holding it otherwise, from an earlier openforge, is cleared.
  */
 export const WAIT_MINUTES = 240
 /**
@@ -240,6 +248,16 @@ interface Chat {
   readonly programs: Map<string, string>
   /** The calls of `calls` being waited on: those in the foreground. */
   readonly waits: Set<string>
+  /** Its background jobs still running (`Job.runningBackground`), as last counted. */
+  jobs: number
+  /** Its background jobs are to be counted again: a call or a run ended, a reconnect, or its activity is due again. */
+  count: boolean
+  /** What CPP was last told of its work on this connection: undefined before anything, and once CPP ended it. */
+  activity: "active" | "inactive" | undefined
+  /** When its last `active` was told: the renewal under way is that one's. */
+  activeAt: number | undefined
+  /** Its `active` is to be told again: `RENEW_MS` went by, or CPP was reached again. */
+  renew: boolean
   /** `pings.duration_minutes` as CPP holds it, when known. */
   duration: number | null | undefined
   /** CPP's label for it, as last read or told. */
@@ -282,6 +300,11 @@ interface Link {
   active: Set<string>
   /** The newest request row seen. */
   newest: number | undefined
+  /**
+   * CPP takes the chats' `active` and `inactive` (since 2026-11-21): undefined until it answered one on this
+   * connection, false once it refused one as a type it doesn't know, when a wait holds its chat's duration instead.
+   */
+  events: boolean | undefined
 }
 
 export const layer = Layer.effect(
@@ -292,12 +315,15 @@ export const layer = Layer.effect(
     const models = yield* PacerModels.Service
     const bus = yield* Bus.Service
     const sessions = yield* Session.Service
+    const jobs = yield* Job.Service
     const notices = yield* PacerNotices.Service
     const attention = yield* PacerAttention.Service
     // Compaction reads the state there: it can't depend on this service.
     const shared = yield* PacerStatus.Service
     // A step reads there whether its chat's cache is still warm: it can't depend on this service either.
     const warmth = yield* PacerWarmth.Service
+    // The chats' renewals sleep there.
+    const scope = yield* Scope.Scope
 
     const link: Link = {
       endpoint: undefined,
@@ -309,6 +335,7 @@ export const layer = Layer.effect(
       aliases: new Map(),
       active: new Set(),
       newest: undefined,
+      events: undefined,
     }
     yield* shared.set(link.status)
     const chats = new Map<SessionID, Chat>()
@@ -409,11 +436,25 @@ export const layer = Layer.effect(
       return typeof ms === "number" ? Math.ceil(ms / 60_000) : undefined
     }
 
-    /** The duration the chat's waits want CPP to hold; null leaves CPP's own. A background job wants none. */
-    const wanted = (chat: Chat) => (chat.waits.size > 0 ? Math.max(WAIT_MINUTES, normal(chat) ?? 0) : null)
+    /**
+     * The duration the chat's waits want CPP to hold; null leaves CPP's own. Only a CPP that refused the activity events
+     * is asked for one, and a background job wants none there, as before them.
+     */
+    const wanted = (chat: Chat) =>
+      link.events === false && chat.waits.size > 0 ? Math.max(WAIT_MINUTES, normal(chat) ?? 0) : null
+
+    /** The chat has work: a foreground wait, or a background job still running. */
+    const working = (chat: Chat) => chat.waits.size > 0 || chat.jobs > 0
+
+    /** What CPP is to be told of the chat's work now, if anything. */
+    const activity = (chat: Chat) => {
+      if (link.events === false || !chat.on) return undefined
+      if (working(chat)) return chat.activity !== "active" || chat.renew ? "active" : undefined
+      return chat.activity === "active" ? "inactive" : undefined
+    }
 
     /**
-     * CPP holds another duration than the one wanted. Without a wait, one set elsewhere stays, but not one a wait or an
+     * CPP holds another duration than the one wanted. With none wanted, one set elsewhere stays, but not one a wait or an
      * earlier openforge's job set, nor one equal to the chat's normal duration, which is none of its own (as CPP's
      * session card reads it).
      */
@@ -428,10 +469,21 @@ export const layer = Layer.effect(
     }
 
     const pending = (chat: Chat) =>
-      chat.requests || chat.events.length > 0 || chat.read || chat.ended || chat.compact !== undefined || misheld(chat)
+      chat.requests ||
+      chat.events.length > 0 ||
+      chat.read ||
+      chat.ended ||
+      chat.compact !== undefined ||
+      chat.count ||
+      activity(chat) !== undefined ||
+      misheld(chat)
 
     const busy = (chat: Chat) =>
-      pending(chat) || chat.waits.size > 0 || queued.has(chat.sessionID) || running.has(chat.sessionID)
+      pending(chat) ||
+      working(chat) ||
+      chat.activity === "active" ||
+      queued.has(chat.sessionID) ||
+      running.has(chat.sessionID)
 
     const forget = (chat: Chat) => {
       chats.delete(chat.sessionID)
@@ -467,6 +519,11 @@ export const layer = Layer.effect(
         calls: new Map(),
         programs: new Map(),
         waits: new Set(),
+        jobs: 0,
+        count: false,
+        activity: undefined,
+        activeAt: undefined,
+        renew: false,
         duration: undefined,
         label: undefined,
         model: undefined,
@@ -520,11 +577,21 @@ export const layer = Layer.effect(
       tell(chat, { type: "tool_calls", call_id: callID, tool, calls: calls.slice(0, INNER_CALLS) })
     }
 
+    /** CPP ends the chat's activity with the pings, and so does a close: nothing more is told of it. */
+    const endActivity = (chat: Chat) => {
+      chat.activity = undefined
+      chat.activeAt = undefined
+      chat.renew = false
+    }
+
     const close = (chat: Chat) => {
       tell(chat, { type: "closed" })
       chat.waits.clear()
       chat.calls.clear()
       chat.programs.clear()
+      chat.jobs = 0
+      chat.count = false
+      endActivity(chat)
       chat.raw = undefined
       chat.view = undefined
     }
@@ -666,6 +733,47 @@ export const layer = Layer.effect(
         Effect.catch(answered(`a chat's ${event.type} event`)),
       )
 
+    /**
+     * Tells CPP of the chat's work, and while it lasts, when to tell it again. A CPP before 2026-11-21 refuses the type
+     * as one it doesn't know: it is asked no more on this connection, and a wait holds its chat's duration instead. Whether
+     * CPP answered, as {@link answered}; one refused otherwise is told again only once its renewal is due.
+     */
+    const signal = Effect.fnUntraced(function* (chat: Chat, type: "active" | "inactive") {
+      const result = yield* send("post", `${sessionPath(chat)}/events`, { type }, Schema.Unknown).pipe(Effect.result)
+      if (Result.isFailure(result) && unknownType(result.failure)) {
+        if (link.events !== false)
+          yield* Effect.logInfo(
+            "CLIProxyPacer doesn't know the chats' activity events: a wait holds its chat's ping duration instead",
+            { reason: result.failure.message },
+          )
+        link.events = false
+        return true
+      }
+      if (Result.isFailure(result) && !(yield* answered(`a chat's ${type} event`)(result.failure))) return false
+      if (Result.isSuccess(result)) link.events = true
+      chat.activity = type
+      chat.renew = false
+      if (type === "inactive") {
+        chat.activeAt = undefined
+        return true
+      }
+      const at = yield* Clock.currentTimeMillis
+      chat.activeAt = at
+      yield* Effect.sleep(RENEW_MS).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            // Another `active` since, an `inactive` or a close: that one's renewal or none.
+            if (chat.activeAt !== at) return
+            chat.renew = true
+            chat.count = true
+            mark(chat)
+          }),
+        ),
+        Effect.forkIn(scope),
+      )
+      return true
+    })
+
     const lookup = (sessionID: SessionID) =>
       sessions.get(sessionID).pipe(
         Effect.map(
@@ -738,7 +846,10 @@ export const layer = Layer.effect(
         discard: true,
       })
 
-    /** One chat's work, in order: its events, its waits' duration, a read of its view, a compaction. */
+    /**
+     * One chat's work, in order: its events, its activity (its background jobs counted when due), its waits' duration on
+     * a CPP without the activity events, a read of its view, a compaction.
+     */
     const work = Effect.fnUntraced(function* (chat: Chat) {
       if (!on()) return
       if (chat.info === undefined) chat.info = yield* lookup(chat.sessionID)
@@ -765,6 +876,13 @@ export const layer = Layer.effect(
         chat.events = chat.events.filter((item) => item !== told)
       }
       if (chat.removed) return forget(chat)
+      if (chat.count) {
+        chat.count = false
+        chat.jobs = (yield* jobs.runningBackground).filter((job) => owner(job) === chat.sessionID).length
+      }
+      // Before the duration: whether CPP takes the activity decides whether a wait sets one.
+      const due = activity(chat)
+      if (due && !(yield* signal(chat, due))) return
       if (misheld(chat)) {
         if (!(yield* patch(chat, { "pings.duration_minutes": wanted(chat) }))) return
         // The answer is the view.
@@ -1042,6 +1160,7 @@ export const layer = Layer.effect(
 
     const reset = (endpoint: PacerEndpoint.Endpoint | undefined) => {
       link.endpoint = endpoint
+      link.events = undefined
       attentionOff = false
       link.contact = undefined
       // Another CPP has its own clock.
@@ -1067,6 +1186,7 @@ export const layer = Layer.effect(
         chat.streamed = false
         chat.missing = false
         chat.storeID = undefined
+        endActivity(chat)
         chat.duration = undefined
         chat.label = undefined
         chat.model = undefined
@@ -1091,6 +1211,17 @@ export const layer = Layer.effect(
         if (!first) capabilities()
         attentionOff = false
         readAttention()
+        // This CPP is asked again whether it takes the activity events. The chats with work tell it again, and a job
+        // that ended meanwhile is counted out; after a restart, the chats CPP lists find their running jobs here.
+        link.events = undefined
+        for (const chat of chats.values()) {
+          if (chat.activity === "active") chat.renew = true
+          if (chat.jobs > 0) chat.count = true
+        }
+        for (const job of yield* jobs.runningBackground) {
+          const chat = known(owner(job))
+          if (chat) chat.count = true
+        }
         for (const chat of chats.values()) if (pending(chat)) mark(chat)
         const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
         yield* contact(stream.offset)
@@ -1220,9 +1351,8 @@ export const layer = Layer.effect(
         case "session.tool.called": {
           const chat = chats.get(sessionID)
           if (!chat?.calls.has(event.data.id)) return
-          // A background shell or subagent is no wait: its chat keeps its normal duration, since a dev server can run for
-          // days.
-          if (event.data.input.background === true) return void chat.calls.delete(event.data.id)
+          // A background shell or subagent is no wait: its job counts once its call has ended.
+          if (event.data.input.background === true) return
           chat.waits.add(event.data.id)
           if (chat.waits.size === 1) mark(chat)
           return
@@ -1233,9 +1363,10 @@ export const layer = Layer.effect(
           if (!chat) return
           report(chat, event.data.id, event.data.metadata)
           if (!chat.calls.delete(event.data.id)) return
-          // Its end ends its wait, also when it was moved to the background.
-          if (chat.waits.delete(event.data.id) && chat.waits.size === 0) mark(chat)
-          return
+          // Its end ends its wait; a background call, or a foreground one moved there, leaves a job running.
+          chat.waits.delete(event.data.id)
+          chat.count = true
+          return mark(chat)
         }
         case "session.execution.succeeded":
         case "session.execution.failed":
@@ -1248,13 +1379,14 @@ export const layer = Layer.effect(
             return
           const chat = chats.get(sessionID)
           if (!chat?.on) return
-          // A run that ended waits on nothing, also when it stopped before a call's end was published.
+          // A run that ended waits on nothing, also when it stopped before a call's end was published. A job that ended
+          // woke the chat with its notice, so its count goes at the end of that run; one that started in it (an image)
+          // counts from there.
           chat.calls.clear()
           chat.programs.clear()
-          if (chat.waits.size > 0) {
-            chat.waits.clear()
-            mark(chat)
-          }
+          chat.waits.clear()
+          chat.count = true
+          mark(chat)
           // Only a subagent's run ending closes its chat on CPP.
           if (chat.info === undefined) {
             chat.ended = true
@@ -1612,9 +1744,20 @@ export const node = makeGlobalNode({
     PacerStatus.node,
     PacerWarmth.node,
     Bus.node,
+    Job.node,
     Session.node,
   ],
 })
+
+/** The chat a background job counts for: a subagent's parent, else its own. */
+function owner(job: Job.Recovery) {
+  return job.kind === "subagent" ? job.parentSessionID : job.sessionID
+}
+
+/** A CPP before the activity events refuses their type: 400, its message naming the types it knows. */
+function unknownType(error: PacerHttp.Error) {
+  return error._tag === "PacerHttp.Unexpected" && error.status === 400 && error.reason.startsWith("type is ")
+}
 
 /** At most `bytes` bytes of UTF-8, cut at a character. */
 function truncate(text: string, bytes: number) {

@@ -89,11 +89,12 @@ export const Plugin = {
      * A call's arguments that hold local files (CPP's `meta.files`): each string of those is a file, replaced by its
      * hash and name once CPP holds its bytes, so the model writes only the paths; so are the first two of an array
      * (`[picture, comparison, comment]`) and an entry's named parts `picture`, `compare` and `text`. Anything else
-     * (a decision, a comment) keeps its shape.
+     * (a decision, a comment) keeps its shape. Each holds at most as many items as the tool's schema allows it.
      */
     const withFiles = Effect.fn("PacerToolsPlugin.withFiles")(function* (
       input: Readonly<Record<string, unknown>>,
       named: ReadonlyArray<string> | undefined,
+      schema: unknown,
       context: FileAccess.Invocation,
     ) {
       const fields = (named ?? []).filter((name) => input[name] !== undefined)
@@ -102,7 +103,8 @@ export const Plugin = {
       for (const name of fields) {
         const value = input[name]
         if (!Array.isArray(value)) continue
-        if (value.length > PICTURE_LIMIT) return yield* notSent(`${name} has more than ${PICTURE_LIMIT} items`)
+        const limit = itemLimit(schema, name)
+        if (value.length > limit) return yield* notSent(`${name} has more than ${limit} items`)
         sent[name] = yield* Effect.forEach(value, (item) => {
           if (typeof item === "string") return file(item, context)
           // `[picture, comparison, caption]`: the first two are files, and the caption is text.
@@ -167,8 +169,11 @@ export const Plugin = {
                     source: { type: "tool", messageID: context.messageID, id: context.id },
                   })
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message, error })))
-                // What the model wrote stays the call's own input; only what CPP is sent has the files' hashes.
-                const sent = isRecord(input) ? yield* withFiles(input, meta.files, context) : input
+                // What the model wrote stays the call's own input; only what CPP is sent has the files' hashes. The
+                // schema is the chat's own copy of the tool, or Code Mode's for every chat while the chat holds none.
+                const schema =
+                  calls.held(context.sessionID)?.byName.get(name)?.inputSchema ?? meta.definition?.input_schema
+                const sent = isRecord(input) ? yield* withFiles(input, meta.files, schema, context) : input
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
                 const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
                 const project = session ? (yield* projects.chat(session.projectID)).headers : undefined
@@ -224,7 +229,27 @@ function subject(args: Readonly<Record<string, unknown>>, names: ReadonlyArray<s
   return values.length > 0 ? values : ["*"]
 }
 
-/** The most pictures one file-bearing argument may hold, and the most one picture may weigh. */
+/**
+ * The most items a file-bearing argument may hold: its `maxItems` in the tool's schema, on the argument or on a branch
+ * of its `anyOf` or `oneOf` (`[{type: "array", maxItems: 100}, {type: "null"}]`), the largest one given; PICTURE_LIMIT
+ * when the schema gives none, as an older CPP's.
+ */
+function itemLimit(schema: unknown, name: string) {
+  const argument = isRecord(schema) && isRecord(schema.properties) ? schema.properties[name] : undefined
+  if (!isRecord(argument)) return PICTURE_LIMIT
+  const branches = [argument.anyOf, argument.oneOf].flatMap((list) => (Array.isArray(list) ? list : []))
+  const limits = [argument, ...branches].flatMap((branch) =>
+    isRecord(branch) &&
+    typeof branch.maxItems === "number" &&
+    Number.isSafeInteger(branch.maxItems) &&
+    branch.maxItems > 0
+      ? [branch.maxItems]
+      : [],
+  )
+  return limits.length > 0 ? Math.max(...limits) : PICTURE_LIMIT
+}
+
+/** The most items a file-bearing argument may hold when the tool's schema says none, and the most one picture may weigh. */
 const PICTURE_LIMIT = 20
 const MAX_PICTURE_BYTES = 20 * 1024 * 1024
 const MEGABYTE = 1024 * 1024

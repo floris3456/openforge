@@ -129,7 +129,15 @@ const taskList = {
   ...listOf("7e57000000000003", [...ownerList.tools.claude, taskTool]),
   meta: { ...ownerList.meta, task: taskMeta },
 }
-const step = { sessionID, parentID, model: "claude-haiku-5-5", agent: "build", codemode: true, step: true, continues: false }
+const step = {
+  sessionID,
+  parentID,
+  model: "claude-haiku-5-5",
+  agent: "build",
+  codemode: true,
+  step: true,
+  continues: false,
+}
 
 /** The real registry with the plugin, over a fake CPP whose list the chat has read once. */
 const setup = Effect.fnUntraced(function* (
@@ -977,13 +985,75 @@ describe("PacerToolsPlugin files", () => {
     }),
   )
 
-  it.effect("refuses more than 20 items before any of them is read", () =>
+  it.effect("refuses more than 20 items before any of them is read, when the tool's schema gives no maxItems", () =>
     Effect.gen(function* () {
       const h = yield* setup({ list: taskList })
       const failed = yield* h.failure("task", { id: "t1", pictures: Array.from({ length: 21 }, () => "#1") })
       expect(failed.message).toBe("Not sent: pictures has more than 20 items")
       expect(h.cpp.calls()).toHaveLength(0)
       expect(h.asked.map((one) => one.action)).toEqual(["memory"])
+    }),
+  )
+
+  // The task tool's `items` as CPP serves it (its definitions.json): an array with its maxItems, or null.
+  const itemsOf = (maxItems: number) => {
+    const array = { type: "array", items: { type: "string" }, maxItems }
+    return {
+      ...taskTool.input_schema,
+      properties: { ...taskTool.input_schema.properties, items: { anyOf: [array, { type: "null" }] } },
+    }
+  }
+
+  it.effect("takes as many items as the argument's maxItems in the chat's schema, and refuses one more naming it", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const pictures = Array.from({ length: 60 }, (_, index) => Buffer.concat([png, Buffer.from([index])]))
+      yield* Effect.promise(() =>
+        Promise.all(pictures.map((bytes, index) => Bun.write(`${tmp.path}/shot-${index}.png`, bytes))),
+      )
+      const list = {
+        ...listOf("7e57000000000004", [...ownerList.tools.claude, { ...taskTool, input_schema: itemsOf(100) }]),
+        meta: taskList.meta,
+      }
+      const h = yield* setup({ list, directory: tmp.path })
+      const items = pictures.map((_, index) => `shot-${index}.png`)
+      expect((yield* h.run("task", { id: "t1", state: "review", items })).status).toBe("completed")
+      expect(sent(h).items).toEqual(pictures.map((bytes, index) => ({ sha256: sha(bytes), name: `shot-${index}.png` })))
+      expect(h.cpp.puts()).toHaveLength(60)
+      const asked = (input: Record<string, unknown>) =>
+        h.failure("task", { id: "t1", ...input }).pipe(Effect.map((error) => error.message))
+      expect(yield* asked({ items: Array.from({ length: 101 }, () => "#1") })).toBe(
+        "Not sent: items has more than 100 items",
+      )
+      // Each argument by its own schema: `pictures` gives none.
+      expect(yield* asked({ pictures: Array.from({ length: 21 }, () => "#1") })).toBe(
+        "Not sent: pictures has more than 20 items",
+      )
+      expect(h.cpp.calls()).toHaveLength(1)
+    }),
+  )
+
+  it.effect("takes a Code Mode tool's maxItems from its definition while the chat holds no list", () =>
+    Effect.gen(function* () {
+      // The registry checks a Code Mode tool's arguments against this definition too, so 31 never reaches the plugin.
+      const definition = { description: taskTool.description, input_schema: itemsOf(30) }
+      const h = yield* setup({
+        read: false,
+        catalog: catalogOf(true, { task: { ...taskMeta, codemode: true, definition } }),
+      })
+      const snapshot = yield* waitForCodeModeTool(h.registry, "task")
+      const input = { id: "t1", items: Array.from({ length: 25 }, () => "#1") }
+      const failed = yield* snapshot
+        .execute({
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-task", name: "task", input },
+          definitions: new Map(),
+        })
+        .pipe(Effect.flip)
+      // Past the count, the items are read: this chat has no image 1.
+      expect(failed.message).toBe("Not sent: #1 is not an image of this chat")
+      expect(h.cpp.calls()).toHaveLength(0)
     }),
   )
 

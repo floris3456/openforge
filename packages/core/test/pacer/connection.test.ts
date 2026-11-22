@@ -74,6 +74,13 @@ interface Cpp {
   registry: string[]
   /** What needs attention (`GET /pacer/v1/attention`); undefined: the key isn't allowed (403 `not_allowed`). */
   attention: Json[] | undefined
+  /**
+   * The session events CPP knows, when it is a CPP before the activity events (2026-11-21), which refuses any other
+   * type with 400 `invalid_request`; undefined: every type, as CPP 0502c7b3.
+   */
+  events: string[] | undefined
+  /** The chats `GET /pacer/v1/state` lists (`sessions.items`), as `{ id, ext, descendants }`. */
+  stated: Json[]
   /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
    * them until the first bytes. */
   quiet: boolean
@@ -155,7 +162,7 @@ const fakeCpp = (now: () => number) =>
             settings: [],
             registry: [],
             meters: cpp.meters,
-            sessions: { items: [], next: null },
+            sessions: { items: cpp.stated, next: null },
             live: {},
             next: [],
           })
@@ -167,8 +174,23 @@ const fakeCpp = (now: () => number) =>
         if (path === "/pacer/v1/sessions") return answer({ items: cpp.listed })
         const events = path.match(/^\/pacer\/v1\/sessions\/([^/]+)\/events$/)?.[1]
         if (events && method === "POST") {
-          const type = (body as Json).type
-          return answer({ id: events, type, pings_stopped: type !== "label" })
+          const type = String((body as Json).type)
+          // crates/cpa-server/src/pacer_sessions.rs, `event`, before and since 0502c7b3.
+          if (cpp.events && !cpp.events.includes(type))
+            return answer(
+              {
+                error: {
+                  type: "invalid_request",
+                  message: "type is closed, compacted, model_changed, reverted, agent_switched, label or tool_calls",
+                },
+              },
+              400,
+            )
+          return answer({
+            id: events,
+            type,
+            pings_stopped: type !== "label" && type !== "active" && type !== "inactive",
+          })
         }
         const session = path.match(/^\/pacer\/v1\/sessions\/([^/]+)$/)?.[1]
         if (session && method === "PATCH") {
@@ -266,6 +288,8 @@ const fakeCpp = (now: () => number) =>
         key: {},
         registry: ["pings.enabled", "warming.compact_before_cold", "warming.compact_cold_first"],
         attention: undefined,
+        events: undefined,
+        stated: [],
         holds: new Set(),
         release: () => {
           cpp.holds.clear()
@@ -408,7 +432,7 @@ interface Harness {
   /** Catalog reads asked for; while `hold` is set, each waits for it. */
   readonly refreshes: { count: number; hold?: Deferred.Deferred<void> }
   readonly execution: { readonly active: Set<SessionID>; readonly woken: SessionID[] }
-  /** The real background jobs (`Job`), which leave a chat's ping duration alone. */
+  /** The real background jobs (`Job`), which the connection counts per chat. */
   readonly jobs: Job.Interface
   /** Every `pacer.*` event published since the harness started. */
   readonly published: Array<{ readonly type: string; readonly data: unknown }>
@@ -526,6 +550,7 @@ const harness = Effect.fnUntraced(function* () {
             }),
           ),
           Layer.succeed(Bus.Service, bus),
+          Layer.succeed(Job.Service, Context.get(context, Job.Service)),
           Layer.succeed(Session.Service, counted),
           Layer.succeed(PacerNotices.Service, notices),
           Layer.succeed(PacerAttention.Service, attention),
@@ -662,6 +687,23 @@ const normalIs = (minutes: number): Json => ({
 /** The `pings.duration_minutes` the chat's settings were patched with, in order. */
 const durations = (h: Harness, sessionID: SessionID) =>
   seen(h, viewPath(sessionID), "PATCH").map((item) => (item.body as Json)["pings.duration_minutes"])
+
+/** The chat's work told CPP (`active`, `inactive`), in order, with the test clock as each arrived. */
+const signals = (h: Harness, sessionID: SessionID) =>
+  seen(h, `${viewPath(sessionID)}/events`, "POST").flatMap((item) => {
+    const type = (item.body as Json).type
+    return type === "active" || type === "inactive" ? [{ type, at: item.at }] : []
+  })
+const activities = (h: Harness, sessionID: SessionID) => signals(h, sessionID).map((item) => item.type)
+
+/** Starts a background job in the real job service, and answers what ends it. */
+const background = (h: Harness, jobID: string, recovery: Job.Recovery) =>
+  Effect.gen(function* () {
+    const end = yield* Deferred.make<string>()
+    yield* h.jobs.start({ id: jobID, type: recovery.kind, recovery, run: Deferred.await(end) })
+    yield* h.jobs.background(jobID)
+    return Deferred.succeed(end, "done").pipe(Effect.andThen(h.jobs.wait({ id: jobID })))
+  })
 
 /** Calls of a step of the chat: a call's start, and its end. */
 const tools = (h: Harness, sessionID: SessionID, assistantMessageID: SessionMessage.ID) => ({
@@ -2026,55 +2068,53 @@ describe("PacerConnection chats", () => {
     }),
   )
 
+  // The owner, 2026-11-21: "I feel like this should also be done by CPP and openforge just telling cpp 'this idle chat
+  // is still active' after it's ending turn rather than it happening in openforge right?"
   it.effect(
-    "keeps a chat warm 4 hours while it waits on a foreground command or subagent, and its normal duration while a background job of it runs",
+    "tells CPP a chat is active while it waits on a foreground command or subagent or a background job of it runs, inactive once the last ends, and sets no duration",
     () =>
       Effect.gen(function* () {
         const h = yield* harness()
         yield* online(h)
         const id = yield* chat(h)
-        // CPP gives the chat 90 minutes without its own (Codex's on 2026-11-21): a wait's 4 hours are longer.
+        // CPP gives the chat 90 minutes without its own (Codex's on 2026-11-21): no wait asks for 4 hours any more.
         h.cpp.views.set(PacerSessionID.make(id), chatView(PacerSessionID.make(id), h.cpp.time(), normalIs(90)))
         const assistantMessageID = yield* step(h, id)
         const { call, done } = tools(h, id, assistantMessageID)
-        const patches = () => durations(h, id)
-        const background = (jobID: string, recovery: Job.Recovery) =>
-          Effect.gen(function* () {
-            const end = yield* Deferred.make<string>()
-            yield* h.jobs.start({ id: jobID, type: recovery.kind, recovery, run: Deferred.await(end) })
-            yield* h.jobs.background(jobID)
-            return Deferred.succeed(end, "done").pipe(Effect.andThen(h.jobs.wait({ id: jobID })))
-          })
+        const activity = () => activities(h, id)
 
-        // A background command is no wait, and its job running holds nothing: the chat keeps its normal duration.
+        // A background command: once its call ended, its job is the chat's work, after its turn too.
         yield* call("server", "shell", { command: "bun run dev", background: true })
-        const stopServer = yield* background("sh_server", {
+        const stopServer = yield* background(h, "sh_server", {
           kind: "shell",
           sessionID: id,
           shellID: "sh_server",
           command: "bun run dev",
         })
         yield* done("server")
-        yield* settle
-        expect(patches()).toEqual([])
-        // A foreground wait beside it: 4 hours while any wait lasts, then CPP's own again, the job still running.
+        yield* until("active", () => activity().length === 1)
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        // A foreground wait and a subagent beside it: the chat is active already.
         yield* call("sleep", "shell", { command: "sleep 600" })
-        yield* until("raised", () => patches().length === 1)
         yield* call("agent", "subagent", { prompt: "look" })
         yield* done("sleep")
-        yield* settle
-        expect(patches()).toEqual([240])
         yield* done("agent")
-        yield* until("cleared", () => patches().length === 2)
-        // The command ended: its notice wakes the chat, and the end of that run writes nothing.
+        yield* settle
+        expect(activity()).toEqual(["active"])
+        // The command ended: its notice wakes the chat, and the end of that run ends the chat's work.
         yield* stopServer
         yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
-        yield* settle
-        expect(patches()).toEqual([240, null])
+        yield* until("inactive", () => activity().length === 2)
 
-        // A background subagent is no wait either.
+        // A foreground wait alone, ended by a run stopped while it waited: the call's end comes only at its next run.
+        yield* call("long", "shell", { command: "sleep 3600" })
+        yield* until("active for the wait", () => activity().length === 3)
+        yield* h.bus.publish(SessionEvent.Execution.Interrupted, { sessionID: id, reason: "user" })
+        yield* until("inactive after it", () => activity().length === 4)
+
+        // A background subagent counts for its parent.
         const child = yield* chat(h, id)
-        const stopChild = yield* background(child, {
+        const stopChild = yield* background(h, child, {
           kind: "subagent",
           parentSessionID: id,
           childSessionID: child,
@@ -2083,59 +2123,183 @@ describe("PacerConnection chats", () => {
         })
         yield* call("helper", "subagent", { prompt: "look", background: true })
         yield* done("helper")
-        yield* settle
-        expect(patches()).toHaveLength(2)
-
-        // A run stopped while it waited waits no more, though the call's end is published only at its next run.
-        yield* call("long", "shell", { command: "sleep 3600" })
-        yield* until("raised again", () => patches().length === 3)
-        yield* h.bus.publish(SessionEvent.Execution.Interrupted, { sessionID: id, reason: "user" })
-        yield* until("cleared again", () => patches().length === 4)
+        yield* until("active for the subagent", () => activity().length === 5)
         yield* stopChild
         yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("inactive after the subagent", () => activity().length === 6)
+
+        // An image a run started in the background counts from that run's end.
+        const stopImage = yield* background(h, "img_a", {
+          kind: "image",
+          sessionID: id,
+          path: "/synthetic/a.png",
+          model: "image-a",
+        })
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("active for the image", () => activity().length === 7)
+        yield* stopImage
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("inactive after the image", () => activity().length === 8)
         yield* settle
-        expect(patches()).toEqual([240, null, 240, null])
+        expect(activity()).toEqual([
+          "active",
+          "inactive",
+          "active",
+          "inactive",
+          "active",
+          "inactive",
+          "active",
+          "inactive",
+        ])
+        // Neither a wait nor a job set the chat's duration.
+        expect(durations(h, id)).toEqual([])
       }),
   )
 
-  it.effect("a wait keeps a chat's normal duration when it is longer than 4 hours", () =>
-    Effect.gen(function* () {
-      const h = yield* harness()
-      yield* online(h)
-      const [unread, read] = yield* Effect.forEach([0, 1], () => chat(h))
-      for (const sessionID of [unread, read])
-        h.cpp.views.set(
-          PacerSessionID.make(sessionID),
-          chatView(PacerSessionID.make(sessionID), h.cpp.time(), normalIs(300)),
-        )
-      const steps = yield* Effect.forEach([unread, read], (sessionID) => step(h, sessionID))
-      yield* ask(h, read)
-
-      // Without its view held, a wait asks for 4 hours, and CPP's answer tells it the chat's normal 5 hours.
-      const first = tools(h, unread, steps[0])
-      yield* first.call("sleep", "shell", { command: "sleep 600" })
-      yield* until("raised to its normal", () => durations(h, unread).length === 2)
-      // With its view held, at once.
-      const second = tools(h, read, steps[1])
-      yield* second.call("sleep", "shell", { command: "sleep 600" })
-      yield* until("raised", () => durations(h, read).length === 1)
-      // A wait's end clears it: a duration equal to the chat's normal one is none of its own.
-      yield* first.done("sleep")
-      yield* second.done("sleep")
-      yield* until("cleared", () => durations(h, unread).length === 3 && durations(h, read).length === 2)
-      yield* settle
-      expect(durations(h, unread)).toEqual([240, 300, null])
-      expect(durations(h, read)).toEqual([300, null])
-    }),
-  )
-
   it.effect(
-    "a duration of ours from an earlier openforge is cleared when the chat's view is read, a job running or not",
+    "tells a chat's activity again every 20 minutes while its work lasts, and inactive at the renewal when its job ended unseen",
     () =>
       Effect.gen(function* () {
         const h = yield* harness()
         yield* online(h)
-        const [idle, working, waited, normal, own] = yield* Effect.forEach([0, 1, 2, 3, 4], () => chat(h))
+        const id = yield* chat(h)
+        const assistantMessageID = yield* step(h, id)
+        const { call, done } = tools(h, id, assistantMessageID)
+        yield* call("server", "shell", { command: "bun run dev", background: true })
+        const stop = yield* background(h, "sh_dev", {
+          kind: "shell",
+          sessionID: id,
+          shellID: "sh_dev",
+          command: "bun run dev",
+        })
+        yield* done("server")
+        yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: id })
+        yield* until("active", () => signals(h, id).length === 1)
+        const start = signals(h, id)[0].at
+        /** Moves the clock on by `ms`, 20 s at a time, CPP's heartbeat keeping the stream open. */
+        const pass = Effect.fnUntraced(function* (ms: number) {
+          for (let left = ms; left > 0; left -= 20_000) {
+            yield* TestClock.adjust(Math.min(left, 20_000))
+            yield* heartbeat(h)
+          }
+        })
+
+        // Not before 20 minutes, then at 20 and 40.
+        yield* pass(PacerConnection.RENEW_MS - 20_000)
+        yield* settle
+        expect(signals(h, id)).toHaveLength(1)
+        yield* pass(20_000)
+        yield* until("renewed", () => signals(h, id).length === 2)
+        yield* pass(PacerConnection.RENEW_MS)
+        yield* until("renewed again", () => signals(h, id).length === 3)
+        // The job ends without waking the chat: the next renewal counts it out.
+        yield* stop
+        yield* settle
+        expect(signals(h, id)).toHaveLength(3)
+        yield* pass(PacerConnection.RENEW_MS)
+        yield* until("inactive", () => signals(h, id).length === 4)
+        // Nothing more once the work ended.
+        yield* pass(PacerConnection.RENEW_MS)
+        yield* settle
+        expect(seen(h, "/pacer/v1/stream")).toHaveLength(1)
+        expect(signals(h, id)).toEqual(
+          [0, 1, 2, 3].map((renewals, index) => ({
+            type: index < 3 ? "active" : "inactive",
+            at: start + renewals * PacerConnection.RENEW_MS,
+          })),
+        )
+        expect(durations(h, id)).toEqual([])
+      }),
+  )
+
+  it.effect(
+    "holds a wait's 4 hours or the chat's longer normal duration on a CPP that refuses the activity events, asking it once per connection",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        // CPP 7483fd09, before the activity events.
+        h.cpp.events = ["closed", "compacted", "model_changed", "reverted", "agent_switched", "label", "tool_calls"]
+        yield* online(h)
+        const [worker, unread, read] = yield* Effect.forEach([0, 1, 2], () => chat(h))
+        const view = (sessionID: SessionID, minutes: number) =>
+          h.cpp.views.set(
+            PacerSessionID.make(sessionID),
+            chatView(PacerSessionID.make(sessionID), h.cpp.time(), normalIs(minutes)),
+          )
+        view(worker, 90)
+        view(unread, 300)
+        view(read, 300)
+        const steps = yield* Effect.forEach([worker, unread, read], (sessionID) => step(h, sessionID))
+        yield* ask(h, read)
+        const asked = () =>
+          h.cpp.seen.filter(
+            (item) =>
+              item.method === "POST" &&
+              item.path.endsWith("/events") &&
+              ["active", "inactive"].includes(String((item.body as Json).type)),
+          )
+
+        // The first wait asks for the activity, which CPP refuses: the wait holds 4 hours, as 0.0.74 did.
+        const first = tools(h, worker, steps[0])
+        yield* first.call("sleep", "shell", { command: "sleep 600" })
+        yield* until("held", () => durations(h, worker).length === 1)
+        expect(asked()).toHaveLength(1)
+        // A chat whose normal duration is longer holds that, with and without its view held; CPP isn't asked again.
+        const second = tools(h, unread, steps[1])
+        yield* second.call("sleep", "shell", { command: "sleep 600" })
+        yield* until("raised to its normal", () => durations(h, unread).length === 2)
+        const third = tools(h, read, steps[2])
+        yield* third.call("sleep", "shell", { command: "sleep 600" })
+        yield* until("raised", () => durations(h, read).length === 1)
+        // A background job holds nothing there.
+        yield* first.call("server", "shell", { command: "bun run dev", background: true })
+        const stop = yield* background(h, "sh_server", {
+          kind: "shell",
+          sessionID: worker,
+          shellID: "sh_server",
+          command: "bun run dev",
+        })
+        yield* first.done("server")
+        // Each wait's end clears its duration.
+        yield* first.done("sleep")
+        yield* second.done("sleep")
+        yield* third.done("sleep")
+        yield* until(
+          "cleared",
+          () =>
+            durations(h, worker).length === 2 && durations(h, unread).length === 3 && durations(h, read).length === 2,
+        )
+        yield* settle
+        expect(durations(h, worker)).toEqual([240, null])
+        expect(durations(h, unread)).toEqual([240, 300, null])
+        expect(durations(h, read)).toEqual([300, null])
+        expect(asked()).toHaveLength(1)
+
+        // A reconnect asks once more, while a wait runs: refused again, the wait's duration stays, and no loop.
+        yield* first.call("again", "shell", { command: "sleep 600" })
+        yield* until("held again", () => durations(h, worker).length === 3)
+        const states = seen(h, "/pacer/v1/state").length
+        h.cpp.end()
+        yield* ahead("connected again", () => seen(h, "/pacer/v1/state").length === states + 1 && h.cpp.streams() === 1)
+        yield* until("asked again", () => asked().length === 2)
+        for (let second = 1; second <= 60; second++) {
+          yield* TestClock.adjust("1 second")
+          if (second % 25 === 0) yield* heartbeat(h)
+        }
+        yield* settle
+        expect(asked()).toHaveLength(2)
+        expect(durations(h, worker)).toEqual([240, null, 240])
+        yield* stop
+      }),
+  )
+
+  it.effect(
+    "clears a duration of ours from an earlier openforge when the chat's view is read, a wait or a job running or not",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        yield* online(h)
+        const [idle, working, waited, normal, waiting, own] = yield* Effect.forEach([0, 1, 2, 3, 4, 5], () => chat(h))
         const view = (sessionID: SessionID, minutes: number) =>
           h.cpp.views.set(
             PacerSessionID.make(sessionID),
@@ -2150,27 +2314,99 @@ describe("PacerConnection chats", () => {
         // A wait's 4 hours, and a wait's longer normal duration.
         view(waited, 240)
         view(normal, 300)
+        // A wait's 4 hours, the chat waiting again.
+        view(waiting, 240)
         // One set on CPP's own page stays.
         view(own, 90)
-        const end = yield* Deferred.make<string>()
-        yield* h.jobs.start({
-          id: "sh_dev",
-          type: "shell",
-          recovery: { kind: "shell", sessionID: working, shellID: "sh_dev", command: "bun run dev" },
-          run: Deferred.await(end),
+        const stop = yield* background(h, "sh_dev", {
+          kind: "shell",
+          sessionID: working,
+          shellID: "sh_dev",
+          command: "bun run dev",
         })
-        yield* h.jobs.background("sh_dev")
-        const all = [idle, working, waited, normal, own]
-        for (const sessionID of all) yield* step(h, sessionID)
+        const all = [idle, working, waited, normal, waiting, own]
+        const steps = yield* Effect.forEach(all, (sessionID) => step(h, sessionID))
+        yield* tools(h, waiting, steps[4]).call("sleep", "shell", { command: "sleep 600" })
         for (const sessionID of all) yield* h.connection.chat(sessionID)
-        yield* until("all four cleared", () =>
-          [idle, working, waited, normal].every((sessionID) => durations(h, sessionID).length === 1),
+        const cleared = [idle, working, waited, normal, waiting]
+        yield* until("all five cleared", () => cleared.every((sessionID) => durations(h, sessionID).length === 1))
+        yield* settle
+        for (const sessionID of cleared) expect(durations(h, sessionID)).toEqual([null])
+        expect(seen(h, viewPath(own), "PATCH")).toEqual([])
+        expect(activities(h, waiting)).toEqual(["active"])
+        yield* stop
+      }),
+  )
+
+  it.effect(
+    "tells CPP again after a restart or a reconnect which chats have work, and inactive for one whose job ended meanwhile",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness()
+        const [restarted, waiting, ended] = yield* Effect.forEach([0, 1, 2], () => chat(h))
+        // The service starts with a background job of a chat CPP lists, as after a restart: no event of it came here.
+        const stopRestarted = yield* background(h, "sh_restarted", {
+          kind: "shell",
+          sessionID: restarted,
+          shellID: "sh_restarted",
+          command: "bun run dev",
+        })
+        h.cpp.stated = [{ id: 7, ext: PacerSessionID.make(restarted), descendants: [] }]
+        yield* online(h)
+        yield* until("active after the restart", () => activities(h, restarted).length === 1)
+
+        // Two more chats with work: a wait, and a job that ends while CPP is away.
+        const waitStep = yield* step(h, waiting)
+        yield* tools(h, waiting, waitStep).call("sleep", "shell", { command: "sleep 600" })
+        const endedStep = yield* step(h, ended)
+        const endedTools = tools(h, ended, endedStep)
+        yield* endedTools.call("server", "shell", { command: "bun run dev", background: true })
+        const stopEnded = yield* background(h, "sh_ended", {
+          kind: "shell",
+          sessionID: ended,
+          shellID: "sh_ended",
+          command: "bun run dev",
+        })
+        yield* endedTools.done("server")
+        yield* until("both active", () => activities(h, waiting).length === 1 && activities(h, ended).length === 1)
+
+        const states = seen(h, "/pacer/v1/state").length
+        h.cpp.end()
+        yield* stopEnded
+        yield* ahead("connected again", () => seen(h, "/pacer/v1/state").length === states + 1 && h.cpp.streams() === 1)
+        yield* until(
+          "told again",
+          () =>
+            activities(h, restarted).length === 2 &&
+            activities(h, waiting).length === 2 &&
+            activities(h, ended).length === 2,
         )
         yield* settle
-        for (const sessionID of [idle, working, waited, normal]) expect(durations(h, sessionID)).toEqual([null])
-        expect(seen(h, viewPath(own), "PATCH")).toEqual([])
-        yield* Deferred.succeed(end, "done")
+        expect(activities(h, restarted)).toEqual(["active", "active"])
+        expect(activities(h, waiting)).toEqual(["active", "active"])
+        expect(activities(h, ended)).toEqual(["active", "inactive"])
+        yield* stopRestarted
       }),
+  )
+
+  it.effect("tells no inactive for a chat closed with work: CPP ends its activity with its pings", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* online(h)
+      const parent = yield* chat(h)
+      const child = yield* chat(h, parent)
+      yield* step(h, parent)
+      const childStep = yield* step(h, child)
+      const events = () => seen(h, `${viewPath(child)}/events`, "POST").map((item) => (item.body as Json).type)
+      yield* tools(h, child, childStep).call("sleep", "shell", { command: "sleep 600" })
+      yield* until("active", () => events().length === 1)
+      // The subagent's run ends: its chat is closed, which ends its activity on CPP.
+      yield* h.bus.publish(SessionEvent.Execution.Succeeded, { sessionID: child })
+      yield* until("closed", () => events().length === 2)
+      for (let minute = 0; minute < 3; minute++) yield* TestClock.adjust(PacerConnection.RENEW_MS)
+      yield* settle
+      expect(events()).toEqual(["active", "closed"])
+    }),
   )
 
   it.effect("compacts a chat CPP asks to, unless it runs, has queued input or a staged revert", () =>

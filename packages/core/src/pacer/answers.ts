@@ -105,9 +105,10 @@ const decodeCppDown = Schema.decodeUnknownOption(CppDown)
 /**
  * Whether a failure of a request to the CLIProxyPacer provider says that neither CPP nor the tunnel in front of it can
  * serve: a transport failure other than a timeout, a 502 or 504, or CPP's "CPP is down" 503 (its CLIENT-GUIDE,
- * "Answers a client gets back"). Not CPP's other 503s (`pacer_transient_wait`, `auth_unavailable`), nor a 429: CPP is
- * there and says how long to wait, or not to loop. A timed-out attempt keeps its own cap (`ModelRetry`), and a
- * transport failure while reading cut a stream CPP had answered: the next request says whether CPP is there.
+ * "Answers a client gets back"). Not CPP's other 503s (`pacer_transient_wait`, `auth_unavailable`,
+ * {@link noReachable}'s), nor a 429: CPP is there and says how long to wait, or not to loop. A timed-out attempt keeps
+ * its own cap (`ModelRetry`), and a transport failure while reading cut a stream CPP had answered: the next request
+ * says whether CPP is there.
  */
 export function outage(model: Model.Ref, failure: AIError) {
   if (model.providerID !== provider) return false
@@ -115,7 +116,32 @@ export function outage(model: Model.Ref, failure: AIError) {
   if (reason._tag === "Transport") return reason.code !== "Timeout" && reason.operation !== "read"
   const status = reason.http?.status
   if (status === 502 || status === 504) return true
-  return status === 503 && reason.body !== undefined && Option.isSome(decodeCppDown(reason.body))
+  if (status !== 503 || reason.body === undefined || noReachable(model, failure)) return false
+  return Option.isSome(decodeCppDown(reason.body))
+}
+
+// What CPP said before `no_reachable_account` (`pair_health.rs`, `cpp_down`): "CPP is down", for one model.
+const NoReachableBefore = Schema.fromJsonString(
+  Schema.Struct({
+    error: Schema.Struct({
+      message: Schema.String.check(Schema.isPattern(/^CPP is down: no account for .+ can be reached from here/)),
+    }),
+  }),
+)
+const decodeNoReachableBefore = Schema.decodeUnknownOption(NoReachableBefore)
+
+/**
+ * Whether a request to the CLIProxyPacer provider was refused because no account that serves its model can be reached
+ * from the instance that answered (the pair's network rule, `pair_health.rs`): CPP's `503 no_reachable_account`, in
+ * `auth_unavailable`'s shapes with a `Retry-After`, or before it had that code, its "CPP is down: no account for
+ * <model> can be reached from here" 503. CPP itself is there and serves its other models, so this is a wait for the
+ * model, as {@link noLogin}'s, never an outage that moves to another address: the other instance forwards to this one.
+ */
+export function noReachable(model: Model.Ref, failure: AIError) {
+  if (model.providerID !== provider || failure.reason.http?.status !== 503) return false
+  const body = failure.reason.body
+  if ((body ?? failure.reason.message).includes("no_reachable_account")) return true
+  return body !== undefined && Option.isSome(decodeNoReachableBefore(body))
 }
 
 /**

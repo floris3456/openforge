@@ -53,7 +53,10 @@ export const NO_LOGIN_WAIT = 60_000
 /** The longest `Retry-After` a run of waits for a free login trusts, as ModelRetry's `RETRY_AFTER_MAX`. */
 const NO_LOGIN_FOR = 15 * 60_000
 
-/** With `endpoints`, an outage first moves to another of CPP's addresses that answers, and then retries at once. */
+/**
+ * With `endpoints`, an outage first moves to another of CPP's addresses that answers, and then retries at once; a
+ * failure within `PacerEndpoint.MOVE_HOLD` of a move waits its own gap and `Retry-After` where it is.
+ */
 export const policy = (sessionID: SessionSchema.ID, from?: Progress, endpoints?: PacerEndpoint.Interface) =>
   Effect.gen(function* () {
     const retry = yield* ModelRetry.resume(from)
@@ -67,9 +70,12 @@ export const policy = (sessionID: SessionSchema.ID, from?: Progress, endpoints?:
         const now = yield* Clock.currentTimeMillis
         const gateway = PacerAnswers.badGateway(input.model, input.cause)
         outageSince = input.retry && PacerAnswers.outage(input.model, input.cause) ? (outageSince ?? now) : undefined
-        // No free login: the wait is the Retry-After or NO_LOGIN_WAIT, whichever is shorter, and the tries before the
-        // first such answer's Retry-After ends are free; past it they count as any retry.
-        const noLogin = input.retry && PacerAnswers.noLogin(input.model, input.cause)
+        // No free login, or none that can be reached from CPP's instance: the wait is the Retry-After or NO_LOGIN_WAIT,
+        // whichever is shorter, and the tries before the first such answer's Retry-After ends are free; past it they
+        // count as any retry.
+        const noLogin =
+          input.retry &&
+          (PacerAnswers.noLogin(input.model, input.cause) || PacerAnswers.noReachable(input.model, input.cause))
         const retryAfterMs = "retryAfterMs" in input.cause.reason ? input.cause.reason.retryAfterMs : undefined
         noLoginUntil = noLogin ? (noLoginUntil ?? now + Math.min(retryAfterMs ?? 0, NO_LOGIN_FOR)) : undefined
         const free = noLogin && now < (noLoginUntil ?? now)

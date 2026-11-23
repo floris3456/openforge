@@ -1,6 +1,7 @@
 export * as ImageFit from "./fit.js"
 
 import type { SessionRunnerModel } from "../session/runner/model.js"
+import { ImageRuler } from "./ruler.js"
 
 // Optimized images (spec images): what each model reads, and an image fitted to it once, the same bytes every time.
 // A model without an entry keeps today's handling.
@@ -20,6 +21,18 @@ export interface Model {
   readonly imageBytes: number
   /** Base64 bytes per visual token at most: an image's share of `bytes`, and so its quality. */
   readonly bytesPerToken: number
+  /** How `image.show` zooms for it: enlarged with the ruler ({@link zoom}, spec image-zoom); without it, as {@link crop} does. */
+  readonly zoom?: Zoom
+}
+
+/** The enlarging zoom with the token-grid ruler (spec image-zoom). */
+export interface Zoom {
+  /** The largest whole factor a region is enlarged by. */
+  readonly enlarge: number
+  /** The zoom image's long and short edge at most, besides the model's own limits. */
+  readonly box: { readonly long: number; readonly short: number }
+  /** The ruler's margin along the picture's top and left, in the model's token cells. */
+  readonly margin: { readonly top: number; readonly left: number }
 }
 
 /** ⌈h/cell⌉ × (⌈w/cell⌉ + row) + image tokens; an image of fewer than `least` pixels is first scaled up to that area. */
@@ -42,6 +55,9 @@ export const MODELS: Readonly<Record<string, Model>> = {
     bytes: 120_000_000,
     imageBytes: 10_000_000,
     bytesPerToken: 120,
+    // The owner, 2026-11-23: "we never send an image over to anthropic over 2576×1449"; the ruler's margin is 56 px on
+    // the left and 28 px at the top (spec image-zoom).
+    zoom: { enlarge: 4, box: { long: 2_576, short: 1_449 }, margin: { top: 1, left: 2 } },
   },
   // DeepSeek's Vision guide and its image token calculator (V4.1: 14-px patches merged 3×3, a token ending each row
   // and 2 an image, an image under 544×544 px scaled up to it): 1,024 tokens, about 1300×1300 px; 4,096 px a side once
@@ -174,6 +190,58 @@ export interface Region {
  * to the original's pixels by the scale it was shown at; one outside the image, or empty, is refused with the reason.
  */
 export const crop = async (source: Uint8Array, region: Region, model: Model) => {
+  const placed = await place(source, region, model)
+  if (typeof placed === "string") return placed
+  const original = placed.original
+  const opened = await open(source, placed.format)
+  const cut = opened.photon.crop(
+    opened.image,
+    original.left,
+    original.top,
+    original.left + original.width,
+    original.top + original.height,
+  )
+  const bytes = cut.get_bytes()
+  opened.image.free()
+  cut.free()
+  return { bytes, shown: placed.shown, original }
+}
+
+/**
+ * The enlarging zoom (spec image-zoom): `region`, in the pixels of the image as shown, cut out of the original at full
+ * resolution and enlarged with Lanczos3 by the largest whole factor from `settings.enlarge` down to 2 at which it fits the
+ * zoom's box and the model's limits with the ruler's margin, else shown at its own resolution, and the ruler drawn
+ * around it ({@link ImageRuler}), as PNG. Never shrunk: a region too large at its own resolution is refused with the
+ * largest region of its shape that fits, in pixels as shown. One outside the image, or empty, is refused as by
+ * {@link crop}.
+ */
+export const zoom = async (source: Uint8Array, region: Region, model: Model, settings: Zoom) => {
+  const placed = await place(source, region, model)
+  if (typeof placed === "string") return placed
+  const original = placed.original
+  const margin = { top: settings.margin.top * model.grid.cell, left: settings.margin.left * model.grid.cell }
+  const fits = (width: number, height: number) => within(margin.left + width, margin.top + height, model, settings)
+  if (!fits(original.width, original.height)) {
+    const largest = largestShown(region, placed.scale, placed.size, fits)
+    return `The zoom shows a region at its own resolution or enlarged, never smaller: this one, ${original.width}×${original.height} pixels of the original, is too large with its ruler. The largest region of its shape that fits is ${largest.width}×${largest.height} pixels of the image as shown.`
+  }
+  const factor =
+    Array.from({ length: Math.max(0, settings.enlarge - 1) }, (_, index) => settings.enlarge - index).find((factor) =>
+      fits(original.width * factor, original.height * factor),
+    ) ?? 1
+  const size = { width: original.width * factor, height: original.height * factor }
+  const opened = await open(source, placed.format)
+  const photon = opened.photon
+  const cut = photon.crop(opened.image, original.left, original.top, original.left + original.width, original.top + original.height)
+  const scaled = factor === 1 ? cut : photon.resize(cut, size.width, size.height, photon.SamplingFilter.Lanczos3)
+  const ruled = ImageRuler.draw(photon, scaled, original, margin, model.grid.cell)
+  const bytes = ruled.image.get_bytes()
+  new Set([opened.image, cut, scaled, ruled.image]).forEach((item) => item.free())
+  return { bytes, shown: placed.shown, original, factor, size, margin, ticks: ruled.ticks }
+}
+
+/** Where `region`, in pixels of the image as shown, lies in the original; the reason when it is outside or empty. */
+const place = async (source: Uint8Array, region: Region, model: Model) => {
   const meta = await new Bun.Image(source).metadata()
   const shown = fit(meta.width, meta.height, model)
   if (
@@ -190,16 +258,59 @@ export const crop = async (source: Uint8Array, region: Region, model: Model) => 
   const top = Math.floor(region.y * scale.y)
   const right = Math.min(meta.width, Math.ceil((region.x + region.width) * scale.x))
   const bottom = Math.min(meta.height, Math.ceil((region.y + region.height) * scale.y))
-  // Photon reads no EXIF orientation, so a JPEG is first turned the way it is shown, losslessly.
-  const upright = meta.format === "jpeg" ? await new Bun.Image(source).png({ compressionLevel: 1 }).bytes() : source
+  return {
+    format: meta.format,
+    size: { width: meta.width, height: meta.height },
+    shown,
+    scale,
+    original: { left, top, width: right - left, height: bottom - top },
+  }
+}
+
+// Photon reads no EXIF orientation, so a JPEG is first turned the way it is shown, losslessly.
+const open = async (source: Uint8Array, format: string) => {
+  const upright = format === "jpeg" ? await new Bun.Image(source).png({ compressionLevel: 1 }).bytes() : source
   const { PhotonNormalize } = await import("./photon-normalize.js")
   const photon = await PhotonNormalize.load()
-  const image = photon.PhotonImage.new_from_byteslice(upright)
-  const cut = photon.crop(image, left, top, right, bottom)
-  const bytes = cut.get_bytes()
-  image.free()
-  cut.free()
-  return { bytes, shown, original: { left, top, width: right - left, height: bottom - top } }
+  return { photon, image: photon.PhotonImage.new_from_byteslice(upright) }
+}
+
+/** Whether an image of this size is within the zoom's box and what the model reads without downscaling it. */
+const within = (width: number, height: number, model: Model, zoom: Zoom) => {
+  const read = fit(width, height, model)
+  return (
+    Math.max(width, height) <= zoom.box.long &&
+    Math.min(width, height) <= zoom.box.short &&
+    read.width === width &&
+    read.height === height
+  )
+}
+
+// The largest region of `region`'s shape, in pixels as shown, that fits wherever it is placed: a shown region covers
+// at most one original pixel more than its size times the scale. By bisection over its scale.
+const largestShown = (
+  region: Region,
+  scale: { readonly x: number; readonly y: number },
+  size: { readonly width: number; readonly height: number },
+  fits: (width: number, height: number) => boolean,
+) => {
+  const shape = (part: number) => ({
+    width: Math.max(1, Math.floor(region.width * part)),
+    height: Math.max(1, Math.floor(region.height * part)),
+  })
+  const holds = (part: number) => {
+    const shown = shape(part)
+    return fits(
+      Math.min(size.width, Math.ceil(shown.width * scale.x) + 1),
+      Math.min(size.height, Math.ceil(shown.height * scale.y) + 1),
+    )
+  }
+  const search = (low: number, high: number, steps: number): number => {
+    if (steps === 0) return low
+    const middle = (low + high) / 2
+    return holds(middle) ? search(middle, high, steps - 1) : search(low, middle, steps - 1)
+  }
+  return shape(search(0, 1, 40))
 }
 
 /**

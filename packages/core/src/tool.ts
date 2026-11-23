@@ -55,12 +55,24 @@ export interface Interface extends State.Transformable<Editor> {
     permissions?: Permission.Ruleset,
     location?: Location.Interface,
     pins?: CodeModePins.Pins,
+    variant?: Variant,
   ) => Effect.Effect<Snapshot>
   /**
    * Runs a Code Mode program with no model step over only the Code Mode tools named in `tools` (still subject to
    * whole-tool permission filtering and each tool's own executor policy), with no `fetch`.
    */
   readonly check: (input: CheckInput) => Effect.Effect<CodeMode.Result>
+}
+
+/**
+ * openforge: the tools as a chat on one model is offered them, where a tool's text differs by model (spec image-zoom).
+ * `key` names the variant, the same for every chat it applies to; `tool` gives a registration as such a chat gets it,
+ * the registration itself when it does not differ, and must give the same answer for the same registration. The
+ * registry builds each variant's tools, Code Mode's catalog and `search` among them, once per registry revision.
+ */
+export interface Variant {
+  readonly key: string
+  readonly tool: (tool: Tool.Info & { readonly id: string }) => Tool.Info & { readonly id: string }
 }
 
 export interface CheckInput {
@@ -210,18 +222,41 @@ const layer = Layer.effect(
       return yield* executeTool(selected, event.tool, event.input, context)
     })
 
-    let catalog:
-      | {
-          data: Data
-          names: string
-          /** The config's pins this value was built for, as JSON. */
-          pinning: string
-          path: boolean
-          inventory: CodeModeTool.Inventory
-          value: CodeModeCatalog.Inventory
-          definition: ToolDefinition
-        }
-      | undefined
+    // One per variant's key ("" without one), so chats on different models in one folder don't rebuild each other's.
+    const catalogs = new Map<
+      string,
+      {
+        data: Data
+        names: string
+        /** The config's pins this value was built for, as JSON. */
+        pinning: string
+        path: boolean
+        inventory: CodeModeTool.Inventory
+        value: CodeModeCatalog.Inventory
+        definition: ToolDefinition
+      }
+    >()
+    // openforge: each variant's registrations as offered, and a reshaped direct tool's definition, for this revision.
+    let variants: { data: Data; byKey: Map<string, Map<string, Tool.Info & { readonly id: string }>> } | undefined
+    const reshapedDefinitions = new WeakMap<Tool.Info, ToolDefinition>()
+    const offered = (data: Data, variant: Variant, tool: Tool.Info & { readonly id: string }) => {
+      if (variants?.data !== data) variants = { data, byKey: new Map() }
+      const byName = variants.byKey.get(variant.key) ?? new Map<string, Tool.Info & { readonly id: string }>()
+      variants.byKey.set(variant.key, byName)
+      const known = byName.get(tool.id)
+      if (known) return known
+      const made = variant.tool(tool)
+      byName.set(tool.id, made)
+      return made
+    }
+    const definitionOf = (data: Data, name: string, tool: Tool.Info) => {
+      if (tool === data.tools.get(name)) return data.definitions.get(name)!
+      const known = reshapedDefinitions.get(tool)
+      if (known) return known
+      const made = definition(tool)
+      reshapedDefinitions.set(tool, made)
+      return made
+    }
     const state = State.create<Data, Editor>({
       name: "tool",
       initial: () => ({
@@ -262,7 +297,8 @@ const layer = Layer.effect(
         },
       }),
       notify: (value) => {
-        catalog = undefined
+        catalogs.clear()
+        variants = undefined
         return Effect.forEach(
           value.errors,
           ({ kind, name, namespace, error }) =>
@@ -280,7 +316,7 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions, location, configured = {}) =>
+      snapshot: Effect.fn("Tool.snapshot")((permissions, location, configured = {}, variant) =>
         Effect.map(flags.enabled("full_codemode"), (enabled) => {
           const pinning = JSON.stringify(configured)
           const path = enabled && location !== undefined
@@ -289,7 +325,7 @@ const layer = Layer.effect(
           const rules = permissions ?? []
           for (const [name, tool] of data.tools) {
             if (whollyDisabled(tool.options?.permission ?? name, rules)) continue
-            active.set(name, tool)
+            active.set(name, variant ? offered(data, variant, tool) : tool)
           }
           const codeModeEnabled = !whollyDisabled("execute", rules)
           // Without Code Mode its tools would be unreachable, so expose them as direct tools instead.
@@ -301,6 +337,8 @@ const layer = Layer.effect(
           // Discovery is immutable for a registry revision and visible tool set. Keep executors
           // fresh, but share the inventory, whose prepared runtime and much larger rendered catalog
           // are cached by identity, and the execute tool's definition across steps.
+          const key = variant?.key ?? ""
+          const catalog = catalogs.get(key)
           const cached =
             catalog?.data === data && catalog.names === names && catalog.pinning === pinning && catalog.path === path
               ? catalog
@@ -319,7 +357,7 @@ const layer = Layer.effect(
             : (cached?.value ?? CodeModeTool.catalog(codeModeInventory, configured))
           const codeModeDefinition = codeModeTool && (cached?.definition ?? definition(codeModeTool))
           if (codeModeCatalog && codeModeDefinition)
-            catalog = {
+            catalogs.set(key, {
               data,
               names,
               pinning,
@@ -327,13 +365,13 @@ const layer = Layer.effect(
               inventory: codeModeInventory,
               value: codeModeCatalog,
               definition: codeModeDefinition,
-            }
+            })
           return {
             ...(codeModeCatalog === undefined ? {} : { codeModeCatalog }),
             definitions: [
               ...Array.from(direct)
                 .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-                .map(([name]) => data.definitions.get(name)!),
+                .map(([name, tool]) => definitionOf(data, name, tool)),
               ...(codeModeDefinition ? [codeModeDefinition] : []),
             ],
             execute: Effect.fnUntraced(function* (input: Parameters<Snapshot["execute"]>[0]) {

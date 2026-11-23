@@ -26,6 +26,7 @@ import { llmClient } from "../effect/app-node-platform.js"
 import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
 import { Model } from "../model.js"
+import { PacerAnswers } from "../pacer/answers.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
 import { PacerSummaries } from "../pacer/summaries.js"
 import { State } from "../state.js"
@@ -970,6 +971,14 @@ export const layer = Layer.effect(
           rejections++
           continue
         }
+
+        // CPP's ask is answered as well without the summary (the step goes out again, moved or cold), so its model
+        // having no free login, or none CPP can reach, is not waited out here.
+        if (
+          (trigger.reason === "move" || trigger.reason === "cold") &&
+          (PacerAnswers.noLogin(context.model.ref, cause) || PacerAnswers.noReachable(context.model.ref, cause))
+        )
+          return yield* Effect.fail<Failure>({ error })
 
         const decision = yield* policy({
           cause,

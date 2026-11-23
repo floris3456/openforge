@@ -1,6 +1,18 @@
 export * as PacerEndpoint from "./endpoint.js"
 
-import { Context, Effect, Fiber, FiberHandle, Layer, Option, Schema, Semaphore, Stream, SubscriptionRef } from "effect"
+import {
+  Clock,
+  Context,
+  Effect,
+  Fiber,
+  FiberHandle,
+  Layer,
+  Option,
+  Schema,
+  Semaphore,
+  Stream,
+  SubscriptionRef,
+} from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
 import { Event } from "@opencode/schema/config"
 import { Integration } from "@opencode/schema/integration"
@@ -72,12 +84,21 @@ export interface Interface {
   /**
    * After an outage at `from` (the current endpoint by default), moves to the first other address of the list whose
    * `/healthz` answers 200: the active instance's, the other instances', the public one last. True when the endpoint
-   * is now another one than `from`.
+   * is now another one than `from`. Within {@link MOVE_HOLD} of the last move it stays, and is false for an outage
+   * at the current endpoint.
    */
   readonly failover?: (from?: Endpoint) => Effect.Effect<boolean>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerEndpoint") {}
+
+/**
+ * How long the endpoint stays after a move before an outage may move it again: the `Retry-After` of CPP's "CPP is
+ * down". Two addresses whose `/healthz` both answer while their requests fail would otherwise trade places at every
+ * retry, each move rebuilding CPP's provider and retrying at once (2026-11-23: about 5 moves a second for 15 minutes).
+ * A failure meanwhile waits its retry's own gap and `Retry-After`.
+ */
+export const MOVE_HOLD = 30_000
 
 /**
  * Where CPP is, from provider settings and the integration's active credential: the settings' `baseURL`, else the
@@ -245,6 +266,8 @@ export function layer(options?: Config.Options) {
       // The set-up endpoint, and the addresses it is reached at, the set-up one first.
       let home: Endpoint | undefined
       let list: ReadonlyArray<Address> = []
+      // When an outage last moved the endpoint.
+      let moved: number | undefined
 
       const stored = Effect.fn("PacerEndpoint.stored")(function* (endpoint: Endpoint) {
         const record = yield* kv.get(storeKey)
@@ -295,6 +318,7 @@ export function layer(options?: Config.Options) {
           if (same(next.endpoint, home)) return
           home = next.endpoint
           list = home ? yield* stored(home) : []
+          moved = undefined
           yield* FiberHandle.clear(back)
           if (same(home, yield* SubscriptionRef.get(current))) return
           yield* SubscriptionRef.set(current, home)
@@ -320,6 +344,8 @@ export function layer(options?: Config.Options) {
           if (!now || !home) return false
           // Another outage moved it meanwhile.
           if (from && !same(from, now)) return true
+          const time = yield* Clock.currentTimeMillis
+          if (moved !== undefined && time - moved < MOVE_HOLD) return false
           const found = yield* Effect.findFirst(
             list.filter((item) => item.root !== now.root).toSorted((a, b) => rank(a) - rank(b)),
             (item) => healthy(item.root),
@@ -327,6 +353,7 @@ export function layer(options?: Config.Options) {
           const target = Option.getOrUndefined(found)
           const next = target && at(target)
           if (!next) return false
+          moved = time
           yield* SubscriptionRef.set(current, next)
           if (next.home === undefined) yield* FiberHandle.clear(back)
           if (next.home !== undefined) yield* FiberHandle.run(back, watch, { onlyIfMissing: true })

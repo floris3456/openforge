@@ -105,6 +105,12 @@ const cppDown = "CPP is down: the active instance could not be reached from here
 const transport = (fields: { readonly operation: "request" | "read"; readonly code?: string }) =>
   new AIError({ reason: new TransportError({ message: "transport", transport: "http", ...fields }) })
 
+// pair_health.rs's answer for a model whose accounts the pair's network rule blocks: before its code, and since.
+const blockedBefore =
+  "CPP is down: no account for claude-test-1 can be reached from here (this instance leaves from 2001:db8::1 and the other one from 192.0.2.7)"
+const blocked =
+  "no_reachable_account: No account for claude-test-1 can be reached from here: its proxy home cannot be reached from here: refused"
+
 describe("PacerAnswers.badGateway", () => {
   test("is any 502 on the CLIProxyPacer provider", () => {
     expect(
@@ -156,6 +162,58 @@ describe("PacerAnswers.outage", () => {
     )
     expect(PacerAnswers.outage(other, answer(502, "error code: 502"))).toBe(false)
     expect(PacerAnswers.outage(other, transport({ operation: "request", code: "ECONNREFUSED" }))).toBe(false)
+  })
+
+  test("is not CPP's 503 for a model none of whose accounts it can reach, before its code and since", () => {
+    expect(PacerAnswers.outage(chat, answer(503, { error: { message: blockedBefore, type: "server_error" } }))).toBe(
+      false,
+    )
+    expect(
+      PacerAnswers.outage(chat, answer(503, { type: "error", error: { type: "api_error", message: blockedBefore } })),
+    ).toBe(false)
+    expect(
+      PacerAnswers.outage(
+        chat,
+        answer(503, { error: { message: blocked, type: "server_error", code: "internal_server_error" } }),
+      ),
+    ).toBe(false)
+  })
+})
+
+describe("PacerAnswers.noReachable", () => {
+  test("is CPP's 503 no_reachable_account, or its 'CPP is down: no account … can be reached from here', on each route", () => {
+    for (const message of [blocked, blockedBefore]) {
+      expect(
+        PacerAnswers.noReachable(chat, answer(503, { type: "error", error: { type: "api_error", message } })),
+      ).toBe(true)
+      expect(PacerAnswers.noReachable(chat, answer(503, { error: { message, type: "server_error" } }))).toBe(true)
+      expect(
+        PacerAnswers.noReachable(chat, answer(503, { error: { code: 503, message, status: "UNAVAILABLE" } })),
+      ).toBe(true)
+    }
+    expect(
+      PacerAnswers.noReachable(
+        chat,
+        answer(503, { error: { message: "no account can be reached", code: "no_reachable_account" } }),
+      ),
+    ).toBe(true)
+  })
+
+  test("is not CPP's other 'CPP is down', another 503, the same answer with another status, or another provider's", () => {
+    expect(
+      PacerAnswers.noReachable(
+        chat,
+        answer(503, { error: { message: cppDown, type: "server_error", code: "cpp_down" } }),
+      ),
+    ).toBe(false)
+    expect(
+      PacerAnswers.noReachable(chat, answer(503, { error: { message: "auth_unavailable: no auth available" } })),
+    ).toBe(false)
+    expect(PacerAnswers.noReachable(chat, answer(502, { error: { message: blocked } }))).toBe(false)
+    expect(PacerAnswers.noReachable(chat, answer(503, { error: { message: `upstream: ${blockedBefore}` } }))).toBe(
+      false,
+    )
+    expect(PacerAnswers.noReachable(other, answer(503, { error: { message: blocked } }))).toBe(false)
   })
 })
 

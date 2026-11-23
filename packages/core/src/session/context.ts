@@ -30,6 +30,7 @@ import { PacerTools } from "../pacer/tools.js"
 import { ReferenceInstructions } from "../reference/instructions.js"
 import { SkillInstructions } from "../skill/instructions.js"
 import { Tool } from "../tool.js"
+import { ImageTool } from "../tool/plugin/image.js"
 import { AgentNotFoundError } from "./error.js"
 import { SessionHistory } from "./history.js"
 import { InstructionEntry } from "./instruction-entry.js"
@@ -269,9 +270,14 @@ const layer = Layer.effect(
       yield* primeList(session, agent.info, permissions, point.cold, reported)
       // The person's and the project's Code Mode pins, every config document's merged, with the agent's over them.
       const pins = CodeModePins.forAgent(configured, agent.info)
+      // openforge: the tools with the chat's model's own texts (spec image-zoom), from its image entry.
+      const chatModel =
+        point.resolved ??
+        Option.getOrUndefined(yield* resolveModel(session, { kind: "primary", agent: agent.info.id }).pipe(Effect.option))
+      const variant = chatModel === undefined ? undefined : ImageTool.variant(yield* images(chatModel))
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions, location, pins),
+          tools: registry.snapshot(permissions, location, pins, variant),
           builtins: builtins.load(),
           discovery: discovery.load(),
           skills: skillInstructions.load(permissions),

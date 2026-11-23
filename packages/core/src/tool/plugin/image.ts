@@ -15,8 +15,8 @@ import { PictureRemoved } from "@opencode/util/picture-removed"
 // The image bank's tool (spec images): `image.show` lists a chat's images, shows one again whole, or zooms into a region
 // of its full-resolution original. Registered only while Settings › Session "Optimize images" is on; a Code Mode tool in
 // the `image` group, beside opencode's `image.generate` (spec image-tools). What it shows is an image arriving like any
-// other: numbered with its line, counted toward the limits. A model whose entry has `zoom` gets the enlarging zoom with
-// the owner's ruler, and a description of it with its own numbers (spec image-zoom).
+// other: numbered with its line, counted toward the limits. A model whose entry has `zoom` gets the enlarging zoom, with
+// the owner's ruler when the entry has it, and a description of it with its own numbers (spec image-zoom).
 
 const Pixels = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -44,7 +44,8 @@ export const ZOOM = fitted(
 export const zoomFor = (id: string, model: ImageFit.Model) => {
   const zoom = model.zoom
   if (!zoom) return fitted(limitsOf(id, model))
-  return `The region to show, in pixels of the image as shown. It is enlarged by the largest whole factor, up to ${zoom.enlarge}×, that keeps it within ${zoom.box.long}×${zoom.box.short} and ${model.tokens.toLocaleString("en-US")} visual tokens, and never shrunk: a region too large to show at its own resolution is refused, and the refusal gives the largest region of its shape that fits. Choose the region loosely, with room around what you want to see so that it is surely all in frame; it need not be tight. It comes with rulers in a margin along its top and left, labelled in the original's pixels.`
+  const box = zoom.box ? `${zoom.box.long}×${zoom.box.short}` : `a long edge of ${model.edge.toLocaleString("en-US")} px`
+  return `The region to show, in pixels of the image as shown. It is enlarged by the largest whole factor, up to ${zoom.enlarge}×, that keeps it within ${box} and ${model.tokens.toLocaleString("en-US")} visual tokens, and never shrunk: a region too large to show at its own resolution is refused, and the refusal gives the largest region of its shape that fits. Choose the region loosely, with room around what you want to see so that it is surely all in frame; it need not be tight.${zoom.ruler ? " It comes with rulers in a margin along its top and left, labelled in the original's pixels." : ""}`
 }
 
 const input = (zoom: string) =>
@@ -176,7 +177,7 @@ export const Plugin = {
                   content: [
                     {
                       type: "text" as const,
-                      text: `Region ${o.width}×${o.height} of image ${input.id} (x=${zoom.x} y=${zoom.y} ${zoom.width}×${zoom.height} as shown): x ${x} and y ${y} of the original's pixels, ${cut.factor > 1 ? `enlarged ${cut.factor}× to ${size}` : `shown at its own resolution, ${size}`}. ${ImageRuler.note(cut.margin, chat.model.grid.cell)}`,
+                      text: `Region ${o.width}×${o.height} of image ${input.id} (x=${zoom.x} y=${zoom.y} ${zoom.width}×${zoom.height} as shown): x ${x} and y ${y} of the original's pixels, ${cut.factor > 1 ? `enlarged ${cut.factor}× to ${size}` : `shown at its own resolution, ${size}`}.${settings.ruler ? ` ${ImageRuler.note(cut.margin, chat.model.grid.cell)}` : ""}`,
                     },
                     {
                       type: "file" as const,

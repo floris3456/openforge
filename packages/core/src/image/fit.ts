@@ -21,18 +21,18 @@ export interface Model {
   readonly imageBytes: number
   /** Base64 bytes per visual token at most: an image's share of `bytes`, and so its quality. */
   readonly bytesPerToken: number
-  /** How `image.show` zooms for it: enlarged with the ruler ({@link zoom}, spec image-zoom); without it, as {@link crop} does. */
+  /** How `image.show` zooms for it: enlarged ({@link zoom}, spec image-zoom); without it, as {@link crop} does. */
   readonly zoom?: Zoom
 }
 
-/** The enlarging zoom with the token-grid ruler (spec image-zoom). */
+/** The enlarging zoom (spec image-zoom). */
 export interface Zoom {
   /** The largest whole factor a region is enlarged by. */
   readonly enlarge: number
-  /** The zoom image's long and short edge at most, besides the model's own limits. */
-  readonly box: { readonly long: number; readonly short: number }
-  /** The ruler's margin along the picture's top and left, in the model's token cells. */
-  readonly margin: { readonly top: number; readonly left: number }
+  /** The zoom image's long and short edge at most, besides the model's own limits; without it, only those. */
+  readonly box?: { readonly long: number; readonly short: number }
+  /** The token-grid ruler, with its margin along the picture's top and left in the model's token cells; without it, none. */
+  readonly ruler?: { readonly margin: { readonly top: number; readonly left: number } }
 }
 
 /** ⌈h/cell⌉ × (⌈w/cell⌉ + row) + image tokens; an image of fewer than `least` pixels is first scaled up to that area. */
@@ -57,7 +57,7 @@ export const MODELS: Readonly<Record<string, Model>> = {
     bytesPerToken: 120,
     // The owner, 2026-11-23: "we never send an image over to anthropic over 2576×1449"; the ruler's margin is 56 px on
     // the left and 28 px at the top (spec image-zoom).
-    zoom: { enlarge: 4, box: { long: 2_576, short: 1_449 }, margin: { top: 1, left: 2 } },
+    zoom: { enlarge: 4, box: { long: 2_576, short: 1_449 }, ruler: { margin: { top: 1, left: 2 } } },
   },
   // DeepSeek's Vision guide and its image token calculator (V4.1: 14-px patches merged 3×3, a token ending each row
   // and 2 an image, an image under 544×544 px scaled up to it): 1,024 tokens, about 1300×1300 px; 4,096 px a side once
@@ -73,6 +73,10 @@ export const MODELS: Readonly<Record<string, Model>> = {
     bytes: 24 * 1024 * 1024,
     imageBytes: 32 * 1024 * 1024,
     bytesPerToken: 270,
+    // Enlarged within its own limits, without the ruler: on DeepSeek's benchmark the ruler undid enlarging's gain in a
+    // single look (9.1 px against 4.6, today 10.4) and added nothing in the zoom loop (2.3 px either way, today 4.3)
+    // for 6,000-7,500 more output tokens an answer (spec image-zoom, deepseek-v4.1-flash).
+    zoom: { enlarge: 4 },
   },
 }
 
@@ -210,20 +214,23 @@ export const crop = async (source: Uint8Array, region: Region, model: Model) => 
 /**
  * The enlarging zoom (spec image-zoom): `region`, in the pixels of the image as shown, cut out of the original at full
  * resolution and enlarged with Lanczos3 by the largest whole factor from `settings.enlarge` down to 2 at which it fits the
- * zoom's box and the model's limits with the ruler's margin, else shown at its own resolution, and the ruler drawn
- * around it ({@link ImageRuler}), as PNG. Never shrunk: a region too large at its own resolution is refused with the
- * largest region of its shape that fits, in pixels as shown. One outside the image, or empty, is refused as by
- * {@link crop}.
+ * zoom's box and the model's limits, with the ruler's margin when it has one, else shown at its own resolution; the
+ * ruler, when it has one, drawn around it ({@link ImageRuler}); as PNG. Never shrunk: a region too large at its own
+ * resolution is refused with the largest region of its shape that fits, in pixels as shown. One outside the image, or
+ * empty, is refused as by {@link crop}.
  */
 export const zoom = async (source: Uint8Array, region: Region, model: Model, settings: Zoom) => {
   const placed = await place(source, region, model)
   if (typeof placed === "string") return placed
   const original = placed.original
-  const margin = { top: settings.margin.top * model.grid.cell, left: settings.margin.left * model.grid.cell }
+  const ruler = settings.ruler
+  const margin = ruler
+    ? { top: ruler.margin.top * model.grid.cell, left: ruler.margin.left * model.grid.cell }
+    : { top: 0, left: 0 }
   const fits = (width: number, height: number) => within(margin.left + width, margin.top + height, model, settings)
   if (!fits(original.width, original.height)) {
     const largest = largestShown(region, placed.scale, placed.size, fits)
-    return `The zoom shows a region at its own resolution or enlarged, never smaller: this one, ${original.width}×${original.height} pixels of the original, is too large with its ruler. The largest region of its shape that fits is ${largest.width}×${largest.height} pixels of the image as shown.`
+    return `The zoom shows a region at its own resolution or enlarged, never smaller: this one, ${original.width}×${original.height} pixels of the original, is too large${ruler ? " with its ruler" : ""}. The largest region of its shape that fits is ${largest.width}×${largest.height} pixels of the image as shown.`
   }
   const factor =
     Array.from({ length: Math.max(0, settings.enlarge - 1) }, (_, index) => settings.enlarge - index).find((factor) =>
@@ -234,10 +241,10 @@ export const zoom = async (source: Uint8Array, region: Region, model: Model, set
   const photon = opened.photon
   const cut = photon.crop(opened.image, original.left, original.top, original.left + original.width, original.top + original.height)
   const scaled = factor === 1 ? cut : photon.resize(cut, size.width, size.height, photon.SamplingFilter.Lanczos3)
-  const ruled = ImageRuler.draw(photon, scaled, original, margin, model.grid.cell)
-  const bytes = ruled.image.get_bytes()
-  new Set([opened.image, cut, scaled, ruled.image]).forEach((item) => item.free())
-  return { bytes, shown: placed.shown, original, factor, size, margin, ticks: ruled.ticks }
+  const ruled = ruler ? ImageRuler.draw(photon, scaled, original, margin, model.grid.cell) : undefined
+  const bytes = (ruled?.image ?? scaled).get_bytes()
+  new Set([opened.image, cut, scaled, ruled?.image ?? scaled]).forEach((item) => item.free())
+  return { bytes, shown: placed.shown, original, factor, size, margin, ticks: ruled?.ticks ?? [] }
 }
 
 /** Where `region`, in pixels of the image as shown, lies in the original; the reason when it is outside or empty. */
@@ -278,9 +285,9 @@ const open = async (source: Uint8Array, format: string) => {
 /** Whether an image of this size is within the zoom's box and what the model reads without downscaling it. */
 const within = (width: number, height: number, model: Model, zoom: Zoom) => {
   const read = fit(width, height, model)
+  const box = zoom.box
   return (
-    Math.max(width, height) <= zoom.box.long &&
-    Math.min(width, height) <= zoom.box.short &&
+    (!box || (Math.max(width, height) <= box.long && Math.min(width, height) <= box.short)) &&
     read.width === width &&
     read.height === height
   )

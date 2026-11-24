@@ -2,6 +2,7 @@ import { TextAttributes } from "@opentui/core"
 import { onCleanup } from "solid-js"
 import { useNewDesigns } from "../config"
 import { useTheme, useThemes } from "../context/theme"
+import { AGENT_LABEL, AGENT_THEME, themeLabel } from "../theme/agent"
 import { useDialog } from "../ui/dialog"
 import { DialogSelect, type DialogSelectRef } from "../ui/dialog-select"
 
@@ -22,8 +23,10 @@ export function DialogThemeList(props: { onClose?: () => void; scope?: "global" 
   const global = themes.global
   const own = themes.own
   const names = Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+  // openforge (spec agent-theme): the agent theme comes first after the global row, as the special entry it is.
   const options = [
-    ...(project ? [{ title: `Global theme (${global})`, value: GLOBAL }] : []),
+    ...(project ? [{ title: `Global theme (${themeLabel(global)})`, value: GLOBAL }] : []),
+    { title: AGENT_LABEL, value: AGENT_THEME, footer: global === AGENT_THEME ? "global" : "agent" },
     ...names.map((name) => ({
       title: name,
       value: name,
@@ -31,9 +34,13 @@ export function DialogThemeList(props: { onClose?: () => void; scope?: "global" 
     })),
   ]
   const description = (() => {
-    if (project) return own ? `${project.name} uses its own theme · global: ${global}` : `${project.name} uses the global theme`
+    if (project)
+      return own
+        ? `${project.name} uses its own theme · global: ${themeLabel(global)}`
+        : `${project.name} uses the global theme`
     const shown = themes.project
-    if (props.scope === "global" && shown && themes.own) return `Global theme · ${shown.name} keeps its own: ${themes.own}`
+    if (props.scope === "global" && shown && themes.own)
+      return `Global theme · ${shown.name} keeps its own: ${themeLabel(themes.own)}`
     return "Global theme"
   })()
   const target = (value: string) => (value === GLOBAL ? global : value)

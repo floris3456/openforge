@@ -5,18 +5,20 @@ import os from "node:os"
 import path from "node:path"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { useTheme, useThemes } from "../context/theme"
-import { AGENT_THEME, copyTheme, nameProblem, parseHex, roleColor, roles, setRole } from "../theme/custom"
+import { AGENT_LABEL, AGENT_THEME } from "../theme/agent"
+import { copyTheme, nameProblem, parseHex, roleColor, roles, setRole } from "../theme/custom"
 import { formats, importScheme } from "../theme/import"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { DialogSelect } from "../ui/dialog-select"
 import { useToast } from "../ui/toast"
+import { DialogThemeAgent } from "./dialog-theme-agent"
 
 // openforge (spec custom-themes): your own themes, each a file in the global themes folder. A theme that isn't yours is
 // copied into one under a name you give; an imported scheme becomes one. Editing a theme shows it on the screen and
 // saves each colour as you set it.
 
-type Choice = { type: "import" } | { type: "edit"; name: string } | { type: "copy"; name: string }
+type Choice = { type: "import" } | { type: "agent" } | { type: "edit"; name: string } | { type: "copy"; name: string }
 
 /** `onClose` returns to the caller, e.g. Settings, instead of closing every dialog. */
 export function DialogThemeCustomize(props: { onClose?: () => void; focus?: string }) {
@@ -26,10 +28,21 @@ export function DialogThemeCustomize(props: { onClose?: () => void; focus?: stri
   const back = () => dialog.replace(() => <DialogThemeCustomize onClose={props.onClose} focus={props.focus} />)
   const options = [
     { title: "Import a colour scheme…", value: { type: "import" } as Choice, category: "New" },
+    {
+      title: `${AGENT_LABEL}…`,
+      value: { type: "agent" } as Choice,
+      category: "Agent",
+      footer: themes.selected === AGENT_THEME ? "in use" : undefined,
+    },
     ...names
       .filter((name) => themes.custom(name))
       // The name again as search text, so typing a theme of yours finds it before the theme it was copied from.
-      .map((name) => ({ title: name, value: { type: "edit", name } as Choice, category: "Your themes", searchText: name })),
+      .map((name) => ({
+        title: name,
+        value: { type: "edit", name } as Choice,
+        category: "Your themes",
+        searchText: name,
+      })),
     ...names
       .filter((name) => !themes.custom(name))
       .map((name) => ({
@@ -38,12 +51,16 @@ export function DialogThemeCustomize(props: { onClose?: () => void; focus?: stri
         category: "Copy into a theme of your own",
       })),
   ]
-  const current = options.find((option) => option.value.type !== "import" && option.value.name === props.focus)?.value
+  const current = options.find((option) => {
+    const choice = option.value
+    if (choice.type === "agent") return props.focus === AGENT_THEME
+    return choice.type !== "import" && choice.name === props.focus
+  })?.value
 
   return (
     <DialogSelect
       title="Customize themes"
-      description="Pick one of your themes to edit, a theme to copy into one of your own, or import a scheme"
+      description="Pick one of your themes to edit, a theme to copy into one of your own, import a scheme, or set the agent colours"
       options={options}
       current={current}
       onCancel={props.onClose}
@@ -52,6 +69,12 @@ export function DialogThemeCustomize(props: { onClose?: () => void; focus?: stri
         if (choice.type === "edit") return openEditor(dialog, choice.name, props.onClose)
         if (choice.type === "import")
           return dialog.replace(() => <DialogImport onClose={props.onClose} onCancel={back} />)
+        if (choice.type === "agent")
+          return dialog.replace(() => (
+            <DialogThemeAgent
+              onClose={() => dialog.replace(() => <DialogThemeCustomize onClose={props.onClose} focus={AGENT_THEME} />)}
+            />
+          ))
         dialog.replace(() => (
           <DialogName
             title={`Copy ${choice.name}`}
@@ -119,7 +142,11 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
       title={`Edit ${props.name}`}
       description={`Each colour is saved as you set it, for the ${mode} mode`}
       options={options}
-      current={props.focus ? options.find((option) => option.value.type === "role" && option.value.key === props.focus)?.value : undefined}
+      current={
+        props.focus
+          ? options.find((option) => option.value.type === "role" && option.value.key === props.focus)?.value
+          : undefined
+      }
       onCancel={back}
       onMove={(option) => {
         const row = option.value
@@ -140,7 +167,9 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
           themes.set(props.name)
           toast.show({
             variant: "success",
-            message: themes.project ? `${themes.project.name} now uses ${props.name}` : `${props.name} is now the global theme`,
+            message: themes.project
+              ? `${themes.project.name} now uses ${props.name}`
+              : `${props.name} is now the global theme`,
           })
           return
         }
@@ -345,7 +374,11 @@ function taken(themes: ReturnType<typeof useThemes>, name: string) {
 
 /** `base`, or `base 2`, `base 3` … : the first name no theme has. */
 function freeName(base: string, taken: (name: string) => boolean) {
-  const clean = base.replace(/[^\p{L}\p{N} ._-]/gu, "").trim().slice(0, 36) || "theme"
+  const clean =
+    base
+      .replace(/[^\p{L}\p{N} ._-]/gu, "")
+      .trim()
+      .slice(0, 36) || "theme"
   if (!taken(clean)) return clean
   const free = Array.from({ length: 98 }, (_, index) => `${clean} ${index + 2}`).find((name) => !taken(name))
   return free ?? clean

@@ -45,7 +45,7 @@ export type {
   ResolvedThemeTokens,
   StatefulColor,
 } from "./types.js"
-export { rgbToOklch } from "./color.js"
+export { oklchToHex, rgbToOklch } from "./color.js"
 export { expandTheme } from "./expand.js"
 export { migrateV1 } from "./v1-migrate.js"
 export { migrateV1NewDesigns } from "./v1-migrate-new-designs.js"

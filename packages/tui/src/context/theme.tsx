@@ -19,9 +19,20 @@ import {
   type ThemeDocumentSource,
 } from "../theme"
 import { generateSystem, terminalMode } from "../theme/system"
+import { AGENT_SAMPLE_HUE, AGENT_THEME, agentHue, agentSettings, agentTheme, type AgentSettings } from "../theme/agent"
 import { discoverThemes } from "../theme/discovery"
 import { createComponentTheme, type ComponentTheme } from "../theme/component"
-import { batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
+import {
+  batch,
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+  type Accessor,
+  type ParentProps,
+} from "solid-js"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import { setProjectTheme, useConfig, useNewDesigns, type Config } from "../config"
@@ -113,9 +124,11 @@ type State = {
   /** Names that failed to load, passed over until the theme files are read again or the name is chosen again. */
   failed: Record<string, true | undefined>
   /** Choices written but not yet read back from the config, so the screen changes at once. null: the project's own goes. */
-  pending: { global?: string; projects: Record<string, string | null | undefined> }
+  pending: { global?: string; projects: Record<string, string | null | undefined>; agent?: AgentSettings }
   /** The themes of the global themes folder: the custom themes the customizer edits. */
   custom: Record<string, true | undefined>
+  /** Agent theme settings shown on this screen over the ones in force, while one is picked; written nowhere. */
+  agentPreview: Partial<AgentSettings> | undefined
 }
 
 type Themes = {
@@ -130,6 +143,8 @@ type Themes = {
   /** Whose theme shows: the project's own or the global one. */
   readonly level: "project" | "global"
   readonly project: ThemeSubject["project"]
+  /** The root chat on screen, whose agent's colour the agent theme takes. */
+  readonly chat: string | undefined
   all: typeof allThemes
   has: typeof hasTheme
   currentSyntax: Accessor<SyntaxStyle>
@@ -152,9 +167,15 @@ type Themes = {
   custom(name: string): boolean
   /** Writes a custom theme into the global themes folder and reads the theme files again. */
   saveCustom(name: string, theme: ThemeV1Json): Promise<void>
-  /** Renames a custom theme; the global theme and project themes of its old name take the new one. */
+  /** Renames a custom theme; the global theme, project themes and the agent theme's base of its old name take the new one. */
   renameCustom(from: string, to: string): Promise<void>
   removeCustom(name: string): Promise<void>
+  /** openforge (spec agent-theme): the agent theme's settings in force. */
+  readonly agent: AgentSettings
+  /** Writes the agent theme's settings and shows them at once. */
+  setAgent(settings: Partial<AgentSettings>): void
+  /** Shows the agent theme with these settings over the ones in force, on this screen only, until cleared. */
+  previewAgent(settings: Partial<AgentSettings> | undefined): void
   show(subject: ThemeSubject): void
   afterPaint(): void
   onError(handler: ThemeErrorHandler): () => void
@@ -176,6 +197,7 @@ const [store, setStore] = createStore<State>({
   failed: {},
   pending: { projects: {} },
   custom: {},
+  agentPreview: undefined,
 })
 const [themeSources, setThemeSources] = createSignal(allThemes())
 
@@ -203,6 +225,7 @@ const themeContext = createSimpleContext({
         draft.failed = {}
         draft.pending = { projects: {} }
         draft.custom = {}
+        draft.agentPreview = undefined
       }),
     )
 
@@ -219,7 +242,7 @@ const themeContext = createSimpleContext({
       (): Record<string, ThemeDocumentSource> =>
         newDesigns() ? { opencode2: getOpenCode2Theme(), ...themeSources() } : themeSources(),
     )
-    const has = (name: string) => Boolean(name) && available()[name] !== undefined
+    const has = (name: string) => name === AGENT_THEME || (Boolean(name) && available()[name] !== undefined)
     const usable = (name: string | undefined) => (name && has(name) && !store.failed[name] ? name : undefined)
     const global = () => store.pending.global ?? config.theme?.name ?? "opencode"
     const own = () => {
@@ -370,11 +393,39 @@ const themeContext = createSimpleContext({
 
     createEffect(on(shown, (name) => name === "system" && refreshPalette(), { defer: true }))
 
+    // openforge (spec agent-theme): the agent theme is its base theme, with the chosen parts in the hue of the chat on
+    // screen; with no chat its base theme shows, or a sample hue while it is previewed. One document per hue and
+    // settings, kept while its base theme's source is.
+    // A base theme this TUI doesn't have counts as opencode.
+    const agent = (): AgentSettings => {
+      const settings = store.pending.agent ?? agentSettings(config.theme?.agent)
+      return available()[settings.base] ? settings : { ...settings, base: "opencode" }
+    }
+    const agentDocuments = new WeakMap<object, Map<string, ThemeDocumentSource>>()
+    function loadAgent() {
+      const settings = { ...agent(), ...store.agentPreview }
+      const sources = available()
+      const base = sources[settings.base] ? settings.base : "opencode"
+      const source = sources[base]!
+      const chat = store.subject.chat
+      const hue = chat ? agentHue(chat) : store.preview === AGENT_THEME ? AGENT_SAMPLE_HUE : undefined
+      if (hue === undefined || !settings.follow.length) return loadTheme(source, base, store.mode, newDesigns())
+      const key = `${hue}|${[...settings.follow].sort().join(",")}|${settings.strength}|${newDesigns()}`
+      const documents = agentDocuments.get(source) ?? new Map<string, ThemeDocumentSource>()
+      agentDocuments.set(source, documents)
+      const document =
+        documents.get(key) ??
+        (agentTheme(parseTheme(source, base, { newDesigns: newDesigns() }), hue, settings) as ThemeDocumentSource)
+      documents.set(key, document)
+      return loadTheme(document, AGENT_THEME, store.mode, newDesigns())
+    }
+
     const initStarted = performance.now()
     const selected = createMemo(() => {
       const sources = available()
-      const name = sources[shown()] ? shown() : "opencode"
+      const name = has(shown()) ? shown() : "opencode"
       try {
+        if (name === AGENT_THEME) return loadAgent()
         return loadTheme(sources[name], name, store.mode, newDesigns())
       } catch (error) {
         if (name === "opencode") throw error
@@ -416,6 +467,23 @@ const themeContext = createSimpleContext({
         })
     }
 
+    let agentWrites = 0
+    function writeAgent(settings: AgentSettings) {
+      const write = ++agentWrites
+      setStore("pending", "agent", reconcile(settings))
+      void configState
+        .update((draft) => {
+          draft.theme = {
+            ...draft.theme,
+            agent: { base: settings.base, follow: [...settings.follow], strength: settings.strength },
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (write === agentWrites) setStore("pending", "agent", undefined)
+        })
+    }
+
     function choose(theme: string) {
       if (!has(theme)) return false
       setStore("failed", theme, undefined)
@@ -440,6 +508,9 @@ const themeContext = createSimpleContext({
       },
       get project() {
         return store.subject.project
+      },
+      get chat() {
+        return store.subject.chat
       },
       all: available,
       has,
@@ -485,6 +556,8 @@ const themeContext = createSimpleContext({
         await themes.custom.write(to, source as ThemeV1Json)
         await configState.update((draft) => {
           if (draft.theme?.name === from) draft.theme = { ...draft.theme, name: to }
+          if (draft.theme?.agent?.base === from)
+            draft.theme = { ...draft.theme, agent: { ...draft.theme.agent, base: to } }
           for (const [id, entry] of Object.entries(draft.projects ?? {}) as [string, Config.ProjectSettings][])
             if (entry.theme?.name === from) setProjectTheme(draft, id, to)
         })
@@ -494,6 +567,15 @@ const themeContext = createSimpleContext({
       async removeCustom(name) {
         await themes.custom?.remove(name)
         await syncCustomThemes()
+      },
+      get agent() {
+        return agent()
+      },
+      setAgent(settings) {
+        writeAgent({ ...agent(), ...settings })
+      },
+      previewAgent(settings) {
+        setStore("agentPreview", settings ? reconcile(settings) : undefined)
       },
       show(subject) {
         const project = subject.project && subject.project.id !== "global" ? subject.project : undefined

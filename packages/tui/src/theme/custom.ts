@@ -10,9 +10,6 @@ import { resolveThemeColors } from "./resolve"
 
 export type Mode = "dark" | "light"
 
-/** openforge (spec agent-theme): the special theme whose chosen colours follow the shown chat's agent. */
-export const AGENT_THEME = "agent"
-
 export type Role = { key: ThemeColor; title: string; group: string; help: string }
 
 const role = (group: string) => (key: ThemeColor, title: string, help: string) => ({ key, title, group, help })
@@ -108,7 +105,10 @@ export function copyTheme(source: ThemeDocumentSource, name: string): ThemeV1Jso
     }),
   ) as ThemeV1Json["theme"]
   const opacity = "theme" in source ? (source as ThemeV1Json).theme.thinkingOpacity : undefined
-  return { $schema: "https://opencode.ai/theme.json", theme: opacity === undefined ? theme : { ...theme, thinkingOpacity: opacity } }
+  return {
+    $schema: "https://opencode.ai/theme.json",
+    theme: opacity === undefined ? theme : { ...theme, thinkingOpacity: opacity },
+  }
 }
 
 /** The colour a role has in a mode, as a hex. */

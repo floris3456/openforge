@@ -138,6 +138,22 @@ export const ProjectSettings = Schema.Struct({
 })
 export type ProjectSettings = Schema.Schema.Type<typeof ProjectSettings>
 
+export const AgentThemePart = Schema.Literals(["background", "panels", "borders", "accents", "headings", "text"])
+export type AgentThemePart = Schema.Schema.Type<typeof AgentThemePart>
+export const AgentThemeStrength = Schema.Literals(["subtle", "clear", "strong"])
+export type AgentThemeStrength = Schema.Schema.Type<typeof AgentThemeStrength>
+
+// openforge (spec agent-theme): the theme named "agent" is a base theme whose chosen parts take the shown chat's agent
+// colour. Settings that aren't valid count as unset.
+export const AgentTheme = Schema.Struct({
+  base: Schema.optional(Schema.String).annotate({ description: "The theme the agent theme starts from (opencode)" }),
+  follow: Schema.optional(Schema.Array(AgentThemePart)).annotate({
+    description: "The parts that take the agent's colour (background, panels); status, diff and code colours never do",
+  }),
+  strength: Schema.optional(AgentThemeStrength).annotate({ description: "How much of the agent's colour (clear)" }),
+})
+export type AgentTheme = Schema.Schema.Type<typeof AgentTheme>
+
 export const Info = Schema.Struct({
   theme: Schema.optional(
     Schema.Struct({
@@ -145,16 +161,16 @@ export const Info = Schema.Struct({
       mode: Schema.optional(Schema.Literals(["system", "dark", "light"])).annotate({
         description: "Color mode; 'system' follows the terminal",
       }),
+      agent: Schema.optional(lenient(AgentTheme)).annotate({
+        description: "The agent theme: chosen parts of a base theme take the shown chat's agent colour",
+      }),
     }),
   ).annotate({ description: "Color theme settings" }),
   // openforge (spec project-themes): each project's own settings, under openforge's id of the project. An entry that
   // isn't valid counts as empty, and the rest of the file still applies.
   projects: Schema.optional(
     lenient(
-      Schema.Record(
-        Schema.String,
-        ProjectSettings.pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({})))),
-      ),
+      Schema.Record(Schema.String, ProjectSettings.pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({}))))),
     ),
   ).annotate({ description: "Settings of one project, by openforge's project id" }),
   keybinds: Schema.optional(TuiKeybind.KeybindOverrides).annotate({ description: "Custom key bindings" }),

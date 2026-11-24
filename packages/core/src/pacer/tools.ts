@@ -180,6 +180,42 @@ export interface Answer {
   readonly place?: Place | null
 }
 
+export interface ReviewItemInput {
+  readonly sessionID: SessionID
+  readonly parentID?: SessionID
+  /** The chat's memory project, the path's `{project}`. */
+  readonly identity: string
+  /** The chat's project headers (`PacerProject`). */
+  readonly project: Readonly<Record<string, string>>
+  readonly task: string
+  readonly item: number
+}
+
+const ReviewFile = Schema.Struct({
+  sha256: Schema.String,
+  mime: Schema.String,
+  bytes: Schema.Number,
+  width: Schema.optional(Schema.NullOr(Schema.Number)),
+  height: Schema.optional(Schema.NullOr(Schema.Number)),
+  lines: Schema.optional(Schema.NullOr(Schema.Number)),
+})
+
+/** A review item as CPP's client read answers it: a picture's file and comparison, a text's file, a decision's none. */
+export const ReviewItem = Schema.Struct({
+  task: Schema.String,
+  round: Schema.Number,
+  n: Schema.Number,
+  kind: Schema.String,
+  name: Schema.String,
+  file: Schema.NullOr(ReviewFile),
+  compare: Schema.NullOr(ReviewFile),
+  compare_name: Schema.NullOr(Schema.String),
+})
+export type ReviewItem = typeof ReviewItem.Type
+
+/** A file's bytes wait this long, as an upload does. */
+export const DOWNLOAD_TIMEOUT = Duration.seconds(60)
+
 /** A call CPP did not answer with `{text, data, error}`. */
 export class CallError extends Schema.TaggedError<CallError>()("PacerTools.CallError", {
   /** `invalid`: CPP named problems in the arguments (400); `unknown`: no such tool (404). */
@@ -203,6 +239,13 @@ export interface Interface {
    * a 404 is followed by a `PUT` of them. A file this process sent once is not asked after again.
    */
   readonly upload: (bytes: Uint8Array, mime: string, sha256: string) => Effect.Effect<void, PacerHttp.Error>
+  /**
+   * Item `item` of task `task`'s latest review round with items, as CPP reads it for the chat (workspace spec
+   * `docs/specs/agent-notes.md`, section 1, item 11): `GET /pacer/v1/memory/{project}/tasks/{id}/items/{n}`.
+   */
+  readonly reviewItem: (input: ReviewItemInput) => Effect.Effect<ReviewItem, PacerHttp.Error>
+  /** A file CPP holds, by its SHA-256: `GET /pacer/v1/files/{sha256}`, its bytes and type. */
+  readonly download: (sha256: string) => Effect.Effect<{ readonly bytes: Uint8Array; readonly mime: string }, PacerHttp.Error>
   /** The tools the current endpoint's lists named, with their meta; empty without an endpoint. */
   readonly known: () => Effect.Effect<Known>
   readonly knownChanges: () => Stream.Stream<Known>
@@ -615,6 +658,26 @@ export const layer = Layer.effect(
             return yield* new PacerHttp.Unexpected({ status, reason: `HEAD of ${path} answered ${status}` })
           if (status === 404) yield* http.put(path, bytes, mime, { timeout: UPLOAD_TIMEOUT })
           files.set(sha256, now)
+        }),
+      reviewItem: (input) =>
+        http
+          .get(
+            `/pacer/v1/memory/${encodeURIComponent(input.identity)}/tasks/${encodeURIComponent(input.task)}/items/${input.item}`,
+            ReviewItem,
+            {
+              failover: true,
+              headers: PacerHeaders.chat({ sessionID: input.sessionID, parentID: input.parentID, project: input.project }),
+            },
+          )
+          .pipe(Effect.map((answer) => answer.body)),
+      download: (sha256) =>
+        Effect.gen(function* () {
+          const answer = yield* http.stream(`/pacer/v1/files/${sha256}`, { timeout: DOWNLOAD_TIMEOUT })
+          const chunks = yield* Stream.runCollect(answer.body)
+          return {
+            bytes: Buffer.concat(Array.from(chunks)),
+            mime: answer.headers["content-type"]?.split(";")[0] ?? "application/octet-stream",
+          }
         }),
       known: () => SubscriptionRef.get(known),
       knownChanges: () => SubscriptionRef.changes(known),

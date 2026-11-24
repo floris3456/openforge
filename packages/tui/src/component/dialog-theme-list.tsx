@@ -26,7 +26,7 @@ export function DialogThemeList(props: { onClose?: () => void; scope?: "global" 
   // openforge (spec agent-theme): the agent theme comes first after the global row, as the special entry it is.
   const options = [
     ...(project ? [{ title: `Global theme (${themeLabel(global)})`, value: GLOBAL }] : []),
-    { title: AGENT_LABEL, value: AGENT_THEME, footer: global === AGENT_THEME ? "global" : "agent" },
+    { title: AGENT_LABEL, value: AGENT_THEME, footer: global === AGENT_THEME ? "global" : "per chat" },
     ...names.map((name) => ({
       title: name,
       value: name,

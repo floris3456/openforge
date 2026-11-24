@@ -85,9 +85,9 @@ export function agentTheme(base: ThemeDocument, hue: number, settings: Omit<Agen
 
 // Lightness is kept; chroma per part and strength, at least the colour's own for parts that are colours already.
 const chroma: Record<AgentThemePart, readonly [number, number, number]> = {
-  background: [0.02, 0.04, 0.065],
-  panels: [0.02, 0.035, 0.055],
-  borders: [0.04, 0.07, 0.1],
+  background: [0.03, 0.05, 0.08],
+  panels: [0.03, 0.05, 0.075],
+  borders: [0.05, 0.08, 0.11],
   text: [0.015, 0.03, 0.05],
   headings: [0.08, 0.11, 0.14],
   accents: [0.08, 0.11, 0.14],

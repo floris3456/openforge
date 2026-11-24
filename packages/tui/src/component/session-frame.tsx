@@ -15,6 +15,7 @@ import { useSessionTerminals } from "../context/session-terminals"
 import { usePromptRef } from "../context/prompt"
 import { usePanel } from "../context/panel"
 import { useStorage } from "../context/storage"
+import { useSidebarState } from "../context/sidebar-state"
 import { useDialog } from "../ui/dialog"
 import { Session } from "../routes/session"
 import { Sidebar } from "../routes/session/sidebar"
@@ -63,6 +64,7 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     }
     paneResize.onMouseUp(event)
   }
+  const sidebarState = useSidebarState()
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [activePane, setActivePane] = createSignal<"session" | "right">("session")
   const [restoreTerminalFocus, setRestoreTerminalFocus] = createSignal(false)
@@ -103,7 +105,8 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
   const wide = createMemo(() => dimensions().width - props.verticalTabsWidth > 120)
   const sidebarVisible = createMemo(() => {
     if (sidebarOpen()) return true
-    return (config.data.session?.sidebar ?? "auto") === "auto" && wide()
+    // openforge: the chat's own visibility, else its root chat's, else the Sidebar setting.
+    return (sidebarState.sidebar(props.sessionID) ?? config.data.session?.sidebar ?? "auto") === "auto" && wide()
   })
   const rightPane = createMemo(() => {
     if (activePanel()) return "panel"
@@ -127,11 +130,7 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
   const toggleSidebar = () => {
     batch(() => {
       const visible = rightPane() === "sidebar"
-      void config
-        .update((draft) => {
-          draft.session = { ...draft.session, sidebar: visible ? "hide" : "auto" }
-        })
-        .catch(toast.error)
+      void sidebarState.set(props.sessionID, { sidebar: visible ? "hide" : "auto" }).catch(toast.error)
       setSidebarOpen(!visible)
       if (!visible && activePanel()) panels.close()
       if (!visible && selectedTerminal()) void sessions.selectTerminal(props.sessionID, null).catch(toast.error)

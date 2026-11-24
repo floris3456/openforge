@@ -3,13 +3,14 @@ export * as ImageTool from "./image.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { optional } from "@opencode/schema/schema"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Schema, Stream } from "effect"
 import { Config } from "../../config.js"
 import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import type { Database } from "../../database/database.js"
 import { ImageBank } from "../../image/bank.js"
 import { ImageFit } from "../../image/fit.js"
 import { ImageRuler } from "../../image/ruler.js"
+import { PacerModels } from "../../pacer/models.js"
 import { PacerProject } from "../../pacer/project.js"
 import { PacerTools } from "../../pacer/tools.js"
 import { Session } from "../../session.js"
@@ -22,7 +23,9 @@ import { PictureRemoved } from "@opencode/util/picture-removed"
 // of its full-resolution original. Registered only while Settings › Session "Optimize images" is on; a Code Mode tool in
 // the `image` group, beside opencode's `image.generate` (spec image-tools). What it shows is an image arriving like any
 // other: numbered with its line, counted toward the limits. A model whose entry has `zoom` gets the enlarging zoom, with
-// the owner's ruler when the entry has it, and a description of it with its own numbers (spec image-zoom).
+// the owner's ruler when the entry has it, and a description of it with its own numbers (spec image-zoom). A review
+// item's picture (`task`, `item`, `compare`; workspace spec agent-notes) only while the connected CLIProxyPacer says it
+// has review items (`pacer.memory.review_items`): without them the tool and its text are as they were before.
 
 const Pixels = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
@@ -54,35 +57,45 @@ export const zoomFor = (id: string, model: ImageFit.Model) => {
   return `The region to show, in pixels of the image as shown. It is enlarged by the largest whole factor, up to ${zoom.enlarge}×, that keeps it within ${box} and ${model.tokens.toLocaleString("en-US")} visual tokens, and never shrunk: a region too large to show at its own resolution is refused, and the refusal gives the largest region of its shape that fits. Choose the region loosely, with room around what you want to see so that it is surely all in frame; it need not be tight.${zoom.ruler ? " It comes with rulers in a margin along its top and left, labelled in the original's pixels." : ""}`
 }
 
-const input = (zoom: string) =>
-  Schema.Struct({
-    id: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
-      .annotate({ description: "The image's number, from the line before it: [Image 7: …]. Omit it to list the images." })
-      .pipe(optional),
-    zoom: Schema.Struct({
-      x: Pixels.annotate({ description: "Left edge, in pixels of the image as shown" }),
-      y: Pixels.annotate({ description: "Top edge, in pixels of the image as shown" }),
-      width: Pixels.annotate({ description: "Width, in pixels of the image as shown" }),
-      height: Pixels.annotate({ description: "Height, in pixels of the image as shown" }),
-    })
-      .annotate({ description: zoom })
-      .pipe(optional),
-    task: Schema.String.annotate({
-      description: "A task's id, with item: shows that review item's picture, in its own pixels",
-    }).pipe(optional),
-    item: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
-      .annotate({ description: "The review item's place in the task's round, with task" })
-      .pipe(optional),
-    compare: Schema.Boolean.annotate({ description: "With task and item: show its comparison instead" }).pipe(optional),
+const fields = (zoom: string) => ({
+  id: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+    .annotate({ description: "The image's number, from the line before it: [Image 7: …]. Omit it to list the images." })
+    .pipe(optional),
+  zoom: Schema.Struct({
+    x: Pixels.annotate({ description: "Left edge, in pixels of the image as shown" }),
+    y: Pixels.annotate({ description: "Top edge, in pixels of the image as shown" }),
+    width: Pixels.annotate({ description: "Width, in pixels of the image as shown" }),
+    height: Pixels.annotate({ description: "Height, in pixels of the image as shown" }),
   })
+    .annotate({ description: zoom })
+    .pipe(optional),
+})
+
+const REVIEW_FIELDS = {
+  task: Schema.String.annotate({
+    description: "A task's id, with item: shows that review item's picture, in its own pixels",
+  }).pipe(optional),
+  item: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+    .annotate({ description: "The review item's place in the task's round, with task" })
+    .pipe(optional),
+  compare: Schema.Boolean.annotate({ description: "With task and item: show its comparison instead" }).pipe(optional),
+}
+
+const input = (zoom: string) => Schema.Struct(fields(zoom))
+const reviewInput = (zoom: string) => Schema.Struct({ ...fields(zoom), ...REVIEW_FIELDS })
 
 export const Input = input(ZOOM)
+/** The input while CLIProxyPacer has review items. */
+export const ReviewInput = reviewInput(ZOOM)
 
 // The catalog shows the first line; the zoom's limits are in its signature, where `zoom` is described.
 export const DESCRIPTION = [
   "See this chat's images again, zoom into them, or list them; each result says the scale it is shown at.",
-  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image.show({ id })` shows image `id` again, whole, such as after a compaction. `image.show({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image.show({})` lists the images. `image.show({ task, item })` shows a review item's picture (`compare: true` its comparison) in its own pixels, the ones the task tool's marks take.",
+  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image.show({ id })` shows image `id` again, whole, such as after a compaction. `image.show({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image.show({})` lists the images.",
 ].join("\n")
+
+/** The description while CLIProxyPacer has review items. */
+export const REVIEW_DESCRIPTION = `${DESCRIPTION} \`image.show({ task, item })\` shows a review item's picture (\`compare: true\` its comparison) in its own pixels, the ones the task tool's marks take.`
 
 /** The Code Mode group of the image tools: `image.show` here, `image.generate` in image-generate.ts. */
 export const GROUP = "image"
@@ -93,9 +106,15 @@ const ID = `${GROUP}_show`
 const VARIANTS = new Map(
   Object.entries(ImageFit.MODELS).map(([id, model]): [ImageFit.Model, Tool.Variant] => {
     const shaped = input(zoomFor(id, model))
+    const reviewShaped = reviewInput(zoomFor(id, model))
+    // The registration says whether CLIProxyPacer has review items: its description names them only then.
     return [
       model,
-      { key: `${ID}:${id}`, tool: (tool) => (tool.id === ID ? { ...tool, input: shaped } : tool) },
+      {
+        key: `${ID}:${id}`,
+        tool: (tool) =>
+          tool.id === ID ? { ...tool, input: tool.description === REVIEW_DESCRIPTION ? reviewShaped : shaped } : tool,
+      },
     ]
   }),
 )
@@ -122,6 +141,19 @@ export const Plugin = {
       sessions: Option.getOrUndefined(yield* Effect.serviceOption(Session.Service)),
       projects: Option.getOrUndefined(yield* Effect.serviceOption(PacerProject.Service)),
     }
+    // Whether the connected CLIProxyPacer has review items; a change of it registers the tool again.
+    const models = Option.getOrUndefined(yield* Effect.serviceOption(PacerModels.Service))
+    const offers = { review: models ? (yield* models.get())?.pacer?.memory?.reviewItems === true : false }
+    if (models)
+      yield* models.changes().pipe(
+        Stream.runForEach((catalog) => {
+          const review = catalog?.pacer?.memory?.reviewItems === true
+          if (review === offers.review) return Effect.void
+          offers.review = review
+          return ctx.tool.reload()
+        }),
+        Effect.forkScoped({ startImmediately: true }),
+      )
 
     /** A review item's picture or comparison, whole, from the chat's store or else CLIProxyPacer, by its hash. */
     const reviewItem = Effect.fnUntraced(function* (
@@ -197,16 +229,18 @@ export const Plugin = {
           description: "See this chat's images again and zoom into them, or make new ones.",
         })
         if (!ImageBank.setting(loaded.entries)) return
+        const review = offers.review
         editor.add({
           name: "show",
-          description: DESCRIPTION,
-          input: Input,
+          description: review ? REVIEW_DESCRIPTION : DESCRIPTION,
+          input: review ? ReviewInput : Input,
           options: { namespace: GROUP },
           execute: (input, context) =>
             Effect.gen(function* () {
               const chat = yield* ImageBank.Current
               if (!chat) return yield* failure(NOT_HERE)
-              if (input.task !== undefined) return yield* reviewItem(chat, context.sessionID, { ...input, task: input.task })
+              if (review && "task" in input && input.task !== undefined)
+                return yield* reviewItem(chat, context.sessionID, { ...input, task: input.task })
               if (input.id === undefined) {
                 const images = yield* ImageBank.list(chat.db, chat.sessionID)
                 return {

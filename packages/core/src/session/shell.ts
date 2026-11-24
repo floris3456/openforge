@@ -24,9 +24,14 @@ export const key = (id: Shell.ID) => PREFIX + id
 export const encode = Schema.encodeSync(Schema.fromJsonString(Pending))
 export const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Pending))
 
+/** Starts a `!` command. Its caller runs it uninterruptibly up to its record; only the wait for plugins can be stopped. */
 export const start = Effect.fn("SessionShell.start")(function* (input: { session: Session.Info; command: string }) {
   const instances = yield* Instance.Service
-  const shell = yield* Plugin.awaitActivation.pipe(Effect.andThen(Shell.Service), instances.provide(input.session))
+  const shell = yield* Plugin.awaitActivation.pipe(
+    Effect.andThen(Shell.Service),
+    instances.provide(input.session),
+    Effect.interruptible,
+  )
   const info = yield* shell.create({
     command: input.command,
     cwd: input.session.location.directory,

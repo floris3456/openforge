@@ -22,6 +22,11 @@ import { it } from "./lib/effect"
 const gated = (release: string, before: string, after: string) =>
   `printf %s ${before}; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s ${after}`
 
+// A workspace's command runs in this process and ends with it, not with the test's services: a test that fails before
+// its release would leave it polling for a release file whose folder is gone. Stopping an ended command does nothing.
+const stopped = (shell: Shell.Interface, info: ShellSchema.Info) =>
+  Effect.addFinalizer(() => shell.stop(info.id).pipe(Effect.ignore))
+
 // Takes watch events until the output so far reads `text` (or the command has exited); returns that output.
 const read = (events: Queue.Queue<ShellSchema.WatchEvent>, text: string) =>
   Effect.gen(function* () {
@@ -48,6 +53,7 @@ describe("Shell through the tool runner", () => {
           yield* Effect.gen(function* () {
             const shell = yield* Shell.Service
             const info = yield* shell.create({ shell: "/bin/sh", command: gated(release, "one", "two"), timeout: 0 })
+            yield* stopped(shell, info)
             const events = yield* Queue.unbounded<ShellSchema.WatchEvent>()
             yield* shell.watch(info.id).pipe(
               Stream.runForEach((event) => Queue.offer(events, event)),
@@ -277,6 +283,7 @@ describe("Shell through the tool runner", () => {
               command: `cat ${source}; while [ ! -e ${release} ]; do sleep 0.02; done; printf %s done`,
               timeout: 0,
             })
+            yield* stopped(shell, info)
             yield* eventually(() => fs.existsSync(info.file) && fs.statSync(info.file).size === 5, "the emoji and z")
             // A tail kept from a byte count back, as the TUI's, starts one byte into the emoji.
             const events = yield* Queue.unbounded<ShellSchema.WatchEvent>()

@@ -2,7 +2,8 @@ import { describe, expect } from "bun:test"
 import { Flag } from "@opencode/core/flag"
 import fs from "fs"
 import path from "path"
-import { Context, Effect, Exit, Fiber, Layer, Schedule, Scope } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Schedule, Scope } from "effect"
+import type { Event } from "@opencode/schema/event"
 import { LanguageModel } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { LLMClient } from "@opencode/ai/route"
@@ -101,16 +102,17 @@ const fixedModel = SessionRunnerModel.node.replace(
   }),
 )
 
+// In the server's order: the tool runner is released after the Session executions, which may still use it then.
 const nodes = LayerNode.group([
   Database.node,
   Bus.node,
+  ShellRunner.node,
   Job.node,
   KV.node,
   Session.node,
   SessionExecution.node,
   SessionRestart.node,
   SessionContinuity.node,
-  ShellRunner.node,
   LocationServiceMap.node,
 ])
 
@@ -155,6 +157,7 @@ const start = (host: Host, options: { readonly paused?: boolean; readonly separa
     return {
       events,
       of: events.of,
+      bus: Context.get(context, Bus.Service),
       continuity,
       /** Settles once the restart sweep has picked up what the previous generation left. */
       recovered: Fiber.join(sweep),
@@ -292,6 +295,8 @@ describe("a `!` command across a stop", () => {
             .shell({ sessionID: chat.session.id, command: chat.command.command })
             .pipe(Effect.forkChild({ startImmediately: true }))
           yield* eventually(() => chat.command.runs() === 1, "the command's start")
+          // The command runs before the service has recorded it; a stop in between is the next test's.
+          yield* first.events.waitFor(SessionEvent.Shell.Started)
           yield* first.stop
           yield* Fiber.interrupt(running)
           const started = first.of(SessionEvent.Shell.Started).map((event) => event.data.shell.id)
@@ -330,6 +335,55 @@ describe("a `!` command across a stop", () => {
         }),
       { timeout: 30_000 },
     )
+
+  it.live(
+    "one a stop catches between its start and its record is recorded first, and reported by the next service, once",
+    () =>
+      Effect.gen(function* () {
+        const host = yield* machine
+        const first = yield* start(host)
+        const chat = yield* setup(host, first)
+        const caught = yield* Deferred.make<void>()
+        // Unlike the recording, which ends as the stop begins, a listener sees what the service publishes while it
+        // stops. Listeners run inline: the runner's announcement of the command holds its start there, after the
+        // command runs and before the service records it, until the stop interrupts it.
+        const published: Event.Payload[] = []
+        yield* first.bus.listen((event) => {
+          published.push(event)
+          if (event.type !== Shell.Event.Created.type) return Effect.void
+          return Deferred.succeed(caught, undefined).pipe(
+            Effect.andThen(Effect.interruptible(Effect.never)),
+            Effect.exit,
+            Effect.asVoid,
+          )
+        })
+        const running = yield* first.sessions
+          .shell({ sessionID: chat.session.id, command: chat.command.command })
+          .pipe(Effect.forkChild({ startImmediately: true }))
+        yield* Deferred.await(caught)
+        yield* first.stop
+        yield* Fiber.interrupt(running)
+        const started = published
+          .filter(
+            (event): event is Event.Payload<typeof SessionEvent.Shell.Started> =>
+              event.type === SessionEvent.Shell.Started.type,
+          )
+          .map((event) => event.data.shell.id)
+        expect(started).toHaveLength(1)
+
+        const second = yield* start(host)
+        yield* second.recovered
+        chat.command.release()
+        yield* noticed(second, chat.session.id)
+        expect(yield* reported(second, chat.session.id)).toHaveLength(1)
+        const messages = yield* second.sessions.messages({ sessionID: chat.session.id })
+        expect(messages.filter((message) => message.type === "shell")).toMatchObject([
+          { shellID: started[0], status: "exited", exit: 0 },
+        ])
+        expect(chat.command.runs()).toBe(1)
+      }),
+    { timeout: 30_000 },
+  )
 
   // As a client resends it when the connection dropped as the old service stopped.
   it.live(

@@ -41,6 +41,7 @@ import { testEffect } from "./lib/effect"
 let requests: LLMRequest[] = []
 let selectedSmall: Model.Info | undefined
 let selectedPrimary: Model.Info | undefined
+let configuredTitle: Model.Info | undefined
 let selections: Array<Session.Info["model"]> = []
 const model = LanguageModel.make({
   id: "title-model",
@@ -107,7 +108,8 @@ const models = Layer.mock(SessionRunnerModel.Service)({
 })
 const smallModels = Layer.mock(Model.Service, {
   small: () => Effect.succeed(selectedSmall),
-  get: (_providerID, modelID) => Effect.succeed(modelID === selectedPrimary?.id ? selectedPrimary : undefined),
+  get: (_providerID, modelID) =>
+    Effect.succeed([selectedPrimary, configuredTitle].find((info) => info?.id === modelID)),
 })
 const it = testEffect(
   AppNodeBuilder.build(
@@ -190,6 +192,7 @@ beforeEach(() => {
   requests = []
   selectedSmall = undefined
   selectedPrimary = undefined
+  configuredTitle = undefined
   selections = []
   titleStream = successfulTitle
 })
@@ -476,6 +479,75 @@ it.effect("uses the primary none variant from its default variant", () =>
   Effect.gen(function* () {
     selectedPrimary = primaryInfo(["none", "low", "high"])
     const result = yield* titleAttempts(Session.ID.make("ses_title_primary_none"), "Disable reasoning", undefined)
+    expect(result.attempted).toEqual(["none"])
+    expect(result.title).toBe("Generated Title")
+  }),
+)
+
+const configureTitleModel = (id: string, variant?: string) =>
+  Effect.gen(function* () {
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) => {
+      editor.update(Agent.ID.make("title"), (agent) => {
+        agent.model = Model.Ref.make({
+          providerID: Provider.ID.make("test"),
+          id: Model.ID.make(id),
+          ...(variant ? { variant: Model.VariantID.make(variant) } : {}),
+        })
+      })
+    })
+  })
+
+it.effect("uses the configured title model at its lowest variant instead of the chat's model", () =>
+  Effect.gen(function* () {
+    configuredTitle = small
+    selectedPrimary = primaryInfo(["none", "low", "high"])
+    yield* configureTitleModel("title-small")
+    const result = yield* titleAttempts(
+      Session.ID.make("ses_title_configured"),
+      "Title on the configured model",
+      "high",
+    )
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"])
+    expect(result.attempted).toEqual(["none"])
+    expect(result.title).toBe("Generated Title")
+  }),
+)
+
+it.effect("uses the variant the configured title model names", () =>
+  Effect.gen(function* () {
+    configuredTitle = small
+    yield* configureTitleModel("title-small", "low")
+    const result = yield* titleAttempts(Session.ID.make("ses_title_configured_variant"), "Named variant", "high")
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"])
+    expect(result.attempted).toEqual(["low"])
+    expect(result.title).toBe("Generated Title")
+  }),
+)
+
+it.effect("falls back to the chat's model when the configured title model fails", () =>
+  Effect.gen(function* () {
+    titleStream = () =>
+      requests.length === 1 ? Stream.fail(providerRejected({ message: "Title model unavailable" })) : successfulTitle()
+    configuredTitle = small
+    yield* configureTitleModel("title-small")
+    const result = yield* titleAttempts(Session.ID.make("ses_title_configured_fails"), "Configured model fails", "high")
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"])
+    expect(result.attempted).toEqual(["none", "high"])
+    expect(result.title).toBe("Generated Title")
+  }),
+)
+
+it.effect("chooses as without a configured title model when the configured one is not in the catalog", () =>
+  Effect.gen(function* () {
+    selectedPrimary = primaryInfo(["none", "low", "high"])
+    yield* configureTitleModel("title-gone")
+    const result = yield* titleAttempts(
+      Session.ID.make("ses_title_configured_missing"),
+      "Configured model gone",
+      "high",
+    )
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-model"])
     expect(result.attempted).toEqual(["none"])
     expect(result.title).toBe("Generated Title")
   }),

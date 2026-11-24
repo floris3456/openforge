@@ -50,6 +50,7 @@ import { Permission } from "@opencode/core/permission"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
 import { Tool } from "@opencode/core/tool"
 import { tmpdir, tmpdirScoped } from "./fixture/tmpdir"
+import { initGit } from "./fixture/git"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
 import { testEffect } from "./lib/effect"
@@ -1065,6 +1066,8 @@ describe("SubagentTool", () => {
 
     const prepare = Effect.fnUntraced(function* (dir: { readonly path: string }) {
       const project = `subagent-tasks-${crypto.randomUUID().slice(0, 8)}`
+      // A git repository, the only folder whose chats have a project; config names it.
+      yield* Effect.promise(() => initGit(dir.path))
       yield* Effect.promise(() =>
         Bun.write(path.join(dir.path, "opencode.json"), JSON.stringify({ memory: { project } })),
       )

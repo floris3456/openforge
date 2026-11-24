@@ -68,11 +68,12 @@ describe("PacerHeaders", () => {
   })
 
   test("names the chat's project beside the chat on each kind of request, and on tool list reads and calls", () => {
-    const project = PacerHeaders.project(identity, { name: "github.com/owner/repo", remote: "github.com/owner/repo" })
+    const project = PacerHeaders.project(identity, { name: "repo", remote: "github.com/owner/repo" })
     const named = {
       "X-Pacer-Project": identity,
-      "X-Pacer-Project-Name": "github.com%2Fowner%2Frepo",
+      "X-Pacer-Project-Name": "repo",
       "X-Pacer-Project-Remote": "github.com%2Fowner%2Frepo",
+      "X-Pacer-Project-Vcs": "git",
     }
     for (const kind of ["primary", "title", "generate", "compaction"] as const)
       expect(
@@ -89,10 +90,11 @@ describe("PacerHeaders", () => {
 const identity = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 describe("PacerHeaders.project", () => {
-  test("percent-encodes the name and the remote as UTF-8, a non-ASCII folder name included", () => {
+  test("percent-encodes the name and the remote as UTF-8, a non-ASCII folder name included, and marks it git", () => {
     expect(PacerHeaders.project(identity, { name: "Café ü 東京 🚀" })).toEqual({
       "X-Pacer-Project": identity,
       "X-Pacer-Project-Name": "Caf%C3%A9%20%C3%BC%20%E6%9D%B1%E4%BA%AC%20%F0%9F%9A%80",
+      "X-Pacer-Project-Vcs": "git",
     })
     expect(
       decodeURIComponent(PacerHeaders.project(identity, { name: "Café ü 東京 🚀" })["X-Pacer-Project-Name"]!),
@@ -103,6 +105,7 @@ describe("PacerHeaders.project", () => {
       "X-Pacer-Project": identity,
       "X-Pacer-Project-Name": "gitlab.com%2Fgroup%2Fsub%20group",
       "X-Pacer-Project-Remote": "gitlab.com%2Fgroup%2Fsub%20group",
+      "X-Pacer-Project-Vcs": "git",
     })
   })
 

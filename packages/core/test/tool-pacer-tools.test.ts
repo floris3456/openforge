@@ -31,7 +31,7 @@ import { PacerToolsPlugin } from "@opencode/core/tool/plugin/pacer-tools"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
-import { locationNode } from "./fixture/location"
+import { gitLocationNode } from "./fixture/location"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
@@ -165,7 +165,7 @@ const setup = Effect.fnUntraced(function* (
       PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
       Session.node.replace(sessionsOf(chat)),
       Image.node.replace(imagePassthrough),
-      locationNode(options.directory ?? "/project"),
+      gitLocationNode(options.directory ?? "/project"),
     ]),
   )
   const registry = Context.get(context, Tool.Service)
@@ -377,7 +377,7 @@ describe("PacerToolsPlugin calls", () => {
           PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
           Session.node.replace(sessionsOf({ current: info })),
           Image.node.replace(imagePassthrough),
-          locationNode("/project"),
+          gitLocationNode("/project"),
         ]),
       )
       const result = yield* executeTool(Context.get(context, Tool.Service), {
@@ -1131,7 +1131,7 @@ describe.skipIf(!LIVE)("PacerToolsPlugin files, live", () => {
         PacerTools.node.replace(Layer.succeed(PacerTools.Service, started.tools)),
         Session.node.replace(sessionsOf(chat)),
         Image.node.replace(imagePassthrough),
-        locationNode(directory),
+        gitLocationNode(directory),
       ]),
     )
     const registry = Context.get(context, Tool.Service)

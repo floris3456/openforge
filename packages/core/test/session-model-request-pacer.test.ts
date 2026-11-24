@@ -41,7 +41,7 @@ import { PacerToolsPlugin } from "@opencode/core/tool/plugin/pacer-tools"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
-import { location, locationNode } from "./fixture/location"
+import { gitVcs, location, locationNode } from "./fixture/location"
 import { imagePassthrough } from "./lib/image"
 import { permissionLayer } from "./lib/permission"
 import { codeModeListings, registerToolPlugin, toolIdentity } from "./lib/tool"
@@ -99,14 +99,17 @@ const snapshot = (
       }),
   }) satisfies Tool.Snapshot
 
-/** The chat's project as PacerProject names it, for a location whose project has `remote`. */
-const placedAt = (remote?: string) =>
+/** The chat's project as PacerProject names it, for a git checkout (unless `outside`) whose project has `remote`. */
+const placedAt = (remote?: string, outside = false) =>
   Layer.fresh(PacerProject.layer).pipe(
     Layer.provide(
       Layer.succeed(
         Location.Service,
         Location.Service.of(
-          location(Location.Ref.make({ directory: AbsolutePath.make("/home/floris/Café") }), { remote }),
+          location(Location.Ref.make({ directory: AbsolutePath.make("/home/floris/Café") }), {
+            remote,
+            ...(outside ? {} : { vcs: gitVcs("/home/floris/Café") }),
+          }),
         ),
       ),
     ),
@@ -119,6 +122,8 @@ const setup = Effect.fnUntraced(function* (
   options: {
     readonly session?: Session.Info
     readonly remote?: string
+    /** The chat's folder is outside git. */
+    readonly outside?: boolean
     readonly catalog?: PacerModels.Catalog
     /** What an earlier start kept of the endpoint's tools: the web tools by default; `{}` for none. */
     readonly known?: Readonly<Record<string, PacerTools.Meta>>
@@ -137,7 +142,7 @@ const setup = Effect.fnUntraced(function* (
     Effect.provide(SessionModelRequest.layer),
     Effect.provideService(SessionModelTransport.Service, transport),
     Effect.provideService(PacerTools.Service, started.tools),
-    Effect.provide(placedAt(options.remote)),
+    Effect.provide(placedAt(options.remote, options.outside)),
     (effect) => (options.where ? Effect.provideService(effect, PacerWhere.Service, options.where) : effect),
   )
   const input = (tools: Tool.Snapshot, model: string | LanguageModel = "claude-haiku-5-5") => ({
@@ -891,8 +896,9 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
   const child = Session.Info.make({ ...session, projectID: identity })
   const named = {
     "X-Pacer-Project": identity,
-    "X-Pacer-Project-Name": "github.com%2Fowner%2Fcaf%C3%A9",
+    "X-Pacer-Project-Name": "Caf%C3%A9",
     "X-Pacer-Project-Remote": "github.com%2Fowner%2Fcaf%C3%A9",
+    "X-Pacer-Project-Vcs": "git",
   }
   const project = (headers: Readonly<Record<string, string>> | undefined) =>
     Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => /^x-pacer-project/i.test(name)))
@@ -922,6 +928,7 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
               "x-pacer-project": identity,
               "x-pacer-project-name": named["X-Pacer-Project-Name"],
               "x-pacer-project-remote": named["X-Pacer-Project-Remote"],
+              "x-pacer-project-vcs": "git",
             },
           ])
         }
@@ -948,13 +955,18 @@ describe("SessionModelRequest naming the chat's project to CPP", () => {
     }),
   )
 
-  it.effect("names the folder without a remote, and no project for a chat outside any", () =>
+  it.effect("names the repository's folder without a remote; no project outside git, nor without an identity", () =>
     Effect.gen(function* () {
       const h = yield* setup(true, { session: lead })
       expect(project((yield* h.requests.primary(h.input(snapshot(all)))).request.headers)).toEqual({
         "X-Pacer-Project": identity,
         "X-Pacer-Project-Name": "Caf%C3%A9",
+        "X-Pacer-Project-Vcs": "git",
       })
+
+      const outside = yield* setup(true, { session: lead, remote: "github.com/owner/café", outside: true })
+      expect(project((yield* outside.requests.primary(outside.input(snapshot(all)))).request.headers)).toEqual({})
+      expect(read(outside.cpp)).toEqual([{}])
 
       const k = yield* setup(true, { remote: "github.com/owner/café" })
       expect(session.projectID).toBe(Project.ID.global)

@@ -13,7 +13,6 @@ import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { InstructionBuiltIns } from "@opencode/core/instructions/builtins"
 import { Instructions } from "@opencode/core/instructions/index"
 import { KV } from "@opencode/core/kv"
-import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
@@ -57,6 +56,7 @@ import { TestClock } from "effect/testing"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
+import { gitBoundNode } from "./fixture/location"
 import { permissionLayer } from "./lib/permission"
 import { settle, until } from "./pacer/fake-tools"
 import { texts } from "./pacer/memory-harness"
@@ -195,7 +195,7 @@ const replacements: LayerNode.Replacements = [
   SkillInstructions.node.replace(Layer.mock(SkillInstructions.Service, none)),
   ReferenceInstructions.node.replace(Layer.mock(ReferenceInstructions.Service, none)),
   McpInstructions.node.replace(Layer.mock(McpInstructions.Service, none)),
-  Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+  gitBoundNode("/project"),
   Config.node.replace(Config.testLayer()),
   Permission.node.replace(permissionLayer({ assert: () => Effect.void })),
   PluginSupervisor.node.replace(Layer.empty),
@@ -927,6 +927,7 @@ describe("MemoryStart when CLIProxyPacer keeps the project's memory from the cha
         {
           "x-pacer-project": h.project,
           "x-pacer-project-name": "project",
+          "x-pacer-project-vcs": "git",
           "x-pacer-session": PacerSessionID.make(h.sessionID),
           "x-pacer-agent": "build",
           "x-pacer-chat": h.sessionID,
@@ -1061,6 +1062,7 @@ describe("MemoryPrompt through the runner", () => {
         {
           "x-pacer-project": h.project,
           "x-pacer-project-name": "project",
+          "x-pacer-project-vcs": "git",
           "x-pacer-session": PacerSessionID.make(h.sessionID),
           "x-pacer-agent": "build",
           "x-pacer-chat": h.sessionID,
@@ -1494,6 +1496,7 @@ describe("MemoryFollowed through the runner", () => {
       const as = (sessionID: Session.ID, parentID?: Session.ID) => ({
         "x-pacer-project": project,
         "x-pacer-project-name": "project",
+        "x-pacer-project-vcs": "git",
         "x-pacer-session": PacerSessionID.make(sessionID),
         ...(parentID ? { "x-pacer-parent-session": PacerSessionID.make(parentID) } : {}),
       })

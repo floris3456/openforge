@@ -94,8 +94,9 @@ const identity = Schema.is(ConfigMemory.Project)
 
 /**
  * The headers that name a chat's project to CPP (workspace spec `docs/specs/cpp-projects.md`, "The wire"): the identity
- * (the rule of memory's `{project}`), its name (at most 200 characters) and its remote, both percent-encoded. None for
- * an identity outside the rule, which CPP would ignore.
+ * (the rule of memory's `{project}`), its name (at most 200 characters) and its remote, both percent-encoded, and the
+ * mark that it is a git repository, the only kind of folder that is a project (workspace task pwtnjy3faa8k): CPP makes
+ * a new project only from a request that carries it. None for an identity outside the rule, which CPP would ignore.
  */
 export function project(id: string, place: Place): Readonly<Record<string, string>> {
   if (!identity(id)) return {}
@@ -103,5 +104,6 @@ export function project(id: string, place: Place): Readonly<Record<string, strin
     "X-Pacer-Project": id,
     "X-Pacer-Project-Name": encodeURIComponent([...place.name.toWellFormed()].slice(0, 200).join("")),
     ...(place.remote ? { "X-Pacer-Project-Remote": encodeURIComponent(place.remote.toWellFormed()) } : {}),
+    "X-Pacer-Project-Vcs": "git",
   }
 }

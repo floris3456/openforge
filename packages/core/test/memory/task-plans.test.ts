@@ -67,6 +67,7 @@ import { eq } from "drizzle-orm"
 import { Context, Deferred, Effect, Layer, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { promptLocationNode } from "../fixture/prompt-location"
+import { initGit } from "../fixture/git"
 import { testEffect } from "../lib/effect"
 import { permissionLayer } from "../lib/permission"
 import { registerToolPlugin } from "../lib/tool"
@@ -80,6 +81,8 @@ import { catalogOf, codeModeList, endpointAt, key, pacerToolsNode, poll, primeTo
 
 const server = startProxied()
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "task-plans-")))
+// A git repository: only its chats have a project, and with it memory and the task tool.
+await initGit(root)
 afterAll(async () => {
   await server.stop()
   fs.rmSync(root, { recursive: true, force: true })

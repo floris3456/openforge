@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { useTheme, useThemes } from "../context/theme"
-import { copyTheme, nameProblem, parseHex, roleColor, roles, setRole } from "../theme/custom"
+import { AGENT_THEME, copyTheme, nameProblem, parseHex, roleColor, roles, setRole } from "../theme/custom"
 import { formats, importScheme } from "../theme/import"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogPrompt } from "../ui/dialog-prompt"
@@ -28,7 +28,8 @@ export function DialogThemeCustomize(props: { onClose?: () => void; focus?: stri
     { title: "Import a colour scheme…", value: { type: "import" } as Choice, category: "New" },
     ...names
       .filter((name) => themes.custom(name))
-      .map((name) => ({ title: name, value: { type: "edit", name } as Choice, category: "Your themes" })),
+      // The name again as search text, so typing a theme of yours finds it before the theme it was copied from.
+      .map((name) => ({ title: name, value: { type: "edit", name } as Choice, category: "Your themes", searchText: name })),
     ...names
       .filter((name) => !themes.custom(name))
       .map((name) => ({
@@ -54,7 +55,7 @@ export function DialogThemeCustomize(props: { onClose?: () => void; focus?: stri
         dialog.replace(() => (
           <DialogName
             title={`Copy ${choice.name}`}
-            value={freeName(`${choice.name} copy`, themes.has)}
+            value={freeName(`${choice.name} copy`, (name) => taken(themes, name))}
             onCancel={back}
             onConfirm={async (name) => {
               await themes.saveCustom(name, copyTheme(themes.all()[choice.name]!, choice.name))
@@ -255,7 +256,11 @@ function DialogName(props: {
       onCancel={props.onCancel}
       onConfirm={(input) => {
         const name = input.trim()
-        const found = nameProblem(name, (name) => name !== props.allow && (themes.has(name) || name === "agent"))
+        // Names differing only in case are one file on macOS, and two themes hard to tell apart in the list.
+        const found = nameProblem(
+          name,
+          (name) => name.toLowerCase() !== props.allow?.toLowerCase() && taken(themes, name),
+        )
         if (found) return setProblem(found)
         void props.onConfirm(name).catch((error) => setProblem(String(error)))
       }}
@@ -297,7 +302,7 @@ function DialogImport(props: { onClose?: () => void; onCancel: () => void }) {
             dialog.replace(() => (
               <DialogName
                 title={`Name the ${imported.format} scheme`}
-                value={freeName(imported.name ?? "imported", themes.has)}
+                value={freeName(imported.name ?? "imported", (name) => taken(themes, name))}
                 onCancel={props.onCancel}
                 onConfirm={async (name) => {
                   await themes.saveCustom(name, imported.theme)
@@ -332,6 +337,10 @@ async function schemeText(input: string) {
     })
   }
   return text
+}
+
+function taken(themes: ReturnType<typeof useThemes>, name: string) {
+  return [...Object.keys(themes.all()), AGENT_THEME].some((other) => other.toLowerCase() === name.toLowerCase())
 }
 
 /** `base`, or `base 2`, `base 3` … : the first name no theme has. */

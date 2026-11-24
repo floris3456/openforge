@@ -10,6 +10,9 @@ import { resolveThemeColors } from "./resolve"
 
 export type Mode = "dark" | "light"
 
+/** openforge (spec agent-theme): the special theme whose chosen colours follow the shown chat's agent. */
+export const AGENT_THEME = "agent"
+
 export type Role = { key: ThemeColor; title: string; group: string; help: string }
 
 const role = (group: string) => (key: ThemeColor, title: string, help: string) => ({ key, title, group, help })

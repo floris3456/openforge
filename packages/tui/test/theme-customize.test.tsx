@@ -186,4 +186,9 @@ test("a name a theme already has is refused, and so is text that is no scheme", 
   for (const _ of " copy") setup.mockInput.pressBackspace()
   setup.mockInput.pressEnter()
   await setup.waitForFrame((frame) => frame.includes("There is already a theme called aura"))
+  // Names differing only in case are taken too.
+  for (const _ of "aura") setup.mockInput.pressBackspace()
+  await setup.mockInput.typeText("AURA")
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("There is already a theme called AURA"))
 })

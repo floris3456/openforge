@@ -141,9 +141,9 @@ export const settings: Setting[] = [
       )),
   },
   {
-    title: "Customize themes",
+    title: "Your themes",
     category: "Appearance",
-    // openforge (spec custom-themes): only the row's ID; Enter opens the customizer.
+    // openforge (spec custom-themes): only the row's ID; Enter opens the customizer, whose command is "Customize themes".
     path: ["theme", "customize"],
     description: "Your own themes: copy one, choose which colour goes where, import a scheme",
     help: "Your own themes, each a file in the global themes folder. Copy any theme into one of your own under a name you give, set which colour each part of the screen uses, or import a colour scheme from a scheme site (base16 or base24, an opencode theme, or a terminal scheme of iTerm2, Windows Terminal, Ghostty, kitty, Alacritty, Xresources, Gogh or terminal.sexy).",

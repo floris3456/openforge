@@ -1,10 +1,12 @@
 import { PacerConnection } from "@opencode/core/pacer/connection"
+import { PacerInspect } from "@opencode/core/pacer/inspect"
 import { PacerModels } from "@opencode/core/pacer/models"
 import type { Session } from "@opencode/core/session"
 import { ServiceUnavailableError } from "@opencode/protocol/errors"
 import type { RequestsQuery } from "@opencode/protocol/groups/pacer"
 import type { Pacer } from "@opencode/schema/pacer"
 import { Effect, FiberHandle } from "effect"
+import { HttpServerResponse } from "effect/http"
 import { HttpApiSchema } from "effect/http-api"
 
 const unavailable = (error: PacerConnection.Unavailable) =>
@@ -14,6 +16,7 @@ const unavailable = (error: PacerConnection.Unavailable) =>
 export const makePacer = Effect.gen(function* () {
   const pacer = yield* PacerConnection.Service
   const models = yield* PacerModels.Service
+  const inspect = yield* PacerInspect.Service
   // The model picker's read of CPP's models outlives its request. While one runs, another call starts none: the read
   // under way already brings what a second would.
   const reading = yield* FiberHandle.make<void, never>()
@@ -51,5 +54,21 @@ export const makePacer = Effect.gen(function* () {
         Effect.map((data) => ({ data })),
         Effect.mapError(unavailable),
       ),
+    /**
+     * `pacer.inspect.*`: CPP's `/pacer/v1/inspect/<path>` with the route's own fields, its answer as it came. Only the
+     * fields the route declares go on, so the key reaches these reads and no other.
+     */
+    inspect: (path: string, query: Readonly<Record<string, string | undefined>>) =>
+      Effect.gen(function* () {
+        const fields = new URLSearchParams(
+          Object.entries(query).flatMap(([name, value]) => (value === undefined ? [] : [[name, value]])),
+        ).toString()
+        const answer = yield* inspect.relay(fields ? `${path}?${fields}` : path)
+        return HttpServerResponse.text(answer.body, {
+          status: answer.status,
+          contentType: answer.contentType,
+          headers: { "cache-control": "no-store", ...(answer.next ? { "x-pacer-next": answer.next } : {}) },
+        })
+      }),
   }
 })

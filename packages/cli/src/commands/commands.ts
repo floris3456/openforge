@@ -48,6 +48,24 @@ const PermissionParams = {
   ),
 }
 
+// openforge: `openforge cpp` (workspace spec cpp-inspect-cli).
+const CppJson = Flag.Boolean("json").pipe(
+  Flag.withDescription("CLIProxyPacer's JSON answer unchanged, an error too"),
+  Flag.withDefault(false),
+)
+const CppPage = {
+  cursor: Flag.String("cursor").pipe(Flag.withDescription("The cursor the page before ends with"), Flag.optional),
+  json: CppJson,
+}
+const CppLimit = (description: string) => ({
+  limit: Flag.Int("limit").pipe(Flag.withDescription(description), Flag.optional),
+})
+const CppProject = Argument.String("project").pipe(
+  Argument.withDescription(
+    "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities",
+  ),
+)
+
 const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : Product.binary, {
   description: `${Product.name} command line interface`,
   params: {
@@ -543,6 +561,103 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
               Argument.withDescription("Environment variable name"),
               Argument.optional,
             ),
+          },
+        }),
+      ],
+    }),
+    Spec.make("cpp", {
+      description:
+        "Read other projects' tasks, reviews and memory on CLIProxyPacer, read only, as far as its owner lets this install's key",
+      commands: [
+        Spec.make("projects", {
+          description:
+            "The projects this key may read: name, id, open tasks, live entries, recalls in 30 days, last used",
+          globalFlags: ServerFlags,
+          params: {
+            all: Flag.Boolean("all").pipe(
+              Flag.withDescription("Add the projects that allow the key with their memory off"),
+              Flag.withDefault(false),
+            ),
+            ...CppPage,
+          },
+        }),
+        Spec.make("tasks", {
+          description:
+            "A project's top-level tasks newest first, with their open subtasks, as the task tool lists them",
+          globalFlags: ServerFlags,
+          params: {
+            project: CppProject,
+            state: Flag.String("state").pipe(
+              Flag.withDescription("A task state, work (the default: todo, active, blocked), reviewed or all"),
+              Flag.optional,
+            ),
+            query: Flag.String("query").pipe(Flag.withDescription("1 to 10 words the tasks hold"), Flag.optional),
+            ...CppLimit("1 to 50 a page, 50 when omitted"),
+            ...CppPage,
+          },
+        }),
+        Spec.make("goals", {
+          description: "A project's goals with their counts",
+          globalFlags: ServerFlags,
+          params: {
+            project: CppProject,
+            all: Flag.Boolean("all").pipe(Flag.withDescription("Add the dropped goals"), Flag.withDefault(false)),
+            json: CppJson,
+          },
+        }),
+        Spec.make("read", {
+          description:
+            "Tasks, steps, goals or entries of any project by id: a task with its subtasks, changes, last decided review round and entries",
+          globalFlags: ServerFlags,
+          params: {
+            ids: Argument.String("id").pipe(
+              Argument.withDescription("1 to 20 ids"),
+              Argument.variadic({ min: 1, max: 20 }),
+            ),
+            json: CppJson,
+          },
+        }),
+        Spec.make("review", {
+          description:
+            "Every review round of a task, oldest first: each item with its answer and every note (pictures and texts by name)",
+          globalFlags: ServerFlags,
+          params: { task: Argument.String("task").pipe(Argument.withDescription("A task's id")), json: CppJson },
+        }),
+        Spec.make("recall", {
+          description: "A project's entries best first, as recall finds them",
+          globalFlags: ServerFlags,
+          params: {
+            project: CppProject,
+            query: Argument.String("query").pipe(
+              Argument.withDescription("What to look for"),
+              Argument.variadic({ min: 1 }),
+            ),
+            scope: Flag.String("scope").pipe(
+              Flag.withDescription("all (the default), global, role:<role> or task:<id> (its subtasks' too)"),
+              Flag.optional,
+            ),
+            kind: Flag.String("kind").pipe(
+              Flag.withDescription("words, unverified or verified; repeatable"),
+              Flag.atMost(3),
+            ),
+            ...CppLimit("1 to 20 a page, 5 when omitted"),
+            ...CppPage,
+          },
+        }),
+        Spec.make("entries", {
+          description: "A project's entries newest first",
+          globalFlags: ServerFlags,
+          params: {
+            project: CppProject,
+            role: Flag.String("role").pipe(Flag.withDescription("Only this role's entries"), Flag.optional),
+            task: Flag.String("task").pipe(Flag.withDescription("Only this task's entries"), Flag.optional),
+            kind: Flag.String("kind").pipe(Flag.withDescription("words, unverified or verified"), Flag.optional),
+            state: Flag.String("state").pipe(
+              Flag.withDescription("live (the default), replaced, deleted or all"),
+              Flag.optional,
+            ),
+            ...CppLimit("1 to 100 a page, 20 when omitted"),
+            ...CppPage,
           },
         }),
       ],

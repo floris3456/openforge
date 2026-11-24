@@ -27,6 +27,115 @@ export const RequestsQuery = Schema.Struct({
   ).annotate({ description: "Rows per page; 50 when omitted." }),
 }).annotate({ identifier: "Pacer.RequestsQuery" })
 
+/** A field passed on to CLIProxyPacer as given; CLIProxyPacer checks it. */
+const field = (description: string) => Schema.optional(Schema.String.annotate({ description }))
+const format = field("`text` for the memory tools' own lines (`text/plain`); JSON when omitted.")
+const cursor = field("The `next` of the page before (in a text answer, its `X-Pacer-Next` header).")
+const ProjectParams = {
+  project: Schema.String.annotate({
+    description: "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities.",
+  }),
+}
+/** CLIProxyPacer's status and body unchanged, or the service's own refusal in CLIProxyPacer's error shape. */
+const InspectAnswer = Schema.Unknown.annotate({
+  description:
+    "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+})
+const INSPECT =
+  "Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other."
+const inspect = (name: string, summary: string, description: string) =>
+  annotations(`inspect.${name}`, summary, `${description} ${INSPECT}`)
+
+const InspectEndpoints = [
+  HttpApiEndpoint.get("pacer.inspect.projects", "/api/experimental/pacer/inspect/projects", {
+    query: Schema.Struct({ all: field("`1` adds the projects that allow the key with memory off."), cursor, format }),
+    success: InspectAnswer,
+  }).annotateMerge(
+    inspect(
+      "projects",
+      "List the projects this key may inspect",
+      "The projects whose memory is on and whose allowed keys take the install's key, oldest first, with their counts.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.inspect.tasks", "/api/experimental/pacer/inspect/projects/:project/tasks", {
+    params: ProjectParams,
+    query: Schema.Struct({
+      state: field("A task state, `work` (the default), `reviewed` or `all`."),
+      query: field("1 to 10 words."),
+      limit: field("1 to 50, 50 when omitted."),
+      cursor,
+      format,
+    }),
+    success: InspectAnswer,
+  }).annotateMerge(
+    inspect(
+      "tasks",
+      "List another project's tasks",
+      "Its top-level tasks newest first, each with its open subtasks and those the words matched, as the task tool lists them.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.inspect.goals", "/api/experimental/pacer/inspect/projects/:project/goals", {
+    params: ProjectParams,
+    query: Schema.Struct({ all: field("`1` adds the dropped goals."), format }),
+    success: InspectAnswer,
+  }).annotateMerge(inspect("goals", "List another project's goals", "The board's goals with their counts.")),
+  HttpApiEndpoint.get("pacer.inspect.recall", "/api/experimental/pacer/inspect/projects/:project/recall", {
+    params: ProjectParams,
+    query: Schema.Struct({
+      q: field("1 to 2,000 characters."),
+      scope: field("`all` (the default), `global`, `role:<role>` or `task:<id>`."),
+      kind: field("`words`, `unverified` or `verified`, comma-separated."),
+      limit: field("1 to 20, 5 when omitted."),
+      cursor,
+      format,
+    }),
+    success: InspectAnswer,
+  }).annotateMerge(
+    inspect(
+      "recall",
+      "Recall another project's memory",
+      "Live entries best first, as recall finds them, without a recall row.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.inspect.entries", "/api/experimental/pacer/inspect/projects/:project/entries", {
+    params: ProjectParams,
+    query: Schema.Struct({
+      role: field("Only this role's entries."),
+      task: field("Only this task's entries."),
+      kind: field("`words`, `unverified` or `verified`."),
+      state: field("`live` (the default), `replaced`, `deleted` or `all`."),
+      limit: field("1 to 100, 20 when omitted."),
+      cursor,
+      format,
+    }),
+    success: InspectAnswer,
+  }).annotateMerge(inspect("entries", "List another project's entries", "Entries newest first.")),
+  HttpApiEndpoint.get("pacer.inspect.items", "/api/experimental/pacer/inspect/items", {
+    query: Schema.Struct({
+      ids: field("1 to 20 ids of tasks, steps, goals or entries, comma-separated."),
+      format,
+    }),
+    success: InspectAnswer,
+  }).annotateMerge(
+    inspect(
+      "items",
+      "Read tasks, goals and entries of other projects by id",
+      "Each id found, under its project; the ids not found named.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.inspect.review", "/api/experimental/pacer/inspect/tasks/:id/review", {
+    params: { id: Schema.String },
+    query: Schema.Struct({ format }),
+    success: InspectAnswer,
+  }).annotateMerge(
+    inspect(
+      "review",
+      "Read every review round of another project's task",
+      "Its rounds oldest first, each item with its answer and every note.",
+    ),
+  ),
+] as const
+
 /**
  * `pacer.*`: CLIProxyPacer, through the service's one connection to it. Lives in the `server.experimental` group (see
  * `groups/experimental.ts`).
@@ -134,4 +243,5 @@ export const PacerEndpoints = [
       "Set compact-cold-first, compact-before-cold, who writes the summaries or whether they keep the user's earlier messages at the key level on CLIProxyPacer, and return them as they apply after the change. A value equal to what CLIProxyPacer applies without the key level (the server's, else the default) clears the key level instead of being stored, so that a later server default reaches the key's chats. Unavailable unless the pacer is on.",
     ),
   ),
+  ...InspectEndpoints,
 ] as const

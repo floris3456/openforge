@@ -1,6 +1,7 @@
 import { ensurePluginRuntime } from "@opencode/plugin/runtime"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Cause, Effect } from "effect"
+import { CliError } from "effect/cli"
 import { defaultTeardown, getErrorReported } from "effect/Runtime"
 import { Commands } from "./commands/commands"
 import { Runtime } from "./framework/runtime"
@@ -38,6 +39,8 @@ if (process.env.OPENCODE_SSH_ASKPASS_PORT) {
 }
 
 let terminated = false
+// openforge: `openforge cpp`'s wrong arguments exit 2, its refusals 1 (workspace spec cpp-inspect-cli).
+let usage = false
 
 const Handlers = Runtime.handlers(Commands, {
   $: () => import("./commands/handlers/default"),
@@ -95,6 +98,15 @@ const Handlers = Runtime.handlers(Commands, {
     unset: () => import("./commands/handlers/service/unset"),
   },
   serve: () => import("./commands/handlers/serve"),
+  cpp: {
+    projects: () => import("./commands/handlers/cpp/projects"),
+    tasks: () => import("./commands/handlers/cpp/tasks"),
+    goals: () => import("./commands/handlers/cpp/goals"),
+    read: () => import("./commands/handlers/cpp/read"),
+    review: () => import("./commands/handlers/cpp/review"),
+    recall: () => import("./commands/handlers/cpp/recall"),
+    entries: () => import("./commands/handlers/cpp/entries"),
+  },
 })
 
 Effect.gen(function* () {
@@ -163,7 +175,10 @@ Effect.gen(function* () {
   Effect.tapCause((cause) =>
     Effect.sync(() => {
       if (Cause.hasInterruptsOnly(cause)) return
-      if (!getErrorReported(Cause.squash(cause))) return
+      const error = Cause.squash(cause)
+      usage =
+        process.argv[2] === "cpp" && CliError.isCliError(error) && error._tag === "ShowHelp" && error.errors.length > 0
+      if (!getErrorReported(error)) return
       process.stderr.write(Cause.pretty(cause) + "\n")
     }),
   ),
@@ -172,7 +187,8 @@ Effect.gen(function* () {
     teardown: (exit) =>
       defaultTeardown(exit, (code) => {
         // Commands report failures through process.exitCode.
-        const status = code === 0 ? (process.exitCode ?? 0) : code === 130 && terminated ? 143 : code
+        const status =
+          code === 0 ? (process.exitCode ?? 0) : code === 130 && terminated ? 143 : code === 1 && usage ? 2 : code
         // process.exit drops output still queued for a pipe; ending the streams waits for it.
         void Promise.all(
           [process.stdout, process.stderr].map((stream) => new Promise<void>((resolve) => stream.end(() => resolve()))),

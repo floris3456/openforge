@@ -22,7 +22,7 @@ import { NetAddress } from "effect/net"
 import { createServer } from "node:http"
 import { ServerAuth } from "./auth"
 import { isAllowedCorsOrigin } from "./cors"
-import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
+import { authorizedRequest, inspectToken, unauthorizedResponse } from "./middleware/authorization"
 import { withoutParentSpan } from "./request-tracing"
 import { RequestSite } from "./request-site"
 import { createRoutes } from "./routes"
@@ -228,8 +228,11 @@ function dispatch(
       if (!(yield* authorizedRequest(request, auth))) return unauthorizedResponse(request)
       return yield* infoResponse(status, version, urls, tmp)
     }
+    // openforge: an inspection route's token is checked by the application's Authorization, which holds it; while the
+    // service starts, such a request gets the same 503 as any other.
     if (
       !isPairingConnectURL(url) &&
+      inspectToken(request, url.pathname) === undefined &&
       (!ready ||
         (!hasPtyConnectTicketURL(url) && !hasPersistentPtyConnectTicketURL(url) && !hasMcpClientTicketURL(url))) &&
       !(yield* authorizedRequest(request, auth))

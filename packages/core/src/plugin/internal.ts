@@ -66,6 +66,7 @@ import { MemoryTask } from "../memory/task.js"
 import { SubagentEnded } from "../session/subagent-ended.js"
 import { Npm } from "@opencode/util/npm"
 import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerInspect } from "../pacer/inspect.js"
 import { PacerModels } from "../pacer/models.js"
 import { PacerProject } from "../pacer/project.js"
 import { PacerTools } from "../pacer/tools.js"
@@ -176,6 +177,8 @@ const services = [
   MemoryTask.Service,
   Npm.Service,
   PacerEndpoint.Service,
+  // openforge: the shell tool gives every command the service's inspection address and token.
+  PacerInspect.Service,
   PacerModels.Service,
   PacerProject.Service,
   PacerTools.Service,
@@ -248,6 +251,7 @@ export const requirements = LayerNode.group([
   MemoryTask.node,
   Npm.node,
   PacerEndpoint.node,
+  PacerInspect.node,
   PacerModels.node,
   PacerProject.node,
   PacerTools.node,

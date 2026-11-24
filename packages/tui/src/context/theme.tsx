@@ -11,6 +11,7 @@ import {
   allThemes,
   getOpenCode2Theme,
   hasTheme,
+  isThemeSource,
   parseTheme,
   setCustomThemes,
   setSystemTheme,
@@ -20,13 +21,16 @@ import {
 import { generateSystem, terminalMode } from "../theme/system"
 import { discoverThemes } from "../theme/discovery"
 import { createComponentTheme, type ComponentTheme } from "../theme/component"
-import { createEffect, createMemo, createSignal, on, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
+import { batch, createEffect, createMemo, createSignal, on, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
-import { setProjectTheme, useConfig, useNewDesigns } from "../config"
+import { setProjectTheme, useConfig, useNewDesigns, type Config } from "../config"
 import { useStorageOptional } from "./storage"
 import { DevTools } from "../devtools"
 import { configDirectories } from "../util/config-directories"
+import type { ThemeV1Json } from "@opencode/theme/tui/v1"
+import { mkdir, rename, rm, writeFile } from "node:fs/promises"
+import path from "node:path"
 
 const themePerformance = DevTools.register({ id: "theme-performance", title: "Theme performance" })
 export type ThemeError = { name: string; error: Error }
@@ -63,6 +67,12 @@ const themeErrors = createThemeErrors()
 export type ThemeSource = Readonly<{
   discover(): Promise<Record<string, unknown>>
   subscribeRefresh?(refresh: () => void): () => void
+  /** openforge (spec custom-themes): the global themes folder, whose themes the customizer edits. */
+  custom?: Readonly<{
+    list(): Promise<Record<string, unknown>>
+    write(name: string, theme: ThemeV1Json): Promise<void>
+    remove(name: string): Promise<void>
+  }>
 }>
 
 export const createThemeSource = (config: string): ThemeSource => ({
@@ -72,6 +82,16 @@ export const createThemeSource = (config: string): ThemeSource => ({
   subscribeRefresh(refresh) {
     process.on("SIGUSR2", refresh)
     return () => process.off("SIGUSR2", refresh)
+  },
+  custom: {
+    list: () => discoverThemes([config]),
+    async write(name, theme) {
+      const file = path.join(config, "themes", `${name}.json`)
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(`${file}.tmp`, JSON.stringify(theme, null, 2) + "\n")
+      await rename(`${file}.tmp`, file)
+    },
+    remove: (name) => rm(path.join(config, "themes", `${name}.json`), { force: true }),
   },
 })
 
@@ -94,6 +114,8 @@ type State = {
   failed: Record<string, true | undefined>
   /** Choices written but not yet read back from the config, so the screen changes at once. null: the project's own goes. */
   pending: { global?: string; projects: Record<string, string | null | undefined> }
+  /** The themes of the global themes folder: the custom themes the customizer edits. */
+  custom: Record<string, true | undefined>
 }
 
 type Themes = {
@@ -126,6 +148,13 @@ type Themes = {
   useGlobal(): void
   /** Shows a theme on this screen only, until cleared with undefined. */
   preview(theme: string | undefined): void
+  /** openforge (spec custom-themes): whether a theme is one of the global themes folder's, which can be edited. */
+  custom(name: string): boolean
+  /** Writes a custom theme into the global themes folder and reads the theme files again. */
+  saveCustom(name: string, theme: ThemeV1Json): Promise<void>
+  /** Renames a custom theme; the global theme and project themes of its old name take the new one. */
+  renameCustom(from: string, to: string): Promise<void>
+  removeCustom(name: string): Promise<void>
   show(subject: ThemeSubject): void
   afterPaint(): void
   onError(handler: ThemeErrorHandler): () => void
@@ -146,6 +175,7 @@ const [store, setStore] = createStore<State>({
   subject: {},
   failed: {},
   pending: { projects: {} },
+  custom: {},
 })
 const [themeSources, setThemeSources] = createSignal(allThemes())
 
@@ -172,6 +202,7 @@ const themeContext = createSimpleContext({
         draft.subject = {}
         draft.failed = {}
         draft.pending = { projects: {} }
+        draft.custom = {}
       }),
     )
 
@@ -204,11 +235,13 @@ const themeContext = createSimpleContext({
     )
 
     function syncCustomThemes() {
-      return themes
-        .discover()
-        .then((themes) => {
-          setCustomThemes(themes)
-          setStore("failed", reconcile({}))
+      return Promise.all([themes.discover(), themes.custom?.list() ?? Promise.resolve({})])
+        .then(([all, custom]) => {
+          batch(() => {
+            setCustomThemes(all)
+            setStore("custom", reconcile(Object.fromEntries(Object.keys(custom).map((name) => [name, true]))))
+            setStore("failed", reconcile({}))
+          })
         })
         .catch(() => {})
     }
@@ -439,6 +472,28 @@ const themeContext = createSimpleContext({
       },
       preview(theme) {
         setStore("preview", theme)
+      },
+      custom: (name) => store.custom[name] === true,
+      async saveCustom(name, theme) {
+        if (!themes.custom) throw new Error("Custom themes can't be saved here")
+        await themes.custom.write(name, theme)
+        await syncCustomThemes()
+      },
+      async renameCustom(from, to) {
+        const source = themes.custom ? (await themes.custom.list())[from] : undefined
+        if (!themes.custom || !isThemeSource(source)) throw new Error(`No custom theme called ${from}`)
+        await themes.custom.write(to, source as ThemeV1Json)
+        await configState.update((draft) => {
+          if (draft.theme?.name === from) draft.theme = { ...draft.theme, name: to }
+          for (const [id, entry] of Object.entries(draft.projects ?? {}) as [string, Config.ProjectSettings][])
+            if (entry.theme?.name === from) setProjectTheme(draft, id, to)
+        })
+        await themes.custom.remove(from)
+        await syncCustomThemes()
+      },
+      async removeCustom(name) {
+        await themes.custom?.remove(name)
+        await syncCustomThemes()
       },
       show(subject) {
         const project = subject.project && subject.project.id !== "global" ? subject.project : undefined

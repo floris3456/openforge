@@ -76,6 +76,7 @@ import { DialogPair } from "./component/dialog-pair"
 import { DialogHighlights } from "./component/dialog-highlights"
 import { claim } from "./util/highlights"
 import { DialogThemeList } from "./component/dialog-theme-list"
+import { DialogThemeCustomize } from "./component/dialog-theme-customize"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
@@ -1171,6 +1172,15 @@ function App() {
         slash: { name: "themes" },
         run: () => {
           dialog.replace(() => <DialogThemeList />)
+        },
+        category: "System",
+      },
+      {
+        name: "theme.customize",
+        title: "Customize themes",
+        slash: { name: "customize-themes" },
+        run: () => {
+          dialog.replace(() => <DialogThemeCustomize />)
         },
         category: "System",
       },

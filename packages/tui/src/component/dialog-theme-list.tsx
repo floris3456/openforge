@@ -24,7 +24,11 @@ export function DialogThemeList(props: { onClose?: () => void; scope?: "global" 
   const names = Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
   const options = [
     ...(project ? [{ title: `Global theme (${global})`, value: GLOBAL }] : []),
-    ...names.map((name) => ({ title: name, value: name, footer: name === global ? "global" : undefined })),
+    ...names.map((name) => ({
+      title: name,
+      value: name,
+      footer: name === global ? "global" : themes.custom(name) ? "custom" : undefined,
+    })),
   ]
   const description = (() => {
     if (project) return own ? `${project.name} uses its own theme · global: ${global}` : `${project.name} uses the global theme`

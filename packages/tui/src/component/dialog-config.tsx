@@ -12,6 +12,7 @@ import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogSelect, DialogSelectChoice } from "../ui/dialog-select"
 import { useToast } from "../ui/toast"
 import { DialogThemeList } from "./dialog-theme-list"
+import { DialogThemeCustomize } from "./dialog-theme-customize"
 
 type Setting = {
   title: string
@@ -137,6 +138,20 @@ export const settings: Setting[] = [
     open: (dialog) =>
       dialog.replace(() => (
         <DialogThemeList scope="global" onClose={() => dialog.replace(() => <DialogConfig current="theme.global" />)} />
+      )),
+  },
+  {
+    title: "Customize themes",
+    category: "Appearance",
+    // openforge (spec custom-themes): only the row's ID; Enter opens the customizer.
+    path: ["theme", "customize"],
+    description: "Your own themes: copy one, choose which colour goes where, import a scheme",
+    help: "Your own themes, each a file in the global themes folder. Copy any theme into one of your own under a name you give, set which colour each part of the screen uses, or import a colour scheme from a scheme site (base16 or base24, an opencode theme, or a terminal scheme of iTerm2, Windows Terminal, Ghostty, kitty, Alacritty, Xresources, Gogh or terminal.sexy).",
+    default: "",
+    keywords: ["custom theme", "colors", "import", "base16", "color scheme"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogThemeCustomize onClose={() => dialog.replace(() => <DialogConfig current="theme.customize" />)} />
       )),
   },
   {
@@ -694,6 +709,7 @@ function themeRow(setting: Setting) {
   const id = settingID(setting)
   if (id === "theme.name") return "project"
   if (id === "theme.global") return "global"
+  if (id === "theme.customize") return "customize"
 }
 
 /**
@@ -792,6 +808,10 @@ export function DialogConfig(props: { current?: string }) {
 
   const value = (setting: Setting) => {
     const theme = themeRow(setting)
+    if (theme === "customize") {
+      const count = Object.keys(themes.all()).filter(themes.custom).length
+      return count === 1 ? "1 of yours" : `${count} of yours`
+    }
     if (theme) return theme === "global" ? themes.global : (themes.own ?? themes.global)
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
@@ -803,7 +823,7 @@ export function DialogConfig(props: { current?: string }) {
     return current ?? setting.default
   }
   const values = (setting: Setting) =>
-    themeRow(setting)
+    themeRow(setting) === "project" || themeRow(setting) === "global"
       ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
       : setting.values
   // A list, such as Muted models, has no value to step to: it changes in its own picker only, which Enter opens.
@@ -850,6 +870,7 @@ export function DialogConfig(props: { current?: string }) {
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
     if (next === current) return
     const theme = themeRow(setting)
+    if (theme === "customize") return
     if (theme) {
       if (theme === "global") themes.setGlobal(String(next))
       else if (themes.project && next === themes.global) themes.useGlobal()
@@ -926,7 +947,7 @@ export function DialogConfig(props: { current?: string }) {
       footerHints={
         newDesigns()
           ? []
-          : themeRow(settings[selected()])
+          : themeRow(settings[selected()]) === "project" || themeRow(settings[selected()]) === "global"
             ? [
                 { title: "open", label: "enter" },
                 { title: "change", label: "←/→" },

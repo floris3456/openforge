@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test"
+import { beforeEach, expect, test } from "bun:test"
+import { takeDraft } from "../src/component/prompt/draft-stash"
 import { InputRenderable, RGBA } from "@opentui/core"
 import { resolveThemeDocument } from "@opencode/theme/tui"
 import { mkdir } from "node:fs/promises"
@@ -11,6 +12,10 @@ import type { Config } from "../src/config"
 
 // openforge (spec project-themes): the screen shows the shown project's theme, switching with the tab in the same frame;
 // the picker previews without writing and writes the project's theme, or removes it, on Enter.
+
+// The home screen's draft is kept in the process across apps; one an earlier test file left would be typed before
+// the commands here.
+beforeEach(() => takeDraft(undefined))
 
 const background = (name: string) =>
   resolveThemeDocument(parseTheme(allThemes()[name]!, name), "dark").background.base

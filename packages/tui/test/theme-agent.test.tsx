@@ -234,3 +234,34 @@ test.each([100, 50])(
     await setup.waitFor(() => setup.config().projects?.proj_a?.theme?.name === "agent")
   },
 )
+
+test("Base theme: a search shows the agent theme on the theme found, and Enter saves it", async () => {
+  await using setup = await app({
+    width: 100,
+    sessionID: alpha.id,
+    config: { tabs: { mode: "off" }, theme: { name: "agent", mode: "dark" } },
+  })
+  await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
+  await command(setup, "/settings", "Settings")
+  await setup.mockInput.typeText("agent colours")
+  await setup.waitForFrame((frame) => frame.includes("on · this project") || frame.includes("on · global"))
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame(
+    (frame) =>
+      frame.includes("Takes the agent's colour") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+  )
+  await setup.mockInput.typeText("base theme")
+  await setup.waitForFrame((frame) => frame.includes("Base theme") && !frame.includes("Strength"))
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame(
+    (frame) =>
+      !frame.includes("Takes the agent's colour") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+  )
+  await setup.mockInput.typeText("dracula")
+  const dracula = colour(alpha.id, { base: "dracula" }).surface("dialog").background.base
+  await setup.waitForFrame(() => dialog(setup, "Base theme")?.equals(dracula) === true)
+  expect(setup.config().theme?.agent).toBeUndefined()
+  setup.mockInput.pressEnter()
+  await setup.waitFor(() => setup.config().theme?.agent?.base === "dracula")
+  await setup.waitForFrame((frame) => frame.includes("Takes the agent's colour") && frame.includes("dracula"))
+})

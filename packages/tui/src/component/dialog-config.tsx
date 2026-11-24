@@ -116,13 +116,27 @@ export const settings: Setting[] = [
     title: "Theme",
     category: "Appearance",
     path: ["theme", "name"],
-    description: "Color theme used across the interface",
-    help: 'The colors of the whole interface. Enter opens the list of themes, with a preview as you move through it. The list holds the built-in themes and any theme files you added. Light and dark variants follow "Color mode".',
+    description: "Color theme of this project, else the global theme",
+    help: 'The colors of the whole interface, for the project on screen: its own theme, or the global theme while it has none. Enter opens the list of themes, with a preview as you move through it; picking a theme saves it for this project, and picking the global theme returns the project to it. Outside a project it sets the global theme. The list holds the built-in themes and any theme files you added. Light and dark variants follow "Color mode".',
     default: "opencode",
-    keywords: ["color scheme", "colors"],
+    keywords: ["color scheme", "colors", "project theme"],
     open: (dialog) =>
       dialog.replace(() => (
         <DialogThemeList onClose={() => dialog.replace(() => <DialogConfig current="theme.name" />)} />
+      )),
+  },
+  {
+    title: "Global theme",
+    category: "Appearance",
+    // openforge (spec project-themes): only the row's ID; it reads and writes the global theme through the theme.
+    path: ["theme", "global"],
+    description: "Color theme of every project without its own",
+    help: "The theme every project shows while it has no theme of its own, and the screen outside a project. Enter opens the list of themes; a project with its own theme keeps it.",
+    default: "opencode",
+    keywords: ["color scheme", "colors", "default theme"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogThemeList scope="global" onClose={() => dialog.replace(() => <DialogConfig current="theme.global" />)} />
       )),
   },
   {
@@ -675,6 +689,13 @@ export function settingID(setting: Setting) {
   return setting.path.join(".")
 }
 
+// openforge (spec project-themes): the Theme row sets the shown project's theme, the Global theme row the global one.
+function themeRow(setting: Setting) {
+  const id = settingID(setting)
+  if (id === "theme.name") return "project"
+  if (id === "theme.global") return "global"
+}
+
 /**
  * Which Settings rows show, one rule for Settings and the command palette: the palette lists a row only where Settings
  * would show it. Each reads CLIProxyPacer's own settings when it opens, and again when CLIProxyPacer answers again
@@ -770,6 +791,8 @@ export function DialogConfig(props: { current?: string }) {
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
 
   const value = (setting: Setting) => {
+    const theme = themeRow(setting)
+    if (theme) return theme === "global" ? themes.global : (themes.own ?? themes.global)
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
     if (setting.service) return serviceConfig()?.optimize ?? setting.default
@@ -777,11 +800,10 @@ export function DialogConfig(props: { current?: string }) {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
     }, config.data)
-    if (setting.path.join(".") === "theme.name") return current ?? themes.selected
     return current ?? setting.default
   }
   const values = (setting: Setting) =>
-    setting.path.join(".") === "theme.name"
+    themeRow(setting)
       ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
       : setting.values
   // A list, such as Muted models, has no value to step to: it changes in its own picker only, which Enter opens.
@@ -789,6 +811,8 @@ export function DialogConfig(props: { current?: string }) {
   const display = (setting: Setting) => {
     if (setting.update && updateStatus()?.unavailable) return "unavailable"
     const current = value(setting)
+    if (themeRow(setting) === "project" && themes.project)
+      return `${current} · ${themes.level === "project" ? "this project" : "global"}`
     if (setting.format) return setting.format(current)
     const index = setting.values?.indexOf(current)
     return index === undefined || index < 0 ? String(current) : (setting.labels?.[index] ?? String(current))
@@ -825,6 +849,13 @@ export function DialogConfig(props: { current?: string }) {
       ? choices[(choices.indexOf(current) + direction + choices.length) % choices.length]
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
     if (next === current) return
+    const theme = themeRow(setting)
+    if (theme) {
+      if (theme === "global") themes.setGlobal(String(next))
+      else if (themes.project && next === themes.global) themes.useGlobal()
+      else themes.set(String(next))
+      return
+    }
     if (setting.preview && Schema.is(Attention.SoundID)(next)) preview(setting.preview, next)
     setSaving(true)
     if (setting.update) {
@@ -889,13 +920,18 @@ export function DialogConfig(props: { current?: string }) {
       onMove={(option) => setSelected(option.value)}
       onSelect={(option) => {
         const setting = settings[option.value]
-        if (setting.open && (newDesigns() || list(setting))) return setting.open(dialog)
+        if (setting.open && (newDesigns() || list(setting) || themeRow(setting))) return setting.open(dialog)
         void change(1, option.value)
       }}
       footerHints={
         newDesigns()
           ? []
-          : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
+          : themeRow(settings[selected()])
+            ? [
+                { title: "open", label: "enter" },
+                { title: "change", label: "←/→" },
+              ]
+            : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
       }
       bindings={[
         {

@@ -87,6 +87,7 @@ import { PaneResizeHandle } from "./ui/pane-resize-handle"
 import { clickedLink } from "./ui/link"
 import { ThemeErrorToast } from "./component/theme-error-toast"
 import { createThemeSource, ThemeProvider, useTheme, useThemes } from "./context/theme"
+import { ThemeSubjectSync } from "./context/theme-subject"
 import { Home } from "./routes/home"
 import { PromptHistoryProvider } from "./prompt/history"
 import { FrecencyProvider } from "./prompt/frecency"
@@ -452,6 +453,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                             mode={mode}
                                                             source={createThemeSource(global.config)}
                                                           >
+                                                            <ThemeSubjectSync />
                                                             <ThemeErrorToast />
                                                             <ClientMcp />
                                                             <LocalProvider>

@@ -20,10 +20,10 @@ import {
 import { generateSystem, terminalMode } from "../theme/system"
 import { discoverThemes } from "../theme/discovery"
 import { createComponentTheme, type ComponentTheme } from "../theme/component"
-import { createEffect, createMemo, createSignal, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
-import { createStore, produce } from "solid-js/store"
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, type Accessor, type ParentProps } from "solid-js"
+import { createStore, produce, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
-import { useConfig, useNewDesigns } from "../config"
+import { setProjectTheme, useConfig, useNewDesigns } from "../config"
 import { useStorageOptional } from "./storage"
 import { DevTools } from "../devtools"
 import { configDirectories } from "../util/config-directories"
@@ -77,17 +77,37 @@ export const createThemeSource = (config: string): ThemeSource => ({
 
 const THEME_REFRESH_DELAYS = [250, 1000] as const
 
+/**
+ * openforge (spec project-themes): what the screen shows, whose theme applies. `project` is openforge's project of the
+ * shown chat or of the folder a new chat starts in; the catch-all project has none.
+ */
+export type ThemeSubject = { project?: { id: string; name: string }; chat?: string }
+
 type State = {
   mode: "dark" | "light"
   lock: "dark" | "light" | undefined
-  active: string
   ready: boolean
+  /** The theme the picker shows while you move through it; written nowhere. */
+  preview: string | undefined
+  subject: ThemeSubject
+  /** Names that failed to load, passed over until the theme files are read again or the name is chosen again. */
+  failed: Record<string, true | undefined>
+  /** Choices written but not yet read back from the config, so the screen changes at once. null: the project's own goes. */
+  pending: { global?: string; projects: Record<string, string | null | undefined> }
 }
 
 type Themes = {
   current: ComponentTheme
   currentTokens: Accessor<ResolvedTheme>
+  /** The name of the theme shown: the preview, else the project's own, else the global one. */
   readonly selected: string
+  /** The global theme's name, as set in the config. */
+  readonly global: string
+  /** The shown project's own theme, while it has one; undefined outside a project. */
+  readonly own: string | undefined
+  /** Whose theme shows: the project's own or the global one. */
+  readonly level: "project" | "global"
+  readonly project: ThemeSubject["project"]
   all: typeof allThemes
   has: typeof hasTheme
   currentSyntax: Accessor<SyntaxStyle>
@@ -98,7 +118,15 @@ type Themes = {
   lock(): void
   unlock(): void
   setMode(mode?: "dark" | "light", persist?: boolean): boolean
+  /** Sets the theme where the screen takes it from: the shown project's own, or the global one outside a project. */
   set(theme: string): boolean
+  /** Sets the global theme; a project with its own theme keeps it. */
+  setGlobal(theme: string): boolean
+  /** Returns the shown project to the global theme: its own theme goes from the config. */
+  useGlobal(): void
+  /** Shows a theme on this screen only, until cleared with undefined. */
+  preview(theme: string | undefined): void
+  show(subject: ThemeSubject): void
   afterPaint(): void
   onError(handler: ThemeErrorHandler): () => void
   readonly ready: boolean
@@ -113,8 +141,11 @@ type ThemeContextValue = {
 const [store, setStore] = createStore<State>({
   mode: "dark",
   lock: undefined,
-  active: "opencode",
   ready: false,
+  preview: undefined,
+  subject: {},
+  failed: {},
+  pending: { projects: {} },
 })
 const [themeSources, setThemeSources] = createSignal(allThemes())
 
@@ -136,17 +167,13 @@ const themeContext = createSimpleContext({
         const mode = lock ?? renderer.themeMode ?? props.mode
         draft.mode = mode
         draft.lock = lock
-        draft.active = config.theme?.name ?? "opencode"
         draft.ready = false
+        draft.preview = undefined
+        draft.subject = {}
+        draft.failed = {}
+        draft.pending = { projects: {} }
       }),
     )
-
-    createEffect(() => {
-      const theme = config.theme?.name
-      if (!theme) return
-      setStore("active", theme)
-      if (theme === "system") refreshPalette()
-    })
 
     createEffect(() => {
       const mode = config.theme?.mode
@@ -157,13 +184,33 @@ const themeContext = createSimpleContext({
       if (mode === "system" && store.lock !== undefined) free(false)
     })
 
+    const available = createMemo(
+      (): Record<string, ThemeDocumentSource> =>
+        newDesigns() ? { opencode2: getOpenCode2Theme(), ...themeSources() } : themeSources(),
+    )
+    const has = (name: string) => Boolean(name) && available()[name] !== undefined
+    const usable = (name: string | undefined) => (name && has(name) && !store.failed[name] ? name : undefined)
+    const global = () => store.pending.global ?? config.theme?.name ?? "opencode"
+    const own = () => {
+      const id = store.subject.project?.id
+      if (!id) return undefined
+      if (id in store.pending.projects) return store.pending.projects[id] ?? undefined
+      return config.projects?.[id]?.theme?.name
+    }
+    // A name this TUI doesn't have, or one that failed to load, passes to the next level. The global name is kept while
+    // unavailable, as before project themes, so `selected` still names it.
+    const shown = createMemo(
+      () => usable(store.preview) ?? usable(own()) ?? (store.failed[global()] ? "opencode" : global()),
+    )
+
     function syncCustomThemes() {
       return themes
         .discover()
         .then((themes) => {
           setCustomThemes(themes)
+          setStore("failed", reconcile({}))
         })
-        .catch(() => setStore("active", "opencode"))
+        .catch(() => {})
     }
 
     onMount(() => {
@@ -190,7 +237,7 @@ const themeContext = createSimpleContext({
     let queued = false
     let disposed = false
     function refreshPalette() {
-      if (store.active !== "system") return
+      if (shown() !== "system") return
       queued = true
       if (!canProbe || probing || disposed) return
 
@@ -288,22 +335,18 @@ const themeContext = createSimpleContext({
       themeRefreshTimeouts.length = 0
     })
 
-    const available = createMemo(
-      (): Record<string, ThemeDocumentSource> =>
-        newDesigns() ? { opencode2: getOpenCode2Theme(), ...themeSources() } : themeSources(),
-    )
-    const has = (name: string) => Boolean(name) && available()[name] !== undefined
+    createEffect(on(shown, (name) => name === "system" && refreshPalette(), { defer: true }))
 
     const initStarted = performance.now()
     const selected = createMemo(() => {
       const sources = available()
-      const name = sources[store.active] ? store.active : "opencode"
+      const name = sources[shown()] ? shown() : "opencode"
       try {
         return loadTheme(sources[name], name, store.mode, newDesigns())
       } catch (error) {
         if (name === "opencode") throw error
         themeErrors.emit(name, error)
-        setStore("active", "opencode")
+        setStore("failed", name, true)
         return loadTheme(sources.opencode, "opencode", store.mode, newDesigns())
       }
     })
@@ -317,12 +360,53 @@ const themeContext = createSimpleContext({
     createEffect(() => renderer.setBackgroundColor(tokens().background.base))
 
     const currentSyntax = createSyntaxStyleMemo(() => generateSyntax(tokens(), renderer.nativeScene))
+    // The choice shows at once; the pending entry goes once the config has it, or the write failed.
+    function writeGlobal(theme: string) {
+      setStore("pending", "global", theme)
+      void configState
+        .update((draft) => {
+          draft.theme = { ...draft.theme, name: theme }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (store.pending.global === theme) setStore("pending", "global", undefined)
+        })
+    }
+
+    function writeProject(id: string, theme: string | null) {
+      setStore("pending", "projects", id, theme)
+      void configState
+        .update((draft) => setProjectTheme(draft, id, theme ?? undefined))
+        .catch(() => {})
+        .finally(() => {
+          if (store.pending.projects[id] === theme) setStore("pending", "projects", id, undefined)
+        })
+    }
+
+    function choose(theme: string) {
+      if (!has(theme)) return false
+      setStore("failed", theme, undefined)
+      return true
+    }
+
     const service: Themes = {
       current,
       currentTokens: tokens,
       currentSyntax,
       get selected() {
-        return store.active
+        return shown()
+      },
+      get global() {
+        return global()
+      },
+      get own() {
+        return usable(own())
+      },
+      get level() {
+        return usable(own()) ? "project" : "global"
+      },
+      get project() {
+        return store.subject.project
       },
       all: available,
       has,
@@ -338,15 +422,27 @@ const themeContext = createSimpleContext({
         return true
       },
       set(theme: string) {
-        if (!has(theme)) return false
-        setStore("active", theme)
-        if (theme === "system") refreshPalette()
-        void configState
-          .update((draft) => {
-            draft.theme = { ...draft.theme, name: theme }
-          })
-          .catch(() => {})
+        const project = store.subject.project
+        if (!project) return service.setGlobal(theme)
+        if (!choose(theme)) return false
+        writeProject(project.id, theme)
         return true
+      },
+      setGlobal(theme: string) {
+        if (!choose(theme)) return false
+        writeGlobal(theme)
+        return true
+      },
+      useGlobal() {
+        const project = store.subject.project
+        if (project) writeProject(project.id, null)
+      },
+      preview(theme) {
+        setStore("preview", theme)
+      },
+      show(subject) {
+        const project = subject.project && subject.project.id !== "global" ? subject.project : undefined
+        setStore("subject", reconcile({ ...subject, project }))
       },
       afterPaint,
       onError: themeErrors.onError,

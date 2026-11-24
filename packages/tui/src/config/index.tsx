@@ -125,6 +125,19 @@ export const Cursor = Schema.Struct({
   }),
 }).annotate({ description: "Terminal cursor settings" })
 
+export const ProjectSettings = Schema.Struct({
+  theme: Schema.optional(
+    lenient(
+      Schema.Struct({
+        name: Schema.optional(Schema.String).annotate({
+          description: "This project's theme, in place of the global theme.name",
+        }),
+      }),
+    ),
+  ).annotate({ description: "This project's color theme" }),
+})
+export type ProjectSettings = Schema.Schema.Type<typeof ProjectSettings>
+
 export const Info = Schema.Struct({
   theme: Schema.optional(
     Schema.Struct({
@@ -134,6 +147,16 @@ export const Info = Schema.Struct({
       }),
     }),
   ).annotate({ description: "Color theme settings" }),
+  // openforge (spec project-themes): each project's own settings, under openforge's id of the project. An entry that
+  // isn't valid counts as empty, and the rest of the file still applies.
+  projects: Schema.optional(
+    lenient(
+      Schema.Record(
+        Schema.String,
+        ProjectSettings.pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({})))),
+      ),
+    ),
+  ).annotate({ description: "Settings of one project, by openforge's project id" }),
   keybinds: Schema.optional(TuiKeybind.KeybindOverrides).annotate({ description: "Custom key bindings" }),
   plugins: Schema.optional(Schema.Array(Plugin)).annotate({
     description: "Ordered plugin enablement directives and external package declarations",
@@ -367,6 +390,23 @@ export const Info = Schema.Struct({
   cursor: Schema.optional(Cursor),
 })
 export type Info = Schema.Schema.Type<typeof Info>
+
+/**
+ * openforge (spec project-themes): sets a project's theme in a config draft, or with undefined removes it, then the
+ * project's entry once nothing else is left in it, and `projects` once it is empty.
+ */
+export function setProjectTheme(draft: { projects?: Info["projects"] }, id: string, name: string | undefined) {
+  const projects = draft.projects ?? {}
+  if (name) {
+    draft.projects = { ...projects, [id]: { ...projects[id], theme: { ...projects[id]?.theme, name } } }
+    return
+  }
+  const { theme: _, ...rest } = projects[id] ?? {}
+  const { [id]: __, ...others } = projects
+  const next = Object.keys(rest).length ? { ...others, [id]: rest } : others
+  if (Object.keys(next).length) draft.projects = next
+  else delete draft.projects
+}
 
 export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader" | "mouse" | "session" | "tabs"> & {
   attention: {

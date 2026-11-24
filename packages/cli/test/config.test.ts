@@ -675,7 +675,10 @@ test("a project's theme is written under its id, keeping comments and other keys
 test("removing the last project's theme removes the projects key, and a broken projects value counts as unset", async () => {
   await using directory = await tmpdir()
   const file = path.join(directory.path, "cli.json")
-  await Bun.write(file, JSON.stringify({ theme: { name: "dracula" }, projects: { proj_a: { theme: { name: "nord" } } } }))
+  await Bun.write(
+    file,
+    JSON.stringify({ theme: { name: "dracula" }, projects: { proj_a: { theme: { name: "nord" } } } }),
+  )
   await run(
     directory.path,
     Effect.gen(function* () {

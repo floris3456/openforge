@@ -96,7 +96,11 @@ test("the agent theme takes each chat's hue on its background and panels, and th
 
 test("its settings choose the base theme, the parts that follow and how strongly; the rest stays the base's", async () => {
   await using view = await mount({
-    theme: { name: "agent", mode: "dark", agent: { base: "dracula", follow: ["text", "headings"], strength: "strong" } },
+    theme: {
+      name: "agent",
+      mode: "dark",
+      agent: { base: "dracula", follow: ["text", "headings"], strength: "strong" },
+    },
   })
   view.themes.show({ project, chat: one })
   expect(view.themes.agent).toEqual({ base: "dracula", follow: ["text", "headings"], strength: "strong" })

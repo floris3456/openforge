@@ -17,8 +17,7 @@ import type { Config } from "../src/config"
 // the commands here.
 beforeEach(() => takeDraft(undefined))
 
-const background = (name: string) =>
-  resolveThemeDocument(parseTheme(allThemes()[name]!, name), "dark").background.base
+const background = (name: string) => resolveThemeDocument(parseTheme(allThemes()[name]!, name), "dark").background.base
 
 function session(id: string, title: string, projectID: string, parentID?: string) {
   return {
@@ -129,42 +128,44 @@ async function openThemes(setup: Setup) {
   await setup.waitForFrame((frame) => frame.includes("commands"))
   setup.renderer.stdin.emit("data", Buffer.from("/themes\r"))
   await setup.waitForFrame(
-    (frame) =>
-      frame.includes("Themes") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+    (frame) => frame.includes("Themes") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
   )
 }
 
-test.each([100, 50])("each tab shows its project's theme from the first frame of a switch at width %s", async (width) => {
-  await using setup = await app({
-    width,
-    sessionID: alpha.id,
-    config: { theme: { name: "dracula", mode: "dark" }, projects: { proj_a: { theme: { name: "nord" } } } },
-  })
-  await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
-  expect(same(screen(setup), "nord")).toBeTrue()
+test.each([100, 50])(
+  "each tab shows its project's theme from the first frame of a switch at width %s",
+  async (width) => {
+    await using setup = await app({
+      width,
+      sessionID: alpha.id,
+      config: { theme: { name: "dracula", mode: "dark" }, projects: { proj_a: { theme: { name: "nord" } } } },
+    })
+    await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
+    expect(same(screen(setup), "nord")).toBeTrue()
 
-  // Every frame until the other tab settles shows either tab in its own theme, never one in the other's.
-  const check = (frame: string) => {
-    const color = screen(setup)
-    if (frame.includes(content[alpha.id]!)) expect(same(color, "nord")).toBeTrue()
-    if (frame.includes(content[beta.id]!)) expect(same(color, "dracula")).toBeTrue()
-    expect(same(color, "nord") || same(color, "dracula")).toBeTrue()
-  }
-  setup.mockInput.pressKey("2", { ctrl: true })
-  await waitForHighlightedFrame(setup, (frame) => {
-    check(frame)
-    return frame.includes(content[beta.id]!)
-  })
-  expect(same(screen(setup), "dracula")).toBeTrue()
+    // Every frame until the other tab settles shows either tab in its own theme, never one in the other's.
+    const check = (frame: string) => {
+      const color = screen(setup)
+      if (frame.includes(content[alpha.id]!)) expect(same(color, "nord")).toBeTrue()
+      if (frame.includes(content[beta.id]!)) expect(same(color, "dracula")).toBeTrue()
+      expect(same(color, "nord") || same(color, "dracula")).toBeTrue()
+    }
+    setup.mockInput.pressKey("2", { ctrl: true })
+    await waitForHighlightedFrame(setup, (frame) => {
+      check(frame)
+      return frame.includes(content[beta.id]!)
+    })
+    expect(same(screen(setup), "dracula")).toBeTrue()
 
-  setup.mockInput.pressKey("1", { ctrl: true })
-  await waitForHighlightedFrame(setup, (frame) => {
-    check(frame)
-    return frame.includes(content[alpha.id]!)
-  })
-  expect(same(screen(setup), "nord")).toBeTrue()
-  expect(setup.config().projects).toEqual({ proj_a: { theme: { name: "nord" } } })
-})
+    setup.mockInput.pressKey("1", { ctrl: true })
+    await waitForHighlightedFrame(setup, (frame) => {
+      check(frame)
+      return frame.includes(content[alpha.id]!)
+    })
+    expect(same(screen(setup), "nord")).toBeTrue()
+    expect(setup.config().projects).toEqual({ proj_a: { theme: { name: "nord" } } })
+  },
+)
 
 test("a subagent's chat shows its root chat's project theme, as its tab does", async () => {
   await using setup = await app({

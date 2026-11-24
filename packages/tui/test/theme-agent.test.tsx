@@ -127,36 +127,39 @@ async function command(setup: Setup, text: string, title: string) {
   )
 }
 
-test.each([100, 50])("each tab shows its chat's agent colour from the first frame of a switch at width %s", async (width) => {
-  await using setup = await app({ width, sessionID: alpha.id, config: { theme: { name: "agent", mode: "dark" } } })
-  const one = colour(alpha.id).background.base
-  const two = colour(beta.id).background.base
-  expect(one.equals(two)).toBeFalse()
-  await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
-  await setup.waitForFrame(() => screen(setup).equals(one))
+test.each([100, 50])(
+  "each tab shows its chat's agent colour from the first frame of a switch at width %s",
+  async (width) => {
+    await using setup = await app({ width, sessionID: alpha.id, config: { theme: { name: "agent", mode: "dark" } } })
+    const one = colour(alpha.id).background.base
+    const two = colour(beta.id).background.base
+    expect(one.equals(two)).toBeFalse()
+    await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
+    await setup.waitForFrame(() => screen(setup).equals(one))
 
-  // Every frame until the other tab settles shows either chat in its own colour, never one in the other's.
-  const check = (frame: string) => {
-    const color: RGBA = screen(setup)
-    if (frame.includes(content[alpha.id]!)) expect(color.equals(one)).toBeTrue()
-    if (frame.includes(content[beta.id]!)) expect(color.equals(two)).toBeTrue()
-    expect(color.equals(one) || color.equals(two)).toBeTrue()
-  }
-  setup.mockInput.pressKey("2", { ctrl: true })
-  await waitForHighlightedFrame(setup, (frame) => {
-    check(frame)
-    return frame.includes(content[beta.id]!)
-  })
-  expect(screen(setup).equals(two)).toBeTrue()
+    // Every frame until the other tab settles shows either chat in its own colour, never one in the other's.
+    const check = (frame: string) => {
+      const color: RGBA = screen(setup)
+      if (frame.includes(content[alpha.id]!)) expect(color.equals(one)).toBeTrue()
+      if (frame.includes(content[beta.id]!)) expect(color.equals(two)).toBeTrue()
+      expect(color.equals(one) || color.equals(two)).toBeTrue()
+    }
+    setup.mockInput.pressKey("2", { ctrl: true })
+    await waitForHighlightedFrame(setup, (frame) => {
+      check(frame)
+      return frame.includes(content[beta.id]!)
+    })
+    expect(screen(setup).equals(two)).toBeTrue()
 
-  setup.mockInput.pressKey("1", { ctrl: true })
-  await waitForHighlightedFrame(setup, (frame) => {
-    check(frame)
-    return frame.includes(content[alpha.id]!)
-  })
-  expect(screen(setup).equals(one)).toBeTrue()
-  expect(setup.config().theme).toEqual({ name: "agent", mode: "dark" })
-})
+    setup.mockInput.pressKey("1", { ctrl: true })
+    await waitForHighlightedFrame(setup, (frame) => {
+      check(frame)
+      return frame.includes(content[alpha.id]!)
+    })
+    expect(screen(setup).equals(one)).toBeTrue()
+    expect(setup.config().theme).toEqual({ name: "agent", mode: "dark" })
+  },
+)
 
 test("a subagent's chat shows its root chat's agent colour", async () => {
   await using setup = await app({
@@ -189,38 +192,45 @@ test("the theme list offers Agent colours first; picking it in a project turns i
   expect(setup.config().theme).toEqual({ name: "dracula", mode: "dark" })
 })
 
-test.each([100, 50])("Settings › Agent colours: Enter on a part makes it follow, and Use turns it on, at width %s", async (width) => {
-  await using setup = await app({
-    width,
-    sessionID: alpha.id,
-    config: { tabs: { mode: "off" }, theme: { name: "nord", mode: "dark" } },
-  })
-  await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
-  await command(setup, "/settings", "Settings")
-  await setup.mockInput.typeText("agent colours")
-  await setup.waitForFrame((frame) => frame.includes("Agent colours") && frame.includes("off"))
-  setup.mockInput.pressEnter()
-  await setup.waitForFrame(
-    (frame) =>
-      frame.includes("Takes the agent's colour") &&
-      setup.renderer.currentFocusedRenderable instanceof InputRenderable,
-  )
-  // Open, it shows the agent theme in this chat's colour, written nowhere yet.
-  await setup.waitForFrame(
-    () => dialog(setup, "Agent colours")?.equals(colour(alpha.id).surface("dialog").background.base) === true,
-  )
-  expect(setup.config().theme).toEqual({ name: "nord", mode: "dark" })
+test.each([100, 50])(
+  "Settings › Agent colours: Enter on a part makes it follow, and Use turns it on, at width %s",
+  async (width) => {
+    await using setup = await app({
+      width,
+      sessionID: alpha.id,
+      config: { tabs: { mode: "off" }, theme: { name: "nord", mode: "dark" } },
+    })
+    await waitForHighlightedFrame(setup, (frame) => frame.includes(content[alpha.id]!))
+    await command(setup, "/settings", "Settings")
+    await setup.mockInput.typeText("agent colours")
+    await setup.waitForFrame((frame) => frame.includes("Agent colours") && frame.includes("off"))
+    setup.mockInput.pressEnter()
+    await setup.waitForFrame(
+      (frame) =>
+        frame.includes("Takes the agent's colour") &&
+        setup.renderer.currentFocusedRenderable instanceof InputRenderable,
+    )
+    // Open, it shows the agent theme in this chat's colour, written nowhere yet.
+    await setup.waitForFrame(
+      () => dialog(setup, "Agent colours")?.equals(colour(alpha.id).surface("dialog").background.base) === true,
+    )
+    expect(setup.config().theme).toEqual({ name: "nord", mode: "dark" })
 
-  await setup.mockInput.typeText("borders")
-  await setup.waitForFrame((frame) => frame.includes("Borders"))
-  setup.mockInput.pressEnter()
-  await setup.waitFor(() => setup.config().theme?.agent?.follow?.includes("borders") === true)
-  expect(setup.config().theme?.agent).toEqual({ base: "opencode", follow: ["background", "panels", "borders"], strength: "clear" })
-  expect(setup.config().theme?.name).toBe("nord")
+    await setup.mockInput.typeText("borders")
+    await setup.waitForFrame((frame) => frame.includes("Borders"))
+    setup.mockInput.pressEnter()
+    await setup.waitFor(() => setup.config().theme?.agent?.follow?.includes("borders") === true)
+    expect(setup.config().theme?.agent).toEqual({
+      base: "opencode",
+      follow: ["background", "panels", "borders"],
+      strength: "clear",
+    })
+    expect(setup.config().theme?.name).toBe("nord")
 
-  for (const _ of "borders") setup.mockInput.pressBackspace()
-  await setup.mockInput.typeText("use agent")
-  await setup.waitForFrame((frame) => frame.includes("Use agent colours"))
-  setup.mockInput.pressEnter()
-  await setup.waitFor(() => setup.config().projects?.proj_a?.theme?.name === "agent")
-})
+    for (const _ of "borders") setup.mockInput.pressBackspace()
+    await setup.mockInput.typeText("use agent")
+    await setup.waitForFrame((frame) => frame.includes("Use agent colours"))
+    setup.mockInput.pressEnter()
+    await setup.waitFor(() => setup.config().projects?.proj_a?.theme?.name === "agent")
+  },
+)

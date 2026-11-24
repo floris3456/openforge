@@ -130,7 +130,9 @@ test("a pasted base16 scheme becomes a theme of its name, and a theme of yours c
   await setup.ready
   await command(setup, "customize-themes", "Import a colour scheme")
   setup.mockInput.pressEnter()
-  await setup.waitForFrame((frame) => frame.includes("Import a colour scheme") && frame.includes("base16") && focused(setup))
+  await setup.waitForFrame(
+    (frame) => frame.includes("Import a colour scheme") && frame.includes("base16") && focused(setup),
+  )
   await setup.mockInput.pasteBracketedText(gruvbox)
   setup.mockInput.pressEnter()
   await setup.waitForFrame((frame) => frame.includes("Name the base16 scheme") && focused(setup))

@@ -39,7 +39,9 @@ test.each([
   expect(imported.format).toBe(format)
   // iTerm2 keeps four decimals of each channel, so its colours may be one step off.
   const close = (actual: string | undefined, expected: string) =>
-    [1, 3, 5].every((at) => Math.abs(parseInt(actual!.slice(at, at + 2), 16) - parseInt(expected.slice(at, at + 2), 16)) <= 1)
+    [1, 3, 5].every(
+      (at) => Math.abs(parseInt(actual!.slice(at, at + 2), 16) - parseInt(expected.slice(at, at + 2), 16)) <= 1,
+    )
   for (const [key, value] of Object.entries(dracula))
     expect(close(roleColor(imported.theme, key as keyof typeof dracula, "dark"), value)).toBeTrue()
   const document = parseTheme(imported.theme, "imported")

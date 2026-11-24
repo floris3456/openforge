@@ -28,8 +28,7 @@ export function importScheme(input: string): Imported {
 }
 
 function read(text: string): Imported | undefined {
-  if (text.startsWith("{") || text.startsWith("["))
-    return fromObject(Option.getOrUndefined(decodeJson(text)))
+  if (text.startsWith("{") || text.startsWith("[")) return fromObject(Option.getOrUndefined(decodeJson(text)))
   if (/<key>\s*Ansi 0 Color\s*<\/key>/i.test(text)) return terminal("iTerm2", iterm(text))
   if (/^\s*\[colors[.\]]/m.test(text)) return fromObject(toml(text), "Alacritty")
   if (/^\s*palette\s*=\s*\d+\s*=/m.test(text)) return terminal("Ghostty", ghostty(text))
@@ -376,7 +375,11 @@ function color(value: unknown): string {
   if (typeof value !== "string") return ""
   const text = value.trim().toLowerCase()
   const rgb = /^rgb:([\da-f]{1,4})\/([\da-f]{1,4})\/([\da-f]{1,4})$/.exec(text)
-  if (rgb) return `#${rgb.slice(1).map((part) => part.padEnd(2, part).slice(0, 2)).join("")}`
+  if (rgb)
+    return `#${rgb
+      .slice(1)
+      .map((part) => part.padEnd(2, part).slice(0, 2))
+      .join("")}`
   const digits = text.replace(/^(#|0x)/, "")
   if (/^[\da-f]{3}$/.test(digits)) return `#${[...digits].map((c) => c + c).join("")}`
   if (/^[\da-f]{6}$/.test(digits)) return `#${digits}`

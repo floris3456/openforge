@@ -60,8 +60,7 @@ async function mount(settings: Info) {
   }
 }
 
-const background = (name: string) =>
-  resolveThemeDocument(parseTheme(allThemes()[name]!, name), "dark").background.base
+const background = (name: string) => resolveThemeDocument(parseTheme(allThemes()[name]!, name), "dark").background.base
 
 const project = { id: "proj_a", name: "alpha" }
 

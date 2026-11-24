@@ -57,7 +57,8 @@ type Answer = (request: Received) => Response | Promise<Response>
  * CPP's tool routes on a local server: `GET /pacer/v1/tools` and `POST /pacer/v1/tools/{name}`, each answered by a
  * function the test may change. It records what it gets, can hold answers until released, and counts the requests the
  * client gave up on. Its files route (`HEAD` and `PUT /pacer/v1/files/{sha256}`) keeps the bytes it is sent, answered
- * `200` once held and `404` before.
+ * `200` once held and `404` before, and gives them back (`GET`); a review item's read (`GET
+ * /pacer/v1/memory/{project}/tasks/{id}/items/{n}`) is answered by a function the test sets.
  */
 export const fakeCpp = Effect.acquireRelease(
   Effect.sync(() => {
@@ -65,7 +66,7 @@ export const fakeCpp = Effect.acquireRelease(
     /** The files CPP holds, by their SHA-256. */
     const files = new Map<string, { readonly bytes: Uint8Array; readonly type: string | null }>()
     const uploads: ReceivedFile[] = []
-    const answers: { list: Answer; call: Answer } = {
+    const answers: { list: Answer; call: Answer; item: Answer } = {
       list: () => Response.json(owner),
       call: (request) =>
         Response.json({
@@ -74,6 +75,7 @@ export const fakeCpp = Effect.acquireRelease(
           error: null,
           metadata: { provider: "Tavily" },
         }),
+      item: () => Response.json({ error: { type: "not_found", message: "no such item" } }, { status: 404 }),
     }
     const gate = { held: false, release: () => {}, aborted: 0 }
     let opened = Promise.resolve()
@@ -101,6 +103,11 @@ export const fakeCpp = Effect.acquireRelease(
           uploads.push({ method: request.method, path: url.pathname, sha256, headers: request.headers, bytes })
           if (gate.held) await opened
           if (request.method === "HEAD") return new Response(null, { status: files.has(sha256) ? 200 : 404 })
+          if (request.method === "GET") {
+            const held = files.get(sha256)
+            if (!held) return Response.json({ error: { type: "not_found", message: `no file ${sha256}` } }, { status: 404 })
+            return new Response(held.bytes, { headers: { "content-type": held.type ?? "application/octet-stream" } })
+          }
           if (request.method !== "PUT") return new Response("405", { status: 405 })
           const already = files.has(sha256)
           if (!already) files.set(sha256, { bytes, type: request.headers.get("content-type") })
@@ -117,6 +124,8 @@ export const fakeCpp = Effect.acquireRelease(
         if (gate.held) await opened
         if (item.path === "/pacer/v1/tools" && item.method === "GET") return answers.list(item)
         if (item.path.startsWith("/pacer/v1/tools/") && item.method === "POST") return answers.call(item)
+        if (/^\/pacer\/v1\/memory\/[^/]+\/tasks\/[^/]+\/items\/\d+$/.test(item.path) && item.method === "GET")
+          return answers.item(item)
         return new Response("404 page not found", { status: 404 })
       },
     })

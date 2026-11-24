@@ -3,12 +3,18 @@ export * as ImageTool from "./image.js"
 import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { optional } from "@opencode/schema/schema"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { Config } from "../../config.js"
 import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
+import type { Database } from "../../database/database.js"
 import { ImageBank } from "../../image/bank.js"
 import { ImageFit } from "../../image/fit.js"
 import { ImageRuler } from "../../image/ruler.js"
+import { PacerProject } from "../../pacer/project.js"
+import { PacerTools } from "../../pacer/tools.js"
+import { Session } from "../../session.js"
+import { SessionBlob } from "../../session/blob.js"
+import type { SessionSchema } from "../../session/schema.js"
 import type { Tool } from "../../tool.js"
 import { PictureRemoved } from "@opencode/util/picture-removed"
 
@@ -61,6 +67,13 @@ const input = (zoom: string) =>
     })
       .annotate({ description: zoom })
       .pipe(optional),
+    task: Schema.String.annotate({
+      description: "A task's id, with item: shows that review item's picture, in its own pixels",
+    }).pipe(optional),
+    item: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+      .annotate({ description: "The review item's place in the task's round, with task" })
+      .pipe(optional),
+    compare: Schema.Boolean.annotate({ description: "With task and item: show its comparison instead" }).pipe(optional),
   })
 
 export const Input = input(ZOOM)
@@ -68,7 +81,7 @@ export const Input = input(ZOOM)
 // The catalog shows the first line; the zoom's limits are in its signature, where `zoom` is described.
 export const DESCRIPTION = [
   "See this chat's images again, zoom into them, or list them; each result says the scale it is shown at.",
-  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image.show({ id })` shows image `id` again, whole, such as after a compaction. `image.show({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image.show({})` lists the images.",
+  "Every image in the chat is numbered; the line before it gives its number, original size and the size it is shown at. `image.show({ id })` shows image `id` again, whole, such as after a compaction. `image.show({ id, zoom: { x, y, width, height } })` cuts that region, in pixels of the image as shown, from the full-resolution original. `image.show({})` lists the images. `image.show({ task, item })` shows a review item's picture (`compare: true` its comparison) in its own pixels, the ones the task tool's marks take.",
 ].join("\n")
 
 /** The Code Mode group of the image tools: `image.show` here, `image.generate` in image-generate.ts. */
@@ -103,6 +116,79 @@ export const Plugin = {
     const config = yield* Config.Service
     const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.tool.reload())
     const failure = (message: string) => new ToolFailure({ message })
+    // A review item comes from CLIProxyPacer (spec agent-notes): optional, so a host without it still has the tool.
+    const review = {
+      calls: Option.getOrUndefined(yield* Effect.serviceOption(PacerTools.Service)),
+      sessions: Option.getOrUndefined(yield* Effect.serviceOption(Session.Service)),
+      projects: Option.getOrUndefined(yield* Effect.serviceOption(PacerProject.Service)),
+    }
+
+    /** A review item's picture or comparison, whole, from the chat's store or else CLIProxyPacer, by its hash. */
+    const reviewItem = Effect.fnUntraced(function* (
+      chat: { readonly db: Database.Interface["db"]; readonly model: ImageFit.Model },
+      sessionID: SessionSchema.ID,
+      input: { readonly task: string; readonly item?: number; readonly compare?: boolean },
+    ) {
+      if (input.item === undefined) return yield* failure("A review item needs its place too: image.show({ task, item }).")
+      const calls = review.calls
+      const session = review.sessions
+        ? yield* review.sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined
+      const project = session && review.projects ? yield* review.projects.chat(session.projectID) : undefined
+      if (!calls || !session || project?.project === undefined)
+        return yield* failure("Review items are on CLIProxyPacer, and this chat has no project there.")
+      const found = yield* calls
+        .reviewItem({
+          sessionID,
+          parentID: session.parentID,
+          identity: project.project,
+          project: project.headers,
+          task: input.task,
+          item: input.item,
+        })
+        .pipe(Effect.mapError((error) => failure(error.message)))
+      const named = `Item ${found.n} of task ${found.task}`
+      if (found.kind === "decision") return yield* failure(`${named} is a decision: it has no picture.`)
+      if (found.kind === "text")
+        return yield* failure(`${named} is a text of ${found.file?.lines ?? 0} lines: mark it by its lines.`)
+      if (input.compare === true && !found.compare) return yield* failure(`${named} has no comparison.`)
+      const file = input.compare === true ? found.compare : found.file
+      if (!file) return yield* failure(`${named} has no picture.`)
+      if (file.mime === "image/svg+xml") return yield* failure(`${named} is an SVG drawing, which image.show cannot show.`)
+      const held = yield* SessionBlob.read(chat.db, file.sha256)
+      const bytes = held
+        ? { bytes: held.data, mime: held.mime }
+        : yield* calls
+            .download(file.sha256)
+            .pipe(
+              Effect.mapError((error) =>
+                failure(
+                  error._tag === "PacerHttp.NotFound"
+                    ? `Item ${found.n}'s picture is no longer kept by CLIProxyPacer.`
+                    : error.message,
+                ),
+              ),
+            )
+      const name = input.compare === true ? (found.compare_name ?? "comparison") : found.name
+      const which = input.compare === true ? `item ${found.n}'s comparison` : `item ${found.n}`
+      const read = chat.model.zoom?.ruler
+        ? "zoom into it by the number on its line and read them off the ruler."
+        : "zoom into it by the number on its line; each zoom says which of these pixels it shows."
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Task ${found.task}'s round ${found.round}, ${which}, ${name}: ${file.width}×${file.height}. Marks take these pixels: ${read}`,
+          },
+          {
+            type: "file" as const,
+            uri: `data:${bytes.mime};base64,${Buffer.from(bytes.bytes).toString("base64")}`,
+            mime: bytes.mime,
+            name: `task ${found.task} ${which}, ${name}`,
+          },
+        ],
+      }
+    })
 
     yield* ctx.tool
       .transform((editor) => {
@@ -116,10 +202,11 @@ export const Plugin = {
           description: DESCRIPTION,
           input: Input,
           options: { namespace: GROUP },
-          execute: (input) =>
+          execute: (input, context) =>
             Effect.gen(function* () {
               const chat = yield* ImageBank.Current
               if (!chat) return yield* failure(NOT_HERE)
+              if (input.task !== undefined) return yield* reviewItem(chat, context.sessionID, { ...input, task: input.task })
               if (input.id === undefined) {
                 const images = yield* ImageBank.list(chat.db, chat.sessionID)
                 return {

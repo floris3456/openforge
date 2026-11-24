@@ -2,9 +2,12 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createMemo, For, Show } from "solid-js"
 import { TodoItem } from "../../component/todo-item"
 import { sessionTodos } from "../../util/todo"
+import { useSidebarState } from "../../context/sidebar-state"
 
 export function SidebarTodo(props: { context: Plugin.Context; sessionID: string }) {
-  const [view, updateView] = props.context.storage.store("view", { initial: { open: true } })
+  // openforge: folded or not per chat.
+  const sidebar = useSidebarState()
+  const open = () => sidebar.open(props.sessionID, "todo")
   const theme = props.context.theme
   const list = createMemo(() =>
     sessionTodos(
@@ -24,22 +27,22 @@ export function SidebarTodo(props: { context: Plugin.Context; sessionID: string 
           gap={1}
           onMouseDown={() => {
             if (list().length <= 2) return
-            void updateView((draft) => {
-              draft.open = !draft.open
-            }).catch((error) => console.error("Failed to persist todo sidebar state", error))
+            void sidebar
+              .set(props.sessionID, { todo: !open() })
+              .catch((error) => console.error("Failed to persist todo sidebar state", error))
           }}
         >
           <Show when={list().length > 2}>
-            <text fg={theme.text.base}>{view.open ? "▼" : "▶"}</text>
+            <text fg={theme.text.base}>{open() ? "▼" : "▶"}</text>
           </Show>
           <text fg={theme.text.base}>
             <b>Todo</b>
-            <Show when={list().length > 2 && !view.open}>
+            <Show when={list().length > 2 && !open()}>
               <span style={{ fg: theme.text.muted }}> ({remaining()} remaining)</span>
             </Show>
           </text>
         </box>
-        <Show when={list().length <= 2 || view.open}>
+        <Show when={list().length <= 2 || open()}>
           <For each={list()}>{(item) => <TodoItem theme={theme} todo={item} />}</For>
         </Show>
       </box>

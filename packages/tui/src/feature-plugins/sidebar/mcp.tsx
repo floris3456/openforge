@@ -1,9 +1,12 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { DialogMcp } from "../../component/dialog-mcp"
+import { useSidebarState } from "../../context/sidebar-state"
 
 export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }) {
-  const [view, updateView] = props.context.storage.store("view", { initial: { open: true } })
+  // openforge: folded or not per chat.
+  const sidebar = useSidebarState()
+  const open = () => sidebar.open(props.sessionID, "mcp")
   const theme = props.context.theme
   const session = createMemo(() => props.context.data.session.get(props.sessionID))
   const list = createMemo(() => props.context.data.location.mcp.server.list(session()?.location) ?? [])
@@ -28,17 +31,17 @@ export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }
           gap={1}
           onMouseDown={() => {
             if (list().length <= 2) return
-            void updateView((draft) => {
-              draft.open = !draft.open
-            }).catch((error) => console.error("Failed to persist MCP sidebar state", error))
+            void sidebar
+              .set(props.sessionID, { mcp: !open() })
+              .catch((error) => console.error("Failed to persist MCP sidebar state", error))
           }}
         >
           <Show when={list().length > 2}>
-            <text fg={theme.text.base}>{view.open ? "▼" : "▶"}</text>
+            <text fg={theme.text.base}>{open() ? "▼" : "▶"}</text>
           </Show>
           <text fg={theme.text.base}>
             <b>MCP</b>
-            <Show when={!view.open}>
+            <Show when={!open()}>
               <span style={{ fg: theme.text.muted }}>
                 {" "}
                 ({on()} active{bad() > 0 ? `, ${bad()} error${bad() > 1 ? "s" : ""}` : ""})
@@ -46,7 +49,7 @@ export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }
             </Show>
           </text>
         </box>
-        <Show when={list().length <= 2 || view.open}>
+        <Show when={list().length <= 2 || open()}>
           <For each={list()}>
             {(item) => (
               <box

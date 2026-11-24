@@ -40,6 +40,7 @@ import { ModelsDev } from "@opencode/core/models-dev"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerIdle } from "@opencode/core/pacer/idle"
+import { PacerInspect } from "@opencode/core/pacer/inspect"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
 import { PacerAttention } from "@opencode/core/pacer/attention"
@@ -118,6 +119,7 @@ const applicationServiceNodes = [
   PacerNotices.node,
   PacerAttention.node,
   PacerIdle.node,
+  PacerInspect.node,
   AutoUpdate.node,
   // openforge: its work on the media files runs in the server process (spec pictures-files).
   MediaKeeper.node,
@@ -183,6 +185,8 @@ function makeRoutes<AuthError, AuthServices>(
     PacerEndpoint.node.replace(
       PacerEndpoint.configured({ file: options.config?.file, content: options.config?.content }),
     ),
+    // openforge: a chat's commands reach the service at its first address, the loopback one when it listens on all.
+    PacerInspect.node.replace(PacerInspect.configured({ url: () => serviceURLs()[0] })),
     InstructionDiscovery.node.replace(
       InstructionDiscovery.configured({
         project: options.config?.project,

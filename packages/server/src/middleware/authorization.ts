@@ -6,6 +6,7 @@ import { PTY_CONNECT_PATH, PTY_CONNECT_TICKET_QUERY } from "@opencode/protocol/g
 import { PERSISTENT_PTY_CONNECT_PATH } from "@opencode/protocol/groups/persistent-pty"
 import { MCP_CLIENT_PATH } from "@opencode/protocol/groups/mcp"
 import { PAIRING_CONNECT_PATH } from "@opencode/protocol/groups/server"
+import { PacerInspect } from "@opencode/core/pacer/inspect"
 import { Effect, Layer, Redacted } from "effect"
 import { Base64 } from "effect/encoding"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
@@ -56,6 +57,15 @@ export function unauthorizedResponse(request: HttpServerRequest.HttpServerReques
   )
 }
 
+/**
+ * openforge: a chat command's token (`OPENFORGE_CPP_TOKEN`, made at this start of the service) as Bearer, on the
+ * inspection routes alone (workspace spec cpp-inspect-cli).
+ */
+export function inspectToken(request: HttpServerRequest.HttpServerRequest, path: string) {
+  if (!path.startsWith(PacerInspect.PREFIX)) return undefined
+  return /^Bearer\s+(\S+)$/i.exec(request.headers.authorization ?? "")?.[1]
+}
+
 export function authorizedRequest(request: HttpServerRequest.HttpServerRequest, config: ServerAuth.Info) {
   return credentialFromRequest(request).pipe(
     Effect.map((credential) => ServerAuth.authorized(credential, config) || authorizedSessionCookie(request, config)),
@@ -75,6 +85,7 @@ export const authorizationLayer = Layer.effect(
   Authorization,
   Effect.gen(function* () {
     const config = yield* ServerAuth.Config
+    const inspect = yield* PacerInspect.Service
     if (!ServerAuth.required(config)) return Authorization.of((effect) => effect)
     return Authorization.of((effect) =>
       Effect.gen(function* () {
@@ -92,6 +103,8 @@ export const authorizationLayer = Layer.effect(
           route.route.path === PAIRING_CONNECT_PATH
         )
           return yield* effect
+        const token = inspectToken(request, route.route.path)
+        if (token !== undefined && inspect.accepts(token)) return yield* effect
         if (yield* authorizedRequest(request, config)) return yield* effect
         if (challengeRequest(request))
           yield* HttpEffect.appendPreResponseHandler((_request, response) =>

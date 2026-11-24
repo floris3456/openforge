@@ -112,6 +112,14 @@ export const promiseOmitEndpoints = new Set([
   "persistentPty.connect",
   "mcp.client",
   "generate.textLegacy",
+  // openforge: `openforge cpp`'s routes pass CLIProxyPacer's answer on as it came, its text too; the CLI reads them.
+  "pacer.inspect.projects",
+  "pacer.inspect.tasks",
+  "pacer.inspect.goals",
+  "pacer.inspect.recall",
+  "pacer.inspect.entries",
+  "pacer.inspect.items",
+  "pacer.inspect.review",
 ])
 export const effectOmitEndpoints = new Set([
   "fs.read",
@@ -123,4 +131,12 @@ export const effectOmitEndpoints = new Set([
   "persistentPty.connect",
   "mcp.client",
   "generate.textLegacy",
+  // openforge: `openforge cpp`'s routes pass CLIProxyPacer's answer on as it came, its text too; the CLI reads them.
+  "pacer.inspect.projects",
+  "pacer.inspect.tasks",
+  "pacer.inspect.goals",
+  "pacer.inspect.recall",
+  "pacer.inspect.entries",
+  "pacer.inspect.items",
+  "pacer.inspect.review",
 ])

@@ -118,6 +118,11 @@ export interface Memory {
    * its file read by hash, which `image.show({ task, item })` needs; openforge offers those fields only then.
    */
   readonly reviewItems: boolean
+  /**
+   * Whether the server has the read-only routes of other projects for a key the owner lets (workspace spec
+   * `docs/specs/cpp-inspect-cli.md`): `PacerInspect` relays `openforge cpp` only then.
+   */
+  readonly inspect: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -294,6 +299,7 @@ const MemoryBlock = Schema.Struct({
   goals: Schema.optional(Schema.Unknown),
   later: Schema.optional(Schema.Unknown),
   review_items: Schema.optional(Schema.Unknown),
+  inspect: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -488,6 +494,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           goals: memory.goals === true,
           later: memory.later === true,
           reviewItems: memory.review_items === true,
+          inspect: memory.inspect === true,
         },
       }),
     }),

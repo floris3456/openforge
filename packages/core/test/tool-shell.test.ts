@@ -45,6 +45,7 @@ import { ToolOutput } from "@opencode/core/tool-output"
 import { Tool } from "@opencode/core/tool"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PersistentPty } from "@opencode/core/persistent-pty"
+import { PacerInspect } from "@opencode/core/pacer/inspect"
 import { disabledPersistentPtyLayer } from "./fixture/persistent-pty"
 import { tmpdir, tmpdirScoped, withTempDir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
@@ -175,6 +176,14 @@ const replacements = [
   PersistentPty.node.replace(disabledPersistentPtyLayer),
 ] satisfies LayerNode.Replacements
 const productionIt = testEffect(AppNodeBuilder.build(nodes, replacements))
+// The service's address as the server gives it to PacerInspect once it listens (workspace spec cpp-inspect-cli).
+const inspectURL = "http://127.0.0.1:47321"
+const inspectIt = testEffect(
+  AppNodeBuilder.build(LayerNode.group([nodes, PacerInspect.node]), [
+    ...replacements,
+    PacerInspect.node.replace(PacerInspect.configured({ url: () => inspectURL })),
+  ]),
+)
 const shellLayer = AppNodeBuilder.build(nodes, [...replacements, PluginSupervisor.node.replace(shellPluginSupervisor)])
 const it = testEffect(shellLayer)
 const codeModeIt = testEffect(shellLayer.pipe(Layer.provide(Layer.succeed(Flag.Overrides, "full_codemode"))))
@@ -1017,6 +1026,37 @@ describe("ShellTool", () => {
 
             expect(settled.status).toBe("completed")
             expect(settled.content?.[0]).toEqual({ type: "text", text: `1|1|opencode|${sessionID}` })
+          }),
+        )
+      }),
+    { timeout: 15_000 },
+  )
+
+  inspectIt.live(
+    "gives agent shell commands the service's inspection address and this start's token",
+    () =>
+      withTempDir((tmp) => {
+        reset()
+        return withSession(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            const inspect = yield* PacerInspect.Service
+            const sessions = yield* Session.Service
+            // A chat's own variables don't replace them.
+            yield* sessions.environment({
+              sessionID,
+              variables: { OPENFORGE_CPP_URL: "http://elsewhere", OPENFORGE_CPP_TOKEN: "stale" },
+            })
+            const command = isWindows
+              ? '[Console]::Out.Write("$env:OPENFORGE_CPP_URL|$env:OPENFORGE_CPP_TOKEN")'
+              : 'printf %s "$OPENFORGE_CPP_URL|$OPENFORGE_CPP_TOKEN"'
+            const settled = yield* executeTool(registry, call({ command }))
+
+            expect(settled.status).toBe("completed")
+            const content = settled.content?.[0]
+            const [url, token] = content?.type === "text" ? content.text.split("|") : []
+            expect(url).toBe(inspectURL)
+            expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/)
+            expect(inspect.accepts(token ?? "")).toBe(true)
           }),
         )
       }),

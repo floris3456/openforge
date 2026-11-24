@@ -83,6 +83,23 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("pacer.prompt", (ctx) => pacer.prompt(ctx.params.requestID))
       .handle("pacer.settings.get", () => pacer.settings())
       .handle("pacer.settings.update", (ctx) => pacer.updateSettings(ctx.payload))
+      .handleRaw("pacer.inspect.projects", (ctx) => pacer.inspect("projects", ctx.query))
+      .handleRaw("pacer.inspect.tasks", (ctx) =>
+        pacer.inspect(`projects/${encodeURIComponent(ctx.params.project)}/tasks`, ctx.query),
+      )
+      .handleRaw("pacer.inspect.goals", (ctx) =>
+        pacer.inspect(`projects/${encodeURIComponent(ctx.params.project)}/goals`, ctx.query),
+      )
+      .handleRaw("pacer.inspect.recall", (ctx) =>
+        pacer.inspect(`projects/${encodeURIComponent(ctx.params.project)}/recall`, ctx.query),
+      )
+      .handleRaw("pacer.inspect.entries", (ctx) =>
+        pacer.inspect(`projects/${encodeURIComponent(ctx.params.project)}/entries`, ctx.query),
+      )
+      .handleRaw("pacer.inspect.items", (ctx) => pacer.inspect("items", ctx.query))
+      .handleRaw("pacer.inspect.review", (ctx) =>
+        pacer.inspect(`tasks/${encodeURIComponent(ctx.params.id)}/review`, ctx.query),
+      )
       .handle(
         "persistentPty.read",
         Effect.fn(function* (ctx) {

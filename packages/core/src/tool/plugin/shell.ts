@@ -16,6 +16,7 @@ import { Flag } from "../../flag.js"
 import { Job } from "../../job.js"
 import { FileAccess } from "../../file-access.js"
 import { Permission } from "../../permission.js"
+import { PacerInspect } from "../../pacer/inspect.js"
 import { NonNegativeInt } from "../../schema.js"
 import { Session } from "../../session.js"
 import { SessionMessage } from "../../session/message.js"
@@ -360,6 +361,8 @@ export const Plugin = {
     // Internal plugins are not re-run on config changes, so reload the tool transform instead.
     const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.tool.reload())
     const flags = yield* Flag.Service
+    // openforge: `openforge cpp` reaches the service with these (workspace spec cpp-inspect-cli).
+    const inspect = yield* Effect.serviceOption(PacerInspect.Service)
 
     const prepare = Effect.fn("ShellTool.prepare")(function* (
       invocation: ShellCreateBefore,
@@ -489,6 +492,7 @@ export const Plugin = {
                             invocation.env.OPENCODE = "1"
                             invocation.env.AI_AGENT ||= "opencode"
                             invocation.env.OPENCODE_SESSION_ID = context.sessionID
+                            if (Option.isSome(inspect)) Object.assign(invocation.env, inspect.value.env())
                             // Asking for permission can take a while; a stop then ends the call before any command starts.
                             finalTimeout = yield* restore(
                               Effect.raceFirst(

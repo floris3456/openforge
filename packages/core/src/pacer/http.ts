@@ -116,6 +116,13 @@ export interface Answer<A> {
   readonly offset: Offset | undefined
 }
 
+/** An answer passed on as it came: its status, headers and body, whatever the status. */
+export interface Relayed {
+  readonly status: number
+  readonly headers: Readonly<Record<string, string>>
+  readonly body: string
+}
+
 export interface StreamAnswer {
   readonly offset: Offset | undefined
   readonly headers: Readonly<Record<string, string>>
@@ -159,6 +166,12 @@ export interface Interface {
   readonly head: (path: string, options?: Options) => Effect.Effect<number, Error>
   /** A GET whose body is read as it arrives, such as the change stream. */
   readonly stream: (path: string, options?: Options) => Effect.Effect<StreamAnswer, Error>
+  /**
+   * A GET whose answer goes back as it came, whatever its status, for a caller that passes CPP's own answer on
+   * (`PacerInspect`). A redirect is {@link Unexpected}; no answer, or a gateway's 502 or 504, is {@link Unreachable},
+   * so that `failover` moves on.
+   */
+  readonly relay: (path: string, options?: Options) => Effect.Effect<Relayed, Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerHttp") {}
@@ -218,29 +231,35 @@ export const layer = Layer.effect(
       return { response, offset: offset(response.headers.date, sent, yield* Clock.currentTimeMillis) }
     })
 
-    const json = <A, I>(
-      request: (url: string) => HttpClientRequest.HttpClientRequest,
-      path: string,
-      schema: Schema.Codec<A, I>,
+    /** `call` on the current endpoint, and with `failover` once more on the next address when that one is down. */
+    const failing = <A>(
       options: Options | undefined,
-    ): Effect.Effect<Answer<A>, Error> => {
+      call: (options: Options | undefined) => Effect.Effect<A, Error>,
+    ): Effect.Effect<A, Error> => {
       const failover = endpoints.failover
-      if (!options?.failover || !failover) return once(request, path, schema, options)
+      if (!options?.failover || !failover) return call(options)
       return Effect.gen(function* () {
         const at = options.endpoint ?? (yield* endpoints.get())
-        if (!at) return yield* once(request, path, schema, options)
-        return yield* once(request, path, schema, { ...options, endpoint: at }).pipe(
+        if (!at) return yield* call(options)
+        return yield* call({ ...options, endpoint: at }).pipe(
           Effect.catchIf(down, (error) =>
             Effect.gen(function* () {
               yield* failover(at)
               const now = yield* endpoints.get()
               if (!now || PacerEndpoint.same(now, at)) return yield* error
-              return yield* once(request, path, schema, { ...options, endpoint: now })
+              return yield* call({ ...options, endpoint: now })
             }),
           ),
         )
       })
     }
+
+    const json = <A, I>(
+      request: (url: string) => HttpClientRequest.HttpClientRequest,
+      path: string,
+      schema: Schema.Codec<A, I>,
+      options: Options | undefined,
+    ): Effect.Effect<Answer<A>, Error> => failing(options, (options) => once(request, path, schema, options))
 
     const once = <A, I>(
       request: (url: string) => HttpClientRequest.HttpClientRequest,
@@ -327,6 +346,18 @@ export const layer = Layer.effect(
             body: sent.response.stream.pipe(Stream.mapError(unreachable)),
           } satisfies StreamAnswer
         }).pipe(timeout(options)),
+      relay: (path, options) =>
+        failing(options, (options) =>
+          Effect.gen(function* () {
+            const sent = yield* send(HttpClientRequest.get, path, options, { redirect: "manual" })
+            const body = yield* sent.response.text.pipe(Effect.mapError(unreachable))
+            const status = sent.response.status
+            if (status >= 300 && status < 400)
+              return yield* new Unexpected({ status, reason: `redirect (${status}) refused` })
+            if (status === 502 || status === 504) return yield* new Unreachable({ status, reason: `HTTP ${status}` })
+            return { status, headers: sent.response.headers, body } satisfies Relayed
+          }).pipe(timeout(options)),
+        ),
     })
   }),
 )

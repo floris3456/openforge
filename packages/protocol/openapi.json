@@ -14908,6 +14908,571 @@
         }
       }
     },
+    "/api/experimental/pacer/inspect/projects": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.projects",
+        "parameters": [
+          {
+            "name": "all",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`1` adds the projects that allow the key with memory off."
+            },
+            "required": false
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "The `next` of the page before (in a text answer, its `X-Pacer-Next` header)."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The projects whose memory is on and whose allowed keys take the install's key, oldest first, with their counts. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "List the projects this key may inspect"
+      }
+    },
+    "/api/experimental/pacer/inspect/projects/{project}/tasks": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.tasks",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities."
+            },
+            "required": true
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "A task state, `work` (the default), `reviewed` or `all`."
+            },
+            "required": false
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 10 words."
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 50, 50 when omitted."
+            },
+            "required": false
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "The `next` of the page before (in a text answer, its `X-Pacer-Next` header)."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Its top-level tasks newest first, each with its open subtasks and those the words matched, as the task tool lists them. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "List another project's tasks"
+      }
+    },
+    "/api/experimental/pacer/inspect/projects/{project}/goals": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.goals",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities."
+            },
+            "required": true
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`1` adds the dropped goals."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The board's goals with their counts. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "List another project's goals"
+      }
+    },
+    "/api/experimental/pacer/inspect/projects/{project}/recall": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.recall",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities."
+            },
+            "required": true
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 2,000 characters."
+            },
+            "required": false
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`all` (the default), `global`, `role:<role>` or `task:<id>`."
+            },
+            "required": false
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`words`, `unverified` or `verified`, comma-separated."
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 20, 5 when omitted."
+            },
+            "required": false
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "The `next` of the page before (in a text answer, its `X-Pacer-Next` header)."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Live entries best first, as recall finds them, without a recall row. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "Recall another project's memory"
+      }
+    },
+    "/api/experimental/pacer/inspect/projects/{project}/entries": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.entries",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "description": "A project's name as CLIProxyPacer's Projects page shows it, its id or one of its identities."
+            },
+            "required": true
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "Only this role's entries."
+            },
+            "required": false
+          },
+          {
+            "name": "task",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "Only this task's entries."
+            },
+            "required": false
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`words`, `unverified` or `verified`."
+            },
+            "required": false
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`live` (the default), `replaced`, `deleted` or `all`."
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 100, 20 when omitted."
+            },
+            "required": false
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "The `next` of the page before (in a text answer, its `X-Pacer-Next` header)."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Entries newest first. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "List another project's entries"
+      }
+    },
+    "/api/experimental/pacer/inspect/items": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.items",
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "1 to 20 ids of tasks, steps, goals or entries, comma-separated."
+            },
+            "required": false
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Each id found, under its project; the ids not found named. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "Read tasks, goals and entries of other projects by id"
+      }
+    },
+    "/api/experimental/pacer/inspect/tasks/{id}/review": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.inspect.review",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "`text` for the memory tools' own lines (`text/plain`); JSON when omitted."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "CLIProxyPacer's answer unchanged: its JSON, or with `format=text` its text (`X-Pacer-Next` names the next page's cursor); a refusal as `{error: {type, message}}`.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Its rounds oldest first, each item with its answer and every note. Read only, relayed to CLIProxyPacer's `/pacer/v1/inspect/` with the install's client key, which CLIProxyPacer answers only for a key its owner lets inspect other projects. Besides the server's password, the token in a chat command's `OPENFORGE_CPP_TOKEN` opens these routes, and no other. Experimental: may change without compatibility guarantees.",
+        "summary": "Read every review round of another project's task"
+      }
+    },
     "/api/experimental/pacer/notices": {
       "get": {
         "tags": ["experimental"],

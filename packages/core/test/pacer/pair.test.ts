@@ -3,7 +3,7 @@ import fs from "fs/promises"
 import { describe, expect } from "bun:test"
 import { AIError, ai } from "@opencode/ai/effect"
 import { LLMClient, RequestExecutor } from "@opencode/ai/route"
-import { Context, Effect, Layer, Option, Stream } from "effect"
+import { Clock, Context, Duration, Effect, Layer, Option, Stream } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { TestClock } from "effect/testing"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -161,6 +161,20 @@ const until = <A, E, R>(effect: Effect.Effect<A, E, R>, predicate: (value: A) =>
     return yield* Effect.die(new Error(`timed out waiting: ${JSON.stringify(yield* effect)}`))
   })
 
+/** The test clock, keeping in `sleeping` the length in milliseconds of each sleep that waits on it now. */
+const watchedClock = (sleeping: number[]) =>
+  TestClock.testClockWith((clock) =>
+    Effect.succeed<TestClock.TestClock>({
+      ...clock,
+      sleep: (duration) =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => sleeping.push(Duration.toMillis(duration))),
+          () => clock.sleep(duration),
+          () => Effect.sync(() => sleeping.splice(sleeping.indexOf(Duration.toMillis(duration)), 1)),
+        ),
+    }),
+  )
+
 const roots = (endpoints: PacerEndpoint.Interface) =>
   Effect.suspend(() => endpoints.addresses?.() ?? Effect.succeed([])).pipe(
     Effect.map((list) => list.map((item) => item.root)),
@@ -300,8 +314,16 @@ describe("CPP's pair addresses", () => {
     }),
   )
 
-  it.effect("moves back after two answers of the first address a minute apart, and polls nothing there", () =>
-    Effect.gen(function* () {
+  it.effect("moves back after two answers of the first address a minute apart, and polls nothing there", () => {
+    const sleeping: number[] = []
+    // The next check of the first address: the minute moves on only once the watch sleeps it out again and no check
+    // waits for its answer. A move made sooner would also fire the check's 2 s timeout, or pass before the watch's
+    // next sleep starts, which would then wake a minute after the check the test waits for.
+    const nextCheck = until(
+      Effect.sync(() => sleeping),
+      (pending) => pending.includes(60_000) && !pending.includes(2_000),
+    ).pipe(Effect.andThen(TestClock.adjust("60 seconds")))
+    return Effect.gen(function* () {
       const a = yield* fakeInstance
       const b = yield* fakeInstance
       a.state.addresses = listed(a, b)
@@ -315,19 +337,19 @@ describe("CPP's pair addresses", () => {
       expect(yield* at(endpoints)).toBe(b.root)
 
       // Still down at the first check: the count starts over.
-      yield* TestClock.adjust("60 seconds")
+      yield* nextCheck
       yield* until(
         Effect.sync(() => a.state.health),
         (count) => count === 1,
       )
       a.state.down = false
-      yield* TestClock.adjust("60 seconds")
+      yield* nextCheck
       yield* until(
         Effect.sync(() => a.state.health),
         (count) => count === 2,
       )
       expect(yield* at(endpoints)).toBe(b.root)
-      yield* TestClock.adjust("60 seconds")
+      yield* nextCheck
       yield* until(at(endpoints), (root) => root === a.root)
       expect((yield* endpoints.get())?.home).toBeUndefined()
       expect(a.state.health).toBe(3)
@@ -335,8 +357,8 @@ describe("CPP's pair addresses", () => {
       yield* TestClock.adjust("10 minutes")
       yield* Effect.promise(() => Bun.sleep(50))
       expect(a.state.health).toBe(3)
-    }),
-  )
+    }).pipe(Effect.provideServiceEffect(Clock.Clock, watchedClock(sleeping)))
+  })
 
   it.live("takes no addresses from an unkeyed or foreign answer, nor malformed entries", () =>
     Effect.gen(function* () {

@@ -83,6 +83,8 @@ export async function createAppFixture(
     ...setup,
     events,
     config: () => config,
+    /** The global config folder the app was given, which holds the themes folder. */
+    configDirectory: path.join(root.path, "config"),
     ready: ready.promise,
     async [Symbol.asyncDispose]() {
       try {

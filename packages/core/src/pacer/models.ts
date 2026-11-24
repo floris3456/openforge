@@ -113,6 +113,11 @@ export interface Memory {
    * `docs/reference/task-system-later-api.md`): openforge then reports a chat's edited files (`TaskFilesPlugin`).
    */
   readonly later: boolean
+  /**
+   * Whether the server has agents' notes on review items (workspace spec `docs/specs/agent-notes.md`): a review item and
+   * its file read by hash, which `image.show({ task, item })` needs; openforge offers those fields only then.
+   */
+  readonly reviewItems: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -288,6 +293,7 @@ const MemoryBlock = Schema.Struct({
   tools: Schema.optional(Schema.Unknown),
   goals: Schema.optional(Schema.Unknown),
   later: Schema.optional(Schema.Unknown),
+  review_items: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -481,6 +487,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           tools: memory.tools === true,
           goals: memory.goals === true,
           later: memory.later === true,
+          reviewItems: memory.review_items === true,
         },
       }),
     }),

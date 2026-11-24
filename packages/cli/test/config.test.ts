@@ -6,6 +6,7 @@ import { expect, test } from "bun:test"
 import { parse } from "jsonc-parser"
 import path from "path"
 import { Config } from "../src/config"
+import { setProjectTheme } from "@opencode/tui/config"
 import { tmpdir } from "./fixture/tmpdir"
 
 function run<A, E>(directory: string, effect: Effect.Effect<A, E, Config.Service>) {
@@ -618,4 +619,82 @@ test("an invalid attention.events value counts as unset, and the rest of cli.jso
   expect(result.updated.attention?.events?.reply).toEqual({ sound: "yup-02" })
   const written = await Bun.file(file).json()
   expect(written.attention.events).toEqual({ done: { sound: "beep", notification: false }, reply: { sound: "yup-02" } })
+})
+
+// openforge (spec project-themes): a project's theme sits under its id in cli.json; setting one edits only that entry,
+// removing its last key removes the entry, and an entry that isn't valid counts as empty while the rest still applies.
+test("a project's theme is written under its id, keeping comments and other keys", async () => {
+  await using directory = await tmpdir()
+  const file = path.join(directory.path, "cli.json")
+  await Bun.write(
+    file,
+    [
+      "{",
+      "  // Keep this comment",
+      '  "theme": { "name": "dracula", "mode": "dark" },',
+      '  "projects": {',
+      '    "proj_a": { "theme": { "name": "nord" } },',
+      '    "proj_broken": 3,',
+      '    "proj_odd": { "theme": { "name": 7 } }',
+      "  },",
+      '  "animations": false',
+      "}",
+      "",
+    ].join("\n"),
+  )
+  const result = await run(
+    directory.path,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      const loaded = yield* service.get()
+      const added = yield* service.update((draft) => setProjectTheme(draft, "proj_c", "gruvbox"))
+      const addedText = yield* Effect.promise(() => Bun.file(file).text())
+      const replaced = yield* service.update((draft) => setProjectTheme(draft, "proj_c", "aura"))
+      const removed = yield* service.update((draft) => setProjectTheme(draft, "proj_a", undefined))
+      return { loaded, added, addedText, replaced, removed }
+    }),
+  )
+  expect(result.loaded).toEqual({
+    theme: { name: "dracula", mode: "dark" },
+    projects: { proj_a: { theme: { name: "nord" } }, proj_broken: {}, proj_odd: { theme: undefined } },
+    animations: false,
+  })
+  expect(result.added.projects?.proj_c).toEqual({ theme: { name: "gruvbox" } })
+  expect(result.addedText).toContain("// Keep this comment")
+  expect(result.replaced.projects?.proj_c).toEqual({ theme: { name: "aura" } })
+  expect(result.removed.projects?.proj_a).toBeUndefined()
+  const written = parse(await Bun.file(file).text())
+  expect(written).toEqual({
+    theme: { name: "dracula", mode: "dark" },
+    projects: { proj_broken: 3, proj_odd: { theme: { name: 7 } }, proj_c: { theme: { name: "aura" } } },
+    animations: false,
+  })
+  expect(await Bun.file(file).text()).toContain("// Keep this comment")
+})
+
+test("removing the last project's theme removes the projects key, and a broken projects value counts as unset", async () => {
+  await using directory = await tmpdir()
+  const file = path.join(directory.path, "cli.json")
+  await Bun.write(
+    file,
+    JSON.stringify({ theme: { name: "dracula" }, projects: { proj_a: { theme: { name: "nord" } } } }),
+  )
+  await run(
+    directory.path,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      yield* service.update((draft) => setProjectTheme(draft, "proj_a", undefined))
+    }),
+  )
+  expect(await Bun.file(file).json()).toEqual({ theme: { name: "dracula" } })
+
+  await Bun.write(file, JSON.stringify({ theme: { name: "dracula" }, projects: "not an object", animations: false }))
+  const loaded = await run(
+    directory.path,
+    Effect.gen(function* () {
+      const service = yield* Config.Service
+      return yield* service.get()
+    }),
+  )
+  expect(loaded).toEqual({ theme: { name: "dracula" }, animations: false })
 })

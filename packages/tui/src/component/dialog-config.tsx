@@ -8,10 +8,13 @@ import { ClientContext } from "../context/client"
 import { usePacer } from "../context/pacer"
 import { useThemes } from "../context/theme"
 import { DialogMuted, mutedSummary, type MutedModel } from "../pacer/muted"
+import { AGENT_THEME, themeLabel } from "../theme/agent"
 import { useDialog, type DialogContext } from "../ui/dialog"
 import { DialogSelect, DialogSelectChoice } from "../ui/dialog-select"
 import { useToast } from "../ui/toast"
 import { DialogThemeList } from "./dialog-theme-list"
+import { DialogThemeCustomize } from "./dialog-theme-customize"
+import { DialogThemeAgent } from "./dialog-theme-agent"
 
 type Setting = {
   title: string
@@ -116,13 +119,55 @@ export const settings: Setting[] = [
     title: "Theme",
     category: "Appearance",
     path: ["theme", "name"],
-    description: "Color theme used across the interface",
-    help: 'The colors of the whole interface. Enter opens the list of themes, with a preview as you move through it. The list holds the built-in themes and any theme files you added. Light and dark variants follow "Color mode".',
+    description: "Color theme of this project, else the global theme",
+    help: 'The colors of the whole interface, for the project on screen: its own theme, or the global theme while it has none. Enter opens the list of themes, with a preview as you move through it; picking a theme saves it for this project, and picking the global theme returns the project to it. Outside a project it sets the global theme. The list holds Agent colours (see that setting), the built-in themes and any theme files you added. Light and dark variants follow "Color mode".',
     default: "opencode",
-    keywords: ["color scheme", "colors"],
+    keywords: ["color scheme", "colors", "project theme"],
     open: (dialog) =>
       dialog.replace(() => (
         <DialogThemeList onClose={() => dialog.replace(() => <DialogConfig current="theme.name" />)} />
+      )),
+  },
+  {
+    title: "Global theme",
+    category: "Appearance",
+    // openforge (spec project-themes): only the row's ID; it reads and writes the global theme through the theme.
+    path: ["theme", "global"],
+    description: "Color theme of every project without its own",
+    help: "The theme every project shows while it has no theme of its own, and the screen outside a project. Enter opens the list of themes; a project with its own theme keeps it.",
+    default: "opencode",
+    keywords: ["color scheme", "colors", "default theme"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogThemeList scope="global" onClose={() => dialog.replace(() => <DialogConfig current="theme.global" />)} />
+      )),
+  },
+  {
+    title: "Your themes",
+    category: "Appearance",
+    // openforge (spec custom-themes): only the row's ID; Enter opens the customizer, whose command is "Customize themes".
+    path: ["theme", "customize"],
+    description: "Your own themes: copy one, choose which colour goes where, import a scheme",
+    help: "Your own themes, each a file in the global themes folder. Copy any theme into one of your own under a name you give, set which colour each part of the screen uses, or import a colour scheme from a scheme site (base16 or base24, an opencode theme, or a terminal scheme of iTerm2, Windows Terminal, Ghostty, kitty, Alacritty, Xresources, Gogh or terminal.sexy).",
+    default: "",
+    keywords: ["custom theme", "colors", "import", "base16", "color scheme"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogThemeCustomize onClose={() => dialog.replace(() => <DialogConfig current="theme.customize" />)} />
+      )),
+  },
+  {
+    title: "Agent colours",
+    category: "Appearance",
+    // openforge (spec agent-theme): Enter opens the agent theme's settings, kept in theme.agent.
+    path: ["theme", "agent"],
+    description: "Tell agent chats apart: parts of the screen take the colour of the chat's agent",
+    help: "A special theme, first in the list of themes, that tells agent chats (and the windows that show them) apart: the parts of the screen you choose take the colour of the agent of the chat on screen, and every other colour stays its base theme's. Status, diff and code colours never change. Enter opens its settings: use it, its base theme, how strongly, and which parts follow (background, panels, borders, accents, headings and links, text). Picking any other theme turns it off.",
+    default: "off",
+    keywords: ["agent theme", "agent color", "tint", "tell windows apart", "colors"],
+    open: (dialog) =>
+      dialog.replace(() => (
+        <DialogThemeAgent onClose={() => dialog.replace(() => <DialogConfig current="theme.agent" />)} />
       )),
   },
   {
@@ -675,6 +720,15 @@ export function settingID(setting: Setting) {
   return setting.path.join(".")
 }
 
+// openforge (spec project-themes): the Theme row sets the shown project's theme, the Global theme row the global one.
+function themeRow(setting: Setting) {
+  const id = settingID(setting)
+  if (id === "theme.name") return "project"
+  if (id === "theme.global") return "global"
+  if (id === "theme.customize") return "customize"
+  if (id === "theme.agent") return "agent"
+}
+
 /**
  * Which Settings rows show, one rule for Settings and the command palette: the palette lists a row only where Settings
  * would show it. Each reads CLIProxyPacer's own settings when it opens, and again when CLIProxyPacer answers again
@@ -770,6 +824,17 @@ export function DialogConfig(props: { current?: string }) {
   const opening = createMemo(() => (shown(settings[current]) ? current : undefined))
 
   const value = (setting: Setting) => {
+    const theme = themeRow(setting)
+    if (theme === "customize") {
+      const count = Object.keys(themes.all()).filter(themes.custom).length
+      return count === 1 ? "1 of yours" : `${count} of yours`
+    }
+    if (theme === "agent") {
+      if (themes.own === AGENT_THEME) return "on · this project"
+      if (!themes.own && themes.global === AGENT_THEME) return "on · global"
+      return themes.global === AGENT_THEME ? "on · global, not here" : "off"
+    }
+    if (theme) return theme === "global" ? themes.global : (themes.own ?? themes.global)
     if (setting.pacer) return pacerValues()?.[setting.pacer] ?? setting.default
     if (setting.update) return updateStatus()?.enabled ?? setting.default
     if (setting.service) return serviceConfig()?.optimize ?? setting.default
@@ -777,18 +842,23 @@ export function DialogConfig(props: { current?: string }) {
       if (!result || typeof result !== "object") return undefined
       return (result as Record<string, unknown>)[key]
     }, config.data)
-    if (setting.path.join(".") === "theme.name") return current ?? themes.selected
     return current ?? setting.default
   }
   const values = (setting: Setting) =>
-    setting.path.join(".") === "theme.name"
-      ? Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    themeRow(setting) === "project" || themeRow(setting) === "global"
+      ? [
+          AGENT_THEME,
+          ...Object.keys(themes.all()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })),
+        ]
       : setting.values
   // A list, such as Muted models, has no value to step to: it changes in its own picker only, which Enter opens.
   const list = (setting: Setting) => !values(setting) && setting.step === undefined
   const display = (setting: Setting) => {
     if (setting.update && updateStatus()?.unavailable) return "unavailable"
     const current = value(setting)
+    if (themeRow(setting) === "project" && themes.project)
+      return `${themeLabel(String(current))} · ${themes.level === "project" ? "this project" : "global"}`
+    if (themeRow(setting) === "project" || themeRow(setting) === "global") return themeLabel(String(current))
     if (setting.format) return setting.format(current)
     const index = setting.values?.indexOf(current)
     return index === undefined || index < 0 ? String(current) : (setting.labels?.[index] ?? String(current))
@@ -825,6 +895,14 @@ export function DialogConfig(props: { current?: string }) {
       ? choices[(choices.indexOf(current) + direction + choices.length) % choices.length]
       : Math.min(setting.max!, Math.max(setting.min!, Number(current) + direction * setting.step!))
     if (next === current) return
+    const theme = themeRow(setting)
+    if (theme === "customize") return
+    if (theme) {
+      if (theme === "global") themes.setGlobal(String(next))
+      else if (themes.project && next === themes.global) themes.useGlobal()
+      else themes.set(String(next))
+      return
+    }
     if (setting.preview && Schema.is(Attention.SoundID)(next)) preview(setting.preview, next)
     setSaving(true)
     if (setting.update) {
@@ -889,13 +967,18 @@ export function DialogConfig(props: { current?: string }) {
       onMove={(option) => setSelected(option.value)}
       onSelect={(option) => {
         const setting = settings[option.value]
-        if (setting.open && (newDesigns() || list(setting))) return setting.open(dialog)
+        if (setting.open && (newDesigns() || list(setting) || themeRow(setting))) return setting.open(dialog)
         void change(1, option.value)
       }}
       footerHints={
         newDesigns()
           ? []
-          : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
+          : themeRow(settings[selected()]) === "project" || themeRow(settings[selected()]) === "global"
+            ? [
+                { title: "open", label: "enter" },
+                { title: "change", label: "←/→" },
+              ]
+            : [list(settings[selected()]) ? { title: "open", label: "enter" } : { title: "change", label: "←/→" }]
       }
       bindings={[
         {

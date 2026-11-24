@@ -76,6 +76,7 @@ import { DialogPair } from "./component/dialog-pair"
 import { DialogHighlights } from "./component/dialog-highlights"
 import { claim } from "./util/highlights"
 import { DialogThemeList } from "./component/dialog-theme-list"
+import { DialogThemeCustomize } from "./component/dialog-theme-customize"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
@@ -87,6 +88,7 @@ import { PaneResizeHandle } from "./ui/pane-resize-handle"
 import { clickedLink } from "./ui/link"
 import { ThemeErrorToast } from "./component/theme-error-toast"
 import { createThemeSource, ThemeProvider, useTheme, useThemes } from "./context/theme"
+import { ThemeSubjectSync } from "./context/theme-subject"
 import { Home } from "./routes/home"
 import { PromptHistoryProvider } from "./prompt/history"
 import { FrecencyProvider } from "./prompt/frecency"
@@ -453,6 +455,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                             mode={mode}
                                                             source={createThemeSource(global.config)}
                                                           >
+                                                            <ThemeSubjectSync />
                                                             <ThemeErrorToast />
                                                             <ClientMcp />
                                                             <LocalProvider>
@@ -1171,6 +1174,15 @@ function App() {
         slash: { name: "themes" },
         run: () => {
           dialog.replace(() => <DialogThemeList />)
+        },
+        category: "System",
+      },
+      {
+        name: "theme.customize",
+        title: "Customize themes",
+        slash: { name: "customize-themes" },
+        run: () => {
+          dialog.replace(() => <DialogThemeCustomize />)
         },
         category: "System",
       },

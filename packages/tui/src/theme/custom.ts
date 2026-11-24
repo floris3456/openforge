@@ -117,11 +117,10 @@ export function roleColor(theme: ThemeV1Json, key: ThemeColor, mode: Mode) {
 /** Sets one role's colour for a mode, keeping the other mode's as it resolves today. */
 export function setRole(theme: ThemeV1Json, key: ThemeColor, mode: Mode, color: string): ThemeV1Json {
   const other: Mode = mode === "dark" ? "light" : "dark"
-  const current = theme.theme[key]
-  const value: ColorValue =
-    current !== undefined && typeof current === "object" && !(current instanceof RGBA)
-      ? { [mode]: color, [other]: roleColor(theme, key, other) ?? color } as { dark: string; light: string }
-      : color
+  const both = themeModes(parseTheme(theme, "custom")).length === 2
+  const value: ColorValue = both
+    ? ({ [mode]: color, [other]: roleColor(theme, key, other) ?? color } as { dark: string; light: string })
+    : color
   return { ...theme, theme: { ...theme.theme, [key]: value } }
 }
 

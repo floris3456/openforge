@@ -74,6 +74,19 @@ test("a built-in copied under a name, one colour set and previewed, listed as yo
   await setup.waitForFrame(() => dialogBackground(setup)?.equals(dialogSurface(edited, "edited")) === true)
   expect(setup.config().theme).toEqual({ name: "nord", mode: "dark" })
 
+  // Another colour's name takes its colour; the theme stays on the screen while it is typed.
+  await setup.waitForFrame(() => focused(setup))
+  await setup.mockInput.typeText("Headings")
+  await setup.waitForFrame((frame) => frame.includes("Headings in replies"))
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("Headings (dark)") && focused(setup))
+  expect(dialogBackground(setup)?.equals(dialogSurface(edited, "edited"))).toBeTrue()
+  for (const _ of "#bd93f9") setup.mockInput.pressBackspace()
+  await setup.mockInput.typeText("Secondary")
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("Edit dracula copy") && frame.includes("#ff79c6"))
+  expect((await themeFile(setup, "dracula copy")).theme.markdownHeading).toEqual({ dark: "#ff79c6", light: "#bd93f9" })
+
   setup.mockInput.pressEscape()
   await setup.waitForFrame((frame) => frame.includes("Your themes") && frame.includes("dracula copy"))
   setup.mockInput.pressEscape()

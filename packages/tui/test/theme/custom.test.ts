@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test"
 import { resolveThemeDocument, themeModes } from "@opencode/theme/tui"
 import { allThemes, parseTheme } from "../../src/theme"
+import path from "node:path"
 import { copyTheme, hex, nameProblem, parseHex, roleColor, roles, setRole } from "../../src/theme/custom"
+import { importScheme } from "../../src/theme/import"
 
 // openforge (spec custom-themes): a copy of a theme looks as the theme does, with every role a colour of its own; one
 // role changes for one mode at a time.
@@ -41,7 +43,7 @@ test("a copy of the default theme keeps its backgrounds, text, accents and code 
   }
 })
 
-test("setting a role changes it in one mode only, and the theme still reads", () => {
+test("setting a role changes it in one mode only, and the theme still reads", async () => {
   const copy = copyTheme(allThemes().opencode!, "opencode")
   const light = roleColor(copy, "background", "light")
   const changed = setRole(copy, "background", "dark", "#102030")
@@ -49,7 +51,8 @@ test("setting a role changes it in one mode only, and the theme still reads", ()
   expect(roleColor(changed, "background", "light")).toBe(light)
   expect(hex(resolved(changed, "changed", "dark").background.base)).toBe("#102030")
 
-  const single = copyTheme(allThemes().dracula!, "dracula")
+  // A theme of one mode keeps one colour per role.
+  const single = importScheme(await Bun.file(path.join(import.meta.dir, "schemes", "Dracula.kitty.conf")).text()).theme
   const one = setRole(single, "primary", "dark", "#abcdef")
   expect(one.theme.primary).toBe("#abcdef")
 })

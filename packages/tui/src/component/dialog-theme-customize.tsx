@@ -80,7 +80,7 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
   const toast = useToast()
   const mode = themes.mode()
   const source = () => themes.all()[props.name] as ThemeV1Json | undefined
-  const [selected, setSelected] = createSignal(roles.find((role) => role.key === props.focus) ?? roles[0]!)
+  const [selected, setSelected] = createSignal(roles.find((role) => role.key === props.focus))
   const reopen = (focus?: string) => openEditor(dialog, props.name, props.onClose, focus)
   const back = () => dialog.replace(() => <DialogThemeCustomize onClose={props.onClose} focus={props.name} />)
 
@@ -122,12 +122,16 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
       onCancel={back}
       onMove={(option) => {
         const row = option.value
-        if (row.type === "role") setSelected(roles.find((role) => role.key === row.key)!)
+        setSelected(row.type === "role" ? roles.find((role) => role.key === row.key) : undefined)
       }}
       footer={
-        <text fg={theme.text.muted} wrapMode="word">
-          {selected().title}: {selected().help}
-        </text>
+        <Show when={selected()}>
+          {(role) => (
+            <text fg={theme.text.muted} wrapMode="word">
+              {role().title}: {role().help}
+            </text>
+          )}
+        </Show>
       }
       onSelect={(option) => {
         const row = option.value
@@ -172,6 +176,7 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
         const role = roles.find((role) => role.key === row.key)!
         dialog.replace(() => (
           <DialogColor
+            name={props.name}
             title={`${role.title} (${mode})`}
             value={color(role.key) ?? ""}
             onCancel={() => reopen(role.key)}
@@ -188,8 +193,9 @@ function DialogThemeEditor(props: { name: string; onClose?: () => void; focus?: 
   )
 }
 
-/** A colour typed as a hex, or the name of another role whose colour it takes. */
+/** A colour typed as a hex, or the name of another role of the theme `name` whose colour it takes. */
 function DialogColor(props: {
+  name: string
   title: string
   value: string
   onConfirm: (color: string) => Promise<void>
@@ -198,6 +204,9 @@ function DialogColor(props: {
   const themes = useThemes()
   const theme = useTheme().surface("dialog")
   const [problem, setProblem] = createSignal<string>()
+  // The theme being edited stays on the screen while its colour is typed.
+  onMount(() => themes.preview(props.name))
+  onCleanup(() => themes.preview(undefined))
   return (
     <DialogPrompt
       title={props.title}
@@ -213,7 +222,7 @@ function DialogColor(props: {
         const named = roles.find(
           (role) => role.title.toLowerCase() === input.trim().toLowerCase() || role.key === input.trim(),
         )
-        const source = themes.all()[themes.selected] as ThemeV1Json | undefined
+        const source = themes.all()[props.name] as ThemeV1Json | undefined
         const value = parseHex(input) ?? (named && source ? roleColor(source, named.key, themes.mode()) : undefined)
         if (!value) return setProblem("Type a colour such as #1e1e2e, or the name of another colour such as Primary")
         void props.onConfirm(value).catch((error) => setProblem(String(error)))

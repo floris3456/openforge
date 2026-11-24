@@ -102,16 +102,17 @@ const fixedModel = SessionRunnerModel.node.replace(
   }),
 )
 
+// In the server's order: the tool runner is released after the Session executions, which may still use it then.
 const nodes = LayerNode.group([
   Database.node,
   Bus.node,
+  ShellRunner.node,
   Job.node,
   KV.node,
   Session.node,
   SessionExecution.node,
   SessionRestart.node,
   SessionContinuity.node,
-  ShellRunner.node,
   LocationServiceMap.node,
 ])
 

@@ -80,6 +80,9 @@ const applicationServiceNodes = [
   // Before the jobs and sessions, so they are released after them: a shutdown's interrupted shell calls and jobs
   // still reach the daemon to stop their commands, and a command being created never falls back to spawning.
   PersistentPty.node,
+  // openforge: the tool runner too, for the same reason: a call the user stopped just before still waits for its
+  // command's exit through it.
+  ShellRunner.node,
   EventLogger.node,
   httpClient,
   Job.node,
@@ -99,7 +102,6 @@ const applicationServiceNodes = [
   ServerPairing.node,
   LocationServiceMap.node,
   LocationActivity.node,
-  ShellRunner.node,
   SessionRestart.node,
   SessionContinuity.node,
   PacerConnection.node,

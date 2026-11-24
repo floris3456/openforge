@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Layer } from "effect"
+import { DateTime, Effect, Layer, SubscriptionRef } from "effect"
 import { Money } from "@opencode/schema/money"
 import { Session as SessionInfo } from "@opencode/schema/session"
 import { Config } from "@opencode/core/config"
@@ -9,6 +9,7 @@ import { ImageBank } from "@opencode/core/image/bank"
 import { ImageFit } from "@opencode/core/image/fit"
 import { PhotonNormalize } from "@opencode/core/image/photon-normalize"
 import { Location } from "@opencode/core/location"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Project } from "@opencode/core/project"
@@ -19,16 +20,20 @@ import { SessionBlob } from "@opencode/core/session/blob"
 import { SessionTable } from "@opencode/core/session/sql"
 import { Tool } from "@opencode/core/tool"
 import { ImageTool } from "@opencode/core/tool/plugin/image"
+import { definition } from "@opencode/core/tool/runtime"
 import { Document, Info } from "@opencode/schema/config"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { testEffect } from "./lib/effect"
 import { registerToolPlugin, toolIdentity } from "./lib/tool"
+import { catalogOf } from "./memory/fixture"
 import { endpointOf, fakeCpp, startTools } from "./pacer/fake-tools"
 
 // Spec agent-notes, section 1, item 11: image.show({ task, item }) shows a review item's picture, read from
 // CLIProxyPacer by its hash, so a lead marks exactly the picture handed in: whole, numbered as any image, with a text
 // naming its round, place and own pixels; its comparison with compare; the bytes from the chat's own store once it
-// holds them; and each refusal's words. CLIProxyPacer's two reads are a local server's.
+// holds them; and each refusal's words. CLIProxyPacer's two reads are a local server's. Offered only while the server's
+// capabilities say it has review items (`pacer.memory.review_items`), so a release does not wait for its deploy; without
+// them the tool is as it was before.
 
 const opus = ImageFit.MODELS["claude-opus-5-5"]
 const deepseek = ImageFit.MODELS["deepseek-v4.1-flash"]
@@ -103,6 +108,66 @@ const services = (sessionID: Session.ID) =>
     ),
   )
 
+/** CLIProxyPacer's catalog in the test's hands, with or without review items; PacerModels over it. */
+const catalogs = (reviewItems: boolean) =>
+  Effect.gen(function* () {
+    const at = (on: boolean) => catalogOf(true, { tools: true, goals: true, later: true, reviewItems: on })
+    const ref = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(at(reviewItems))
+    return {
+      set: (on: boolean) => SubscriptionRef.set(ref, at(on)),
+      layer: Layer.succeed(
+        PacerModels.Service,
+        PacerModels.Service.of({
+          get: () => SubscriptionRef.get(ref),
+          changes: () => SubscriptionRef.changes(ref),
+          refresh: () => Effect.void,
+        }),
+      ),
+    }
+  })
+
+/** image.show's definitions, each as SHA-256 of its JSON: as registered, and as a chat on Opus or DeepSeek gets it. */
+const offered = Effect.gen(function* () {
+  const registry = yield* Tool.Service
+  const tool = (yield* registry.list()).find((item) => item.id === "image_show")!
+  const shaped = {
+    plain: tool,
+    opus: ImageTool.variant(opus)!.tool(tool),
+    deepseek: ImageTool.variant(deepseek)!.tool(tool),
+  }
+  return Object.fromEntries(
+    Object.entries(shaped).map(([name, info]) => [
+      name,
+      new Bun.CryptoHasher("sha256").update(JSON.stringify(definition(info))).digest("hex"),
+    ]),
+  )
+})
+
+/** image.show's definitions on 3331bf5d6c, before review items: the tool without them is these, byte for byte. */
+const BEFORE = {
+  plain: "04a44bb4f936974b8686003fc9da46ef81745cba3d01d797635cce1e2929ac44",
+  opus: "da32a3bd836b5c4f7b019668f92309f61d1fbb9e51071f1bc984cf21ceb21d45",
+  deepseek: "c3521d80111211785ce377ae92f76242e4749483602200d681a8a87edee768c9",
+}
+
+/** The input fields image.show offers, as registered and as a chat on Opus gets it. */
+const fields = Effect.gen(function* () {
+  const registry = yield* Tool.Service
+  const tool = (yield* registry.list()).find((item) => item.id === "image_show")!
+  const keys = (info: typeof tool) => Object.keys(definition(info).inputSchema.properties ?? {})
+  return { plain: keys(tool), opus: keys(ImageTool.variant(opus)!.tool(tool)), description: tool.description }
+})
+
+/** Waits, at most 5 s, until image.show's definitions are `wanted`: a change of the catalog reloads it. */
+const offeredBecomes = (wanted: (hashes: Record<string, string>) => boolean) =>
+  Effect.gen(function* () {
+    const deadline = performance.now() + 5_000
+    while (!wanted(yield* offered)) {
+      if (performance.now() > deadline) return yield* Effect.die(new Error("image.show never changed"))
+      yield* Effect.sleep("5 millis")
+    }
+  })
+
 /** A review item as CLIProxyPacer's client read answers it. */
 const itemOf = (n: number, file: object | null, compare: object | null, extra: object = {}) => ({
   task: TASK,
@@ -136,7 +201,9 @@ const show = Effect.fnUntraced(function* (
     .execute(input, { ...toolIdentity, sessionID: bank.sessionID, id: Tool.CallID.make("call_review"), progress: () => Effect.void })
     .pipe(Effect.provideService(ImageBank.Current, { db: bank.db, sessionID: bank.sessionID, model }), Effect.result)
   if (result._tag === "Failure") return { error: result.failure.message }
-  const content = typeof result.success.content === "string" ? [] : (result.success.content ?? [])
+  // the list's answer is a plain text
+  if (typeof result.success.content === "string") return { text: result.success.content }
+  const content = result.success.content ?? []
   const arrived = yield* ImageBank.arriveContent(bank.db, bank.sessionID, model, "image_show", content)
   return {
     text: content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n"),
@@ -161,9 +228,11 @@ describe("image.show of a review item", () => {
           ? Response.json(itemOf(2, fileOf(afterSha, after, 2400, 1600), fileOf(beforeSha, before, 1200, 800)))
           : Response.json({ error: { type: "not_found", message: `the latest round of ${TASK} has no item 9` } }, { status: 404 })
       const bank = yield* chat("ses_review_show")
+      const catalog = yield* catalogs(true)
       yield* registerToolPlugin(ImageTool.Plugin).pipe(
         Effect.provideService(PacerTools.Service, started.tools),
         Effect.provide(services(bank.sessionID)),
+        Effect.provide(catalog.layer),
       )
 
       const shown = yield* show(bank, opus, { task: TASK, item: 2 })
@@ -224,9 +293,11 @@ describe("image.show of a review item", () => {
       }
       cpp.answers.item = (request) => Response.json(items[request.path.split("/").at(-1)!])
       const bank = yield* chat("ses_review_refused")
+      const catalog = yield* catalogs(true)
       yield* registerToolPlugin(ImageTool.Plugin).pipe(
         Effect.provideService(PacerTools.Service, started.tools),
         Effect.provide(services(bank.sessionID)),
+        Effect.provide(catalog.layer),
       )
       const refused = (input: Record<string, unknown>) => show(bank, opus, input).pipe(Effect.map((r) => r.error))
       expect(yield* refused({ task: TASK })).toBe("A review item needs its place too: image.show({ task, item }).")
@@ -240,21 +311,54 @@ describe("image.show of a review item", () => {
     }).pipe(Effect.scoped),
   )
 
-  it.live("in a host without CLIProxyPacer, it says so", () =>
+  it.live("without the server's review items, image.show is as it was before, byte for byte, and asks nothing", () =>
     Effect.gen(function* () {
-      const bank = yield* chat("ses_review_none")
-      yield* registerToolPlugin(ImageTool.Plugin)
-      expect((yield* show(bank, opus, { task: TASK, item: 1 })).error).toBe(
-        "Review items are on CLIProxyPacer, and this chat has no project there.",
+      const cpp = yield* fakeCpp
+      const started = yield* startTools(endpointOf(cpp.origin))
+      const bank = yield* chat("ses_review_without")
+      const catalog = yield* catalogs(false)
+      yield* registerToolPlugin(ImageTool.Plugin).pipe(
+        Effect.provideService(PacerTools.Service, started.tools),
+        Effect.provide(services(bank.sessionID)),
+        Effect.provide(catalog.layer),
       )
+      expect(yield* offered).toEqual(BEFORE)
+      expect((yield* fields).plain).toEqual(["id", "zoom"])
+      // Asked for an item all the same: the list, as before, and nothing asked of the server.
+      expect((yield* show(bank, opus, { task: TASK, item: 1 })).text).toBe("This chat has no images yet.")
+      expect(cpp.received.some((request) => request.path.includes("/items/"))).toBe(false)
     }).pipe(Effect.scoped),
   )
 
-  it.live("its description names the review item", () =>
-    Effect.sync(() => {
-      expect(ImageTool.DESCRIPTION).toContain(
+  it.live("in a host without CLIProxyPacer, image.show is as it was before", () =>
+    Effect.gen(function* () {
+      const bank = yield* chat("ses_review_none")
+      yield* registerToolPlugin(ImageTool.Plugin)
+      expect(yield* offered).toEqual(BEFORE)
+      expect((yield* show(bank, opus, { task: TASK, item: 1 })).text).toBe("This chat has no images yet.")
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("with the server's review items, image.show offers task, item and compare, and follows the server", () =>
+    Effect.gen(function* () {
+      const bank = yield* chat("ses_review_with")
+      const catalog = yield* catalogs(true)
+      yield* registerToolPlugin(ImageTool.Plugin).pipe(Effect.provide(services(bank.sessionID)), Effect.provide(catalog.layer))
+      const offeredNow = yield* fields
+      expect(offeredNow.plain).toEqual(["id", "zoom", "task", "item", "compare"])
+      expect(offeredNow.opus).toEqual(["id", "zoom", "task", "item", "compare"])
+      expect(offeredNow.description).toContain(
         "`image.show({ task, item })` shows a review item's picture (`compare: true` its comparison) in its own pixels, the ones the task tool's marks take.",
       )
-    }),
+      const hashes = yield* offered
+      expect([hashes.plain, hashes.opus, hashes.deepseek].some((hash) => Object.values(BEFORE).includes(hash))).toBe(false)
+      // The server no longer says so (another one connected): as before; and back.
+      yield* catalog.set(false)
+      yield* offeredBecomes((now) => now.plain === BEFORE.plain)
+      expect(yield* offered).toEqual(BEFORE)
+      yield* catalog.set(true)
+      yield* offeredBecomes((now) => now.plain === hashes.plain)
+      expect(yield* offered).toEqual(hashes)
+    }).pipe(Effect.scoped),
   )
 })

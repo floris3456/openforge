@@ -116,6 +116,7 @@ import { askTmux, notificationEnvironment } from "./tmux-terminal"
 import { createImageTerminal, ImageTerminalProvider, type ImageOutput } from "./image/terminal"
 import { StorageProvider, useStorage } from "./context/storage"
 import { SessionTerminalsProvider } from "./context/session-terminals"
+import { pruneSidebarState } from "./context/sidebar-state"
 import { ClientMcp } from "./context/client-mcp"
 import { PanelProvider, usePanel } from "./context/panel"
 import { PacerProvider } from "./context/pacer"
@@ -592,6 +593,7 @@ function App() {
       }).catch((error) => console.error("Failed to persist TUI layout", error))
     },
   })
+  pruneSidebarState()
   const [openSessions, setOpenSessions] = createSignal<SessionInfo[]>([])
   // Toast once when an MCP server enters a failed or needs-auth state so the user knows to act,
   // without having to open the status panel. Tracking the last alerted status avoids re-toasting

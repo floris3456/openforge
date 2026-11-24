@@ -43,7 +43,8 @@ export const catalogOf = (
   /**
    * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; `plans`: whether its
    * tasks are plans; `tools`: whether it serves the memory tools and memory's texts; as the small server says when
-   * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items; `codemode`: the
+   * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items; `reviewItems`:
+   * whether it has agents' notes on review items (`image.show({ task, item })`); `codemode`: the
    * tools its capabilities say run in Code Mode (`tools.task_codemode`), whose list keeps them direct otherwise.
    */
   options: {
@@ -53,6 +54,7 @@ export const catalogOf = (
     readonly tools?: boolean
     readonly goals?: boolean
     readonly later?: boolean
+    readonly reviewItems?: boolean
     readonly codemode?: ReadonlyArray<string>
   } = {},
 ): PacerModels.Catalog => ({
@@ -90,6 +92,7 @@ export const catalogOf = (
                   tools: options.tools ?? capabilities.tools,
                   goals: options.goals ?? false,
                   later: options.later ?? false,
+                  reviewItems: options.reviewItems ?? false,
                 },
               }
             : {}),

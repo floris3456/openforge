@@ -173,9 +173,11 @@ const layer = Layer.effect(
         Effect.orElseSucceed(() => undefined),
       )
       const candidate = yield* Effect.gen(function* () {
+        // openforge: a configured title model missing from the catalog chooses as no configured one, never the
+        // chat's model at its selected variant.
         if (agent.model) {
           const info = yield* model.get(agent.model.providerID, agent.model.id)
-          return info && { info, variant: agent.model.variant ?? minimalVariant(info) }
+          if (info) return { info, variant: agent.model.variant ?? minimalVariant(info) }
         }
         if (!primary) return
         const small = yield* model.small(primary.ref.providerID)

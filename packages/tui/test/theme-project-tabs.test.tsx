@@ -215,9 +215,9 @@ test("in a project the picker previews without writing, Enter sets the project's
 
   await openThemes(setup)
   expect(setup.captureCharFrame()).toContain("uses its own theme · global: dracula")
-  // The first row is the global theme, above the sorted themes.
+  // The first row is the global theme, then Agent colours, above the sorted themes.
   const names = Object.keys(allThemes()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-  for (const _ of names.slice(0, names.indexOf("gruvbox") + 1)) setup.mockInput.pressArrow("up")
+  for (const _ of names.slice(0, names.indexOf("gruvbox") + 2)) setup.mockInput.pressArrow("up")
   await setup.waitForFrame(() => previews(setup, "dracula"))
   setup.mockInput.pressEnter()
   await setup.waitForFrame((frame) => !frame.includes("Themes"))

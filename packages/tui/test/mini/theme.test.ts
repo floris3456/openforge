@@ -185,6 +185,22 @@ test.each(["light", "dark"] as const)("uses shared %s defaults and named built-i
   }
 })
 
+// openforge (spec agent-theme): the inline mode draws before it knows the chat, so the agent theme is its base theme.
+test.each(["light", "dark"] as const)("draws the agent theme as its base theme in %s mode", async (mode) => {
+  const colors = terminalColors({}, mode)
+  for (const [agent, expected] of [
+    [{ base: "tokyonight" }, parseTheme(DEFAULT_THEMES.tokyonight!)],
+    [undefined, getOpenCodeTheme()],
+  ] as const) {
+    const theme = await resolveRunTheme(renderer({ colors }), { name: "agent", mode, agent })
+    try {
+      expectFooter(theme, resolveThemeDocument(expected, mode))
+    } finally {
+      theme.block.syntax?.destroy()
+    }
+  }
+})
+
 test.each(["light", "dark"] as const)("shares the %s system scheme while retaining terminal intent", async (mode) => {
   const colors = terminalColors({
     defaultBackground: mode === "light" ? "#fbf1c7" : "#0f172a",

@@ -223,8 +223,15 @@ export const make = Effect.fn("Session.make")(function* () {
           commit: () => kv.set(SessionShell.key(started.info.id), SessionShell.encode(pending)),
         },
       )
-      yield* report(pending, started)
-    }).pipe(Effect.forkIn(scope, { startImmediately: true }))
+      return { pending, started }
+    }).pipe(
+      // A command that runs outlives this service in the tool runner, and only its record (the Started event and its
+      // key) lets the next service report it: a stop that lands once it runs waits for the record. Only the wait for
+      // plugins before the start can be stopped (see SessionShell.start).
+      Effect.uninterruptible,
+      Effect.flatMap((recorded) => report(recorded.pending, recorded.started)),
+      Effect.forkIn(scope, { startImmediately: true }),
+    )
     yield* Fiber.join(running)
   })
   // Shows a `!` command's end and admits its result for the model, then forgets it.

@@ -541,6 +541,7 @@ describe("PacerModels", () => {
             tools: false,
             goals: false,
             later: false,
+            reviewItems: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -580,6 +581,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, later: true }))?.pacer?.memory).toMatchObject({
           goals: false,
           later: true,
+        })
+        // A server with agents' notes on review items says so.
+        expect((yield* told({ ...block, embedding: null, review_items: true }))?.pacer?.memory).toMatchObject({
+          later: false,
+          reviewItems: true,
         })
         // A server whose start takes a compaction's summary says so.
         expect((yield* told({ ...block, embedding: null, prompt: true, summary: true }))?.pacer?.memory).toMatchObject({

@@ -8,7 +8,7 @@ import { RunnerOutput } from "../src/output.js"
 import { RunnerPaths } from "../src/paths.js"
 import { RunnerProtocol } from "../src/protocol.js"
 import { RunnerServer } from "../src/server.js"
-import { alive, command, folder, run, serve, served, until } from "./fixture/runner.js"
+import { alive, command, folder, graceClock, run, serve, served, until } from "./fixture/runner.js"
 
 const collect = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   connection.watch(id, { offset, output }).pipe(Stream.runCollect)
@@ -69,7 +69,7 @@ describe("runner", () => {
         expect(exitOf(later)).toEqual(exit)
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("starting the same id twice gives the same command", async () => {
@@ -91,7 +91,7 @@ describe("runner", () => {
         })
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("a SIGTERM to a command reaches its whole group and turns into SIGKILL when ignored", async () => {
@@ -114,7 +114,7 @@ describe("runner", () => {
         yield* Effect.promise(() => until(() => !alive(child)))
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("ends a command at its deadline, which the client can move or clear", async () => {
@@ -139,25 +139,34 @@ describe("runner", () => {
         expect(text(finished)).toBe("done")
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("after its last command it waits its grace period for another, then stops listening, says bye and frees the folder", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    await using runner = await serve({ directory: folderPath, version: "test", grace: 300 })
+    const grace = graceClock()
+    await using runner = await serve({ directory: folderPath, version: "test", grace: 300, schedule: grace.schedule })
     const closed = await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(folderPath)
         const first = command(directory.path, "printf one")
         yield* connection.start(first)
-        yield* Effect.promise(() => until(() => fs.existsSync(RunnerPaths.exit(first.output))))
-        // Nothing runs now, yet a late watch still gets the end, and the next command shares this runner.
+        // Nothing runs now: the runner waits its grace for another command.
+        yield* Effect.promise(() => until(() => grace.waiting !== undefined, "the runner resting"))
+        expect(grace.waiting).toBe(300)
+        expect(fs.existsSync(RunnerPaths.exit(first.output))).toBe(true)
+        // A late watch still gets the end, and the next command shares this runner.
         expect(exitOf(yield* collect(connection, first.id))).toMatchObject({ status: "exited", code: 0 })
         const second = command(directory.path, "printf two")
         expect((yield* connection.start(second)).existing).toBe(false)
+        yield* Effect.promise(() => until(() => grace.waiting !== undefined, "the runner resting again"))
+        expect(grace.waiting).toBe(300)
+        expect(readExit(second.output)).toMatchObject({ status: "exited", code: 0 })
+        // It listens until its grace has passed.
+        expect(fs.existsSync(RunnerPaths.socket(folderPath))).toBe(true)
+        grace.pass()
         const ended = yield* connection.closed
-        expect(Date.now() - readExit(second.output).ended).toBeGreaterThanOrEqual(300)
         expect(fs.existsSync(RunnerPaths.socket(folderPath))).toBe(false)
         return ended
       }),
@@ -176,6 +185,7 @@ describe("runner", () => {
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
+        host.grace.pass()
         expect(yield* connection.closed).toBe("bye")
         const input = command(host.path, "printf late")
         expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
@@ -186,23 +196,29 @@ describe("runner", () => {
   })
 
   test("a fresh runner that never gets a command exits after its grace period", async () => {
-    await using host = await served()
-    await host.runner.closed
-    expect(fs.existsSync(RunnerPaths.socket(host.runner.directory))).toBe(false)
+    await using directory = await folder()
+    const begun = Date.now()
+    // On its own timer, which the other tests' graces stand in for.
+    await using runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50 })
+    await runner.closed
+    expect(Date.now() - begun).toBeGreaterThanOrEqual(50)
+    expect(fs.existsSync(RunnerPaths.socket(runner.directory))).toBe(false)
   })
 
   test("only one runner serves a folder at a time", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    await using first = await serve({ directory: folderPath, version: "test", grace: 500 })
+    const grace = graceClock()
+    await using first = await serve({ directory: folderPath, version: "test", schedule: grace.schedule })
     expect(
       await RunnerServer.serve({ directory: folderPath, version: "test", wait: 100 }).catch((error) => error),
     ).toBeInstanceOf(RunnerServer.LockedError)
+    grace.pass()
     await first.closed
   })
 
   test("refuses a client without the token and one without a shared protocol", async () => {
-    await using host = await served({ grace: 500 })
+    await using host = await served()
     const exchange = (line: string) =>
       new Promise<string[]>((resolve) => {
         const lines: string[] = []
@@ -225,11 +241,11 @@ describe("runner", () => {
     expect(JSON.parse(wrong[1])).toMatchObject({ id: 0, type: "error", code: "auth" })
     const future = await exchange(JSON.stringify({ id: 0, op: "hello", protocol: 99, token }))
     expect(JSON.parse(future[1])).toMatchObject({ id: 0, type: "error", code: "protocol" })
-    await host.runner.closed
+    await host.rest()
   })
 
   test("reports a command that cannot start and leaves no file", async () => {
-    await using host = await served({ grace: 500 })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
@@ -245,15 +261,11 @@ describe("runner", () => {
         expect((yield* connection.list).map((item) => item.id)).toEqual([])
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("an end is told only once its exit file is written, and removed commands leave no files", async () => {
-    // A runner with nothing running exits once its grace has run out, and refuses a later request. The service sends
-    // a refused start to the next runner (shell-runner.test.ts in core); this bare connection would fail. On a loaded
-    // host the loop's next request, or even the first one after the runner is served, can come later than a short
-    // grace, so this runner never exits on its own, and the test stops it.
-    await using host = await served({ grace: Infinity })
+    await using host = await served()
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
@@ -267,7 +279,7 @@ describe("runner", () => {
         }
       }),
     )
-    await host.runner.shutdown()
+    await host.rest()
     expect(fs.readdirSync(host.path).filter((name) => name !== "runner")).toEqual([])
   })
 
@@ -286,7 +298,7 @@ describe("runner", () => {
         process.kill(-started.command.pgid, "SIGKILL")
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("removing a command stops it and deletes its files", async () => {
@@ -303,7 +315,7 @@ describe("runner", () => {
         expect(fs.existsSync(RunnerPaths.exit(input.output))).toBe(false)
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 })
 
@@ -351,7 +363,7 @@ describe("runner output", () => {
         expect(end.data.length).toBe(0)
       }),
     )
-    await host.runner.closed
+    await host.rest()
   })
 
   test("when its folder refuses a command's last writes, the end still arrives, what is in order is read, and the log says why", async () => {
@@ -397,7 +409,7 @@ describe("runner output", () => {
         expect(fs.readdirSync(out).toSorted()).toEqual(["large.out", "small.out"])
       }),
     )
-    await host.runner.closed
+    await host.rest()
     expect(log.map((line) => line.replace(/: EACCES: .*/, ": EACCES")).toSorted()).toEqual(
       [
         `cannot put the output of ${large.id} in order, so only its start can be read: EACCES`,
@@ -439,6 +451,6 @@ describe("runner output", () => {
         expect(middle.toString()).toContain(`bytes of output dropped here`)
       }),
     )
-    await host.runner.closed
+    await host.rest()
   }, 120_000)
 })

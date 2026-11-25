@@ -20,15 +20,56 @@ export async function serve(options: RunnerServer.Options) {
 }
 
 /**
- * A fresh folder whose `runner` folder has a runner in this process, which exits soon after its last command. Both go
- * with the test.
+ * A runner's grace that passes only when the test says so. A runner whose grace has run out refuses later requests:
+ * the service sends a refused start to the next runner (shell-runner.test.ts in core), but a test's bare connection
+ * fails, and on a loaded host a test's set-up or its steps outrun any short grace.
+ */
+export function graceClock() {
+  let pending: { readonly passed: () => void; readonly ms: number } | undefined
+  return {
+    schedule: (passed: () => void, ms: number) => {
+      const wait = { passed, ms }
+      pending = wait
+      return () => {
+        if (pending === wait) pending = undefined
+      }
+    },
+    /** The grace a resting runner waits out; undefined while a command runs. */
+    get waiting() {
+      return pending?.ms
+    },
+    /** Ends the grace of a resting runner, which then exits as it does once its timer has run out. */
+    pass() {
+      const wait = pending
+      if (!wait) throw new Error("the runner is not resting: a command still runs")
+      pending = undefined
+      wait.passed()
+    },
+  }
+}
+
+/**
+ * A fresh folder whose `runner` folder has a runner in this process, whose grace passes only when the test calls
+ * `rest()`. Both go with the test.
  */
 export async function served(options: Partial<RunnerServer.Options> = {}) {
   const directory = await folder()
-  const runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50, ...options })
+  const grace = graceClock()
+  const runner = await serve({
+    directory: path.join(directory.path, "runner"),
+    version: "test",
+    schedule: grace.schedule,
+    ...options,
+  })
   return {
     path: directory.path,
     runner,
+    grace,
+    /** Once nothing runs any more, the runner's grace passes and it exits. */
+    async rest() {
+      grace.pass()
+      await runner.closed
+    },
     async [Symbol.asyncDispose]() {
       await runner.shutdown()
       await directory[Symbol.asyncDispose]()

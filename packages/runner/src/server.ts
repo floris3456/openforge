@@ -13,11 +13,13 @@ export type Options = {
   readonly directory: string
   /** The release this runner belongs to, reported in its greeting. */
   readonly version: string
-  /**
-   * How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits.
-   * `Infinity`: it never exits on its own, only by `shutdown()`.
-   */
+  /** How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits. */
   readonly grace?: number
+  /**
+   * Waits `ms` and then calls `passed`, returning what cancels the wait: how the runner waits out its grace, a timer
+   * by default. A test passes its own to say when the grace has passed.
+   */
+  readonly schedule?: (passed: () => void, ms: number) => () => void
   /** How long a group gets between SIGTERM and SIGKILL. */
   readonly killAfter?: number
   /** How long to wait for the folder's lock, which an exiting runner still holds for a moment. */
@@ -136,16 +138,20 @@ export async function serve(options: Options): Promise<Runner> {
   })
   fs.chmodSync(socketPath, 0o600)
   let stopping = false
-  let grace: ReturnType<typeof setTimeout> | undefined
+  const schedule =
+    options.schedule ??
+    ((passed: () => void, ms: number) => {
+      const timer = setTimeout(passed, ms)
+      timer.unref()
+      return () => clearTimeout(timer)
+    })
+  let cancelGrace = () => {}
   // Nothing runs: wait a while for the next command, so a burst of short ones shares this runner. Asked to stop, exit.
   function rest() {
     if ([...entries.values()].some((entry) => !entry.exit)) return
     if (stopping) return idle()
-    clearTimeout(grace)
-    // A timer of Infinity fires after 1 ms.
-    if (options.grace === Infinity) return
-    grace = setTimeout(idle, options.grace ?? GRACE)
-    grace.unref()
+    cancelGrace()
+    cancelGrace = schedule(idle, options.grace ?? GRACE)
   }
   rest()
 
@@ -206,7 +212,7 @@ export async function serve(options: Options): Promise<Runner> {
     const existing = entries.get(input.id)
     if (existing) return send(connection, { id, type: "started", command: describe(existing), existing: true })
     if (closing) return fail(connection, id, "closing", "the runner is exiting")
-    clearTimeout(grace)
+    cancelGrace()
     const failed = (cause: unknown) => {
       writer?.close()
       guarded(`cannot remove the output of ${input.id}, which did not start`, () =>
@@ -476,7 +482,7 @@ export async function serve(options: Options): Promise<Runner> {
   function idle() {
     if (closing) return
     closing = true
-    clearTimeout(grace)
+    cancelGrace()
     server.close()
     fs.rmSync(socketPath, { force: true })
     connections.forEach((connection) => {

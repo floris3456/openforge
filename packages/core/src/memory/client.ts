@@ -108,6 +108,24 @@ export const Owed = Schema.Struct({
 })
 export interface Owed extends Schema.Schema.Type<typeof Owed> {}
 const OwedAnswer = Schema.Struct({ owed: Schema.Array(Owed) })
+/**
+ * A task as `GET …/tasks/{id}` answers it, as far as openforge reads it: its state and when it was made, its changes
+ * newest first (at most 20, the making not among them; an edit's holds the `title` or `description` it set), and its
+ * subtasks in their order.
+ */
+export const TaskRead = Schema.Struct({
+  task: Schema.Struct({ id: Schema.String, state: Schema.String, at: Schema.Number }),
+  changes: Schema.Array(
+    Schema.Struct({
+      state: Schema.String,
+      at: Schema.Number,
+      title: maybe(Schema.String),
+      description: maybe(Schema.String),
+    }),
+  ),
+  subtasks: Schema.Array(Schema.Struct({ id: Schema.String, state: Schema.String })),
+})
+export interface TaskRead extends Schema.Schema.Type<typeof TaskRead> {}
 const FilesAnswer = Schema.Struct({ notice: maybe(Schema.String) })
 const TextsAnswer = Schema.Struct({ unavailable: Schema.String, refused: Schema.String })
 /** memory's texts for when CPP cannot be reached or a rule of openforge's hooks says no. */
@@ -230,6 +248,12 @@ export interface Interface {
   readonly assign: (project: string, id: string) => Effect.Effect<Step, Error>
   /** With the child's headers, before its first step: sets task `id` active in its name. */
   readonly begin: (project: string, id: string) => Effect.Effect<Step, Error>
+  /** Task `id`, with its changes and its subtasks. */
+  readonly task: (
+    project: string,
+    id: string,
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<TaskRead, Error>
   /** What the subagent's answer gets after it when task `id` is no longer active, else null. */
   readonly ended: (project: string, id: string) => Effect.Effect<string | null, Error>
   /** With a lead's headers: the open rounds chat `helper` (its own id) gave that the lead has not answered. */
@@ -310,6 +334,11 @@ export const layer = Layer.effect(
       begin: (project, id) =>
         http.post(`${task(project, id)}/start`, {}, StepAnswer, { headers }).pipe(
           Effect.map((answer) => step(answer.body)),
+          Effect.mapError(failure(id, "task")),
+        ),
+      task: (project, id, options) =>
+        http.get(task(project, id), TaskRead, { ...options, headers }).pipe(
+          Effect.map((answer) => answer.body),
           Effect.mapError(failure(id, "task")),
         ),
       ended: (project, id) =>

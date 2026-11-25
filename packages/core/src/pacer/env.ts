@@ -5,7 +5,7 @@ import { readdir, readFile, realpath } from "node:fs/promises"
 import { statSync, type Stats } from "node:fs"
 import path from "path"
 import type { HttpMiddleware } from "@opencode/ai/route"
-import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect"
+import { Context, Deferred, Effect, Layer, Option, Schema, Semaphore } from "effect"
 import { HttpClientRequest, HttpClientResponse } from "effect/http"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -183,13 +183,21 @@ export interface Interface {
    */
   readonly named: (place: Place, input: unknown, directory: string) => Effect.Effect<void>
   /**
-   * HTTP middleware for a model request to CPP of a chat in `place`: names the set (`X-Pacer-Env`), and on CPP's
-   * refusal of an unknown set hands it over and sends the same request once more. A second refusal, or a set CPP does
-   * not take, fails the request with a plain error; it never goes without the set. Nothing while the catalog says the
-   * server lacks `redaction.env`, while no CPP is set up, or while the place has no value. A catalog not read yet, as
-   * after a restart, names it.
+   * HTTP middleware for a model request to CPP of a chat in `place`: names the set (`X-Pacer-Env`), hands it over first
+   * when the serving instance is not known to hold it (a set that changed, or one no request named since the change
+   * stream opened), and on CPP's refusal of an unknown set hands it over and sends the same request once more. A second
+   * refusal, or a set CPP does not take then, fails the request with a plain error; it never goes without the set.
+   * Nothing while the catalog says the server lacks `redaction.env`, while no CPP is set up, or while the place has no
+   * value. A catalog not read yet, as after a restart, names the set but hands it over only when refused.
    */
   readonly http: (place: Place) => HttpMiddleware
+  /**
+   * The connection's: CPP's change stream opened at `endpoint`, on the instance now serving, which holds no set it was
+   * not given since. Every set held is handed over, the chats' next requests waiting for it (at most {@link WAIT}).
+   */
+  readonly opened: (endpoint: PacerEndpoint.Endpoint) => Effect.Effect<void>
+  /** The connection's: the change stream ended; the instance may be gone with the sets it held. */
+  readonly closed: Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerEnv") {}
@@ -214,6 +222,8 @@ interface State {
 
 /** How many places' sets are kept: one or two per project a chat works in. */
 const KEPT = 64
+/** How long a model request waits for the sets handed over as the change stream opened; then the refusal covers it. */
+const WAIT = "5 seconds"
 
 export const layer = Layer.effect(
   Service,
@@ -221,8 +231,13 @@ export const layer = Layer.effect(
     const models = yield* PacerModels.Service
     const endpoints = yield* PacerEndpoint.Service
     const http = yield* PacerHttp.Service
+    const scope = yield* Effect.scope
     const states = new Map<string, State>()
     const digests = new WeakMap<ReadonlyArray<string>, { readonly key: string; readonly digest: string }>()
+    /** The digests the serving instance holds as far as openforge knows: handed over since its stream opened. */
+    const held = new Set<string>()
+    /** The sets being handed over as the stream opened. */
+    const sending: { current?: Deferred.Deferred<void> } = {}
 
     const stateOf = (place: Place) => {
       const found = states.get(keyOf(place))
@@ -251,35 +266,39 @@ export const layer = Layer.effect(
       return made
     }
 
+    /** Hands `set` over as `named`; the instance then holds it. */
+    const put = (endpoint: PacerEndpoint.Endpoint, set: ReadonlyArray<string>, named: string) =>
+      http
+        .put(PATH, new TextEncoder().encode(JSON.stringify({ digest: named, values: set })), "application/json", {
+          endpoint,
+        })
+        .pipe(Effect.tap(() => Effect.sync(() => held.add(named))))
+
     const handed = (
       endpoint: PacerEndpoint.Endpoint,
       sent: HttpClientRequest.HttpClientRequest,
       set: ReadonlyArray<string>,
       named: string,
     ) =>
-      http
-        .put(PATH, new TextEncoder().encode(JSON.stringify({ digest: named, values: set })), "application/json", {
-          endpoint,
-        })
-        .pipe(
-          Effect.map(() => undefined),
-          Effect.catch((error) =>
-            Effect.succeed(
-              error._tag === "PacerHttp.Unreachable"
-                ? plain(
-                    sent,
-                    503,
-                    `CLIProxyPacer could not be reached to take the chat's .env values: ${error.reason}`,
-                    error.retryAfter,
-                  )
-                : plain(
-                    sent,
-                    428,
-                    `CLIProxyPacer did not take the chat's .env values, so the request was not sent without them: ${reasonOf(error)}`,
-                  ),
-            ),
+      put(endpoint, set, named).pipe(
+        Effect.map(() => undefined),
+        Effect.catch((error) =>
+          Effect.succeed(
+            error._tag === "PacerHttp.Unreachable"
+              ? plain(
+                  sent,
+                  503,
+                  `CLIProxyPacer could not be reached to take the chat's .env values: ${error.reason}`,
+                  error.retryAfter,
+                )
+              : plain(
+                  sent,
+                  428,
+                  `CLIProxyPacer did not take the chat's .env values, so the request was not sent without them: ${reasonOf(error)}`,
+                ),
           ),
-        )
+        ),
+      )
 
     return Service.of({
       current,
@@ -304,10 +323,20 @@ export const layer = Layer.effect(
             return yield* handler(request)
           const set = yield* current(place)
           if (set.length === 0) return yield* handler(request)
+          // The sets handed over as the stream opened go before the chats' next requests (workspace spec, section 3).
+          if (sending.current) yield* Deferred.await(sending.current).pipe(Effect.timeoutOption(WAIT))
           const named = digestOf(endpoint.key, set)
+          // A set the instance is not known to hold goes before the request; one it does not take is left to its refusal.
+          if (catalog !== undefined && !held.has(named))
+            yield* put(endpoint, set, named).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("could not hand CLIProxyPacer a set of .env values", { reason: reasonOf(error) }),
+              ),
+            )
           const sent = HttpClientRequest.setHeader(request, PacerHeaders.ENV, named)
           const first = yield* refusal(yield* handler(sent))
           if (first.passes) return first.response
+          held.delete(named)
           const failed = yield* handed(endpoint, sent, set, named)
           if (failed) return failed
           const again = yield* refusal(yield* handler(sent))
@@ -318,6 +347,37 @@ export const layer = Layer.effect(
             "CLIProxyPacer refused this request again after openforge sent it the chat's .env values; it was not sent without them.",
           )
         }),
+      opened: (endpoint) =>
+        Effect.gen(function* () {
+          held.clear()
+          if ((yield* models.get())?.pacer?.redaction?.env !== true) return
+          const sets = new Map(
+            [...states.values()].flatMap((state) =>
+              state.set.length === 0 ? [] : [[digestOf(endpoint.key, state.set), state.set] as const],
+            ),
+          )
+          if (sets.size === 0) return
+          const done = yield* Deferred.make<void>()
+          sending.current = done
+          yield* Effect.forEach(
+            sets,
+            ([named, set]) =>
+              put(endpoint, set, named).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("could not hand CLIProxyPacer a set of .env values", { reason: reasonOf(error) }),
+                ),
+              ),
+            { concurrency: 4, discard: true },
+          ).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (sending.current === done) sending.current = undefined
+              }).pipe(Effect.andThen(Deferred.succeed(done, undefined))),
+            ),
+            Effect.forkIn(scope, { startImmediately: true }),
+          )
+        }),
+      closed: Effect.sync(() => held.clear()),
     })
   }),
 )

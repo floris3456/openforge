@@ -219,25 +219,32 @@ describe("a chat's .env values on its model requests to CLIProxyPacer", () => {
         const response = yield* h.send(yield* h.requests[kind](h.input()), onto)
         expect([kind, response.status, onto.sent.length, header(onto.sent[0])]).toEqual([kind, 200, 1, digest])
       }
-      // CPP held the set: nothing was handed over.
-      expect(h.cpp.envs()).toHaveLength(0)
+      // Handed over once, before the first request that named it (spec section 3, "Sent before it is asked for").
+      expect(h.cpp.envs()).toHaveLength(1)
     }),
   )
 
-  it.live("hands CPP the set when it refuses an unknown one, and sends the same request once more", () =>
-    Effect.gen(function* () {
-      const h = yield* setup()
-      const digest = PacerEnv.digest(KEY, [HEX])
-      const onto = h.wire(unknownSet, answered)
-      const response = yield* h.send(yield* h.requests.primary(h.input()), onto)
-      expect(response.status).toBe(200)
-      expect(onto.sent.map(header)).toEqual([digest, digest])
-      expect(onto.sent.map(bodyOf)).toEqual(['{"model":"claude-haiku-5-5"}', '{"model":"claude-haiku-5-5"}'])
-      const put = h.cpp.envs()
-      expect(put).toHaveLength(1)
-      expect(put[0]?.headers.get("authorization")).toBe(`Bearer ${KEY}`)
-      expect(JSON.parse(put[0]!.body)).toEqual({ digest, values: [HEX] })
-    }),
+  it.live(
+    "hands CPP the set again when it refuses it, as an instance that lost it does, and sends the request once more",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const digest = PacerEnv.digest(KEY, [HEX])
+        yield* h.send(yield* h.requests.primary(h.input()), h.wire(answered))
+        // The instance lost the set before the change stream could tell openforge so.
+        const onto = h.wire(unknownSet, answered)
+        const response = yield* h.send(yield* h.requests.primary(h.input()), onto)
+        expect(response.status).toBe(200)
+        expect(onto.sent.map(header)).toEqual([digest, digest])
+        expect(onto.sent.map(bodyOf)).toEqual(['{"model":"claude-haiku-5-5"}', '{"model":"claude-haiku-5-5"}'])
+        const put = h.cpp.envs()
+        expect(put).toHaveLength(2)
+        expect(put.map((item) => item.headers.get("authorization"))).toEqual([`Bearer ${KEY}`, `Bearer ${KEY}`])
+        expect(put.map((item) => JSON.parse(item.body))).toEqual([
+          { digest, values: [HEX] },
+          { digest, values: [HEX] },
+        ])
+      }),
   )
 
   it.live("fails with a plain error when CPP refuses again, never sending the request without the set", () =>
@@ -246,7 +253,8 @@ describe("a chat's .env values on its model requests to CLIProxyPacer", () => {
       const onto = h.wire(unknownSet)
       const response = yield* h.send(yield* h.requests.primary(h.input()), onto)
       expect(onto.sent.map(header)).toEqual([PacerEnv.digest(KEY, [HEX]), PacerEnv.digest(KEY, [HEX])])
-      expect(h.cpp.envs()).toHaveLength(1)
+      // Before the request, and on its refusal.
+      expect(h.cpp.envs()).toHaveLength(2)
       expect(response.status).toBe(428)
       expect(yield* errorOf(response)).toBe(
         "CLIProxyPacer refused this request again after openforge sent it the chat's .env values; it was not sent without them.",
@@ -344,11 +352,15 @@ describe("a chat's .env values on its model requests to CLIProxyPacer", () => {
           input: { filePath: path.join(h.root, "packages/fresh/.env"), content: `FRESH_REF=${OTHER}\n` },
         },
       })
-      const next = h.wire(unknownSet, answered)
+      // The changed set is handed over at once, before the request that names it: CPP refuses nothing.
+      const next = h.wire(answered)
       yield* h.send(yield* h.requests.primary(h.input()), next)
       const digest = PacerEnv.digest(KEY, PacerEnv.sorted([HEX, OTHER]))
-      expect(next.sent.map(header)).toEqual([digest, digest])
-      expect(JSON.parse(h.cpp.envs()[0]!.body)).toEqual({ digest, values: PacerEnv.sorted([HEX, OTHER]) })
+      expect(next.sent.map(header)).toEqual([digest])
+      expect(h.cpp.envs().map((item) => JSON.parse(item.body))).toEqual([
+        { digest: PacerEnv.digest(KEY, [HEX]), values: [HEX] },
+        { digest, values: PacerEnv.sorted([HEX, OTHER]) },
+      ])
     }),
   )
 

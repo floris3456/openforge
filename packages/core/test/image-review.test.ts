@@ -78,8 +78,27 @@ const chat = (id: string) =>
     return { db, sessionID }
   })
 
-/** The chat as the store answers it, and its project as CLIProxyPacer names it. */
-const services = (sessionID: Session.ID) =>
+/** openforge's own PacerProject for a folder outside git, as theorysnap's workspace is: its chats have no project. */
+const outsideGit = PacerProject.layer.pipe(
+  Layer.provide(
+    Layer.succeed(
+      Location.Service,
+      Location.Service.of({
+        directory: AbsolutePath.make("/root/theorysnap"),
+        workspaceID: undefined,
+        project: {
+          id: Project.ID.make("2c63fe7b9185c1af3950e6f9e0e154b06f07677f"),
+          directory: AbsolutePath.make("/root/theorysnap"),
+          canonical: AbsolutePath.make("/root/theorysnap"),
+        },
+      }),
+    ),
+  ),
+  Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.succeed([]) })),
+)
+
+/** The chat as the store answers it, and its project as CLIProxyPacer names it (`projects`: another PacerProject). */
+const services = (sessionID: Session.ID, projects?: Layer.Layer<PacerProject.Service>) =>
   Layer.mergeAll(
     Layer.mock(Session.Service, {
       get: () =>
@@ -99,13 +118,14 @@ const services = (sessionID: Session.ID) =>
         commit: () => Effect.die("unused"),
       },
     }),
-    Layer.succeed(
-      PacerProject.Service,
-      PacerProject.Service.of({
-        chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
-        headers: () => ({ "X-Pacer-Project": PROJECT }),
-      }),
-    ),
+    projects ??
+      Layer.succeed(
+        PacerProject.Service,
+        PacerProject.Service.of({
+          chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
+          headers: () => ({ "X-Pacer-Project": PROJECT }),
+        }),
+      ),
   )
 
 /** CLIProxyPacer's catalog in the test's hands, with or without review items; PacerModels over it. */
@@ -308,6 +328,25 @@ describe("image.show of a review item", () => {
       expect(yield* refused({ task: TASK, item: 4 })).toBe(
         `Item 4 of task ${TASK} is an SVG drawing, which image.show cannot show.`,
       )
+    }).pipe(Effect.scoped),
+  )
+
+  it.live("tells a chat outside git why it has no review items, and asks CLIProxyPacer nothing", () =>
+    Effect.gen(function* () {
+      const cpp = yield* fakeCpp
+      const started = yield* startTools(endpointOf(cpp.origin))
+      const bank = yield* chat("ses_review_outside")
+      const catalog = yield* catalogs(true)
+      yield* registerToolPlugin(ImageTool.Plugin).pipe(
+        Effect.provideService(PacerTools.Service, started.tools),
+        Effect.provide(services(bank.sessionID, outsideGit)),
+        Effect.provide(catalog.layer),
+      )
+      expect(yield* show(bank, opus, { task: TASK, item: 2 })).toEqual({
+        error:
+          "Review items are on CLIProxyPacer's task board. This chat's folder is not in a git repository, so it has no project, memory or task board. A chat started inside a git repository has one.",
+      })
+      expect(cpp.received.some((request) => request.path.includes("/items/"))).toBe(false)
     }).pipe(Effect.scoped),
   )
 

@@ -155,7 +155,7 @@ const layer = Layer.effect(
       yield* pacerTools.list(
         PacerTools.listInput({
           session,
-          project: (yield* pacerProject.chat(session.projectID)).headers,
+          project: (yield* pacerProject.session(session)).headers,
           model: String(ref.id),
           agent: agent.id,
           pins,

@@ -81,7 +81,7 @@ const layer = Layer.effect(
       if (memory?.reviewOwed !== true || memory.tools !== true || lead.parentID !== undefined) return []
       // A lead without the task tool could never answer: its messages are never held.
       if (calls.holds(lead.id, "task") !== true) return []
-      const chat = yield* projects.chat(lead.projectID)
+      const chat = yield* projects.session(lead)
       if (chat.project === undefined) return []
       const role = String((yield* agents.select(lead.agent)).id)
       return yield* client

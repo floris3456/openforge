@@ -135,7 +135,7 @@ export const Plugin = {
       if ((yield* catalogs.get())?.pacer?.memory?.later !== true) return null
       const session = yield* ctx.session.get({ sessionID })
       if (!MemoryTask.inside(session.metadata)) return null
-      const memory = yield* projects.chat(session.projectID)
+      const memory = yield* projects.session(session)
       if (memory.project === undefined) return null
       const changed = yield* name(files)
       if (changed.length === 0) return null

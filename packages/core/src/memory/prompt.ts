@@ -59,7 +59,7 @@ const layer = Layer.effect(
       // A chat has memory while its start block in view offers it; one built while memory was unreachable asks nothing.
       const block = yield* MemoryOffer.newestBlock(db, sessionID)
       if (!block?.visible || block.unavailable) return
-      const chat = yield* projects.chat(input.session.projectID)
+      const chat = yield* projects.session(input.session)
       const project = chat.project
       if (project === undefined) return
       const memory = client.withHeaders(

@@ -33,19 +33,17 @@ export const makePacer = Effect.gen(function* () {
   const sessions = yield* Session.Service
   const locations = yield* LocationServiceMap.Service
 
-  /** The chat as `/identity` names it to CPP: its project and agent, in its own location; refused outside a project. */
+  /**
+   * The chat as `/identity` names it to CPP: its project (a helper's own, else its lead's) and agent, in its own
+   * location; refused outside a project.
+   */
   const identityChat = Effect.fn("pacer.identityChat")(function* (sessionID: Session.ID) {
     const session = yield* sessions.get(sessionID).pipe(Effect.mapError(missingSession))
     const found = yield* Effect.gen(function* () {
       const projects = yield* PacerProject.Service
       const agents = yield* Agent.Service
-      return { chat: yield* projects.chat(session.projectID), agent: String((yield* agents.select(session.agent)).id) }
-    }).pipe(
-      // Built here over the chat's location: its headers are worked out once per command.
-      Effect.provide(PacerProject.layer),
-      Effect.provide(locations.get(session.location)),
-      locationErrors,
-    )
+      return { chat: yield* projects.session(session), agent: String((yield* agents.select(session.agent)).id) }
+    }).pipe(Effect.provide(locations.get(session.location)), locationErrors)
     if (found.chat.project === undefined)
       return yield* new InvalidRequestError({ message: found.chat.why, kind: "identity" })
     return {

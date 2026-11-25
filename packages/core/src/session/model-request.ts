@@ -394,7 +394,7 @@ export const layer = Layer.effect(
       const session = input.session
       const model = input.model
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
-      const project = (yield* pacerProject.chat(session.projectID)).headers
+      const project = (yield* pacerProject.session(session)).headers
       const place =
         String(model.ref.providerID) === PacerEndpoint.id && Option.isSome(where)
           ? yield* where.value.folder(session.location.directory)

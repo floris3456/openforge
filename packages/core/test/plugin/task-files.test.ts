@@ -132,6 +132,7 @@ const client = MemoryClient.layer.pipe(
 )
 const projects = Layer.mock(PacerProject.Service, {
   chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
+  session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
   headers: (project) => ({ "X-Pacer-Project": project }),
 })
 

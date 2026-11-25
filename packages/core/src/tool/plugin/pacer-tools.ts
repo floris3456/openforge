@@ -177,7 +177,7 @@ export const Plugin = {
                 const sent = isRecord(input) ? yield* withFiles(input, meta.files, schema, context) : input
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
                 const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
-                const project = session ? (yield* projects.chat(session.projectID)).headers : undefined
+                const project = session ? (yield* projects.session(session)).headers : undefined
                 const answer = yield* calls
                   .call({
                     sessionID: context.sessionID,

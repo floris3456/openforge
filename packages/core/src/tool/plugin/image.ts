@@ -167,6 +167,8 @@ export const Plugin = {
         ? yield* review.sessions.get(sessionID).pipe(Effect.orElseSucceed(() => undefined))
         : undefined
       const project = session && review.projects ? yield* review.projects.chat(session.projectID) : undefined
+      if (project !== undefined && project.project === undefined)
+        return yield* failure(`Review items are on CLIProxyPacer's task board. ${project.why}`)
       if (!calls || !session || project?.project === undefined)
         return yield* failure("Review items are on CLIProxyPacer, and this chat has no project there.")
       const found = yield* calls

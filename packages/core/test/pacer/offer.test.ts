@@ -126,4 +126,23 @@ describe("PacerOffer with tools in Code Mode", () => {
     ])
     expect(PacerOffer.catalog(inventory, new Set())).toBe(inventory)
   })
+
+  test("names the Code Mode tools a chat's list leaves out, as a chat in no project's leaves out task", () => {
+    const withTask: PacerTools.Known = new Map([
+      ...placed,
+      ["task", { ...PacerTools.fallback("task"), codemode: true }],
+      ["recall", PacerTools.fallback("recall")],
+    ])
+    // The list of a chat in no project: the web tools, no memory tools.
+    expect([...PacerOffer.unlisted(withTask, all)]).toEqual(["task"])
+    expect([...PacerOffer.unlisted(withTask, listOf(["web_search"]))].toSorted()).toEqual([
+      "task",
+      "web_crawl",
+      "web_extract",
+      "web_research",
+    ])
+    // Before the chat holds a list, none.
+    expect(PacerOffer.unlisted(withTask, undefined).size).toBe(0)
+    expect(PacerOffer.unlisted(known, listOf([])).size).toBe(0)
+  })
 })

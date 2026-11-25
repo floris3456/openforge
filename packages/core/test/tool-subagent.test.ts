@@ -1064,13 +1064,18 @@ describe("SubagentTool", () => {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }).then((response) => response.json() as Promise<{ task: { id: string; state: string; worker: unknown } }>)
 
-    const prepare = Effect.fnUntraced(function* (dir: { readonly path: string }) {
+    const prepare = Effect.fnUntraced(function* (
+      dir: { readonly path: string },
+      /** A git repository unless told, whose project config names unless told. */
+      where: { readonly git?: boolean; readonly named?: boolean } = {},
+    ) {
       const project = `subagent-tasks-${crypto.randomUUID().slice(0, 8)}`
       // A git repository, the only folder whose chats have a project; config names it.
-      yield* Effect.promise(() => initGit(dir.path))
-      yield* Effect.promise(() =>
-        Bun.write(path.join(dir.path, "opencode.json"), JSON.stringify({ memory: { project } })),
-      )
+      if (where.git !== false) yield* Effect.promise(() => initGit(dir.path))
+      if (where.named !== false)
+        yield* Effect.promise(() =>
+          Bun.write(path.join(dir.path, "opencode.json"), JSON.stringify({ memory: { project } })),
+        )
       const location = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
       const sessions = yield* Session.Service
       const parent = yield* sessions.create({ location, model: parentModel })
@@ -1249,6 +1254,36 @@ describe("SubagentTool", () => {
           const settled = yield* h.run({ agent: "reviewer", description: "x", prompt: "x", taskID: "000000000000" })
           expect(settled.status).toBe("error")
           expect(settled.error?.message).toBe("No task 000000000000 (fake).")
+          expect(yield* h.children).toEqual([])
+        }),
+      ),
+    )
+
+    tasksIt.live("a chat outside git is told it has no task board, memory.project notwithstanding; no child", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir, { git: false })
+          const asked = tasksServer.received.length
+          const settled = yield* h.run({ agent: "reviewer", description: "x", prompt: "x", taskID: "k3f9x2m7q4tz" })
+          expect(settled.status).toBe("error")
+          expect(settled.error?.message).toBe(
+            "There is no task k3f9x2m7q4tz, so no subagent was started. This chat's folder is not in a git repository, so it has no project, memory or task board. A chat started inside a git repository has one.",
+          )
+          expect(yield* h.children).toEqual([])
+          expect(tasksServer.received.slice(asked).filter((item) => item.path.includes("/tasks/"))).toEqual([])
+        }),
+      ),
+    )
+
+    tasksIt.live("a chat in a repository without a commit or a remote is told so; no child", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir, { named: false })
+          const settled = yield* h.run({ agent: "reviewer", description: "x", prompt: "x", taskID: "k3f9x2m7q4tz" })
+          expect(settled.status).toBe("error")
+          expect(settled.error?.message).toBe(
+            "There is no task k3f9x2m7q4tz, so no subagent was started. This chat's git repository has no commit and no remote yet, so it has no project, memory or task board. It gets one with its first commit, or the setting memory.project can name one.",
+          )
           expect(yield* h.children).toEqual([])
         }),
       ),

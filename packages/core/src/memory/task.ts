@@ -147,13 +147,13 @@ const layer = Layer.effect(
     const roleOf = (session: SessionSchema.Info) =>
       agents.select(session.agent).pipe(Effect.map((selected) => String(selected.id)))
 
-    const projectOf = Effect.fnUntraced(function* (parent: SessionSchema.Info) {
-      const project = (yield* projects.chat(parent.projectID)).project
-      if (project === undefined)
+    const projectOf = Effect.fnUntraced(function* (parent: SessionSchema.Info, taskID: string) {
+      const chat = yield* projects.chat(parent.projectID)
+      if (chat.project === undefined)
         return yield* new ToolFailure({
-          message: "This chat is in no project, so it has no memory; the setting memory.project can name one.",
+          message: `There is no task ${taskID}, so no subagent was started. ${chat.why}`,
         })
-      return project
+      return chat.project
     })
     /** The client of `project`, its calls in the name of `chat` and, for a subagent, of its parent. */
     const named = (
@@ -176,7 +176,7 @@ const layer = Layer.effect(
           return yield* new ToolFailure({
             message: `There is no task ${taskID}: this server serves no memory, so no subagent was started.`,
           })
-        const project = yield* projectOf(parent)
+        const project = yield* projectOf(parent, taskID)
         const answer = yield* named(project, parent, yield* roleOf(parent))
           .assign(project, taskID)
           .pipe(Effect.mapError(fail))

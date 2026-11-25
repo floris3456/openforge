@@ -17,12 +17,26 @@ import { PacerHeaders } from "./headers.js"
 /** How many projects' headers are kept; a location's chats name one or two. */
 const KEPT = 16
 
-export interface Chat {
-  /** The chat's memory project; undefined for a chat outside any project (outside git), which has no memory. */
-  readonly project: string | undefined
-  /** The headers naming it ({@link PacerHeaders.project}); none without a project. */
-  readonly headers: Readonly<Record<string, string>>
-}
+/** Why a chat has no project, in plain words, for what tells the model so (workspace task c66m6k0sa6h6). */
+export const OUTSIDE_GIT =
+  "This chat's folder is not in a git repository, so it has no project, memory or task board. A chat started inside a git repository has one."
+export const NO_IDENTITY =
+  "This chat's git repository has no commit and no remote yet, so it has no project, memory or task board. It gets one with its first commit, or the setting memory.project can name one."
+
+export type Chat =
+  | {
+      /** The chat's memory project. */
+      readonly project: string
+      /** The headers naming it ({@link PacerHeaders.project}). */
+      readonly headers: Readonly<Record<string, string>>
+    }
+  | {
+      /** A chat outside any project (outside git), which has no memory, and names none. */
+      readonly project: undefined
+      readonly headers: Readonly<Record<string, string>>
+      /** Why: {@link OUTSIDE_GIT} or {@link NO_IDENTITY}. */
+      readonly why: string
+    }
 
 export interface Interface {
   /** The memory project of a chat of this location in project `projectID`, and its headers. */
@@ -61,7 +75,10 @@ export const layer = Layer.effect(
             const found = chats.get(projectID)
             if (found?.entries === entries) return found.chat
             const project = git ? MemoryClient.project(entries, projectID) : undefined
-            const chat = { project, headers: project === undefined ? {} : headers(project) }
+            const chat =
+              project === undefined
+                ? { project, headers: {}, why: git ? NO_IDENTITY : OUTSIDE_GIT }
+                : { project, headers: headers(project) }
             if (chats.size >= KEPT) chats.clear()
             chats.set(projectID, { entries, chat })
             return chat

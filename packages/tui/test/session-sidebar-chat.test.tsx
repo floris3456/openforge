@@ -6,7 +6,7 @@ import { SESSION_SIDEBAR_WIDTH } from "../src/ui/layout"
 import { createAppFixture } from "./fixture/app"
 import { tmpdir } from "./fixture/fixture"
 import { directory, json } from "./fixture/tui-client"
-import { until } from "./fixture/wait"
+import { until, within } from "./fixture/wait"
 
 // The owner, 2026-11-24: "please make the sidebar also exclusive for every chat on the same server". The sidebar's
 // visibility and the state of its Todo and MCP sections belong to the chat they were changed in, kept in the TUI's
@@ -137,9 +137,11 @@ async function clickSection(setup: Window, name: string) {
  * frames, so it is polled against the wall clock (the tui-tests skill), with the frame shown on failure.
  */
 async function appears(setup: Window, match: (frame: string) => boolean) {
-  await until(() => match(setup.captureCharFrame()), 10_000).catch(() => {
-    throw new Error(`the frame did not match within 10 s:\n${setup.captureCharFrame()}`)
-  })
+  await within(
+    () => match(setup.captureCharFrame()),
+    10_000,
+    () => `the frame did not match within 10 s:\n${setup.captureCharFrame()}`,
+  )
 }
 
 /** The other window has read the shared storage file once the write reached it; give it the time it takes. */

@@ -96,6 +96,7 @@ export const catalogOf = (
                   later: options.later ?? false,
                   reviewItems: options.reviewItems ?? false,
                   inspect: options.inspect ?? false,
+                  news: false,
                 },
               }
             : {}),

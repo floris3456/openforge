@@ -123,6 +123,11 @@ export interface Memory {
    * `docs/specs/cpp-inspect-cli.md`): `PacerInspect` relays `openforge cpp` only then.
    */
   readonly inspect: boolean
+  /**
+   * Whether the server keeps blocker news for the chats to tell (workspace spec `docs/specs/blocker-tasks.md`): the
+   * connection then claims the news of the chats this install holds and wakes them with it (`PacerNews`).
+   */
+  readonly news: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -300,6 +305,7 @@ const MemoryBlock = Schema.Struct({
   later: Schema.optional(Schema.Unknown),
   review_items: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
+  news: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -495,6 +501,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           later: memory.later === true,
           reviewItems: memory.review_items === true,
           inspect: memory.inspect === true,
+          news: memory.news === true,
         },
       }),
     }),

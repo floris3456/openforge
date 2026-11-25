@@ -65,6 +65,7 @@ const catalog = (inspect: boolean): PacerModels.Catalog => ({
       later: true,
       reviewItems: false,
       inspect,
+      news: false,
     },
   },
   models: [],

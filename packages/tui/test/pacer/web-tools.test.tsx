@@ -8,7 +8,10 @@ import type {
   SessionMessageInfo,
 } from "@opencode/client"
 import type { CapturedLine } from "@opentui/core"
+import { Flock } from "@opencode/util/flock"
+import path from "node:path"
 import { createAppFixture } from "../fixture/app"
+import { tmpdir } from "../fixture/fixture"
 import { recordFrames, type RecordedFrame } from "../fixture/frames"
 import { directory, json } from "../fixture/tui-client"
 import { within } from "../fixture/wait"
@@ -80,30 +83,62 @@ function chat(parts: SessionMessageAssistantTool[], done = true): SessionMessage
 }
 
 /**
- * The app on the chat. Its messages are answered once the recorder listens, so `recorder` holds every frame from
- * before they are drawn.
+ * The app on the chat. Its messages are answered once the recorder listens and the chat's tab is drawn, so `recorder`
+ * holds every frame from before they are drawn, and no frame that shows them moves them: the app admits the tab by a
+ * write of the tabs file under its lock, which a busy disk can finish after the messages are drawn, and its row then
+ * moves every row below it down a line, so that a click at a line read before lands on the line above. With
+ * `tabs: "late"` the tabs file stays locked for 300 ms after the app asks for the messages, as another window's write
+ * on a slow disk holds it, and the tab comes once that write is done.
  */
 async function transcript(
   messages: SessionMessageInfo[],
-  input: { width?: number; height?: number; grouping?: "auto" | "none"; permissions?: PermissionRequest[] } = {},
+  input: {
+    width?: number
+    height?: number
+    grouping?: "auto" | "none"
+    permissions?: PermissionRequest[]
+    tabs?: "late"
+  } = {},
 ) {
   const listening = Promise.withResolvers<void>()
+  const state = await tmpdir()
+  const lock =
+    input.tabs === "late"
+      ? await Flock.acquire(path.join(state.path, "test", "tui", "tabs.json"), {
+          dir: path.join(state.path, "test", "locks"),
+        })
+      : undefined
+  const unlock = { released: lock === undefined, timer: undefined as ReturnType<typeof setTimeout> | undefined }
+  const release = async () => {
+    clearTimeout(unlock.timer)
+    if (unlock.released) return
+    unlock.released = true
+    await lock?.release()
+  }
   const setup = await createAppFixture({
     width: input.width ?? 120,
     height: input.height ?? 30,
+    state: state.path,
     args: { sessionID: SESSION },
     config: { animations: false, session: { sidebar: "hide", grouping: input.grouping ?? "none" } },
     fetch: (url) => {
       if (url.pathname === "/api/session") return json({ data: [session], cursor: {} })
       if (url.pathname === `/api/session/${SESSION}`) return json({ data: session })
-      if (url.pathname === `/api/session/${SESSION}/message`)
+      if (url.pathname === `/api/session/${SESSION}/message`) {
+        if (!unlock.released) unlock.timer ??= setTimeout(() => void release(), 300)
         return listening.promise.then(() => json({ data: messages.toReversed(), cursor: {} }))
+      }
       if (url.pathname === `/api/session/${SESSION}/permission`) return json({ data: input.permissions ?? [] })
       if (url.pathname === `/api/session/${SESSION}/inbox`) return json({ data: [] })
     },
   })
   await setup.ready
   const recorder = recordFrames(setup)
+  await within(
+    () => recorder.frames.some((frame) => lines(frame.text)[0]!.includes(session.title)),
+    5_000,
+    () => `the chat's tab was not drawn within 5 s:\n${recorder.frames.at(-1)?.text ?? "(none drawn yet)"}`,
+  )
   listening.resolve()
   return {
     ...setup,
@@ -131,7 +166,9 @@ async function transcript(
     },
     async [Symbol.asyncDispose]() {
       recorder.stop()
+      await release()
       await setup[Symbol.asyncDispose]()
+      await state[Symbol.asyncDispose]()
     },
   }
 }
@@ -212,6 +249,15 @@ function inOrder(
   const order = seen.map((line) => states.indexOf(line))
   expect(order).toEqual(order.toSorted((a, b) => a - b))
   expect(seen.at(-1)).toBe(states.at(-1)!)
+}
+
+/** The lines on which the recorded frames drew a row starting with `start`: one, if it never moved. */
+function drawnAt(setup: Setup, start: string) {
+  const at = setup.recorder.frames.flatMap((frame) => {
+    const line = lines(frame.text).findIndex((line) => line.startsWith(start))
+    return line < 0 ? [] : [line]
+  })
+  return [...new Set(at)]
 }
 
 /** The colour of a frame's row: its icon's and its text's. */
@@ -476,8 +522,14 @@ describe("grouped with upstream's search and fetch", () => {
   ]
 
   // The owner, 2026-11-10: "It should also include "X crawls" or "x researches" or "1 research"".
-  test("searches count with upstream's searches, extracts with its fetches, researches and crawls as their own; expanded, the rows in order", async () => {
-    await using setup = await transcript(chat(parts), { grouping: "auto" })
+  // The test clicks the group at the line a frame drew it on; were the rows to move after that frame, the click would
+  // land on the line above. On 0.0.87's code they did under heavy disk load: the chat's tab, which a locked write of
+  // the tabs file admits, came a frame after the messages and moved every row down a line.
+  test.each([
+    { when: "", tabs: undefined },
+    { when: ", also when the chat's tab comes late", tabs: "late" as const },
+  ])("searches count with upstream's searches, extracts with its fetches, researches and crawls as their own; expanded, the rows in order$when", async (item) => {
+    await using setup = await transcript(chat(parts), { grouping: "auto", tabs: item.tabs })
     const frame = await setup.frame((frame) => frame.text.includes("Explored:"))
     expect(lines(frame.text).filter((line) => line.includes("Explored:"))).toEqual([
       "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
@@ -495,6 +547,8 @@ describe("grouped with upstream's search and fetch", () => {
       `◈ Web Research via Exa "${QUESTION}"`,
       `% Web Crawl via Tavily ${SITE}`,
     ])
+    await setup.frame((frame) => lines(frame.text)[0]!.includes(session.title))
+    expect(drawnAt(setup, "→ Explored:")).toEqual([row])
   })
 
   test("two researches and two crawls count as researches and crawls", async () => {
@@ -583,16 +637,18 @@ describe("web calls inside a script", () => {
 
   test("grouped, each run folds into the line direct calls fold into, and opens when clicked", async () => {
     await using setup = await transcript(chat([script]), { grouping: "auto" })
-    await setup.frame((frame) => rows(frame.text).length === 2)
-    expect(rows(setup.captureCharFrame())).toEqual(["→ Explored: 1 search, 1 research", "→ Explored: 1 fetch"])
-    const row = lines(setup.captureCharFrame()).findIndex((line) => line.startsWith("→ Explored: 1 search"))
+    const frame = await setup.frame((frame) => rows(frame.text).length === 2)
+    expect(rows(frame.text)).toEqual(["→ Explored: 1 search, 1 research", "→ Explored: 1 fetch"])
+    const row = lines(frame.text).findIndex((line) => line.startsWith("→ Explored: 1 search"))
     await setup.mockMouse.click(6, row)
-    await setup.frame((frame) => rows(frame.text).length === 4)
-    expect(rows(setup.captureCharFrame())).toEqual([
+    const expanded = await setup.frame((frame) => rows(frame.text).length === 4)
+    expect(rows(expanded.text)).toEqual([
       "→ Explored: 1 search, 1 research",
       `◈ Web Search via Tavily "${QUERY}"`,
       `◈ Web Research via Exa "${QUESTION}"`,
       "→ Explored: 1 fetch",
     ])
+    await setup.frame((frame) => lines(frame.text)[0]!.includes(session.title))
+    expect(drawnAt(setup, "→ Explored: 1 search")).toEqual([row])
   })
 })

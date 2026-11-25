@@ -6,6 +6,7 @@ import { Deferred, Effect, Fiber, Layer, Queue, Stream } from "effect"
 import { RunnerClient } from "@opencode/runner/client"
 import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
+import { RunnerProtocol } from "@opencode/runner/protocol"
 import { Location } from "@opencode/core/location"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Shell } from "@opencode/core/shell"
@@ -224,6 +225,56 @@ describe("Shell through the tool runner", () => {
         expect((yield* shell.get(fresh.id)).status).toBe("running")
         yield* shell.remove(fresh.id)
       }).pipe(Effect.scoped, Effect.provide(host.service({ version: "0.1.1" })))
+    }),
+  )
+
+  it.live("a start that reaches a runner as its grace runs out runs in the next runner", () =>
+    Effect.gen(function* () {
+      const host = yield* machine
+      // In the service's folder, a runner whose grace runs out just as the start reaches it: as a runner does then, it
+      // stops listening and tells each connection bye, so the start is never answered.
+      const directory = RunnerPaths.directory(host.state, "test")
+      fs.mkdirSync(directory, { recursive: true })
+      fs.writeFileSync(RunnerPaths.token(directory), "token")
+      const sockets = new Set<net.Socket>()
+      const server = net.createServer((socket) => {
+        sockets.add(socket)
+        const write = (frame: RunnerProtocol.Frame | RunnerProtocol.Hello) => socket.write(JSON.stringify(frame) + "\n")
+        write({ type: "hello", protocols: [1], version: "test", pid: process.pid })
+        socket.setEncoding("utf8")
+        socket.on("error", () => {})
+        socket.on(
+          "data",
+          RunnerProtocol.lines(
+            (line) => {
+              const request = RunnerProtocol.decodeRequest(line)
+              if (request._tag === "None") return
+              if (request.value.op === "hello") return write({ id: request.value.id, type: "ok" })
+              if (request.value.op === "list") return write({ id: request.value.id, type: "list", commands: [] })
+              if (request.value.op !== "start") return
+              server.close()
+              fs.rmSync(RunnerPaths.socket(directory), { force: true })
+              sockets.forEach((each) => each.end(JSON.stringify({ type: "bye" }) + "\n"))
+            },
+            () => {},
+          ),
+        )
+      })
+      yield* Effect.acquireRelease(
+        Effect.callback<void>((resume) => {
+          server.listen(RunnerPaths.socket(directory), () => resume(Effect.void))
+        }),
+        () => Effect.sync(() => server.close()),
+      )
+
+      const finished = yield* Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const info = yield* shell.create({ shell: "/bin/sh", command: "printf ran", timeout: 0 })
+        return { info: yield* shell.wait(info.id), output: (yield* shell.output(info.id)).output }
+      }).pipe(Effect.scoped, Effect.provide(host.service()))
+      expect(finished).toMatchObject({ info: { status: "exited", exit: 0 }, output: "ran" })
+      // The service started that runner itself, in the same folder.
+      expect(host.runners.map((runner) => runner.directory)).toEqual([directory])
     }),
   )
 

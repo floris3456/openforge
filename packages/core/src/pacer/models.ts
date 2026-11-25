@@ -119,6 +119,11 @@ export interface Memory {
    */
   readonly reviewItems: boolean
   /**
+   * Whether the server says what a lead owes its helper's handed-in rounds (`GET …/owed`, the workspace's task
+   * khtzd8a7qje3): openforge then holds a lead's message to that helper until it answers them (`MemoryHeld`).
+   */
+  readonly reviewOwed: boolean
+  /**
    * Whether the server has the read-only routes of other projects for a key the owner lets (workspace spec
    * `docs/specs/cpp-inspect-cli.md`): `PacerInspect` relays `openforge cpp` only then.
    */
@@ -299,6 +304,7 @@ const MemoryBlock = Schema.Struct({
   goals: Schema.optional(Schema.Unknown),
   later: Schema.optional(Schema.Unknown),
   review_items: Schema.optional(Schema.Unknown),
+  review_owed: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
@@ -494,6 +500,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           goals: memory.goals === true,
           later: memory.later === true,
           reviewItems: memory.review_items === true,
+          reviewOwed: memory.review_owed === true,
           inspect: memory.inspect === true,
         },
       }),

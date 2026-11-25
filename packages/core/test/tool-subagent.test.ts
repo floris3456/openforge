@@ -35,6 +35,7 @@ import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionStore } from "@opencode/core/session/store"
 import { SubagentJob } from "@opencode/core/session/subagent-job"
 import { SubagentEnded } from "@opencode/core/session/subagent-ended"
+import { MemoryHeld } from "@opencode/core/memory/held"
 import { MemoryTask } from "@opencode/core/memory/task"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -147,6 +148,8 @@ const subagentPluginSupervisor = makeLocationNode({
     Job.node,
     SubagentJob.node,
     MemoryTask.node,
+    MemoryHeld.node,
+    PacerModels.node,
     SubagentEnded.node,
     Tool.node,
     PluginHooks.node,

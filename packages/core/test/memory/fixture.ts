@@ -44,7 +44,8 @@ export const catalogOf = (
    * `prompt`: whether the server answers prompts; `summary`: whether its start takes a summary; `plans`: whether its
    * tasks are plans; `tools`: whether it serves the memory tools and memory's texts; as the small server says when
    * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items; `reviewItems`:
-   * whether it has agents' notes on review items (`image.show({ task, item })`); `inspect`: whether it has the reads of
+   * whether it has agents' notes on review items (`image.show({ task, item })`); `reviewOwed`: whether it says what a
+   * lead owes its helper's rounds (`GET …/owed`); `inspect`: whether it has the reads of
    * other projects (`openforge cpp`); `codemode`: the
    * tools its capabilities say run in Code Mode (`tools.task_codemode`), whose list keeps them direct otherwise.
    */
@@ -56,6 +57,7 @@ export const catalogOf = (
     readonly goals?: boolean
     readonly later?: boolean
     readonly reviewItems?: boolean
+    readonly reviewOwed?: boolean
     readonly inspect?: boolean
     readonly codemode?: ReadonlyArray<string>
   } = {},
@@ -95,6 +97,7 @@ export const catalogOf = (
                   goals: options.goals ?? false,
                   later: options.later ?? false,
                   reviewItems: options.reviewItems ?? false,
+                  reviewOwed: options.reviewOwed ?? false,
                   inspect: options.inspect ?? false,
                 },
               }

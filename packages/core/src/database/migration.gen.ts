@@ -68,6 +68,7 @@ import m65 from "./migration/20261116121524_prompt_start_parts.js"
 import m66 from "./migration/20261116181958_automation_event_position.js"
 import m67 from "./migration/20261116213417_automation_active_index.js"
 import m68 from "./migration/20261120181245_media_files.js"
+import m69 from "./migration/20261125015820_memory_held.js"
 
 export const migrations = [
   m00,
@@ -139,4 +140,5 @@ export const migrations = [
   m66,
   m67,
   m68,
+  m69,
 ] satisfies DatabaseMigration.Migration[]

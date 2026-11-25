@@ -115,7 +115,7 @@ describe("PacerEnv.values", () => {
             'DOUBLE="double-0123456789"',
             "BACKTICK=`backtick-0123456789`",
             'HASHED="quoted#hash-0123456" # a comment',
-            "PEM=\"-----BEGIN PRIVATE KEY-----",
+            'PEM="-----BEGIN PRIVATE KEY-----',
             "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
             "abcdefghijklmnopqrstuvwxyz012345",
             '-----END PRIVATE KEY-----"',

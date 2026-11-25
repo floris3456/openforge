@@ -33,6 +33,16 @@ export interface Pacer {
    * without the field.
    */
   readonly tools?: ReadonlyMap<string, ToolMeta>
+  /** `pacer.redaction`, when the server says what it hides beyond its own layers; absent otherwise. */
+  readonly redaction?: Redaction
+}
+
+export interface Redaction {
+  /**
+   * Whether the server takes each chat's .env values as exact values (workspace spec `docs/specs/env-redaction.md`):
+   * openforge then names the set on each model request and hands it over when asked (`PacerEnv`).
+   */
+  readonly env: boolean
 }
 
 /** What a client needs to run one of CPP's tools: its `meta`, as capabilities and each list give it. */
@@ -290,6 +300,7 @@ export const CapabilitiesAnswer = Schema.Struct({
       freeze_prompt: Schema.optional(Schema.Unknown),
       addresses: Schema.optional(Schema.Unknown),
       tools: Schema.optional(Schema.Unknown),
+      redaction: Schema.optional(Schema.Unknown),
     }),
   ),
   providers: Items,
@@ -320,6 +331,7 @@ const MemoryBlock = Schema.Struct({
   news: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
+const decodeRedaction = Schema.decodeUnknownOption(Schema.Struct({ env: Schema.optional(Schema.Unknown) }))
 
 const RatesAnswer = Schema.Struct({
   input: maybe(Schema.Number),
@@ -518,6 +530,10 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           news: memory.news === true,
         },
       }),
+    }),
+    ...Option.match(decodeRedaction(pacer.redaction), {
+      onNone: () => ({}),
+      onSome: (redaction) => ({ redaction: { env: redaction.env === true } }),
     }),
   }
 }

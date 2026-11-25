@@ -74,6 +74,7 @@ describe("PacerProject", () => {
           "X-Pacer-Project-Remote": "github.com%2Fowner%2Frepo",
           "X-Pacer-Project-Vcs": "git",
         },
+        repository: "/home/floris/QuettaForge",
       })
     }),
   )
@@ -89,6 +90,8 @@ describe("PacerProject", () => {
         "X-Pacer-Project-Name": "openforge",
         "X-Pacer-Project-Vcs": "git",
       })
+      // Its .env files are this checkout's, not the main one's (workspace spec env-redaction, section 2).
+      expect(yield* projects.chat(id)).toMatchObject({ repository: "/home/floris/worktrees/task/openforge-task" })
     }),
   )
 
@@ -135,6 +138,7 @@ describe("PacerProject", () => {
           "X-Pacer-Project-Name": "openforge",
           "X-Pacer-Project-Vcs": "git",
         },
+        repository: "/home/floris/openforge",
       })
       // A repository without an identity of its own shares the one config names, as its memory does.
       expect((yield* projects.chat(Project.ID.global)).project).toBe("openforge-workspace")

@@ -66,8 +66,7 @@ const resolved = (model: string | LanguageModel) =>
 /** Tools whose one call runs `run`. */
 const tools = (run: () => Promise<void> = async () => {}): Tool.Snapshot => ({
   definitions: [],
-  execute: () =>
-    Effect.promise(run).pipe(Effect.as({ content: [{ type: "text" as const, text: "written" }] })),
+  execute: () => Effect.promise(run).pipe(Effect.as({ content: [{ type: "text" as const, text: "written" }] })),
 })
 
 const write = (root: string, files: Readonly<Record<string, string>>) =>
@@ -114,6 +113,7 @@ const setup = Effect.fnUntraced(function* (
   const cpp = yield* fakeCpp
   const catalog = "catalog" in options ? options.catalog : capable
   const started = yield* startTools(endpointOf(cpp.origin, KEY), catalog)
+  if (catalog === undefined) yield* SubscriptionRef.set(started.catalogs, undefined)
   const endpointLayer = Layer.succeed(
     PacerEndpoint.Service,
     PacerEndpoint.Service.of({
@@ -145,10 +145,7 @@ const setup = Effect.fnUntraced(function* (
   const ref = Location.Ref.make({ directory: AbsolutePath.make(root) })
   const projects = Layer.fresh(PacerProject.layer).pipe(
     Layer.provide(
-      Layer.succeed(
-        Location.Service,
-        Location.Service.of(location(ref, options.outside ? {} : { vcs: gitVcs(root) })),
-      ),
+      Layer.succeed(Location.Service, Location.Service.of(location(ref, options.outside ? {} : { vcs: gitVcs(root) }))),
     ),
     Layer.provide(Config.testLayer()),
     Layer.provide(
@@ -170,7 +167,8 @@ const setup = Effect.fnUntraced(function* (
   const session = Session.Info.make({
     id: Session.ID.make("ses_env_request"),
     ...(options.parentID ? { parentID: options.parentID } : {}),
-    projectID: Project.ID.global,
+    // A project of its own in git; outside git, none.
+    projectID: Project.ID.make("env-request-project"),
     cost: Money.USD.zero,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
@@ -273,8 +271,7 @@ describe("a chat's .env values on its model requests to CLIProxyPacer", () => {
       )
 
       // An unreachable CPP is an answer the step's retry waits out, as any 503 of CPP's.
-      h.cpp.answers.env = () =>
-        Response.json({ error: { type: "cpp_down", message: "CPP is down" } }, { status: 503 })
+      h.cpp.answers.env = () => Response.json({ error: { type: "cpp_down", message: "CPP is down" } }, { status: 503 })
       const down = yield* h.send(yield* h.requests.primary(h.input()), h.wire(unknownSet, answered))
       expect(down.status).toBe(503)
     }),

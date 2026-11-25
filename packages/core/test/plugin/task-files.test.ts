@@ -131,8 +131,8 @@ const client = MemoryClient.layer.pipe(
   Layer.provide(PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints))),
 )
 const projects = Layer.mock(PacerProject.Service, {
-  chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
-  session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
+  chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
+  session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
   headers: (project) => ({ "X-Pacer-Project": project }),
 })
 

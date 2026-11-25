@@ -1,9 +1,13 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "0c7c6ae0-01e7-47e1-94b9-cec976b8d7ad",
-  "prevIds": ["ab8fea18-0d95-48a1-b631-c112235dc492"],
+  "id": "33ce2603-9412-42cc-9e10-ff407b298300",
+  "prevIds": ["0c7c6ae0-01e7-47e1-94b9-cec976b8d7ad"],
   "ddl": [
+    {
+      "name": "memory_held",
+      "entityType": "tables"
+    },
     {
       "name": "memory_prompt",
       "entityType": "tables"
@@ -127,6 +131,56 @@
     {
       "name": "worktree",
       "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "helper_id",
+      "entityType": "columns",
+      "table": "memory_held"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "lead_id",
+      "entityType": "columns",
+      "table": "memory_held"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "message_id",
+      "entityType": "columns",
+      "table": "memory_held"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "input",
+      "entityType": "columns",
+      "table": "memory_held"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "memory_held"
     },
     {
       "type": "text",
@@ -2529,6 +2583,28 @@
       "table": "worktree"
     },
     {
+      "columns": ["helper_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_memory_held_helper_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "memory_held"
+    },
+    {
+      "columns": ["lead_id"],
+      "tableTo": "session_v2",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_memory_held_lead_id_session_v2_id_fk",
+      "entityType": "fks",
+      "table": "memory_held"
+    },
+    {
       "columns": ["message_id"],
       "tableTo": "session_message",
       "columnsTo": ["id"],
@@ -2816,6 +2892,13 @@
       "table": "worktree"
     },
     {
+      "columns": ["helper_id"],
+      "nameExplicit": false,
+      "name": "memory_held_pk",
+      "table": "memory_held",
+      "entityType": "pks"
+    },
+    {
       "columns": ["message_id"],
       "nameExplicit": false,
       "name": "memory_prompt_pk",
@@ -2975,6 +3058,20 @@
       "name": "workspace_pk",
       "table": "workspace",
       "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "lead_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "memory_held_lead_idx",
+      "entityType": "indexes",
+      "table": "memory_held"
     },
     {
       "columns": [

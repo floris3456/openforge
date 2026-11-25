@@ -5,6 +5,17 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
   up(tx) {
     return Effect.gen(function* () {
       yield* tx.run(`
+        CREATE TABLE \`memory_held\` (
+          \`helper_id\` text PRIMARY KEY,
+          \`lead_id\` text NOT NULL,
+          \`message_id\` text NOT NULL,
+          \`input\` text NOT NULL,
+          \`time_created\` integer NOT NULL,
+          CONSTRAINT \`fk_memory_held_helper_id_session_v2_id_fk\` FOREIGN KEY (\`helper_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_memory_held_lead_id_session_v2_id_fk\` FOREIGN KEY (\`lead_id\`) REFERENCES \`session_v2\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`memory_prompt\` (
           \`message_id\` text PRIMARY KEY,
           \`session_id\` text NOT NULL,
@@ -397,6 +408,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           CONSTRAINT \`fk_worktree_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE
         );
       `)
+      yield* tx.run(`CREATE INDEX \`memory_held_lead_idx\` ON \`memory_held\` (\`lead_id\`);`)
       yield* tx.run(`CREATE INDEX \`automation_project_idx\` ON \`automation\` (\`project_id\`);`)
       yield* tx.run(`CREATE INDEX \`automation_session_idx\` ON \`automation\` (\`session_id\`);`)
       yield* tx.run(

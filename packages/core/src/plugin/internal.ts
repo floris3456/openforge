@@ -61,6 +61,7 @@ import { Location } from "../location.js"
 import { ModelsDev } from "../models-dev.js"
 import { Mcp } from "../mcp/index.js"
 import { MemoryClient } from "../memory/client.js"
+import { MemoryHeld } from "../memory/held.js"
 import { MemoryPlans } from "../memory/plans.js"
 import { MemoryTask } from "../memory/task.js"
 import { SubagentEnded } from "../session/subagent-ended.js"
@@ -173,6 +174,7 @@ const services = [
   ModelsDev.Service,
   Mcp.Service,
   MemoryClient.Service,
+  MemoryHeld.Service,
   MemoryPlans.Service,
   MemoryTask.Service,
   Npm.Service,
@@ -247,6 +249,7 @@ export const requirements = LayerNode.group([
   ModelsDev.node,
   Mcp.node,
   MemoryClient.node,
+  MemoryHeld.node,
   MemoryPlans.node,
   MemoryTask.node,
   Npm.node,

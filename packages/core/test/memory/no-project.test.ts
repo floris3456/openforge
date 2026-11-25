@@ -11,12 +11,16 @@ import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/core/effect/app-node-platform"
+import type { FileSystem } from "@opencode/core/filesystem"
+import { Image } from "@opencode/core/image"
+import { Instance } from "@opencode/core/instance"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { InstructionBuiltIns } from "@opencode/core/instructions/builtins"
 import { Instructions } from "@opencode/core/instructions/index"
 import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
+import type { LocationServices } from "@opencode/core/location-services"
 import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { MemoryClient } from "@opencode/core/memory/client"
 import { MemoryTexts } from "@opencode/core/memory/texts"
@@ -24,11 +28,14 @@ import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerProject } from "@opencode/core/pacer/project"
+import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerTools } from "@opencode/core/pacer/tools"
 import { Permission } from "@opencode/core/permission"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
+import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { ReferenceInstructions } from "@opencode/core/reference/instructions"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -41,19 +48,20 @@ import { SessionRunnerLLM } from "@opencode/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
+import { Skill } from "@opencode/core/skill"
 import { SkillInstructions } from "@opencode/core/skill/instructions"
 import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
-import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { Node, makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Effect, Layer, Schema, SubscriptionRef } from "effect"
+import { Context, Effect, Layer, LayerMap, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { initRepo } from "../fixture/git"
 import { promptLocationNode } from "../fixture/prompt-location"
 import { it } from "../lib/effect"
 import { permissionLayer } from "../lib/permission"
 import { codeModeListings } from "../lib/tool"
-import { catalogOf, codeModeList, endpointAt, pacerToolsNode, poll, primeTools, startProxied } from "./fixture"
+import { catalogOf, codeModeList, endpointAt, key, pacerToolsNode, poll, primeTools, startProxied } from "./fixture"
 
 // The tools of a chat in no project (the workspace's spec `docs/specs/cpp-projects.md`, "What a project is": a chat
 // outside git "names none, makes none and gets no memory and no task tools"), through the real runner over the small
@@ -62,11 +70,14 @@ import { catalogOf, codeModeList, endpointAt, pacerToolsNode, poll, primeTools, 
 
 const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "in-git-")))
 const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "outside-git-")))
+/** A second repository, a helper's own checkout. */
+const ownRepo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "own-git-")))
 await initRepo(repo)
+await initRepo(ownRepo)
 const server = startProxied()
 afterAll(async () => {
   await server.stop()
-  for (const directory of [repo, outside]) fs.rmSync(directory, { recursive: true, force: true })
+  for (const directory of [repo, outside, ownRepo]) fs.rmSync(directory, { recursive: true, force: true })
 })
 
 const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
@@ -141,8 +152,46 @@ const own = makeLocationNode({
 })
 const memoryTools = pacerToolsNode("test/no-project-pacer-tools")
 
+/**
+ * Every folder's services as a location of its own, each with its project resolved as openforge resolves it, as the
+ * service has them: a helper's chat reaches its lead's location through them, wherever the lead now is.
+ */
+const projectLocations = makeGlobalNode({
+  service: LocationServiceMap.Service,
+  layer: Layer.effect(
+    LocationServiceMap.Service,
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const store = yield* SessionStore.Service
+      const projects = yield* Project.Service
+      const map: Context.Service.Shape<typeof LocationServiceMap.Service> = yield* LayerMap.make(
+        (ref: Location.Ref) =>
+          LayerNode.compile(LayerNode.group([PluginHooks.node, Image.node, Skill.node, Plugin.node, PacerProject.node]), {
+            shared: Node.tags.values.global,
+            replacements: [
+              Bus.node.replace(Layer.succeed(Bus.Service, bus)),
+              SessionStore.node.replace(Layer.succeed(SessionStore.Service, store)),
+              Project.node.replace(Layer.succeed(Project.Service, projects)),
+              Location.node.replace(Location.boundNode(ref)),
+              Config.node.replace(Config.testLayer()),
+              Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
+              Instance.node.replace(
+                Layer.succeed(
+                  Instance.Service,
+                  Instance.Service.of({ provide: (session) => Effect.provide(map.get(session.location)) }),
+                ),
+              ),
+            ],
+          }) as unknown as Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError>,
+      )
+      return map
+    }),
+  ),
+  deps: [Bus.node, SessionStore.node, Project.node],
+})
+
 /** The runner's graph for chats whose folder is `directory`, its project resolved as openforge resolves it. */
-const layerAt = (directory: string) => {
+const layerAt = (directory: string, locations: LayerNode.Provider<LocationServiceMap.Service> = promptLocationNode) => {
   const replacements: LayerNode.Replacements = [
     Snapshot.node.replace(Snapshot.noopLayer),
     LayerNodePlatform.llmClient.replace(testLLM),
@@ -197,6 +246,7 @@ const layerAt = (directory: string) => {
       MemoryTexts.node,
       Config.node,
       Location.node,
+      Project.node,
       Snapshot.node,
       SessionRunnerLLM.node,
       Session.node,
@@ -204,7 +254,7 @@ const layerAt = (directory: string) => {
     [
       ...replacements,
       Bus.node.replace(Bus.configured({ persist: true })),
-      LocationServiceMap.node.replace(promptLocationNode),
+      LocationServiceMap.node.replace(locations),
       Model.node.replace(
         Layer.mock(Model.Service, {
           get: () => Effect.undefined,
@@ -270,6 +320,92 @@ const firstRequest = (directory: string) =>
     }
   }).pipe(Effect.provide(layerAt(directory)), Effect.scoped)
 
+/**
+ * The first request of a helper whose folder is `directory` and whose lead's is `leadDirectory`, as a helper is left
+ * when its lead moves, then its `task` call with `call` when given: the request, and what each of the helper's
+ * requests to CPP named as its project.
+ */
+const helperRequest = (directory: string, leadDirectory: string, call?: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    yield* primeTools(`elsewhere-${crypto.randomUUID().slice(0, 8)}`)
+    const texts = yield* MemoryTexts.Service
+    yield* poll("memory's texts are kept", () => Effect.runSync(texts.get()) !== undefined)
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) => {
+      editor.update(Agent.ID.make("build"), (agent) => {
+        agent.mode = "primary"
+      })
+    })
+    const location = yield* Location.Service
+    const projects = yield* Project.Service
+    const lead = yield* projects.resolve(AbsolutePath.make(leadDirectory), { persist: false })
+    const db = (yield* Database.Service).db
+    yield* db
+      .insert(ProjectTable)
+      .values([
+        { id: lead.id, worktree: AbsolutePath.make(leadDirectory), sandboxes: [] },
+        { id: location.project.id, worktree: location.directory, sandboxes: [] },
+      ])
+      .onConflictDoNothing()
+      .run()
+      .pipe(Effect.orDie)
+    const leadID = Session.ID.make(`ses_lead_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`)
+    const sessionID = Session.ID.make(`ses_helper_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`)
+    yield* db
+      .insert(SessionTable)
+      .values([
+        {
+          id: leadID,
+          project_id: lead.id,
+          slug: leadID,
+          directory: AbsolutePath.make(leadDirectory),
+          title: "lead",
+          version: "test",
+        },
+        {
+          id: sessionID,
+          project_id: location.project.id,
+          parent_id: leadID,
+          model: { id: "fake-model", providerID: PacerEndpoint.id },
+          slug: sessionID,
+          directory: location.directory,
+          title: "helper",
+          version: "test",
+        },
+      ])
+      .run()
+      .pipe(Effect.orDie)
+    const llm = yield* TestLLM.Test
+    if (call) yield* llm.push(TestLLM.toolCall("call-task", "task", call), TestLLM.text("Done.", "done"))
+    const session = yield* Session.Service
+    const started = requests.length
+    const seen = server.received.length
+    yield* session.prompt({ sessionID, text: "hello", resume: false }).pipe(Effect.andThen(session.resume(sessionID)))
+    return {
+      lead: lead.id,
+      own: location.project.id,
+      request: requests[started],
+      named: server.received
+        .slice(seen)
+        .filter((item) => item.pacer["x-pacer-session"] === PacerSessionID.make(sessionID))
+        .map((item) => ({
+          call: `${item.method} ${item.path}`,
+          project: item.pacer["x-pacer-project"],
+          name: item.pacer["x-pacer-project-name"],
+        })),
+    }
+  }).pipe(Effect.provide(layerAt(directory, projectLocations)), Effect.scoped)
+
+/** The titles of the tasks in work on project `project`'s board, as the small memory server keeps it. */
+const board = (project: string) =>
+  Effect.promise(async () => {
+    const answer = await fetch(`${server.store.url}/pacer/v1/memory/${project}/tasks`, {
+      headers: { authorization: `Bearer ${key}` },
+    })
+    const body = (await answer.json()) as { tasks: ReadonlyArray<{ title: string }> }
+    return body.tasks.map((task) => task.title)
+  })
+
 /** The request's direct tools but Code Mode's own. */
 const names = (request: LLMRequest | undefined) =>
   (request?.tools ?? []).map((tool) => tool.name).filter((name) => name !== "execute")
@@ -316,6 +452,49 @@ describe("a chat in no project", () => {
       expect(listed).toContain("weather")
       // Its catalog is the git chat's without `task`'s lines.
       expect(catalogText(outsideGit.request)).toBe(listed?.replace(`\n- task (1 tool)\n${inGit.task}`, ""))
+    }),
+  )
+})
+
+// A helper whose own folder gives it no project takes its lead's (workspace task 0v61fkfkn7sh): theorysnap's helpers
+// stayed in the workspace outside git when their leads moved into the repository.
+describe("a helper of a chat in git", () => {
+  it.live("outside git, gets the memory tools, names its lead's project and makes its task on the lead's board", () =>
+    Effect.gen(function* () {
+      server.reset()
+      Effect.runSync(SubscriptionRef.set(catalogRef, catalogOf(true, { prompt: false })))
+      const helper = yield* helperRequest(outside, repo, { title: "Helper's task" })
+
+      expect(names(helper.request).toSorted()).toEqual(["echo", ...memoryNames])
+      expect(helper.named.map((item) => item.call)).toContain("GET /pacer/v1/tools")
+      expect(helper.named.map((item) => item.call)).toContain("POST /pacer/v1/tools/task")
+      for (const item of helper.named)
+        expect(item).toEqual({ call: item.call, project: helper.lead, name: path.basename(repo) })
+      expect(yield* board(helper.lead)).toContain("Helper's task")
+    }),
+  )
+
+  it.live("in a git repository of its own, keeps its own project", () =>
+    Effect.gen(function* () {
+      server.reset()
+      Effect.runSync(SubscriptionRef.set(catalogRef, catalogOf(true, { prompt: false })))
+      const helper = yield* helperRequest(ownRepo, repo)
+
+      expect(names(helper.request).toSorted()).toEqual(["echo", ...memoryNames])
+      expect(helper.named.map((item) => item.call)).toContain("GET /pacer/v1/tools")
+      for (const item of helper.named)
+        expect(item).toEqual({ call: item.call, project: helper.own, name: path.basename(ownRepo) })
+    }),
+  )
+
+  it.live("of a lead outside git, gets no memory tools and names no project", () =>
+    Effect.gen(function* () {
+      server.reset()
+      Effect.runSync(SubscriptionRef.set(catalogRef, catalogOf(true, { prompt: false })))
+      const helper = yield* helperRequest(outside, outside)
+
+      expect(names(helper.request)).toEqual(["echo"])
+      for (const item of helper.named) expect(item).toEqual({ call: item.call, project: undefined, name: undefined })
     }),
   )
 })

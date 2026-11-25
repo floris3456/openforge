@@ -304,6 +304,11 @@ import type {
   ExperimentalPacerSettingsGetOutput,
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
+  ExperimentalPacerFeaturesOutput,
+  ExperimentalPacerChatIdentitiesInput,
+  ExperimentalPacerChatIdentitiesOutput,
+  ExperimentalPacerChatIdentityInput,
+  ExperimentalPacerChatIdentityOutput,
   ExperimentalPacerNoticesListOutput,
   ExperimentalPacerNoticesDismissInput,
   ExperimentalPacerNoticesDismissOutput,
@@ -1965,6 +1970,29 @@ export function make(options: ClientOptions) {
               },
               requestOptions,
             ).then((value) => value.data),
+          identities: (input: ExperimentalPacerChatIdentitiesInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerChatIdentitiesOutput }>(
+              {
+                method: "GET",
+                path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}/identities`,
+                successStatus: 200,
+                declaredStatuses: [400, 401, 404, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
+          identity: (input: ExperimentalPacerChatIdentityInput, requestOptions?: RequestOptions) =>
+            request<{ readonly data: ExperimentalPacerChatIdentityOutput }>(
+              {
+                method: "POST",
+                path: `/api/experimental/pacer/chat/${encodeURIComponent(input.sessionID)}/identity`,
+                body: { identity: input["identity"], session: input["session"], new: input["new"] },
+                successStatus: 200,
+                declaredStatuses: [400, 401, 404, 503],
+                empty: false,
+              },
+              requestOptions,
+            ).then((value) => value.data),
         },
         refresh: (requestOptions?: RequestOptions) =>
           request<ExperimentalPacerRefreshOutput>(
@@ -2018,6 +2046,17 @@ export function make(options: ClientOptions) {
               requestOptions,
             ).then((value) => value.data),
         },
+        features: (requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerFeaturesOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/pacer/features`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
         notices: {
           list: (requestOptions?: RequestOptions) =>
             request<{ readonly data: ExperimentalPacerNoticesListOutput }>(

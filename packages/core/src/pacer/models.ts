@@ -129,6 +129,11 @@ export interface Memory {
    */
   readonly inspect: boolean
   /**
+   * Whether the server keeps agents' identities and takes the `identity` event (workspace reference
+   * `docs/reference/agent-identity-api.md`): the TUI offers `/identity` only then (`PacerIdentity`).
+   */
+  readonly identities: boolean
+  /**
    * Whether the server keeps blocker news for the chats to tell (workspace spec `docs/specs/blocker-tasks.md`): the
    * connection then claims the news of the chats this install holds and wakes them with it (`PacerNews`).
    */
@@ -311,6 +316,7 @@ const MemoryBlock = Schema.Struct({
   review_items: Schema.optional(Schema.Unknown),
   review_owed: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
+  identities: Schema.optional(Schema.Unknown),
   news: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
@@ -508,6 +514,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           reviewItems: memory.review_items === true,
           reviewOwed: memory.review_owed === true,
           inspect: memory.inspect === true,
+          identities: memory.identities === true,
           news: memory.news === true,
         },
       }),

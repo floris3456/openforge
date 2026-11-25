@@ -1,6 +1,8 @@
 import type {
+  ExperimentalPacerChatIdentityInput,
   PacerAccounts,
   PacerChat,
+  PacerFeatures,
   PacerModels,
   PacerNotice,
   PacerPromptChange,
@@ -102,6 +104,8 @@ function createPacer(input: { clock: Clock }) {
     epoch: number
     accounts?: Held<PacerAccounts>
     models?: Held<PacerModels>
+    /** What CPP offers the TUI's commands, from its capabilities as the service last read them. */
+    features?: PacerFeatures
     chats: Record<string, ChatHeld>
     prompts: Record<string, PacerPromptChange | null>
     /** The cache notices of every chat of the service not dismissed in every TUI, newest first. */
@@ -196,10 +200,21 @@ function createPacer(input: { clock: Clock }) {
     ),
   )
 
+  // What CPP offers the TUI's commands (`/identity`): read with the models, and again when the service read CPP's
+  // capabilities anew.
+  const readFeatures = () =>
+    void client.api.experimental.pacer.features().then(
+      (features) => {
+        if (state() !== "unset") setStore("features", features)
+      },
+      () => undefined,
+    )
+
   // The accounts and the providers serving each model, once CPP is set up, and again each time it comes back.
   createEffect(
     on([() => store.epoch, () => state() !== "unset", resync], ([, set]) => {
       if (!set) return
+      readFeatures()
       const epoch = store.epoch
       void client.api.experimental.pacer.accounts().then(
         (accounts) => {
@@ -360,7 +375,9 @@ function createPacer(input: { clock: Clock }) {
   )
   onCleanup(
     event.on("pacer.models.updated", (event) => {
-      if (state() !== "unset") setStore("models", { value: event.data.models, epoch: store.epoch })
+      if (state() === "unset") return
+      setStore("models", { value: event.data.models, epoch: store.epoch })
+      readFeatures()
     }),
   )
   onCleanup(
@@ -571,6 +588,16 @@ function createPacer(input: { clock: Clock }) {
     /** Changes CPP's settings for all chats; the answer is them after the change. */
     updateSettings: (change: Partial<PacerSettings>): Promise<PacerSettings> =>
       client.api.experimental.pacer.settings.update(change),
+    /**
+     * CPP keeps agents' identities (the workspace's spec `docs/specs/agent-badges.md`, section 1): `/identity` is
+     * offered only then, so nothing changes against a CPP without them.
+     */
+    identities: () => state() !== "unset" && store.features?.identities === true,
+    /** The identities of the chat's project, the most recently active first, and the one it is now; read each time. */
+    identityList: (sessionID: string) => client.api.experimental.pacer.chat.identities({ sessionID }),
+    /** Links the chat to an identity (`/identity`); answers the one it is now. */
+    linkIdentity: (sessionID: string, to: Omit<ExperimentalPacerChatIdentityInput, "sessionID">) =>
+      client.api.experimental.pacer.chat.identity({ sessionID, ...to }),
     /** The session route of a shown chat: how to open its Requests tab. */
     attach(sessionID: string, handlers: { readonly open: () => void }) {
       sessions.set(sessionID, handlers)

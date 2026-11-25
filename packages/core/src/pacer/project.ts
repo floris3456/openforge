@@ -69,12 +69,19 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/PacerProject") {}
 
+/** The location a chat asks from: where it is, and its own answer for a chat there ({@link Interface.chat}). */
+export interface Here {
+  readonly location: Pick<Location.Interface, "directory" | "workspaceID">
+  readonly chat: Interface["chat"]
+}
+
 export interface AncestorsInterface {
   /**
    * The chat of `session`'s nearest ancestor whose own folder gives it a project, as that ancestor's own location
-   * names it; none when no ancestor has one. Worked out once per chat, until a chat moves.
+   * names it (`here`'s own answer for an ancestor in the same location); none when no ancestor has one. Worked out
+   * once per chat, until a chat moves.
    */
-  readonly nearest: (session: Placed) => Effect.Effect<Chat | undefined>
+  readonly nearest: (session: Placed, here: Here) => Effect.Effect<Chat | undefined>
 }
 
 export class Ancestors extends Context.Service<Ancestors, AncestorsInterface>()("@opencode/PacerProject/Ancestors") {}
@@ -116,6 +123,8 @@ export const layer = Layer.effect(
         }),
       )
 
+    const here: Here = { location, chat }
+
     return Service.of({
       headers,
       chat,
@@ -124,7 +133,7 @@ export const layer = Layer.effect(
           Effect.flatMap((own) =>
             own.project !== undefined || session.parentID === undefined
               ? Effect.succeed(own)
-              : ancestors.nearest(session).pipe(Effect.map((found) => found ?? own)),
+              : ancestors.nearest(session, here).pipe(Effect.map((found) => found ?? own)),
           ),
         ),
     })
@@ -151,25 +160,29 @@ const ancestorsLayer = Layer.effect(
       Effect.forkScoped({ startImmediately: true }),
     )
 
-    const up = (parentID: SessionSchema.ID | undefined, steps: number): Effect.Effect<Chat | undefined> =>
+    const up = (parentID: SessionSchema.ID | undefined, here: Here, steps: number): Effect.Effect<Chat | undefined> =>
       Effect.gen(function* () {
         if (parentID === undefined || steps === 0) return undefined
         const parent = yield* store.get(parentID)
         if (parent === undefined) return undefined
-        const chat = yield* instances
-          .provide(parent)(Service.use((projects) => projects.chat(parent.projectID)))
-          // An ancestor whose folder is gone gives none.
-          .pipe(Effect.catchTag("FileSystem.DirectoryNotFoundError", () => Effect.succeed(undefined)))
+        const chat =
+          parent.location.directory === here.location.directory &&
+          parent.location.workspaceID === here.location.workspaceID
+            ? yield* here.chat(parent.projectID)
+            : yield* instances
+                .provide(parent)(Service.use((projects) => projects.chat(parent.projectID)))
+                // An ancestor whose folder is gone gives none.
+                .pipe(Effect.catchTag("FileSystem.DirectoryNotFoundError", () => Effect.succeed(undefined)))
         if (chat?.project !== undefined) return chat
-        return yield* up(parent.parentID, steps - 1)
+        return yield* up(parent.parentID, here, steps - 1)
       })
 
     return Ancestors.of({
-      nearest: (session) =>
+      nearest: (session, here) =>
         Effect.gen(function* () {
           if (found.has(session.id)) return found.get(session.id)
           const seen = moves.seen
-          const chat = yield* up(session.parentID, DEPTH)
+          const chat = yield* up(session.parentID, here, DEPTH)
           if (moves.seen !== seen) return chat
           if (found.size >= KEPT_HELPERS) found.clear()
           found.set(session.id, chat)

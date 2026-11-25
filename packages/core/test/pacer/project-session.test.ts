@@ -1,4 +1,7 @@
-import { describe, expect } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
+import { afterAll, describe, expect } from "bun:test"
 import { Context, Duration, Effect, Layer, LayerMap } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
@@ -9,6 +12,7 @@ import { Instance } from "@opencode/core/instance"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import type { LocationServices } from "@opencode/core/location-services"
+import { KV } from "@opencode/core/kv"
 import { PacerHeaders } from "@opencode/core/pacer/headers"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { Project } from "@opencode/core/project"
@@ -21,7 +25,11 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { Node, makeGlobalNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { Global } from "@opencode/util/global"
+import { initRepo } from "../fixture/git"
+import { tempGlobalLayer } from "../fixture/global"
 import { gitVcs, location } from "../fixture/location"
+import { offlineModels } from "../fixture/models"
 import { testEffect } from "../lib/effect"
 
 // A chat's project as CLIProxyPacer is told it (`PacerProject.session`), when the chat is a helper: one whose own
@@ -236,6 +244,74 @@ describe("a helper's project", () => {
       yield* projectOf(helper)
       yield* projectOf(outsideHelper)
       expect(reads).toEqual([lead, outsideLead])
+    }),
+  )
+})
+
+// The service's own Location graphs (`LocationServiceMap`, `Instance.layer`), whose global nodes no root builds: the
+// first Location to boot builds them, with that Location ambient (as cold-tools found of PacerTools, 2026-11-19).
+const disk = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "helper-project-")))
+const onDisk = {
+  elsewhere: path.join(disk, "notes"),
+  workspace: path.join(disk, "theorysnap"),
+  repo: path.join(disk, "theorysnap", "theorysnap"),
+}
+for (const folder of Object.values(onDisk)) fs.mkdirSync(folder, { recursive: true })
+await initRepo(onDisk.repo)
+afterAll(() => fs.rmSync(disk, { recursive: true, force: true }))
+
+const itGraphs = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      Bus.node,
+      KV.node,
+      SessionProjector.node,
+      SessionStore.node,
+      Project.node,
+      LocationServiceMap.node,
+    ]),
+    [Global.node.replace(tempGlobalLayer), offlineModels],
+  ),
+)
+
+describe("a helper's project in the service's Location graphs", () => {
+  itGraphs.live("follows its lead's move published in the lead's Location, when another Location booted first", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const store = yield* SessionStore.Service
+      const projects = yield* Project.Service
+      const locations = yield* LocationServiceMap.Service
+      const at = (folder: string) => Location.Ref.make({ directory: AbsolutePath.make(folder) })
+      const resolved = yield* projects.resolve(AbsolutePath.make(onDisk.repo))
+      const other = yield* chat("other", onDisk.elsewhere, ids.elsewhere)
+      const lead = yield* chat("lead", onDisk.workspace, ids.workspace)
+      const helper = yield* chat("helper", onDisk.workspace, ids.workspace, lead)
+      const projectIn = (sessionID: Session.ID) =>
+        Effect.gen(function* () {
+          const session = yield* store.get(sessionID)
+          if (session === undefined) return yield* Effect.die(new Error(`no session ${sessionID}`))
+          return yield* PacerProject.Service.use((found) => found.session(session)).pipe(
+            Effect.provide(locations.get(session.location)),
+          )
+        })
+
+      // A chat elsewhere runs first: its Location boots before the lead's and the helper's.
+      expect(yield* projectIn(other)).toEqual(none)
+      expect(yield* projectIn(helper)).toEqual(none)
+      // Applied by the lead's drain, in its Location.
+      yield* bus
+        .publish(SessionEvent.Moved, { sessionID: lead, location: at(onDisk.repo), projectID: resolved.id })
+        .pipe(Effect.provide(locations.get(at(onDisk.workspace))))
+
+      expect(yield* projectIn(lead)).toEqual({
+        project: resolved.id,
+        headers: PacerHeaders.project(resolved.id, { name: "theorysnap" }),
+      })
+      expect(yield* settled(projectIn(helper), (found) => found.project !== undefined)).toEqual({
+        project: resolved.id,
+        headers: PacerHeaders.project(resolved.id, { name: "theorysnap" }),
+      })
     }),
   )
 })

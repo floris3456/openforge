@@ -3,3 +3,6 @@ afa57acfda894e0ebf3c637dd710310b705c0a2f:packages/http-recorder/test/record-repl
 afa57acfda894e0ebf3c637dd710310b705c0a2f:packages/http-recorder/test/record-replay.test.ts:generic-api-key:92
 afa57acfda894e0ebf3c637dd710310b705c0a2f:packages/http-recorder/test/record-replay.test.ts:generic-api-key:146
 afa57acfda894e0ebf3c637dd710310b705c0a2f:packages/http-recorder/test/record-replay.test.ts:gcp-api-key:71
+# A made-up PEM key in the .env redaction tests (workspace task 1rshm3yhyn76), committed before its header was split.
+1ade6f8341eedbe55f49ce70f1eb03391c8a2649:packages/core/test/pacer/env.test.ts:forge-private-key-block:118
+f8c98a125ba8800b7d7d965ac36dec5a7d72492c:packages/core/test/pacer/env.test.ts:forge-private-key-block:118

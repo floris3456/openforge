@@ -20,15 +20,58 @@ export async function serve(options: RunnerServer.Options) {
 }
 
 /**
- * A fresh folder whose `runner` folder has a runner in this process, which exits soon after its last command. Both go
- * with the test.
+ * A runner's waits, its grace and its commands' deadlines, which pass only when the test says so. On a loaded host a
+ * test's set-up or its steps outrun any short wait: a runner whose grace has run out refuses later requests (the
+ * service sends a refused start to the next runner, shell-runner.test.ts in core, but a test's bare connection
+ * fails), and a deadline passes before the request that clears it arrives.
+ */
+export function clock() {
+  const pending = new Set<{ readonly passed: () => void; readonly ms: number }>()
+  return {
+    schedule: (passed: () => void, ms: number) => {
+      const wait = { passed, ms }
+      pending.add(wait)
+      return () => void pending.delete(wait)
+    },
+    /** How long each wait the runner holds now was to last. */
+    get waits() {
+      return [...pending].map((wait) => wait.ms)
+    },
+    /**
+     * Passes every wait the runner holds now, as their timers would once that long has passed. A runner whose grace
+     * passes exits; one whose command's deadline passes before its time waits again for the rest of it.
+     */
+    pass() {
+      if (pending.size === 0) throw new Error("the runner waits for nothing: a command without a deadline still runs")
+      const due = [...pending]
+      pending.clear()
+      due.forEach((wait) => wait.passed())
+    },
+  }
+}
+
+/**
+ * A fresh folder whose `runner` folder has a runner in this process, whose waits pass only when the test says so: its
+ * grace once the test calls `rest()`. Both go with the test.
  */
 export async function served(options: Partial<RunnerServer.Options> = {}) {
   const directory = await folder()
-  const runner = await serve({ directory: path.join(directory.path, "runner"), version: "test", grace: 50, ...options })
+  const time = clock()
+  const runner = await serve({
+    directory: path.join(directory.path, "runner"),
+    version: "test",
+    schedule: time.schedule,
+    ...options,
+  })
   return {
     path: directory.path,
     runner,
+    clock: time,
+    /** Once nothing runs any more, the runner's grace passes and it exits. */
+    async rest() {
+      time.pass()
+      await runner.closed
+    },
     async [Symbol.asyncDispose]() {
       await runner.shutdown()
       await directory[Symbol.asyncDispose]()

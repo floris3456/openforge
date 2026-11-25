@@ -468,6 +468,10 @@ export type PacerPromptItem = {
 
 export type PacerSummaryWriter = "cliproxypacer" | "openforge"
 
+export type PacerFeatures = { identities: boolean }
+
+export type PacerIdentityChat = { chat: string; how: "made" | "linked" | "own"; since: number; current: boolean }
+
 export type ReferenceGitSource = { type: "git"; repository: string; branch?: string }
 
 export type VcsBranch = { current?: string; default?: string }
@@ -1208,6 +1212,20 @@ export type PacerSettings = {
   compactBeforeCold: boolean
   summaryWriter?: PacerSummaryWriter
   keepUserMessages?: boolean
+}
+
+export type PacerIdentity = {
+  id: string
+  name: string
+  person?: string
+  part: string
+  role: string
+  title?: string
+  parent?: string
+  chats: Array<PacerIdentityChat>
+  openTasks: Array<{ id: string; title: string; state: string }>
+  lastActive?: number
+  madeAt: number
 }
 
 export type VcsInfo = { provider?: string; branch: VcsBranch }
@@ -2695,6 +2713,10 @@ export type PacerPromptChange = {
   unchanged: number
   asOf: number
 }
+
+export type PacerIdentities = { items: Array<PacerIdentity>; current?: string }
+
+export type PacerIdentityLinked = { identity: PacerIdentity; changed: boolean }
 
 export type SessionInboxMove = {
   id: SessionMessageID
@@ -5384,6 +5406,21 @@ export type ExperimentalPacerSettingsUpdateInput = {
 }
 
 export type ExperimentalPacerSettingsUpdateOutput = { data: PacerSettings }["data"]
+
+export type ExperimentalPacerFeaturesOutput = { data: PacerFeatures }["data"]
+
+export type ExperimentalPacerChatIdentitiesInput = { readonly sessionID: string }
+
+export type ExperimentalPacerChatIdentitiesOutput = { data: PacerIdentities }["data"]
+
+export type ExperimentalPacerChatIdentityInput = {
+  readonly sessionID: string
+  readonly identity?: string | undefined
+  readonly session?: string | undefined
+  readonly new?: boolean | undefined
+}
+
+export type ExperimentalPacerChatIdentityOutput = { data: PacerIdentityLinked }["data"]
 
 export type ExperimentalPacerNoticesListOutput = { data: Array<PacerNotice> }["data"]
 

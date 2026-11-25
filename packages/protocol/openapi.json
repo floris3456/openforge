@@ -14908,6 +14908,235 @@
         }
       }
     },
+    "/api/experimental/pacer/features": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.features",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Features"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then). All false before they are read, and without CPP. Never waits on CPP. Experimental: may change without compatibility guarantees.",
+        "summary": "Get what CLIProxyPacer offers the TUI's commands"
+      }
+    },
+    "/api/experimental/pacer/chat/{sessionID}/identities": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.chat.identities",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Identities"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The identities CLIProxyPacer keeps for the chat's project, the most recently active first, and the one the chat is now. Read from CPP with the chat's project; invalid when CPP keeps no identities, the chat is in no project or CPP refuses, unavailable when CPP can't be asked. Experimental: may change without compatibility guarantees.",
+        "summary": "List the agents' identities of a chat's project"
+      }
+    },
+    "/api/experimental/pacer/chat/{sessionID}/identity": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.chat.identity",
+        "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.IdentityLinked"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "SessionNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ServiceUnavailableError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceUnavailableErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The owner's `/identity`: from now on the chat's board actions are the named identity's (one of its project's, the one another chat is now, by its session ID, or with `new` the chat's own again), as an `identity` event on the chat's events on CLIProxyPacer. Answers the identity the chat is now. Invalid with CPP's reason in words (an unknown session or identity, another project's), unavailable when CPP can't be asked. Experimental: may change without compatibility guarantees.",
+        "summary": "Link a chat to an agent's identity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pacer.IdentityLink"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
     "/api/experimental/pacer/inspect/projects": {
       "get": {
         "tags": ["experimental"],
@@ -24467,6 +24696,16 @@
         },
         "additionalProperties": false
       },
+      "Pacer.Features": {
+        "type": "object",
+        "properties": {
+          "identities": {
+            "type": "boolean"
+          }
+        },
+        "required": ["identities"],
+        "additionalProperties": false
+      },
       "Pacer.Filter": {
         "type": "string",
         "enum": ["all", "misses"]
@@ -24483,6 +24722,132 @@
           }
         },
         "required": ["account", "when"],
+        "additionalProperties": false
+      },
+      "Pacer.Identities": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.Identity"
+            }
+          },
+          "current": {
+            "type": "string"
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+      },
+      "Pacer.Identity": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string"
+          },
+          "part": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "parent": {
+            "type": "string"
+          },
+          "chats": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pacer.IdentityChat"
+            }
+          },
+          "openTasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": ["id", "title", "state"],
+              "additionalProperties": false
+            }
+          },
+          "lastActive": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "madeAt": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          }
+        },
+        "required": ["id", "name", "part", "role", "chats", "openTasks", "madeAt"],
+        "additionalProperties": false
+      },
+      "Pacer.IdentityChat": {
+        "type": "object",
+        "properties": {
+          "chat": {
+            "type": "string"
+          },
+          "how": {
+            "type": "string",
+            "enum": ["made", "linked", "own"]
+          },
+          "since": {
+            "type": "number",
+            "description": "Milliseconds since the Unix epoch, on the service's clock"
+          },
+          "current": {
+            "type": "boolean"
+          }
+        },
+        "required": ["chat", "how", "since", "current"],
+        "additionalProperties": false
+      },
+      "Pacer.IdentityLink": {
+        "type": "object",
+        "properties": {
+          "identity": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "new": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Pacer.IdentityLinked": {
+        "type": "object",
+        "properties": {
+          "identity": {
+            "$ref": "#/components/schemas/Pacer.Identity"
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["identity", "changed"],
         "additionalProperties": false
       },
       "Pacer.Kind": {

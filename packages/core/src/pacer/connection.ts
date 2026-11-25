@@ -14,6 +14,7 @@ import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
+import { PacerNews } from "./news.js"
 import { PacerNotices } from "./notices.js"
 import { PacerAttention } from "./attention.js"
 import { PacerSessionID } from "./session-id.js"
@@ -1086,6 +1087,50 @@ export const layer = Layer.effect(
         if (answer) yield* attention.read(endpoint, answer.items, yield* dashboard(endpoint))
       }),
     )
+    // Blocker news (PacerNews; CPP's capability `memory.news`): the chats a `news` notice named, and whether the
+    // pending list is still to be read, as each connect asks; both wait for the capability, whose arrival reads it.
+    const newsNamed = new Map<string, PacerNews.Named>()
+    let newsListed = false
+    const readNews = yield* trigger(
+      "the news",
+      Effect.gen(function* () {
+        if ((yield* models.get())?.pacer?.memory?.news !== true) return newsNamed.clear()
+        if (newsListed) {
+          const listed = yield* get("/pacer/v1/news", PacerNews.Pending)
+          newsListed = false
+          for (const named of listed.sessions) newsNamed.set(named.session.toLowerCase(), named)
+        }
+        const named = [...newsNamed.values()]
+        newsNamed.clear()
+        yield* Effect.forEach(named, (item) =>
+          wakeNews(item).pipe(
+            Effect.catchCause((cause) => Effect.logWarning("CLIProxyPacer: waking a chat with its news failed", cause)),
+          ),
+        )
+      }),
+    )
+    /** The chat's news, when this install holds it: claimed, each admitted, then acked. */
+    const wakeNews = Effect.fnUntraced(function* (named: PacerNews.Named) {
+      const uuid = named.session.toLowerCase()
+      const sessionID = yield* PacerNews.holder(sessions, named, byUuid.get(uuid))
+      if (!sessionID) return
+      const path = `/pacer/v1/sessions/${encodeURIComponent(uuid)}/news`
+      const claimed = yield* send("post", path, {}, PacerNews.Claimed)
+      for (const item of claimed.items) yield* PacerNews.admit(sessions, sessionID, item)
+      for (let at = 0; at < claimed.items.length; at += PacerNews.ACKED)
+        yield* send(
+          "post",
+          `${path}/told`,
+          { ids: claimed.items.slice(at, at + PacerNews.ACKED).map((item) => item.id) },
+          PacerNews.Told,
+        )
+    })
+    yield* models.changes().pipe(
+      Stream.map((catalog) => catalog?.pacer?.memory?.news === true),
+      Stream.changes,
+      Stream.runForEach((news) => Effect.sync(() => news && readNews())),
+      Effect.forkScoped({ startImmediately: true }),
+    )
     /** The dashboard's address: the endpoint's, else, on a loopback one, the public address CPP named. */
     const dashboard = Effect.fnUntraced(function* (endpoint: PacerEndpoint.Endpoint) {
       const host = new URL(endpoint.origin).hostname
@@ -1134,6 +1179,10 @@ export const layer = Layer.effect(
         readAttention()
       }
       if (event === "attention") return readAttention()
+      if (event === "news") {
+        for (const named of PacerNews.notice(data)) newsNamed.set(named.session.toLowerCase(), named)
+        return readNews()
+      }
       if (event === "settings") return staleViews()
       if (event === "price" || event === "capabilities") return capabilities()
       if (event === "resync") {
@@ -1162,6 +1211,8 @@ export const layer = Layer.effect(
       link.endpoint = endpoint
       link.events = undefined
       attentionOff = false
+      newsNamed.clear()
+      newsListed = false
       link.contact = undefined
       // Another CPP has its own clock.
       link.offset = 0
@@ -1211,6 +1262,9 @@ export const layer = Layer.effect(
         if (!first) capabilities()
         attentionOff = false
         readAttention()
+        // The change stream replays nothing: the chats with news are listed at each connect.
+        newsListed = true
+        readNews()
         // This CPP is asked again whether it takes the activity events. The chats with work tell it again, and a job
         // that ended meanwhile is counted out; after a restart, the chats CPP lists find their running jobs here.
         link.events = undefined

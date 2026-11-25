@@ -96,6 +96,18 @@ export interface Step {
   readonly place?: Place
 }
 const EndedAnswer = Schema.Struct({ text: maybe(Schema.String) })
+/**
+ * An open round a lead owes its helper an answer on (`GET …/owed`, the workspace's task khtzd8a7qje3): its task, title
+ * and round, and its pictures and texts that have neither the person's answer nor the lead's.
+ */
+export const Owed = Schema.Struct({
+  task: Schema.String,
+  title: Schema.String,
+  round: Schema.Number,
+  items: Schema.Array(Schema.Struct({ n: Schema.Number, kind: Schema.String, name: Schema.String })),
+})
+export interface Owed extends Schema.Schema.Type<typeof Owed> {}
+const OwedAnswer = Schema.Struct({ owed: Schema.Array(Owed) })
 const FilesAnswer = Schema.Struct({ notice: maybe(Schema.String) })
 const TextsAnswer = Schema.Struct({ unavailable: Schema.String, refused: Schema.String })
 /** memory's texts for when CPP cannot be reached or a rule of openforge's hooks says no. */
@@ -220,6 +232,12 @@ export interface Interface {
   readonly begin: (project: string, id: string) => Effect.Effect<Step, Error>
   /** What the subagent's answer gets after it when task `id` is no longer active, else null. */
   readonly ended: (project: string, id: string) => Effect.Effect<string | null, Error>
+  /** With a lead's headers: the open rounds chat `helper` (its own id) gave that the lead has not answered. */
+  readonly owed: (
+    project: string,
+    helper: string,
+    options?: { readonly timeout?: Duration.Input },
+  ) => Effect.Effect<ReadonlyArray<Owed>, Error>
   /** Adds what followed to a search's row of the recall log; each part is kept once, the first that comes. */
   readonly after: (
     project: string,
@@ -299,6 +317,13 @@ export const layer = Layer.effect(
           Effect.map((answer) => answer.body.text ?? null),
           Effect.mapError(failure(id, "task")),
         ),
+      owed: (project, helper, options) =>
+        http
+          .get(`${base(project)}/owed?helper=${encodeURIComponent(helper)}`, OwedAnswer, { ...options, headers })
+          .pipe(
+            Effect.map((answer) => answer.body.owed),
+            Effect.mapError(failure()),
+          ),
       after: (project, id, input, options) =>
         http.post(`${recall(project, id)}/after`, input, RecallAnswer, { ...options, headers }).pipe(
           Effect.map((answer) => answer.body.recall),

@@ -1,6 +1,8 @@
 import { SessionContinuity } from "@opencode/core/continuity"
 import { describe, expect } from "bun:test"
+import { MemoryHeld } from "@opencode/core/memory/held"
 import { MemoryTask } from "@opencode/core/memory/task"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { SubagentEnded } from "@opencode/core/session/subagent-ended"
 import path from "path"
 import { LanguageModel } from "@opencode/ai/effect"
@@ -80,6 +82,8 @@ const pluginSupervisor = makeLocationNode({
     ShellSelect.node,
     SubagentJob.node,
     MemoryTask.node,
+    MemoryHeld.node,
+    PacerModels.node,
     SubagentEnded.node,
     SessionContinuity.node,
     Tool.node,

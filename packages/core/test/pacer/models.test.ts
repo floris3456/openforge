@@ -542,7 +542,10 @@ describe("PacerModels", () => {
             goals: false,
             later: false,
             reviewItems: false,
+            reviewOwed: false,
             inspect: false,
+            identities: false,
+            news: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -588,10 +591,25 @@ describe("PacerModels", () => {
           later: false,
           reviewItems: true,
         })
+        // A server that says what a lead owes its helper's rounds says so (task khtzd8a7qje3).
+        expect((yield* told({ ...block, embedding: null, review_owed: true }))?.pacer?.memory).toMatchObject({
+          reviewItems: false,
+          reviewOwed: true,
+        })
         // A server with the reads of other projects says so (workspace spec cpp-inspect-cli).
         expect((yield* told({ ...block, embedding: null, inspect: true }))?.pacer?.memory).toMatchObject({
           reviewItems: false,
           inspect: true,
+        })
+        // A server that keeps agents' identities says so (workspace reference agent-identity-api).
+        expect((yield* told({ ...block, embedding: null, identities: true }))?.pacer?.memory).toMatchObject({
+          inspect: false,
+          identities: true,
+        })
+        // A server that keeps blocker news for the chats to tell says so (workspace spec blocker-tasks).
+        expect((yield* told({ ...block, embedding: null, news: true }))?.pacer?.memory).toMatchObject({
+          inspect: false,
+          news: true,
         })
         // A server whose start takes a compaction's summary says so.
         expect((yield* told({ ...block, embedding: null, prompt: true, summary: true }))?.pacer?.memory).toMatchObject({

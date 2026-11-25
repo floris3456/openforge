@@ -38,7 +38,9 @@ import { SessionTable } from "@opencode/core/session/sql"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SubagentJob } from "@opencode/core/session/subagent-job"
+import { MemoryHeld } from "@opencode/core/memory/held"
 import { MemoryTask } from "@opencode/core/memory/task"
+import { PacerModels } from "@opencode/core/pacer/models"
 import { Tool } from "@opencode/core/tool"
 import { QuestionTool } from "@opencode/core/tool/plugin/question"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
@@ -185,6 +187,8 @@ const plugins = makeLocationNode({
     Job.node,
     SubagentJob.node,
     MemoryTask.node,
+    MemoryHeld.node,
+    PacerModels.node,
     SubagentEnded.node,
     Tool.node,
     PluginHooks.node,

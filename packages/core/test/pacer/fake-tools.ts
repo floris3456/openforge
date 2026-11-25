@@ -66,7 +66,7 @@ export const fakeCpp = Effect.acquireRelease(
     /** The files CPP holds, by their SHA-256. */
     const files = new Map<string, { readonly bytes: Uint8Array; readonly type: string | null }>()
     const uploads: ReceivedFile[] = []
-    const answers: { list: Answer; call: Answer; item: Answer } = {
+    const answers: { list: Answer; call: Answer; item: Answer; env: Answer } = {
       list: () => Response.json(owner),
       call: (request) =>
         Response.json({
@@ -76,6 +76,7 @@ export const fakeCpp = Effect.acquireRelease(
           metadata: { provider: "Tavily" },
         }),
       item: () => Response.json({ error: { type: "not_found", message: "no such item" } }, { status: 404 }),
+      env: () => new Response(null, { status: 204 }),
     }
     const gate = { held: false, release: () => {}, aborted: 0 }
     let opened = Promise.resolve()
@@ -129,10 +130,12 @@ export const fakeCpp = Effect.acquireRelease(
         if (item.path.startsWith("/pacer/v1/tools/") && item.method === "POST") return answers.call(item)
         if (/^\/pacer\/v1\/memory\/[^/]+\/tasks\/[^/]+\/items\/\d+$/.test(item.path) && item.method === "GET")
           return answers.item(item)
+        if (item.path === "/pacer/v1/redaction/env" && item.method === "PUT") return answers.env(item)
         return new Response("404 page not found", { status: 404 })
       },
     })
     const lists = () => received.filter((item) => item.path === "/pacer/v1/tools")
+    const envs = () => received.filter((item) => item.path === "/pacer/v1/redaction/env")
     const calls = () => received.filter((item) => item.path.startsWith("/pacer/v1/tools/"))
     const heads = () => uploads.filter((item) => item.method === "HEAD")
     const puts = () => uploads.filter((item) => item.method === "PUT")
@@ -145,6 +148,7 @@ export const fakeCpp = Effect.acquireRelease(
       hold,
       lists,
       calls,
+      envs,
       files,
       uploads,
       heads,

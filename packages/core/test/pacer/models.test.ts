@@ -637,6 +637,31 @@ describe("PacerModels", () => {
       }),
   )
 
+  it.live("says the server hides a chat's .env values while capabilities' pacer block says redaction.env", () =>
+    Effect.gen(function* () {
+      const told = (redaction: unknown) =>
+        Effect.gen(function* () {
+          const server = yield* serve({
+            ...cpp(),
+            "/pacer/v1/capabilities": () =>
+              Response.json({ ...capabilities, pacer: { ...capabilities.pacer, redaction } }),
+          })
+          const { models } = yield* start(endpoint(server.origin))
+          return (yield* until(models, loaded))?.pacer
+        })
+      // Workspace spec env-redaction, section 4.
+      expect((yield* told({ env: true }))?.redaction).toEqual({ env: true })
+      expect((yield* told({ env: false }))?.redaction).toEqual({ env: false })
+      expect((yield* told({}))?.redaction).toEqual({ env: false })
+      // Left out, or of a shape this one cannot read: no redaction, and the rest stands.
+      for (const unread of [undefined, null, "yes", { env: "yes" }]) {
+        const pacer = yield* told(unread)
+        expect(pacer?.redaction?.env ?? false).toBe(false)
+        expect(pacer?.compactTokens).toEqual(["auto", "before-cold", "cold"])
+      }
+    }),
+  )
+
   it.live("says per route whether CLIProxyPacer writes a model's summaries itself, as its server_writes decides", () =>
     Effect.gen(function* () {
       // The routes as the owner's CPP gave them for a key whose writer is unset (2026-11-12): `server_writes` says

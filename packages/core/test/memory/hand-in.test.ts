@@ -582,8 +582,9 @@ describe("a helper's hand-in", () => {
         ok("task"),
         ok("task"),
       ])
+      // The items went on the task, then its last step was done.
+      expect(h.sent().map((call) => call.body)).toMatchObject([{ id: h.task }, { id: step, state: "done" }])
       expect(yield* h.state(step)).toBe("done")
-      expect(yield* h.state(h.task)).toBe("review")
     }),
   )
 

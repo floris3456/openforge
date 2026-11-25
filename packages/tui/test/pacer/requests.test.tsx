@@ -720,11 +720,11 @@ describe("empty and hidden", () => {
       await setup.app.renderOnce()
       expect(setup.app.captureCharFrame()).not.toContain("Requests")
       expect(setup.app.captureCharFrame()).not.toContain("warm")
-      // The accounts, the providers serving each model (spec cliproxypacer-usage-meters) and the cache notices (spec
-      // cliproxypacer-cache-notices) are the service's, not the chat's: they are read once CPP is set up, whatever chat
-      // shows.
+      // The accounts, the providers serving each model (spec cliproxypacer-usage-meters), the cache notices (spec
+      // cliproxypacer-cache-notices) and what CPP offers the TUI's commands (`/identity`) are the service's, not the
+      // chat's: they are read once CPP is set up, whatever chat shows.
       expect(
-        setup.fake.calls.filter((call) => !["status", "accounts", "models", "notices"].includes(call.path)),
+        setup.fake.calls.filter((call) => !["status", "accounts", "models", "notices", "features"].includes(call.path)),
       ).toEqual([])
       if (input.state === "unset") expect(setup.fake.calls.map((call) => call.path)).toEqual(["status"])
       expect(setup.pacer.ticking()).toBe(false)

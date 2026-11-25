@@ -2,7 +2,7 @@ import { Pacer } from "@opencode/schema/pacer"
 import { Session } from "@opencode/schema/session"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiSchema, OpenApi } from "effect/http-api"
-import { ServiceUnavailableError } from "../errors.js"
+import { InvalidRequestError, LocationNotFoundError, ServiceUnavailableError, SessionNotFoundError } from "../errors.js"
 
 const EXPERIMENTAL = "Experimental: may change without compatibility guarantees."
 export const annotations = (identifier: string, summary: string, description: string) =>
@@ -241,6 +241,38 @@ export const PacerEndpoints = [
       "settings.update",
       "Switch CLIProxyPacer's compaction asks for all chats",
       "Set compact-cold-first, compact-before-cold, who writes the summaries or whether they keep the user's earlier messages at the key level on CLIProxyPacer, and return them as they apply after the change. A value equal to what CLIProxyPacer applies without the key level (the server's, else the default) clears the key level instead of being stored, so that a later server default reaches the key's chats. Unavailable unless the pacer is on.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.features", "/api/experimental/pacer/features", {
+    success: Schema.Struct({ data: Pacer.Features }),
+  }).annotateMerge(
+    annotations(
+      "features",
+      "Get what CLIProxyPacer offers the TUI's commands",
+      "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then). All false before they are read, and without CPP. Never waits on CPP.",
+    ),
+  ),
+  HttpApiEndpoint.get("pacer.chat.identities", "/api/experimental/pacer/chat/:sessionID/identities", {
+    params: ChatParams,
+    success: Schema.Struct({ data: Pacer.Identities }),
+    error: [InvalidRequestError, ServiceUnavailableError, SessionNotFoundError, LocationNotFoundError],
+  }).annotateMerge(
+    annotations(
+      "chat.identities",
+      "List the agents' identities of a chat's project",
+      "The identities CLIProxyPacer keeps for the chat's project, the most recently active first, and the one the chat is now. Read from CPP with the chat's project; invalid when CPP keeps no identities, the chat is in no project or CPP refuses, unavailable when CPP can't be asked.",
+    ),
+  ),
+  HttpApiEndpoint.post("pacer.chat.identity", "/api/experimental/pacer/chat/:sessionID/identity", {
+    params: ChatParams,
+    payload: Pacer.IdentityLink,
+    success: Schema.Struct({ data: Pacer.IdentityLinked }),
+    error: [InvalidRequestError, ServiceUnavailableError, SessionNotFoundError, LocationNotFoundError],
+  }).annotateMerge(
+    annotations(
+      "chat.identity",
+      "Link a chat to an agent's identity",
+      "The owner's `/identity`: from now on the chat's board actions are the named identity's (one of its project's, the one another chat is now, by its session ID, or with `new` the chat's own again), as an `identity` event on the chat's events on CLIProxyPacer. Answers the identity the chat is now. Invalid with CPP's reason in words (an unknown session or identity, another project's), unavailable when CPP can't be asked.",
     ),
   ),
   ...InspectEndpoints,

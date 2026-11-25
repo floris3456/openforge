@@ -3,6 +3,9 @@ import type {
   OpenCodeEvent,
   PacerAccounts,
   PacerChat,
+  PacerFeatures,
+  PacerIdentities,
+  PacerIdentityLinked,
   PacerModels,
   PacerNotice,
   PacerPromptChange,
@@ -254,6 +257,12 @@ export function pacerFake(input: { delay?: number } = {}) {
     settings: { compactColdFirst: false, compactBeforeCold: false } as PacerSettings,
     /** The cache notices the service holds, newest first; a dismissal drops one. */
     notices: [] as PacerNotice[],
+    /** What CPP offers the TUI's commands: without identities, no `/identity`. */
+    features: { identities: false } as PacerFeatures,
+    /** The chat's project's agents' identities (`/identity`'s picker), or the service's refusal in words. */
+    identities: { items: [] } as PacerIdentities | { refused: string },
+    /** What a link answers, from its body (`/identity`); a string is the service's refusal in words. */
+    link: (_body: unknown): PacerIdentityLinked | string => "no link answer set",
     /** Requests, prompts, settings and updates answer 503, as when the pacer is not on. */
     unavailable: false,
     calls: [] as Call[],
@@ -265,7 +274,7 @@ export function pacerFake(input: { delay?: number } = {}) {
         method: request.method,
         path: url.pathname.slice("/api/experimental/pacer/".length),
         query: Object.fromEntries(url.searchParams),
-        body: request.method === "PATCH" ? await request.json() : undefined,
+        body: request.method === "PATCH" || request.method === "POST" ? await bodyOf(request) : undefined,
         at: performance.now(),
       }
       fake.calls.push(call)
@@ -283,9 +292,17 @@ export function pacerFake(input: { delay?: number } = {}) {
       },
       { status: 503 },
     )
+  const refused = (message: string) => json({ _tag: "InvalidRequestError", message, kind: "identity" }, { status: 400 })
   const answer = (call: Call) => {
     const parts = call.path.split("/")
     if (call.path === "status") return json({ data: fake.status })
+    if (call.path === "features") return json({ data: fake.features })
+    if (parts[0] === "chat" && parts[2] === "identities" && call.method === "GET")
+      return "refused" in fake.identities ? refused(fake.identities.refused) : json({ data: fake.identities })
+    if (parts[0] === "chat" && parts[2] === "identity" && call.method === "POST") {
+      const linked = fake.link(call.body)
+      return typeof linked === "string" ? refused(linked) : json({ data: linked })
+    }
     if (call.path === "accounts") return json({ data: fake.accounts })
     if (call.path === "models") return json({ data: fake.models })
     if (call.path === "refresh" && call.method === "POST") return new Response(null, { status: 204 })
@@ -330,6 +347,12 @@ export function pacerFake(input: { delay?: number } = {}) {
 }
 
 export type PacerFake = ReturnType<typeof pacerFake>
+
+/** A request's JSON body; none when it has none. */
+async function bodyOf(request: Request) {
+  const text = await request.text()
+  return text ? JSON.parse(text) : undefined
+}
 
 /** The TUI's config as an update writes it. */
 type ConfigDraft = { -readonly [Key in keyof Config.Info]: Config.Info[Key] }

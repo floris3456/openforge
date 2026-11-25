@@ -46,7 +46,7 @@ export const catalogOf = (
    * left out; `goals`: whether it has goals; `later`: whether it has the task system's later items; `reviewItems`:
    * whether it has agents' notes on review items (`image.show({ task, item })`); `reviewOwed`: whether it says what a
    * lead owes its helper's rounds (`GET …/owed`); `inspect`: whether it has the reads of
-   * other projects (`openforge cpp`); `codemode`: the
+   * other projects (`openforge cpp`); `identities`: whether it keeps agents' identities (`/identity`); `codemode`: the
    * tools its capabilities say run in Code Mode (`tools.task_codemode`), whose list keeps them direct otherwise.
    */
   options: {
@@ -59,6 +59,7 @@ export const catalogOf = (
     readonly reviewItems?: boolean
     readonly reviewOwed?: boolean
     readonly inspect?: boolean
+    readonly identities?: boolean
     readonly codemode?: ReadonlyArray<string>
   } = {},
 ): PacerModels.Catalog => ({
@@ -99,6 +100,7 @@ export const catalogOf = (
                   reviewItems: options.reviewItems ?? false,
                   reviewOwed: options.reviewOwed ?? false,
                   inspect: options.inspect ?? false,
+                  identities: options.identities ?? false,
                 },
               }
             : {}),

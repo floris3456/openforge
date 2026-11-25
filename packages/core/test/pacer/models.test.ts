@@ -544,6 +544,7 @@ describe("PacerModels", () => {
             reviewItems: false,
             reviewOwed: false,
             inspect: false,
+            identities: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -598,6 +599,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, inspect: true }))?.pacer?.memory).toMatchObject({
           reviewItems: false,
           inspect: true,
+        })
+        // A server that keeps agents' identities says so (workspace reference agent-identity-api).
+        expect((yield* told({ ...block, embedding: null, identities: true }))?.pacer?.memory).toMatchObject({
+          inspect: false,
+          identities: true,
         })
         // A server whose start takes a compaction's summary says so.
         expect((yield* told({ ...block, embedding: null, prompt: true, summary: true }))?.pacer?.memory).toMatchObject({

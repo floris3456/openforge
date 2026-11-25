@@ -46,6 +46,7 @@ import { SessionRunnerModel } from "./session/runner/model.js"
 import { SessionCompaction } from "./session/compaction.js"
 import { SessionTitle } from "./session/title.js"
 import { SessionContext } from "./session/context.js"
+import { PacerProject } from "./pacer/project.js"
 import { Skill } from "./skill.js"
 import { SkillInstructions } from "./skill/instructions.js"
 import { Snapshot } from "./snapshot.js"
@@ -113,6 +114,8 @@ const nodes = [
   SessionRunnerModel.node,
   SessionCompaction.node,
   SessionTitle.node,
+  // openforge: a helper's ancestor's location gives its own chats' project (`PacerProject.Ancestors`).
+  PacerProject.node,
   SessionContext.node,
   Snapshot.node,
   SessionRunnerLLM.node,

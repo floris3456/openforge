@@ -99,7 +99,7 @@ const layer = Layer.effect(
       if (yield* MemoryOffer.stepped(db, sessionID)) return
       // A server that answers each prompt gives the block no entries: they come with the prompts.
       const limit = catalog?.pacer?.memory?.prompt === true ? 0 : LIMIT
-      const chat = yield* projects.chat(input.session.projectID)
+      const chat = yield* projects.session(input.session)
       const project = chat.project
       if (project === undefined) return
       const prompt = yield* newestPrompt(sessionID)

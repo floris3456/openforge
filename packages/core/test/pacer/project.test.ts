@@ -7,6 +7,7 @@ import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigMemory } from "@opencode/schema/config/memory"
+import { noAncestors } from "../fixture/pacer-project"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(Layer.empty)
@@ -52,6 +53,7 @@ const projectAt = (
         ),
         // One array until it is replaced, as Config's entries are until it reloads.
         Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.sync(() => entries.current) })),
+        Layer.provide(noAncestors),
       ),
     ),
   )

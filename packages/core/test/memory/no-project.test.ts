@@ -54,7 +54,7 @@ import { Snapshot } from "@opencode/core/snapshot"
 import { Tool } from "@opencode/core/tool"
 import { Node, makeGlobalNode, makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Context, Effect, Layer, LayerMap, Schema, SubscriptionRef } from "effect"
+import { Context, Duration, Effect, Layer, LayerMap, Schema, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { initRepo } from "../fixture/git"
 import { promptLocationNode } from "../fixture/prompt-location"
@@ -166,23 +166,28 @@ const projectLocations = makeGlobalNode({
       const projects = yield* Project.Service
       const map: Context.Service.Shape<typeof LocationServiceMap.Service> = yield* LayerMap.make(
         (ref: Location.Ref) =>
-          LayerNode.compile(LayerNode.group([PluginHooks.node, Image.node, Skill.node, Plugin.node, PacerProject.node]), {
-            shared: Node.tags.values.global,
-            replacements: [
-              Bus.node.replace(Layer.succeed(Bus.Service, bus)),
-              SessionStore.node.replace(Layer.succeed(SessionStore.Service, store)),
-              Project.node.replace(Layer.succeed(Project.Service, projects)),
-              Location.node.replace(Location.boundNode(ref)),
-              Config.node.replace(Config.testLayer()),
-              Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
-              Instance.node.replace(
-                Layer.succeed(
-                  Instance.Service,
-                  Instance.Service.of({ provide: (session) => Effect.provide(map.get(session.location)) }),
+          LayerNode.compile(
+            LayerNode.group([PluginHooks.node, Image.node, Skill.node, Plugin.node, PacerProject.node]),
+            {
+              shared: Node.tags.values.global,
+              replacements: [
+                Bus.node.replace(Layer.succeed(Bus.Service, bus)),
+                SessionStore.node.replace(Layer.succeed(SessionStore.Service, store)),
+                Project.node.replace(Layer.succeed(Project.Service, projects)),
+                Location.node.replace(Location.boundNode(ref)),
+                Config.node.replace(Config.testLayer()),
+                Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
+                Instance.node.replace(
+                  Layer.succeed(
+                    Instance.Service,
+                    Instance.Service.of({ provide: (session) => Effect.provide(map.get(session.location)) }),
+                  ),
                 ),
-              ),
-            ],
-          }) as unknown as Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError>,
+              ],
+            },
+          ) as unknown as Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError>,
+        // As the service keeps them: a location's services stay once booted.
+        { idleTimeToLive: Duration.infinity },
       )
       return map
     }),
@@ -191,7 +196,10 @@ const projectLocations = makeGlobalNode({
 })
 
 /** The runner's graph for chats whose folder is `directory`, its project resolved as openforge resolves it. */
-const layerAt = (directory: string, locations: LayerNode.Provider<LocationServiceMap.Service> = promptLocationNode) => {
+const layerAt = (
+  directory: string,
+  locations: LayerNode.Provider<LocationServiceMap.Service, never, typeof Node.tags.values.global> = promptLocationNode,
+) => {
   const replacements: LayerNode.Replacements = [
     Snapshot.node.replace(Snapshot.noopLayer),
     LayerNodePlatform.llmClient.replace(testLLM),
@@ -494,7 +502,7 @@ describe("a helper of a chat in git", () => {
       const helper = yield* helperRequest(outside, outside)
 
       expect(names(helper.request)).toEqual(["echo"])
-      for (const item of helper.named) expect(item).toEqual({ call: item.call, project: undefined, name: undefined })
+      expect(helper.named.filter((item) => item.project !== undefined || item.name !== undefined)).toEqual([])
     }),
   )
 })

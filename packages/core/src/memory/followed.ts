@@ -63,18 +63,30 @@ const layer = Layer.effect(
 
     const recalls = catalogs.get().pipe(Effect.map((catalog) => catalog?.pacer?.memory?.recalls === true))
 
-    /** The chat's parent, for a subagent's calls; none for a lead or a chat no longer there. */
-    const parentOf = (sessionID: SessionSchema.ID) =>
-      store.get(sessionID).pipe(Effect.map((session) => session?.parentID))
+    /**
+     * The chat's parent, for a subagent's calls (none for a lead or a chat no longer there), and its project: a search
+     * in that project goes with the chat's own headers, which for a helper in its lead's project are the lead's.
+     */
+    const chatOf = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+      const session = yield* store.get(sessionID)
+      return { parentID: session?.parentID, project: session ? yield* projects.session(session) : undefined }
+    })
 
     const send = (
       searched: Searched,
       input: Omit<MemoryClient.AfterInput, "by">,
       by: MemoryClient.By & { readonly chat: SessionSchema.ID },
-      parentID: SessionSchema.ID | undefined,
+      chat: { readonly parentID: SessionSchema.ID | undefined; readonly project: PacerProject.Chat | undefined },
     ) =>
       client
-        .withHeaders(PacerHeaders.chat({ sessionID: by.chat, parentID, project: projects.headers(searched.project) }))
+        .withHeaders(
+          PacerHeaders.chat({
+            sessionID: by.chat,
+            parentID: chat.parentID,
+            project:
+              chat.project?.project === searched.project ? chat.project.headers : projects.headers(searched.project),
+          }),
+        )
         .after(searched.project, searched.recall, { ...input, by }, { timeout: TIMEOUT })
         .pipe(
           Effect.asVoid,
@@ -123,7 +135,7 @@ const layer = Layer.effect(
         STEP,
       )
       if (!step) return
-      const parentID = yield* parentOf(sessionID)
+      const chat = yield* chatOf(sessionID)
       const acts = message.content.flatMap((part): NonNullable<MemoryClient.AfterInput["acted"]> => {
         if (part.type !== "tool" || part.state.status !== "completed") return []
         const input = part.state.input
@@ -139,7 +151,7 @@ const layer = Layer.effect(
             (act, index) =>
               searched.entries.includes(act.id) && acts.findIndex((other) => other.id === act.id) === index,
           )
-          return send(searched, { step, acted }, { role: message.agent, chat: sessionID }, parentID)
+          return send(searched, { step, acted }, { role: message.agent, chat: sessionID }, chat)
         },
         { concurrency: "unbounded", discard: true },
       )
@@ -190,10 +202,10 @@ const layer = Layer.effect(
       // Who answers is the chat's agent as it last ran; a chat that has not run since has nobody to add it for.
       const agent = (yield* newest("assistant"))?.agent
       if (!searches.length || typeof agent !== "string") return
-      const parentID = yield* parentOf(sessionID)
+      const chat = yield* chatOf(sessionID)
       yield* Effect.forEach(
         searches,
-        (search) => send(search.searched, { person }, { role: agent, chat: sessionID }, parentID),
+        (search) => send(search.searched, { person }, { role: agent, chat: sessionID }, chat),
         { concurrency: "unbounded", discard: true },
       )
     })

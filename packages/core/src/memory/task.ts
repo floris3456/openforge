@@ -115,6 +115,8 @@ export interface Assigned {
   /** The chat the child is made under. */
   readonly parent: SessionSchema.ID
   readonly project: string
+  /** The headers naming it, as the parent's chat names it (`PacerProject.session`). */
+  readonly headers: Readonly<Record<string, string>>
   readonly task: string
   /** The child's metadata: the parent's, inside the task. */
   readonly metadata: SessionSchema.Metadata
@@ -148,16 +150,16 @@ const layer = Layer.effect(
       agents.select(session.agent).pipe(Effect.map((selected) => String(selected.id)))
 
     const projectOf = Effect.fnUntraced(function* (parent: SessionSchema.Info, taskID: string) {
-      const chat = yield* projects.chat(parent.projectID)
+      const chat = yield* projects.session(parent)
       if (chat.project === undefined)
         return yield* new ToolFailure({
           message: `There is no task ${taskID}, so no subagent was started. ${chat.why}`,
         })
-      return chat.project
+      return chat
     })
-    /** The client of `project`, its calls in the name of `chat` and, for a subagent, of its parent. */
+    /** The client of the project `headers` name, its calls in the name of `chat` and, for a subagent, of its parent. */
     const named = (
-      project: string,
+      headers: Readonly<Record<string, string>>,
       chat: { readonly id: SessionSchema.ID; readonly parentID?: SessionSchema.ID },
       agent?: string,
     ) =>
@@ -165,7 +167,7 @@ const layer = Layer.effect(
         PacerHeaders.chat({
           sessionID: chat.id,
           parentID: chat.parentID,
-          project: projects.headers(project),
+          project: headers,
           ...(agent === undefined ? {} : { agent }),
         }),
       )
@@ -176,16 +178,22 @@ const layer = Layer.effect(
           return yield* new ToolFailure({
             message: `There is no task ${taskID}: this server serves no memory, so no subagent was started.`,
           })
-        const project = yield* projectOf(parent, taskID)
-        const answer = yield* named(project, parent, yield* roleOf(parent))
-          .assign(project, taskID)
+        const chat = yield* projectOf(parent, taskID)
+        const answer = yield* named(chat.headers, parent, yield* roleOf(parent))
+          .assign(chat.project, taskID)
           .pipe(Effect.mapError(fail))
         if (answer.error) return yield* new ToolFailure({ message: answer.text || answer.error.message })
         const place = answer.place === undefined ? { task: taskID } : fromPlace(answer.place)
-        return { parent: parent.id, project, task: taskID, metadata: placed(parent.metadata, place) }
+        return {
+          parent: parent.id,
+          project: chat.project,
+          headers: chat.headers,
+          task: taskID,
+          metadata: placed(parent.metadata, place),
+        }
       }),
       activate: Effect.fn("MemoryTask.activate")(function* (assigned, child, role) {
-        const answer = yield* named(assigned.project, { id: child.id, parentID: assigned.parent }, role)
+        const answer = yield* named(assigned.headers, { id: child.id, parentID: assigned.parent }, role)
           .begin(assigned.project, assigned.task)
           .pipe(Effect.mapError(fail))
         if (answer.error) return yield* new ToolFailure({ message: answer.text || answer.error.message })
@@ -194,10 +202,10 @@ const layer = Layer.effect(
         return at(child.metadata, place) ? undefined : placed(child.metadata, place)
       }),
       ended: Effect.fn("MemoryTask.ended")(function* (parent, taskID, output) {
-        const project = (yield* projects.chat(parent.projectID)).project
-        if (project === undefined) return output
-        const text = yield* named(project, parent, yield* roleOf(parent))
-          .ended(project, taskID)
+        const chat = yield* projects.session(parent)
+        if (chat.project === undefined) return output
+        const text = yield* named(chat.headers, parent, yield* roleOf(parent))
+          .ended(chat.project, taskID)
           .pipe(Effect.option)
         if (text._tag === "None" || !text.value) return output
         return `${output}\n${text.value}`

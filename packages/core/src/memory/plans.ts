@@ -75,7 +75,7 @@ const layer = Layer.effect(
 
     /** The chat's place as CPP says it, copied into its metadata when it moved, and the check's line. */
     const chat = Effect.fnUntraced(function* (session: SessionSchema.Info, timeout?: Duration.Input) {
-      const named = yield* projects.chat(session.projectID)
+      const named = yield* projects.session(session)
       if (named.project === undefined) return undefined
       // A chat that names no agent runs as the default one.
       const agent = String((yield* agents.select(session.agent)).id)

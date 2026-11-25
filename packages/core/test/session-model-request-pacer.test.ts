@@ -47,6 +47,7 @@ import { permissionLayer } from "./lib/permission"
 import { codeModeListings, registerToolPlugin, toolIdentity } from "./lib/tool"
 import { catalogOf, endpointOf, fakeCpp, ownerList, settle, startTools, until, webMeta } from "./pacer/fake-tools"
 import { PluginTestLayer } from "./plugin/fixture"
+import { noAncestors } from "./fixture/pacer-project"
 
 const it = testEffect(PluginTestLayer)
 
@@ -114,6 +115,7 @@ const placedAt = (remote?: string, outside = false) =>
       ),
     ),
     Layer.provide(Config.testLayer()),
+    Layer.provide(noAncestors),
   )
 
 /** SessionModelRequest with PacerTools over a fake CPP; the chat `session`, in a location with `place`'s remote. */

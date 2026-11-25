@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Context, Effect, Layer, LayerMap } from "effect"
+import { Context, Duration, Effect, Layer, LayerMap } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
@@ -88,6 +88,8 @@ const locations = makeGlobalNode({
               ),
             ],
           }) as unknown as Layer.Layer<LocationServices, FileSystem.DirectoryNotFoundError>,
+        // As the service keeps them: a location's services stay once booted.
+        { idleTimeToLive: Duration.infinity },
       )
       return map
     }),
@@ -102,17 +104,24 @@ const it = testEffect(
   ),
 )
 
-/** A chat of `directory` in project `projectID`, a helper of `parentID` when given. */
-const chat = (name: string, directory: string, projectID: string, parentID?: Session.ID) =>
+/** Project `projectID` of `directory`, as openforge keeps one it resolved. */
+const project = (directory: string, projectID: string) =>
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
-    const id = Session.ID.make(`ses_${name}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`)
     yield* db
       .insert(ProjectTable)
       .values({ id: Project.ID.make(projectID), worktree: AbsolutePath.make(directory), sandboxes: [] })
       .onConflictDoNothing()
       .run()
       .pipe(Effect.orDie)
+  })
+
+/** A chat of `directory` in project `projectID`, a helper of `parentID` when given. */
+const chat = (name: string, directory: string, projectID: string, parentID?: Session.ID) =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const id = Session.ID.make(`ses_${name}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`)
+    yield* project(directory, projectID)
     yield* db
       .insert(SessionTable)
       .values({
@@ -199,6 +208,7 @@ describe("a helper's project", () => {
       expect(yield* projectOf(helper)).toEqual(none)
 
       // What `SessionMove` publishes once the move is applied: the lead's new folder and its project there.
+      yield* project(repo, ids.repo)
       yield* bus.publish(SessionEvent.Moved, {
         sessionID: lead,
         location: Location.Ref.make({ directory: AbsolutePath.make(repo) }),

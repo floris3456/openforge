@@ -23,6 +23,7 @@ import { ImageTool } from "@opencode/core/tool/plugin/image"
 import { definition } from "@opencode/core/tool/runtime"
 import { Document, Info } from "@opencode/schema/config"
 import { LayerNode } from "@opencode/util/effect/layer-node"
+import { noAncestors } from "./fixture/pacer-project"
 import { testEffect } from "./lib/effect"
 import { registerToolPlugin, toolIdentity } from "./lib/tool"
 import { catalogOf } from "./memory/fixture"
@@ -95,6 +96,7 @@ const outsideGit = PacerProject.layer.pipe(
     ),
   ),
   Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.succeed([]) })),
+  Layer.provide(noAncestors),
 )
 
 /** The chat as the store answers it, and its project as CLIProxyPacer names it (`projects`: another PacerProject). */
@@ -123,6 +125,7 @@ const services = (sessionID: Session.ID, projects?: Layer.Layer<PacerProject.Ser
         PacerProject.Service,
         PacerProject.Service.of({
           chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
+          session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
           headers: () => ({ "X-Pacer-Project": PROJECT }),
         }),
       ),

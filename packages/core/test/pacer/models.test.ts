@@ -542,6 +542,7 @@ describe("PacerModels", () => {
             goals: false,
             later: false,
             reviewItems: false,
+            stepItems: false,
             reviewOwed: false,
             inspect: false,
             identities: false,
@@ -590,6 +591,12 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, review_items: true }))?.pacer?.memory).toMatchObject({
           later: false,
           reviewItems: true,
+        })
+        // A server whose steps take items and hold rounds of their own says so (workspace spec picture-hand-ins,
+        // section 5).
+        expect((yield* told({ ...block, embedding: null, step_items: true }))?.pacer?.memory).toMatchObject({
+          reviewItems: false,
+          stepItems: true,
         })
         // A server that says what a lead owes its helper's rounds says so (task khtzd8a7qje3).
         expect((yield* told({ ...block, embedding: null, review_owed: true }))?.pacer?.memory).toMatchObject({

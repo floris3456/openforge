@@ -10,6 +10,7 @@ import { Effect, Stream } from "effect"
 import { Environment } from "../../environment/index.js"
 import { FileAccess } from "../../file-access.js"
 import { ImageBank } from "../../image/bank.js"
+import { MemoryHandIn } from "../../memory/hand-in.js"
 import { MemoryTask } from "../../memory/task.js"
 import { Mime } from "../../mime.js"
 import { PacerHttp } from "../../pacer/http.js"
@@ -40,6 +41,7 @@ export const Plugin = {
     const projects = yield* PacerProject.Service
     const access = yield* FileAccess.Service
     const environment = yield* Environment.Service
+    const handIn = yield* MemoryHandIn.Service
 
     /** What the model wrote, when the call does not go: `Not sent:` and why, and nothing reaches CPP. */
     const notSent = (reason: string) => new ToolFailure({ message: `Not sent: ${reason}` })
@@ -174,9 +176,13 @@ export const Plugin = {
                 // schema is the chat's own copy of the tool, or Code Mode's for every chat while the chat holds none.
                 const schema =
                   calls.held(context.sessionID)?.byName.get(name)?.inputSchema ?? meta.definition?.input_schema
+                const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
+                // A helper's work that made pictures goes to review with them (the workspace's spec picture-hand-ins).
+                const refused =
+                  name === "task" && session ? yield* handIn.refusal(session, String(context.agent), input) : undefined
+                if (refused) return yield* notSent(refused)
                 const sent = isRecord(input) ? yield* withFiles(input, meta.files, schema, context) : input
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
-                const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
                 const project = session ? (yield* projects.session(session)).headers : undefined
                 const answer = yield* calls
                   .call({

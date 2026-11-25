@@ -13,6 +13,7 @@ import { Image } from "@opencode/core/image"
 import { ImageBank } from "@opencode/core/image/bank"
 import { ImageFit } from "@opencode/core/image/fit"
 import { ImageTable } from "@opencode/core/image/sql"
+import { MemoryHandIn } from "@opencode/core/memory/hand-in"
 import { Location } from "@opencode/core/location"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -92,6 +93,7 @@ const pluginNode = makeLocationNode({
     PacerProject.node,
     FileAccess.node,
     Environment.node,
+    MemoryHandIn.node,
     Session.node,
   ],
 })

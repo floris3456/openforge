@@ -57,7 +57,7 @@ import { ReadTool } from "@opencode/core/tool/plugin/read"
 import { ReadToolFileSystem } from "@opencode/core/tool/read-filesystem"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Context, Effect, Layer, SubscriptionRef } from "effect"
+import { Effect, Layer, SubscriptionRef } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { promptLocationNode } from "../fixture/prompt-location"
 import { initGit } from "../fixture/git"
@@ -263,8 +263,9 @@ const setup = Effect.fnUntraced(function* (
   const activate = (id: string) => api(`/tasks/${id}/state`, { state: "active", by })
   const task = yield* make("Draw the counter")
   yield* activate(task)
-  const steps = yield* Effect.forEach(Array.from({ length: input.steps ?? 0 }, (_, n) => `Step ${n + 1}`), (title) =>
-    make(title, task),
+  const steps = yield* Effect.forEach(
+    Array.from({ length: input.steps ?? 0 }, (_, n) => `Step ${n + 1}`),
+    (title) => make(title, task),
   )
   if (steps[0]) yield* activate(steps[0])
   const inside = { task, ...(steps[0] ? { subtask: steps[0] } : {}) }
@@ -331,8 +332,14 @@ const setup = Effect.fnUntraced(function* (
           ),
         ),
       ),
-    /** The task tool calls that reached the server. */
-    sent: () => server.calls().filter((call) => call.method === "POST" && call.path === "/pacer/v1/tools/task"),
+    /** The chat's task tool calls that reached the server. */
+    sent: () =>
+      server.received.filter(
+        (call) =>
+          call.method === "POST" &&
+          call.path === "/pacer/v1/tools/task" &&
+          call.pacer["x-pacer-session"] === PacerSessionID.make(sessionID),
+      ),
   }
 })
 
@@ -349,7 +356,7 @@ const made = (name: string) => picture(name, Date.now() + 1_000)
 /** A reference picture: changed an hour before its task went active. */
 const older = (name: string) => picture(name, Date.now() - 3_600_000)
 
-const ok = (name: string) => ({ name, status: "completed", error: undefined })
+const ok = (name: string) => ({ name, status: "completed" as const, error: undefined })
 const onTask = (task: string, pictures: string) =>
   `Not sent: since task ${task} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: send this again with items, those that show the work, each {picture, comment} saying what it shows and what to judge.`
 const onStep = (task: string, pictures: string) =>
@@ -378,7 +385,7 @@ describe("a helper's hand-in", () => {
       ])
       // The refused call never reached the server; the one with items did, and the task is in review.
       expect(h.sent()).toHaveLength(1)
-      expect(JSON.parse(h.sent()[0]!.body)).toMatchObject({ id: h.task, state: "review" })
+      expect(h.sent()[0]!.body).toMatchObject({ id: h.task, state: "review" })
       expect(yield* h.state(h.task)).toBe("review")
     }),
   )

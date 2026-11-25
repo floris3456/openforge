@@ -5,6 +5,7 @@ import { Bus } from "@opencode/core/bus"
 import { Environment } from "@opencode/core/environment/index"
 import { FileAccess } from "@opencode/core/file-access"
 import { MemoryClient } from "@opencode/core/memory/client"
+import { MemoryHandIn } from "@opencode/core/memory/hand-in"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHeaders } from "@opencode/core/pacer/headers"
 import { PacerHttp } from "@opencode/core/pacer/http"
@@ -286,6 +287,7 @@ export const pacerToolsNode = (name: string) =>
       PacerProject.node,
       FileAccess.node,
       Environment.node,
+      MemoryHandIn.node,
       SessionStore.node,
       Bus.node,
     ],

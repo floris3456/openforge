@@ -15,6 +15,7 @@ import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
 import { Environment } from "@opencode/core/environment/index"
 import { FileAccess } from "@opencode/core/file-access"
+import { MemoryHandIn } from "@opencode/core/memory/hand-in"
 import { Image } from "@opencode/core/image"
 import { Location } from "@opencode/core/location"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
@@ -717,6 +718,7 @@ const pluginNode = makeLocationNode({
     PacerProject.node,
     FileAccess.node,
     Environment.node,
+    MemoryHandIn.node,
     Sessions.node,
   ],
 })

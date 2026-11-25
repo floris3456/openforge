@@ -36,7 +36,7 @@ export function optional(argv: readonly string[]) {
 
 /**
  * `observability`, or for a run that may go without the file log ({@link optional}), when it fails to build: the
- * loggers that open nothing (`--print-logs` still prints), nothing written and nothing said about it.
+ * loggers that open nothing (`OPENCODE_PRINT_LOGS` still prints to stderr), nothing written and nothing said about it.
  */
 export function layer<E, R>(observability: Layer.Layer<never, E, R>, argv: readonly string[]) {
   if (!optional(argv)) return observability

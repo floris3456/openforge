@@ -122,8 +122,14 @@ const it = { live: process.platform === "win32" ? harness.live.skip : harness.li
 
 type Host = Effect.Success<typeof machine>
 
-/** Starts a service generation; `stop` is its SIGTERM. A `separate` runner is a process of its own, so it can die. */
-const start = (host: Host, options: { readonly paused?: boolean; readonly separate?: boolean } = {}) =>
+/**
+ * Starts a service generation; `stop` is its SIGTERM. A `separate` runner is a process of its own, so it can die. A
+ * `version` other than the first one's is a new release, with a runner of its own.
+ */
+const start = (
+  host: Host,
+  options: { readonly paused?: boolean; readonly separate?: boolean; readonly version?: string } = {},
+) =>
   Effect.gen(function* () {
     const database = yield* Database.Service
     const llm = yield* TestLLM.Test
@@ -137,7 +143,7 @@ const start = (host: Host, options: { readonly paused?: boolean; readonly separa
         ShellRunner.node.replace(
           ShellRunner.configured({ launch: options.separate ? host.launchSeparate : host.launch }),
         ),
-        App.node.replace(App.configured({ version: "test" })),
+        App.node.replace(App.configured({ version: options.version ?? "test" })),
         // The machine's folders: the runner's, and the shell files it keeps.
         Global.node.replace(host.global),
         PluginSupervisor.node.replace(plugins),
@@ -184,15 +190,48 @@ const gated = (directory: string) => {
   }
 }
 
-const setup = Effect.fnUntraced(function* (host: Host, generation: Generation) {
-  const directory = path.join(host.project, crypto.randomUUID())
-  fs.mkdirSync(directory)
+/** A chat in a folder of its own, or in `directory`'s Location. */
+const setup = Effect.fnUntraced(function* (host: Host, generation: Generation, directory?: string) {
+  const folder = directory ?? path.join(host.project, crypto.randomUUID())
+  if (!directory) fs.mkdirSync(folder)
   const session = yield* generation.sessions.create({
-    location: Location.Ref.make({ directory: AbsolutePath.make(directory) }),
+    location: Location.Ref.make({ directory: AbsolutePath.make(folder) }),
     model,
     title: "continuity shell",
   })
-  return { session, directory, command: gated(directory) }
+  return { session, directory: folder, command: gated(folder) }
+})
+
+/** `count` `!` commands of a chat of its own in `directory`'s Location, each run to its end. */
+const endedCommands = Effect.fnUntraced(function* (generation: Generation, directory: string, count: number) {
+  const session = yield* generation.sessions.create({
+    location: Location.Ref.make({ directory: AbsolutePath.make(directory) }),
+    model,
+    title: "neighbour",
+  })
+  yield* Effect.forEach(
+    Array.from({ length: count }, (_, index) => index),
+    (index) => generation.sessions.shell({ sessionID: session.id, command: `echo ${index}` }),
+    { discard: true },
+  )
+})
+
+/**
+ * An older release's service that ran 25 commands in `directory`'s Location and stopped, leaving its runner alive for
+ * a command still running elsewhere; `release` ends that one.
+ */
+const olderRunner = Effect.fnUntraced(function* (host: Host, directory: string) {
+  const older = yield* start(host, { version: "older" })
+  const keeper = yield* setup(host, older)
+  const running = yield* older.sessions
+    .shell({ sessionID: keeper.session.id, command: keeper.command.command })
+    .pipe(Effect.forkChild({ startImmediately: true }))
+  yield* eventually(() => keeper.command.runs() === 1, "the older runner's running command")
+  yield* older.events.waitFor(SessionEvent.Shell.Started)
+  yield* endedCommands(older, directory, 25)
+  yield* older.stop
+  yield* Fiber.interrupt(running)
+  return keeper.command
 })
 
 /** The model calls the shell tool once, then answers. */
@@ -258,6 +297,60 @@ describe("a foreground shell tool call across a stop", () => {
           expect((yield* llm.requests()).length).toBe(2)
           if (paused) expect(text).not.toContain(RESTART_NOTICE)
           else expect(text).toContain(RESTART_NOTICE)
+          expect(created(second)).toEqual([])
+        }),
+      { timeout: 30_000 },
+    )
+
+  // As in a release switch: the service is paused and stopped, the command ends while no service runs, and the next
+  // release's service starts paused and is resumed. The runners it adopts may also list commands of the chat's Location
+  // that ended before: none (its runner has closed), ones started after it in its own runner, or those of an older
+  // release's runner that a command still running keeps (theorysnap, 2026-11-25: three such, 256 ended commands each).
+  for (const others of ["none", "later", "older runner"] as const)
+    it.live(
+      `one whose command ends while no service runs gets its real result in the next release, beside ${others === "none" ? "no other command" : others === "later" ? "25 later commands that ended" : "an older runner's 25 ended commands"}`,
+      () =>
+        Effect.gen(function* () {
+          const llm = yield* TestLLM.Test
+          const host = yield* machine
+          const directory = path.join(host.project, crypto.randomUUID())
+          fs.mkdirSync(directory)
+          const keeper = others === "older runner" ? yield* olderRunner(host, directory) : undefined
+          const first = yield* start(host)
+          const chat = yield* setup(host, first, directory)
+          const command = `${chat.command.command}; exit 3`
+          yield* shellTool(llm, command)
+          yield* first.sessions.prompt({ sessionID: chat.session.id, text: "run it" })
+          yield* eventually(() => chat.command.runs() === 1, "the command's start")
+          const info = (yield* first.events.waitFor(
+            Shell.Event.Created,
+            (event) => event.data.info.command === command,
+          )).data.info
+          if (others === "later") yield* endedCommands(first, directory, 25)
+
+          expect(yield* first.continuity.pause()).toMatchObject({ paused: true })
+          yield* first.stop
+          chat.command.release()
+          yield* eventually(() => fs.existsSync(RunnerPaths.exit(info.file)), "the command's exit file")
+          if (others === "none") yield* Effect.promise(() => Promise.all(host.runners.map((item) => item.closed)))
+
+          const second = yield* start(host, { paused: true, version: "next" })
+          yield* second.continuity.resume
+          yield* second.recovered
+          yield* succeeded(second.events, chat.session.id)
+          keeper?.release()
+
+          expect(chat.command.runs()).toBe(1)
+          expect(yield* shellCalls(second, chat.session.id)).toMatchObject([
+            {
+              status: "completed",
+              content: [
+                { type: "text", text: "done\n" },
+                { type: "text", text: "Exit code: 3" },
+              ],
+              metadata: { exit: 3 },
+            },
+          ])
           expect(created(second)).toEqual([])
         }),
       { timeout: 30_000 },

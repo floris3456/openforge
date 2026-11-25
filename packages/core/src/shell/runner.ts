@@ -146,6 +146,14 @@ type Entry = {
   removed: boolean
 }
 
+/** An ended command a runner listed, known once something asks for it. */
+type Listed = {
+  readonly info: Shell.Info
+  readonly location: Location.Ref
+  readonly sandboxNote?: string
+  readonly exit: RunnerProtocol.Exit
+}
+
 type Remote = {
   readonly directory: string
   readonly connection: RunnerClient.Connection
@@ -169,6 +177,7 @@ const layer = (options: Options) =>
         : path.join(global.tmp, "runner", `${app.version}-${process.pid}`)
       const shells = path.join(global.data, DIRECTORY)
       const entries = new Map<Shell.ID, Entry>()
+      const listed = new Map<Shell.ID, Listed>()
       const exited = new Map<string, Shell.ID[]>()
       const remotes = new Map<string, Remote>()
       const starting = Semaphore.makeUnsafe(1)
@@ -373,15 +382,23 @@ const layer = (options: Options) =>
             const decoded = decodeMeta(command.meta)
             if (decoded._tag === "None") return
             const info = describe(command.id, decoded.value, command.pid)
+            const location = decoded.value.location
+            const sandboxNote = decoded.value.sandboxNote
+            // Registered only once asked for, as one known from its exit file: registering every ended command a
+            // runner lists, in its order, would push one that just ended out of the Location's kept ones, deleting its
+            // files before the call waiting for it reads them (an older release's runner lists up to 256).
+            if (command.exit) {
+              listed.set(info.id, { info, location, sandboxNote, exit: command.exit })
+              return
+            }
             const entry = yield* register({
               info,
-              location: decoded.value.location,
-              sandboxNote: decoded.value.sandboxNote,
+              location,
+              sandboxNote,
               pgid: command.pgid,
-              control: command.exit ? undefined : control(remote, info.id, command.pgid, info.file),
-              exit: command.exit,
+              control: control(remote, info.id, command.pgid, info.file),
             })
-            if (!command.exit) yield* track(remote, entry)
+            yield* track(remote, entry)
           }),
           { discard: true },
         )
@@ -464,7 +481,9 @@ const layer = (options: Options) =>
         const known = entries.get(id)
         if (known) return known
         yield* Deferred.await(adopted)
-        const entry = entries.get(id) ?? (yield* fromDisk(id))
+        const ended = listed.get(id)
+        listed.delete(id)
+        const entry = entries.get(id) ?? (ended ? yield* register(ended) : yield* fromDisk(id))
         if (!entry) return yield* new NotFoundError({ id })
         return entry
       })

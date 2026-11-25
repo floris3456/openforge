@@ -11,7 +11,7 @@ import type { CapturedLine } from "@opentui/core"
 import { createAppFixture } from "../fixture/app"
 import { recordFrames, type RecordedFrame } from "../fixture/frames"
 import { directory, json } from "../fixture/tui-client"
-import { until } from "../fixture/wait"
+import { within } from "../fixture/wait"
 
 // Section 4 of spec cliproxypacer-step-2: CPP's web tool calls in the chat, as upstream's search and fetch rows and
 // grouped with them, the service's name once CPP's answer gives it. The whole app draws a chat whose messages hold
@@ -111,9 +111,11 @@ async function transcript(
     emit: (event: OpenCodeEvent) => setup.events.emit(event),
     /** Resolves with the first frame, as text, that matches; fails with the last one after 5 s. */
     async frame(match: (frame: string) => boolean) {
-      await until(() => match(setup.captureCharFrame()), 5_000).catch(() => {
-        throw new Error(`no frame matched within 5 s:\n${setup.captureCharFrame()}`)
-      })
+      await within(
+        () => match(setup.captureCharFrame()),
+        5_000,
+        () => `no frame matched within 5 s:\n${setup.captureCharFrame()}`,
+      )
       return setup.captureCharFrame()
     },
     async [Symbol.asyncDispose]() {

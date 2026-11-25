@@ -3,7 +3,7 @@ import type { JsonValue, SessionInfo, SessionMessageAssistantTool, SessionMessag
 import { createAppFixture } from "../fixture/app"
 import { recordFrames } from "../fixture/frames"
 import { directory, json } from "../fixture/tui-client"
-import { until } from "../fixture/wait"
+import { within } from "../fixture/wait"
 
 // The goals board (workspace reference `docs/reference/goals-board-api.md`, "The task tool"): a call of CLIProxyPacer's
 // `task` tool that makes a goal shows as "Goal: <title>" in its row; every other task call keeps the row it had, the
@@ -114,9 +114,11 @@ describe("task calls in the chat", () => {
       "✓ Found: Flaky test",
     ]
     await using setup = await transcript(chat(parts))
-    await until(() => rows(setup.captureCharFrame()).length === expected.length, 5_000).catch(() => {
-      throw new Error(`no frame showed the rows within 5 s:\n${setup.captureCharFrame()}`)
-    })
+    await within(
+      () => rows(setup.captureCharFrame()).length === expected.length,
+      5_000,
+      () => `no frame showed the rows within 5 s:\n${setup.captureCharFrame()}`,
+    )
     await setup.waitForVisualIdle({ quietFrames: 3 })
     expect(rows(setup.captureCharFrame())).toEqual(expected)
     expect(setup.captureCharFrame()).not.toContain("Subagent")

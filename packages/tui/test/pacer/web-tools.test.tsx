@@ -528,28 +528,31 @@ describe("grouped with upstream's search and fetch", () => {
   test.each([
     { when: "", tabs: undefined },
     { when: ", also when the chat's tab comes late", tabs: "late" as const },
-  ])("searches count with upstream's searches, extracts with its fetches, researches and crawls as their own; expanded, the rows in order$when", async (item) => {
-    await using setup = await transcript(chat(parts), { grouping: "auto", tabs: item.tabs })
-    const frame = await setup.frame((frame) => frame.text.includes("Explored:"))
-    expect(lines(frame.text).filter((line) => line.includes("Explored:"))).toEqual([
-      "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
-    ])
-    expect(rows(frame.text).filter((line) => line.startsWith("◈") || line.startsWith("%"))).toEqual([])
-    const row = frame.text.split("\n").findIndex((line) => line.includes("Explored:"))
-    await setup.mockMouse.click(6, row)
-    const expanded = await setup.frame((frame) => rows(frame.text).length === 7)
-    expect(rows(expanded.text)).toEqual([
-      "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
-      `◈ Web Search via Exa "upstream"`,
-      `◈ Web Search via ChatGPT "${QUERY}"`,
-      `% WebFetch ${SITE}`,
-      `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
-      `◈ Web Research via Exa "${QUESTION}"`,
-      `% Web Crawl via Tavily ${SITE}`,
-    ])
-    await setup.frame((frame) => lines(frame.text)[0]!.includes(session.title))
-    expect(drawnAt(setup, "→ Explored:")).toEqual([row])
-  })
+  ])(
+    "searches count with upstream's searches, extracts with its fetches, researches and crawls as their own; expanded, the rows in order$when",
+    async (item) => {
+      await using setup = await transcript(chat(parts), { grouping: "auto", tabs: item.tabs })
+      const frame = await setup.frame((frame) => frame.text.includes("Explored:"))
+      expect(lines(frame.text).filter((line) => line.includes("Explored:"))).toEqual([
+        "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
+      ])
+      expect(rows(frame.text).filter((line) => line.startsWith("◈") || line.startsWith("%"))).toEqual([])
+      const row = frame.text.split("\n").findIndex((line) => line.includes("Explored:"))
+      await setup.mockMouse.click(6, row)
+      const expanded = await setup.frame((frame) => rows(frame.text).length === 7)
+      expect(rows(expanded.text)).toEqual([
+        "→ Explored: 2 searches, 2 fetches, 1 research, 1 crawl",
+        `◈ Web Search via Exa "upstream"`,
+        `◈ Web Search via ChatGPT "${QUERY}"`,
+        `% WebFetch ${SITE}`,
+        `% Web Extract via Firecrawl ${URLS[0]} (+2 more)`,
+        `◈ Web Research via Exa "${QUESTION}"`,
+        `% Web Crawl via Tavily ${SITE}`,
+      ])
+      await setup.frame((frame) => lines(frame.text)[0]!.includes(session.title))
+      expect(drawnAt(setup, "→ Explored:")).toEqual([row])
+    },
+  )
 
   test("two researches and two crawls count as researches and crawls", async () => {
     await using setup = await transcript(
@@ -562,7 +565,9 @@ describe("grouped with upstream's search and fetch", () => {
       { grouping: "auto" },
     )
     const frame = await setup.frame((frame) => frame.text.includes("Explored:"))
-    expect(lines(frame.text).filter((line) => line.includes("Explored:"))).toEqual(["→ Explored: 2 researches, 2 crawls"])
+    expect(lines(frame.text).filter((line) => line.includes("Explored:"))).toEqual([
+      "→ Explored: 2 researches, 2 crawls",
+    ])
   })
 
   test("a call that runs joins the group, which counts it once it ends, on every frame", async () => {

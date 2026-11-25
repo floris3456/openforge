@@ -36,6 +36,10 @@ test("within fails with what failure() says once the time is up, written then", 
 
 test("within resolves once its check holds", async () => {
   const checks = { count: 0 }
-  await within(() => ++checks.count === 3, 5_000, () => "timed out")
+  await within(
+    () => ++checks.count === 3,
+    5_000,
+    () => "timed out",
+  )
   expect(checks.count).toBe(3)
 })

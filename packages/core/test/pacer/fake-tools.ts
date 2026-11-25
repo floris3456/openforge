@@ -105,8 +105,11 @@ export const fakeCpp = Effect.acquireRelease(
           if (request.method === "HEAD") return new Response(null, { status: files.has(sha256) ? 200 : 404 })
           if (request.method === "GET") {
             const held = files.get(sha256)
-            if (!held) return Response.json({ error: { type: "not_found", message: `no file ${sha256}` } }, { status: 404 })
-            return new Response(held.bytes, { headers: { "content-type": held.type ?? "application/octet-stream" } })
+            if (!held)
+              return Response.json({ error: { type: "not_found", message: `no file ${sha256}` } }, { status: 404 })
+            return new Response(new Uint8Array(held.bytes), {
+              headers: { "content-type": held.type ?? "application/octet-stream" },
+            })
           }
           if (request.method !== "PUT") return new Response("405", { status: 405 })
           const already = files.has(sha256)

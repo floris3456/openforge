@@ -81,6 +81,14 @@ interface Cpp {
   events: string[] | undefined
   /** The chats `GET /pacer/v1/state` lists (`sessions.items`), as `{ id, ext, descendants }`. */
   stated: Json[]
+  /**
+   * Blocker news by chat UUID (crates/cpa-server/src/memory/news.rs), with the client's own id of the chat when CPP
+   * knows it: `GET /pacer/v1/news` lists the chats with news not told, a claim answers those, an ack marks them told.
+   */
+  readonly news: Map<string, { readonly chat: string | null; readonly items: Json[] }>
+  readonly told: Set<string>
+  /** The acks answer 500 while set. */
+  ackFails: boolean
   /** The stream sends nothing before the first heartbeat, so its headers come only then, as through a proxy that holds
    * them until the first bytes. */
   quiet: boolean
@@ -172,6 +180,22 @@ const fakeCpp = (now: () => number) =>
             ? answer({ items: cpp.attention })
             : answer({ error: { type: "not_allowed", message: "not allowed" } }, 403)
         if (path === "/pacer/v1/sessions") return answer({ items: cpp.listed })
+        const untold = (items: Json[]) => items.filter((item) => !cpp.told.has(String(item.id)))
+        if (path === "/pacer/v1/news")
+          return answer({
+            sessions: [...cpp.news]
+              .filter((entry) => untold(entry[1].items).length > 0)
+              .map((entry) => ({ session: entry[0], chat: entry[1].chat })),
+          })
+        const news = path.match(/^\/pacer\/v1\/sessions\/([^/]+)\/news(\/told)?$/)
+        if (news && method === "POST") {
+          const items = cpp.news.get(news[1])?.items ?? []
+          if (!news[2]) return answer({ items: untold(items) })
+          if (cpp.ackFails) return answer({ error: { type: "internal", message: "synthetic 500" } }, 500)
+          const ids = ((body as Json).ids as string[]).filter((id) => untold(items).some((item) => item.id === id))
+          for (const id of ids) cpp.told.add(id)
+          return answer({ told: ids.length })
+        }
         const events = path.match(/^\/pacer\/v1\/sessions\/([^/]+)\/events$/)?.[1]
         if (events && method === "POST") {
           const type = String((body as Json).type)
@@ -290,6 +314,9 @@ const fakeCpp = (now: () => number) =>
         attention: undefined,
         events: undefined,
         stated: [],
+        news: new Map(),
+        told: new Set(),
+        ackFails: false,
         holds: new Set(),
         release: () => {
           cpp.holds.clear()
@@ -416,6 +443,37 @@ const catalog = (at: number, pacer = true): PacerModels.Catalog => ({
   models: [],
 })
 
+/** A catalog of a CPP with memory, whose memory block says it has blocker news (`memory.news`) when `news` is set. */
+const memoryCatalog = (at: number, news: boolean): PacerModels.Catalog => ({
+  at,
+  pacer: {
+    compactTokens: ["auto", "before-cold"],
+    webTools: false,
+    memory: {
+      version: 1,
+      entryCharacters: 2_000,
+      queryCharacters: 500,
+      searchLimit: 20,
+      embedding: null,
+      tasks: true,
+      plans: true,
+      recalls: true,
+      projects: true,
+      prompt: true,
+      summary: true,
+      tools: true,
+      goals: true,
+      later: true,
+      reviewItems: true,
+      reviewOwed: false,
+      inspect: false,
+      identities: false,
+      news,
+    },
+  },
+  models: [],
+})
+
 interface Harness {
   readonly cpp: Cpp
   /** A folder of its own, where the test's chats are. */
@@ -445,10 +503,13 @@ interface Harness {
   readonly warmth: PacerWarmth.Interface
 }
 
-/** The connection over the real Bus and Session store, with CPP's endpoint and catalog in the test's hands. */
-const harness = Effect.fnUntraced(function* () {
+/**
+ * The connection over the real Bus and Session store, with CPP's endpoint and catalog in the test's hands; over
+ * `server`, another install of the same key, with its own sessions.
+ */
+const harness = Effect.fnUntraced(function* (server?: Cpp) {
   const clock = yield* TestClock.testClockWith(Effect.succeed)
-  const cpp = yield* fakeCpp(() => clock.currentTimeMillisUnsafe())
+  const cpp = server ?? (yield* fakeCpp(() => clock.currentTimeMillisUnsafe()))
   const folder = yield* tmpdirScoped("opencode-pacer-connection-")
   const endpoint = yield* SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(undefined)
   const models = yield* SubscriptionRef.make<PacerModels.Catalog | undefined>(catalog(0))
@@ -3387,5 +3448,168 @@ describe("PacerConnection cache notices", () => {
         yield* settle
         expect(added.map((notice) => notice.requestID)).toEqual(["req-2"])
       }),
+  )
+})
+
+// Blocker news (the workspace's spec docs/specs/blocker-tasks.md, section 4.2): CPP names a chat with news on its key's
+// stream, and lists them at each connect; the install holding the chat claims its news, admits each as a queued
+// synthetic message, which wakes an idle chat, then acks it.
+describe("PacerConnection news", () => {
+  /** A news item as CPP's claim answers it (crates/cpa-server/src/memory/news.rs), with synthetic tasks. */
+  const item = (id: string, fields: Json = {}): Json => ({
+    id,
+    kind: "through",
+    task: "task-f",
+    blocked: "task-b",
+    summary: "Blocker task-f is through",
+    text: [
+      "The board's news for this chat (CLIProxyPacer, not the person):",
+      `- [task-f] 'Fix it', which your [task-b] 'Build it' waits for, is in review, handed in by person-a as role-a: go on with [task-b] (task({id: "task-b", state: "active"})). (${id})`,
+    ].join("\n"),
+    ...fields,
+  })
+  const newsPath = (uuid: string) => `/pacer/v1/sessions/${uuid}/news`
+  const claims = (h: Harness, uuid: string) => seen(h, newsPath(uuid), "POST")
+  const acks = (h: Harness, uuid: string) =>
+    seen(h, `${newsPath(uuid)}/told`, "POST").map((item) => (item.body as Json).ids)
+  const notice = (h: Harness, ...chats: Array<{ session: string; chat: string | null }>) =>
+    h.cpp.notice("news", { sessions: chats.map((chat) => ({ key: 1, ...chat })), at: h.cpp.time() })
+  const withNews = (h: Harness) => SubscriptionRef.set(h.catalog, memoryCatalog(0, true))
+  /** The ids of the chat's inbox items, in order. */
+  const admitted = (h: Harness, sessionID: SessionID) =>
+    Effect.map(h.sessions.inbox(sessionID), (items) => items.map((item) => String(item.id)))
+  /** Waits until the installs' connects listed the chats with news, so that a test's news come after. */
+  const listed = (h: Harness, installs = 1) =>
+    until("the news listed", () => seen(h, "/pacer/v1/news").length === installs)
+
+  it.effect("wakes an idle chat CPP names: claims its news, admits each as a queued synthetic message, then acks", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* withNews(h)
+      yield* online(h)
+      yield* listed(h)
+      const sessionID = yield* chat(h)
+      const uuid = PacerSessionID.make(sessionID)
+      h.cpp.news.set(uuid, { chat: sessionID, items: [item("news-1"), item("news-2", { kind: "denied" })] })
+      // The ack waits, so the messages are seen admitted before it is answered.
+      h.cpp.holds.add(`${newsPath(uuid)}/told`)
+
+      notice(h, { session: uuid, chat: sessionID })
+      yield* until("acked", () => acks(h, uuid).length === 1)
+      expect(claims(h, uuid)).toHaveLength(1)
+      expect(acks(h, uuid)).toEqual([["news-1", "news-2"]])
+      expect(yield* h.sessions.inbox(sessionID)).toMatchObject([
+        {
+          id: "msg_pacer_news_news-1",
+          type: "synthetic",
+          delivery: "queue",
+          payload: { text: item("news-1").text, description: "Blocker task-f is through" },
+        },
+        { id: "msg_pacer_news_news-2", type: "synthetic", delivery: "queue" },
+      ])
+      expect(h.execution.woken).toContain(sessionID)
+      h.cpp.release()
+      yield* until("told", () => h.cpp.told.size === 2)
+    }),
+  )
+
+  it.effect("reads the chats with news at each connect, finding one CPP names by its UUID alone", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* withNews(h)
+      const sessionID = yield* chat(h)
+      const uuid = PacerSessionID.make(sessionID)
+      // A subagent's news goes to its lead's chat, which CPP knows by its UUID only.
+      h.cpp.news.set(uuid, { chat: null, items: [item("news-1")] })
+
+      yield* online(h)
+      yield* until("acked", () => acks(h, uuid).length === 1)
+      expect(seen(h, "/pacer/v1/news")).toHaveLength(1)
+      expect(yield* admitted(h, sessionID)).toEqual(["msg_pacer_news_news-1"])
+      expect(h.execution.woken).toContain(sessionID)
+
+      // An install that was away claims at its next connect what came meanwhile.
+      h.cpp.end()
+      h.cpp.news.set(uuid, { chat: null, items: [item("news-1"), item("news-2")] })
+      yield* ahead("connected again", () => seen(h, "/pacer/v1/news").length === 2 && h.cpp.streams() === 1)
+      yield* until("acked again", () => acks(h, uuid).length === 2)
+      expect(acks(h, uuid)).toEqual([["news-1"], ["news-2"]])
+    }),
+  )
+
+  it.effect("admits an item claimed again once: its message id is the item's", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* withNews(h)
+      yield* online(h)
+      yield* listed(h)
+      const sessionID = yield* chat(h)
+      const uuid = PacerSessionID.make(sessionID)
+      h.cpp.news.set(uuid, { chat: sessionID, items: [item("news-1")] })
+      // The ack is lost: CPP keeps the item untold, and the next claim answers it again.
+      h.cpp.ackFails = true
+      notice(h, { session: uuid, chat: sessionID })
+      yield* until("the ack tried", () => acks(h, uuid).length === 1)
+      h.cpp.ackFails = false
+      notice(h, { session: uuid, chat: sessionID })
+      yield* until("acked", () => h.cpp.told.has("news-1"))
+      expect(claims(h, uuid)).toHaveLength(2)
+      expect(yield* admitted(h, sessionID)).toEqual(["msg_pacer_news_news-1"])
+    }),
+  )
+
+  it.effect("leaves a chat another install holds to that install, on this machine or another", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const other = yield* harness(h.cpp)
+      yield* withNews(h)
+      yield* withNews(other)
+      yield* online(h)
+      yield* other.connect()
+      yield* until("both on", () => status(other).state === "on" && h.cpp.streams() === 2)
+      yield* listed(h, 2)
+      const mine = yield* chat(h)
+      const theirs = yield* chat(other)
+      const uuids = { mine: PacerSessionID.make(mine), theirs: PacerSessionID.make(theirs) }
+      h.cpp.news.set(uuids.mine, { chat: mine, items: [item("news-1")] })
+      // Named by its UUID alone, which this process has computed for either install.
+      h.cpp.news.set(uuids.theirs, { chat: null, items: [item("news-2")] })
+
+      // Every install of the key hears the notice.
+      notice(h, { session: uuids.mine, chat: mine }, { session: uuids.theirs, chat: null })
+      yield* until("both acked", () => h.cpp.told.size === 2)
+      yield* heartbeat(h)
+      yield* settle
+      expect(claims(h, uuids.mine)).toHaveLength(1)
+      expect(claims(h, uuids.theirs)).toHaveLength(1)
+      expect(h.execution.woken).toEqual([mine])
+      expect(other.execution.woken).toEqual([theirs])
+      expect(yield* admitted(h, mine)).toEqual(["msg_pacer_news_news-1"])
+      expect(yield* admitted(other, theirs)).toEqual(["msg_pacer_news_news-2"])
+    }),
+  )
+
+  it.effect("reads no news from a CPP without them, until its capabilities say it has them", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* SubscriptionRef.set(h.catalog, memoryCatalog(0, false))
+      const sessionID = yield* chat(h)
+      const uuid = PacerSessionID.make(sessionID)
+      h.cpp.news.set(uuid, { chat: sessionID, items: [item("news-1")] })
+      yield* online(h)
+      notice(h, { session: uuid, chat: sessionID })
+      yield* heartbeat(h)
+      yield* settle
+      expect(seen(h, "/pacer/v1/news")).toEqual([])
+      expect(claims(h, uuid)).toEqual([])
+      expect(yield* h.sessions.inbox(sessionID)).toEqual([])
+      expect(h.execution.woken).toEqual([])
+
+      // CPP updated: its capabilities now have news, and what waits is read.
+      yield* SubscriptionRef.set(h.catalog, memoryCatalog(1, true))
+      yield* until("acked", () => h.cpp.told.has("news-1"))
+      expect(seen(h, "/pacer/v1/news")).toHaveLength(1)
+      expect(h.execution.woken).toEqual([sessionID])
+    }),
   )
 })

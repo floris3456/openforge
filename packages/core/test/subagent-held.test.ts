@@ -24,6 +24,7 @@ import { Model } from "@opencode/core/model"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
+import { PacerNews } from "@opencode/core/pacer/news"
 import { PacerProject } from "@opencode/core/pacer/project"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerTools } from "@opencode/core/pacer/tools"
@@ -366,6 +367,29 @@ describe("a lead's message to its helper", () => {
           expect(yield* h.inbox).toHaveLength(2)
         }),
       ),
+  )
+
+  // Blocker news (the workspace's spec blocker-tasks.md, `PacerNews`) wake a lead with a queued message in its own chat,
+  // never its helper's: what the woken lead then says to its helper is held the same.
+  it.live("is held the same after blocker news woke the lead", () =>
+    withLead((h) =>
+      Effect.gen(function* () {
+        cpp.owed.set(h.helper, [round([1, 2])])
+        yield* PacerNews.admit(h.sessions, h.lead.id, {
+          id: "news-1",
+          kind: "through",
+          task: "t2",
+          blocked: "t3",
+          summary: "Blocker t2 is through",
+          text: "The board's news for this chat (CLIProxyPacer, not the person):\n- [t2] 'Fix it', which your [t3] 'Build it' waits for, is in review.",
+        })
+        expect((yield* h.sessions.inbox(h.lead.id)).map((item) => String(item.id))).toContain("msg_pacer_news_news-1")
+        expect((yield* h.follow("The fix is in: make the colours match too.")).error?.message).toBe(
+          heldText("items 1 screen 1.png and 2 spec.md"),
+        )
+        expect(yield* h.inbox).toEqual(["You are a subagent spawned by another session.\nDraw the counter."])
+      }),
+    ),
   )
 
   it.live("held again is replaced by the newer one, and one sent at once drops the held one", () =>

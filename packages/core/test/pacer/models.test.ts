@@ -545,6 +545,7 @@ describe("PacerModels", () => {
             reviewOwed: false,
             inspect: false,
             identities: false,
+            news: false,
           },
         })
         expect((yield* told({ ...block, embedding: null, tasks: true }))?.pacer?.memory).toMatchObject({
@@ -604,6 +605,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, identities: true }))?.pacer?.memory).toMatchObject({
           inspect: false,
           identities: true,
+        })
+        // A server that keeps blocker news for the chats to tell says so (workspace spec blocker-tasks).
+        expect((yield* told({ ...block, embedding: null, news: true }))?.pacer?.memory).toMatchObject({
+          inspect: false,
+          news: true,
         })
         // A server whose start takes a compaction's summary says so.
         expect((yield* told({ ...block, embedding: null, prompt: true, summary: true }))?.pacer?.memory).toMatchObject({

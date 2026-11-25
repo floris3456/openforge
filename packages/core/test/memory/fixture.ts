@@ -101,6 +101,7 @@ export const catalogOf = (
                   reviewOwed: options.reviewOwed ?? false,
                   inspect: options.inspect ?? false,
                   identities: options.identities ?? false,
+                  news: false,
                 },
               }
             : {}),

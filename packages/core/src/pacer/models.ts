@@ -133,6 +133,11 @@ export interface Memory {
    * `docs/reference/agent-identity-api.md`): the TUI offers `/identity` only then (`PacerIdentity`).
    */
   readonly identities: boolean
+  /**
+   * Whether the server keeps blocker news for the chats to tell (workspace spec `docs/specs/blocker-tasks.md`): the
+   * connection then claims the news of the chats this install holds and wakes them with it (`PacerNews`).
+   */
+  readonly news: boolean
 }
 
 /** USD per million tokens; undefined where CPP has no rate, which it counts as unpriced. */
@@ -312,6 +317,7 @@ const MemoryBlock = Schema.Struct({
   review_owed: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
   identities: Schema.optional(Schema.Unknown),
+  news: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
 
@@ -509,6 +515,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           reviewOwed: memory.review_owed === true,
           inspect: memory.inspect === true,
           identities: memory.identities === true,
+          news: memory.news === true,
         },
       }),
     }),

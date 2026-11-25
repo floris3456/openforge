@@ -12,6 +12,7 @@ import { Job } from "../job.js"
 import { Session } from "../session.js"
 import { SessionEvent } from "../session/event.js"
 import { PacerEndpoint } from "./endpoint.js"
+import { PacerEnv } from "./env.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
 import { PacerNews } from "./news.js"
@@ -325,6 +326,8 @@ export const layer = Layer.effect(
     const warmth = yield* PacerWarmth.Service
     // The chats' renewals sleep there.
     const scope = yield* Scope.Scope
+    // The chats' .env values, handed to the instance each stream opens on (workspace spec env-redaction, section 3).
+    const env = yield* Effect.serviceOption(PacerEnv.Service)
 
     const link: Link = {
       endpoint: undefined,
@@ -1278,6 +1281,7 @@ export const layer = Layer.effect(
         }
         for (const chat of chats.values()) if (pending(chat)) mark(chat)
         const stream = yield* http.stream("/pacer/v1/stream", { endpoint, timeout: SILENCE_MS })
+        if (Option.isSome(env)) yield* env.value.opened(endpoint)
         yield* contact(stream.offset)
         const events: Array<{ readonly event: string; readonly data: string }> = []
         const parser = makeParser((event) => {
@@ -1295,6 +1299,7 @@ export const layer = Layer.effect(
           ),
           // A stream that breaks has ended; reading again says whether CPP is still there.
           Effect.catch(() => Effect.void),
+          Effect.ensuring(Option.isSome(env) ? env.value.closed : Effect.void),
         )
       })
 
@@ -1793,6 +1798,7 @@ export const node = makeGlobalNode({
     PacerEndpoint.node,
     PacerHttp.node,
     PacerModels.node,
+    PacerEnv.node,
     PacerNotices.node,
     PacerAttention.node,
     PacerStatus.node,

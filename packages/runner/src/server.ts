@@ -13,7 +13,10 @@ export type Options = {
   readonly directory: string
   /** The release this runner belongs to, reported in its greeting. */
   readonly version: string
-  /** How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits. */
+  /**
+   * How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits.
+   * `Infinity`: it never exits on its own, only by `shutdown()`.
+   */
   readonly grace?: number
   /** How long a group gets between SIGTERM and SIGKILL. */
   readonly killAfter?: number
@@ -139,6 +142,8 @@ export async function serve(options: Options): Promise<Runner> {
     if ([...entries.values()].some((entry) => !entry.exit)) return
     if (stopping) return idle()
     clearTimeout(grace)
+    // A timer of Infinity fires after 1 ms.
+    if (options.grace === Infinity) return
     grace = setTimeout(idle, options.grace ?? GRACE)
     grace.unref()
   }

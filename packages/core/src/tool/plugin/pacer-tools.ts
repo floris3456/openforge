@@ -25,7 +25,8 @@ import { SessionBlob } from "../../session/blob.js"
 // their definitions, rules and texts (the workspace's specs `docs/specs/cpp-tools.md`, `web-tools-code-mode.md`).
 // A direct tool's definition here never reaches a model: each request puts the chat's own from CPP in its place, or
 // leaves it out (`PacerOffer`). A Code Mode tool is described by CPP's definition, one for every chat, as Code Mode's
-// catalog is; a chat whose list doesn't hold it is answered that it is unavailable.
+// registry is; a chat whose list doesn't hold it has none in its catalog (`SessionContext`), and a call of it is
+// answered that it is unavailable.
 
 /** CPP's definitions, from the chat's list, replace these on every request (a Code Mode tool's: when it has none). */
 const placeholder = "One of CLIProxyPacer's tools; each request carries CLIProxyPacer's own definition instead."

@@ -104,7 +104,7 @@ describe("PacerProject", () => {
     Effect.gen(function* () {
       for (const vcs of [null, "hg"] as const) {
         const projects = yield* projectAt({ directory: "/home/floris/notes", vcs })
-        expect(yield* projects.chat(id)).toEqual({ project: undefined, headers: {} })
+        expect(yield* projects.chat(id)).toEqual({ project: undefined, headers: {}, why: PacerProject.OUTSIDE_GIT })
       }
     }),
   )
@@ -112,7 +112,11 @@ describe("PacerProject", () => {
   it.effect("names no project for a git repository without an identity (no commit, no remote)", () =>
     Effect.gen(function* () {
       const projects = yield* projectAt({ directory: "/tmp/scratch", remote: "github.com/owner/repo" })
-      expect(yield* projects.chat(Project.ID.global)).toEqual({ project: undefined, headers: {} })
+      expect(yield* projects.chat(Project.ID.global)).toEqual({
+        project: undefined,
+        headers: {},
+        why: PacerProject.NO_IDENTITY,
+      })
     }),
   )
 
@@ -143,7 +147,7 @@ describe("PacerProject", () => {
         { directory: "/tmp/release-test", vcs: null },
         { current: named("openforge-release-test") },
       )
-      expect(yield* projects.chat(id)).toEqual({ project: undefined, headers: {} })
+      expect(yield* projects.chat(id)).toEqual({ project: undefined, headers: {}, why: PacerProject.OUTSIDE_GIT })
     }),
   )
 

@@ -206,28 +206,31 @@ const layer = Layer.effect(
     })
 
     /**
-     * openforge: Code Mode's catalog as the chat's step gets it. A tool CPP moved into Code Mode that the chat's recorded
-     * start still holds as a direct tool stays out of it while that record holds, and comes with the next cold point.
+     * openforge: Code Mode's catalog as the chat's step gets it. A tool CPP placed in Code Mode that the chat's list
+     * leaves out (the memory tools of a chat in no project) is not in it. One CPP moved into Code Mode that the chat's
+     * recorded start still holds as a direct tool stays out of it while that record holds, and comes with the next cold
+     * point.
      */
     const catalogOf = Effect.fnUntraced(function* (
       session: SessionSchema.Info,
       agent: Agent.ID,
       catalog: CodeModeCatalog.Inventory,
     ) {
-      const moved = PacerOffer.codemode(yield* pacerTools.known())
-      if (moved.size === 0 || Option.isNone(starts)) return catalog
+      const known = yield* pacerTools.known()
+      const moved = PacerOffer.codemode(known)
+      if (moved.size === 0) return catalog
+      const hidden = PacerOffer.unlisted(known, pacerTools.held(session.id))
+      if (Option.isNone(starts)) return PacerOffer.catalog(catalog, hidden)
       const resolved = yield* resolveModel(session, { kind: "primary", agent }).pipe(Effect.option)
-      if (Option.isNone(resolved)) return catalog
+      if (Option.isNone(resolved)) return PacerOffer.catalog(catalog, hidden)
       const recorded = yield* starts.value.recorded({
         sessionID: session.id,
         agent,
         model: resolved.value.ref,
         ...(resolved.value.cache?.ttl === undefined ? {} : { ttl: resolved.value.cache.ttl }),
       })
-      return PacerOffer.catalog(
-        catalog,
-        new Set((recorded ?? []).flatMap((tool) => (moved.has(tool.name) ? [tool.name] : []))),
-      )
+      for (const tool of recorded ?? []) if (moved.has(tool.name)) hidden.add(tool.name)
+      return PacerOffer.catalog(catalog, hidden)
     })
 
     // openforge: a selection's model, and whether its step is at a cold point, worked out once in `select` for its list

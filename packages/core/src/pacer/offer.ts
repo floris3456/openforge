@@ -29,6 +29,15 @@ export function codemode(known: PacerTools.Known) {
   return new Set([...known].flatMap(([name, meta]) => (meta.codemode === true ? [name] : [])))
 }
 
+/**
+ * CPP's tools in Code Mode that the chat's list leaves out, as it leaves the memory tools out for a chat in no project:
+ * they stay out of its catalog, as such a direct tool stays out of its definitions ({@link apply}). None while the chat
+ * holds no list.
+ */
+export function unlisted(known: PacerTools.Known, list: PacerTools.List | undefined) {
+  return new Set(list === undefined ? [] : [...codemode(known)].filter((name) => !list.byName.has(name)))
+}
+
 /** Whether the chat runs Code Mode: its definitions hold `execute`, which a registry leaves out when Code Mode is denied. */
 export function executes(definitions: ReadonlyArray<{ readonly name: string }>) {
   return definitions.some((item) => item.name === CodeModeTool.name)

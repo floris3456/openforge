@@ -60,6 +60,7 @@ import { useEditorContext } from "../../context/editor"
 import { useDialog } from "../../ui/dialog"
 import { DialogSelect } from "../../ui/dialog-select"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
+import { identityCommands } from "../../component/dialog-identity-list"
 import { TodoItem } from "../../component/todo-item"
 import { chatImages, isRemovedPicture, toolImages, userImages, viewerImages, type ChatImage } from "../../image/chat"
 import { ChatImageLine } from "../../image/line"
@@ -74,6 +75,7 @@ import { useStorage } from "../../context/storage"
 import { Composer } from "./composer"
 import { compactionLine } from "../../pacer/format"
 import { usePacerSession } from "../../pacer/jump"
+import { usePacer } from "../../context/pacer"
 import { webTool, webToolJobRunning, webToolProvider, webToolSubject, webToolTitle } from "../../pacer/web-tools"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -648,6 +650,7 @@ export function Session(props: {
     current.submit()
   })
   const dialog = useDialog()
+  const pacer = usePacer()
   const storage = useStorage()
   const [goUpsell, updateGoUpsell] = storage.store<{ lastSeenAt?: number; dontShow?: boolean }>("go-upsell", {
     initial: {},
@@ -1099,6 +1102,7 @@ export function Session(props: {
         ).catch((error) => toast.error(error))
       },
     },
+    ...identityCommands({ pacer, dialog, toast, sessionID: () => route.sessionID }),
     {
       title: "Jump to message",
       id: "session.timeline",

@@ -300,6 +300,11 @@ import type {
   ExperimentalPacerSettingsGetOutput,
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
+  ExperimentalPacerFeaturesOutput,
+  ExperimentalPacerChatIdentitiesInput,
+  ExperimentalPacerChatIdentitiesOutput,
+  ExperimentalPacerChatIdentityInput,
+  ExperimentalPacerChatIdentityOutput,
   ExperimentalPacerNoticesListOutput,
   ExperimentalPacerNoticesDismissInput,
   ExperimentalPacerNoticesDismissOutput,
@@ -1959,6 +1964,35 @@ const EndpointExperimentalPacerSettingsUpdate =
       ),
     )
 
+const EndpointExperimentalPacerFeatures = (raw: RawClient["server.experimental"]) => () =>
+  preserveEffect<ExperimentalPacerFeaturesOutput>()(
+    raw["pacer.features"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointExperimentalPacerChatIdentities =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatIdentitiesInput) =>
+    preserveEffect<ExperimentalPacerChatIdentitiesOutput>()(
+      raw["pacer.chat.identities"]({ params: { sessionID: input["sessionID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const EndpointExperimentalPacerChatIdentity =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatIdentityInput) =>
+    preserveEffect<ExperimentalPacerChatIdentityOutput>()(
+      raw["pacer.chat.identity"]({
+        params: { sessionID: input["sessionID"] },
+        payload: { identity: input["identity"], session: input["session"], new: input["new"] },
+      }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const EndpointExperimentalPacerNoticesList = (raw: RawClient["server.experimental"]) => () =>
   preserveEffect<ExperimentalPacerNoticesListOutput>()(
     raw["pacer.notices.list"]({}).pipe(
@@ -2041,10 +2075,13 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
       get: EndpointExperimentalPacerChatGet(raw),
       update: EndpointExperimentalPacerChatUpdate(raw),
       requests: EndpointExperimentalPacerChatRequests(raw),
+      identities: EndpointExperimentalPacerChatIdentities(raw),
+      identity: EndpointExperimentalPacerChatIdentity(raw),
     },
     refresh: EndpointExperimentalPacerRefresh(raw),
     prompt: EndpointExperimentalPacerPrompt(raw),
     settings: { get: EndpointExperimentalPacerSettingsGet(raw), update: EndpointExperimentalPacerSettingsUpdate(raw) },
+    features: EndpointExperimentalPacerFeatures(raw),
     notices: { list: EndpointExperimentalPacerNoticesList(raw), dismiss: EndpointExperimentalPacerNoticesDismiss(raw) },
   },
   update: { get: EndpointExperimentalUpdateGet(raw), set: EndpointExperimentalUpdateSet(raw) },

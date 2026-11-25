@@ -83,6 +83,9 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("pacer.prompt", (ctx) => pacer.prompt(ctx.params.requestID))
       .handle("pacer.settings.get", () => pacer.settings())
       .handle("pacer.settings.update", (ctx) => pacer.updateSettings(ctx.payload))
+      .handle("pacer.features", () => pacer.features)
+      .handle("pacer.chat.identities", (ctx) => pacer.identities(ctx.params.sessionID))
+      .handle("pacer.chat.identity", (ctx) => pacer.link(ctx.params.sessionID, ctx.payload))
       .handleRaw("pacer.inspect.projects", (ctx) => pacer.inspect("projects", ctx.query))
       .handleRaw("pacer.inspect.tasks", (ctx) =>
         pacer.inspect(`projects/${encodeURIComponent(ctx.params.project)}/tasks`, ctx.query),

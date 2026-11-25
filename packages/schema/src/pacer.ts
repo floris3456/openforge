@@ -282,6 +282,80 @@ export const SettingsUpdate = Schema.Struct({
   keepUserMessages: Schema.Boolean.pipe(optional),
 }).annotate({ identifier: "Pacer.SettingsUpdate" })
 
+/** What the connected CPP offers that the TUI's commands follow, from its capabilities as last read. */
+export interface Features extends Schema.Schema.Type<typeof Features> {}
+export const Features = Schema.Struct({
+  /**
+   * Agents' identities and the `identity` event (the workspace's reference `docs/reference/agent-identity-api.md`):
+   * `/identity` is offered only then.
+   */
+  identities: Schema.Boolean,
+}).annotate({ identifier: "Pacer.Features" })
+
+/** A chat that joined an agent's identity. */
+export interface IdentityChat extends Schema.Schema.Type<typeof IdentityChat> {}
+export const IdentityChat = Schema.Struct({
+  /** The client's own id of the chat: an openforge chat's session ID. */
+  chat: Schema.String,
+  /** How it joined: it made the identity, was linked to it, or came back to its own. */
+  how: Schema.Literals(["made", "linked", "own"]),
+  since: Instant,
+  /** It is still this identity's. */
+  current: Schema.Boolean,
+}).annotate({ identifier: "Pacer.IdentityChat" })
+
+/** An agent as people know it, kept by CPP per project: "floris's lead" working on "Agent badges plan". */
+export interface Identity extends Schema.Schema.Type<typeof Identity> {}
+export const Identity = Schema.Struct({
+  /** 12 characters, as a task's id. */
+  id: Schema.String,
+  /** Its person and its part: "floris's lead", or "lead (owner unknown)". */
+  name: Schema.String,
+  /** The user whose key its first chat used; absent when the key names none. */
+  person: Schema.String.pipe(optional),
+  /** "lead" for the build agent, else its role. */
+  part: Schema.String,
+  /** The agent its first chat ran as. */
+  role: Schema.String,
+  /** Its latest chat's title; absent while that chat has none. */
+  title: Schema.String.pipe(optional),
+  /** The identity its first chat's parent had; absent for a lead. */
+  parent: Schema.String.pipe(optional),
+  /** Every chat that joined it, the latest first. */
+  chats: Schema.Array(IdentityChat),
+  /** The open tasks and subtasks its current chats work on. */
+  openTasks: Schema.Array(Schema.Struct({ id: Schema.String, title: Schema.String, state: Schema.String })),
+  /** The newest model request of any of its chats; absent before one. */
+  lastActive: Instant.pipe(optional),
+  madeAt: Instant,
+}).annotate({ identifier: "Pacer.Identity" })
+
+/** The identities of a chat's project, the most recently active first. */
+export interface Identities extends Schema.Schema.Type<typeof Identities> {}
+export const Identities = Schema.Struct({
+  items: Schema.Array(Identity),
+  /** The identity the chat is now; absent while it has none. */
+  current: Schema.String.pipe(optional),
+}).annotate({ identifier: "Pacer.Identities" })
+
+/**
+ * What `/identity` links a chat to: an identity of its project, the identity another chat is now (by its session ID,
+ * or its CPP chat UUID), or with `new` its own again. Exactly one.
+ */
+export interface IdentityLink extends Schema.Schema.Type<typeof IdentityLink> {}
+export const IdentityLink = Schema.Struct({
+  identity: Schema.String.pipe(optional),
+  session: Schema.String.pipe(optional),
+  new: Schema.Boolean.pipe(optional),
+}).annotate({ identifier: "Pacer.IdentityLink" })
+
+/** The identity a chat is after `/identity`, and whether that changed. */
+export interface IdentityLinked extends Schema.Schema.Type<typeof IdentityLinked> {}
+export const IdentityLinked = Schema.Struct({
+  identity: Identity,
+  changed: Schema.Boolean,
+}).annotate({ identifier: "Pacer.IdentityLinked" })
+
 /** What a request was. A subagent's step is a `step` whose request has `subagent` set. */
 export const Kind = Schema.Literals(["step", "ping", "title", "compaction", "other", "probe", "search"]).annotate({
   identifier: "Pacer.Kind",

@@ -2844,6 +2844,26 @@ export type ExperimentalPacerSettingsUpdateOperation<E = never> = (
   input?: ExperimentalPacerSettingsUpdateInput,
 ) => Effect.Effect<ExperimentalPacerSettingsUpdateOutput, E>
 
+export type ExperimentalPacerFeaturesOutput = Pacer.Features
+export type ExperimentalPacerFeaturesOperation<E = never> = () => Effect.Effect<ExperimentalPacerFeaturesOutput, E>
+
+export type ExperimentalPacerChatIdentitiesInput = { readonly sessionID: Session.ID }
+export type ExperimentalPacerChatIdentitiesOutput = Pacer.Identities
+export type ExperimentalPacerChatIdentitiesOperation<E = never> = (
+  input: ExperimentalPacerChatIdentitiesInput,
+) => Effect.Effect<ExperimentalPacerChatIdentitiesOutput, E>
+
+export type ExperimentalPacerChatIdentityInput = {
+  readonly sessionID: Session.ID
+  readonly identity?: string | undefined
+  readonly session?: string | undefined
+  readonly new?: boolean | undefined
+}
+export type ExperimentalPacerChatIdentityOutput = Pacer.IdentityLinked
+export type ExperimentalPacerChatIdentityOperation<E = never> = (
+  input: ExperimentalPacerChatIdentityInput,
+) => Effect.Effect<ExperimentalPacerChatIdentityOutput, E>
+
 export type ExperimentalPacerNoticesListOutput = ReadonlyArray<Pacer.Notice>
 export type ExperimentalPacerNoticesListOperation<E = never> = () => Effect.Effect<
   ExperimentalPacerNoticesListOutput,
@@ -2922,6 +2942,8 @@ export interface ExperimentalApi<E = never> {
       readonly get: ExperimentalPacerChatGetOperation<E>
       readonly update: ExperimentalPacerChatUpdateOperation<E>
       readonly requests: ExperimentalPacerChatRequestsOperation<E>
+      readonly identities: ExperimentalPacerChatIdentitiesOperation<E>
+      readonly identity: ExperimentalPacerChatIdentityOperation<E>
     }
     readonly refresh: ExperimentalPacerRefreshOperation<E>
     readonly prompt: ExperimentalPacerPromptOperation<E>
@@ -2929,6 +2951,7 @@ export interface ExperimentalApi<E = never> {
       readonly get: ExperimentalPacerSettingsGetOperation<E>
       readonly update: ExperimentalPacerSettingsUpdateOperation<E>
     }
+    readonly features: ExperimentalPacerFeaturesOperation<E>
     readonly notices: {
       readonly list: ExperimentalPacerNoticesListOperation<E>
       readonly dismiss: ExperimentalPacerNoticesDismissOperation<E>

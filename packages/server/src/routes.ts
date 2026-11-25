@@ -39,6 +39,7 @@ import { LocationActivity } from "@opencode/core/location-activity"
 import { ModelsDev } from "@opencode/core/models-dev"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
+import { PacerIdentity } from "@opencode/core/pacer/identity"
 import { PacerIdle } from "@opencode/core/pacer/idle"
 import { PacerInspect } from "@opencode/core/pacer/inspect"
 import { PacerModels } from "@opencode/core/pacer/models"
@@ -120,6 +121,7 @@ const applicationServiceNodes = [
   PacerAttention.node,
   PacerIdle.node,
   PacerInspect.node,
+  PacerIdentity.node,
   AutoUpdate.node,
   // openforge: its work on the media files runs in the server process (spec pictures-files).
   MediaKeeper.node,

@@ -24,10 +24,11 @@ import { MemoryTask } from "./task.js"
 // are openforge's. A lead is never refused, and a hand-in is never stopped by a read that failed.
 //
 // A step holds review rounds of its own on a server that says `step_items` (section 5, the lead's decision of
-// 2026-11-25): a helper on a step hands its pictures in on the step, checked against when the step went active, and a
-// refusal always asks for the items on the call's own task or step. Without `step_items` a step's items could only go
-// on its task, whose open round may be a lead's hand-in waiting for the person, so a chat on a step and a call on a
-// step are never refused there.
+// 2026-11-25): a helper whose chat works on a step of its lead's task hands its pictures in on that step, and its
+// `done` there is asked to go to review instead, so that its lead judges the step. Without `step_items` its items could
+// only go on the lead's task, whose open round may be a lead's hand-in waiting for the person, so a chat on a step is
+// never refused there. A helper whose chat works on its task itself hands in on the task, as above: that round is its
+// hand-in. Either counts from its task's or step's last going active or back to todo, as a deny sends it.
 
 /** How long the read of the chat's task may take; without an answer the call goes as before. */
 export const READ = "5 seconds"
@@ -38,8 +39,8 @@ export interface Interface {
   /**
    * Why `input`, a call of CPP's task tool by `session` as `agent` (its role), is not sent ({@link refusedText}): the
    * pictures it should hand in as items, and how. Undefined when it goes: a lead's, one with items or that hands nothing
-   * in, on a server without review items, one on a step where steps take no items, or when its task or step cannot be
-   * read (logged). Never fails.
+   * in, on a server without review items, one of a chat on a step where steps take no items, or when its task or step
+   * cannot be read (logged). Never fails.
    */
   readonly refusal: (session: SessionSchema.Info, agent: string, input: unknown) => Effect.Effect<string | undefined>
 }
@@ -126,17 +127,16 @@ const layer = Layer.effect(
       if (inside === undefined) return undefined
       const memory = (yield* catalogs.get())?.pacer?.memory
       if (memory?.reviewItems !== true) return undefined
-      // Where steps take no items, a step's could only go on its task, where they could replace a lead's hand-in.
-      if (memory.stepItems !== true && (inside.subtask !== undefined || id !== inside.task)) return undefined
-      // A chat on a step hands in only that step: its calls on another step or on the task go.
-      if (inside.subtask !== undefined && id !== inside.subtask) return undefined
+      // A chat on a step hands in only that step, and only where steps take items: elsewhere they could only go on its
+      // lead's task, where they could replace the lead's hand-in. Its calls on another step or on the task go.
+      if (inside.subtask !== undefined && (memory.stepItems !== true || id !== inside.subtask)) return undefined
       const began = DateTime.toEpochMillis(session.time.created)
       const calls = yield* callsSince(session.id, began)
       // Most hand-ins looked at no picture: they go without a read of the task.
       if (!calls.some((call) => call.pictures.length > 0)) return undefined
       const chat = yield* projects.session(session)
       if (chat.project === undefined) return undefined
-      // What the chat works on, whose going active the pictures are counted from: its step, or its task.
+      // What the chat works on, whose round its items go in and whose going active the pictures are counted from.
       const own = inside.subtask ?? inside.task
       const kind = inside.subtask === undefined ? "task" : "step"
       const read = yield* client
@@ -152,8 +152,8 @@ const layer = Layer.effect(
           ),
         )
       if (read === undefined) return undefined
+      const step = inside.subtask === undefined ? read.subtasks.find((subtask) => subtask.id === id) : undefined
       if (inside.subtask === undefined) {
-        const step = read.subtasks.find((subtask) => subtask.id === id)
         if (id !== inside.task && step === undefined) return undefined
         // On its task's step, done hands in only on the last open one, which sends the task to review.
         if (
@@ -163,12 +163,13 @@ const layer = Layer.effect(
           return undefined
       }
       // A helper on a step of its lead's task, which went active long before, counts from its own start.
-      const moment = Math.max(wentActive(read), began)
+      const moment = Math.max(opened(read), began)
       const since = calls.filter((call) => call.at >= moment)
-      if (since.some((call) => gaveItems(call, [id, own]))) return undefined
+      if (since.some((call) => gaveItems(call, own))) return undefined
       const pictures = yield* changedAfter(since, moment)
       if (pictures.length === 0) return undefined
-      return refusedText(kind, own, pictures)
+      if (step !== undefined) return refusedText(kind, own, "first", pictures)
+      return refusedText(kind, own, kind === "step" && input.state === "done" ? "review" : "again", pictures)
     })
 
     return Service.of({ refusal })
@@ -183,15 +184,24 @@ export const node = makeLocationNode({
 
 /**
  * Why the call is not sent, after `Not sent: `: the pictures looked at since the chat's task or step `id` went active,
- * and that the ones showing the work go as items in the call itself, on its own task or step.
+ * and how the ones showing the work go as items: in the call sent again (`again`), sent again for review (`review`, a
+ * step's done, so that its lead judges it), or first on task `id`, then the call (`first`, a call on its step).
  */
-export function refusedText(kind: "task" | "step", id: string, pictures: ReadonlyArray<string>) {
+export function refusedText(
+  kind: "task" | "step",
+  id: string,
+  ask: "again" | "review" | "first",
+  pictures: ReadonlyArray<string>,
+) {
   const more = pictures.length - NAMED
   const named = `${pictures.slice(0, NAMED).join(", ")}${more > 0 ? ` and ${more} more` : ""}`
+  const how = "each {picture, comment} saying what it shows and what to judge"
   return [
     `since ${kind} ${id} went active you looked at pictures changed after that: ${named}.`,
     "Work that made pictures goes to review with them as items:",
-    "send this again with items, those that show the work, each {picture, comment} saying what it shows and what to judge.",
+    ask === "first"
+      ? `first give those that show the work as items on task ${id} (task with id ${id} and items, ${how}), then send this again.`
+      : `send this again with ${ask === "review" ? 'state "review" and ' : ""}items, those that show the work, ${how}.`,
   ].join(" ")
 }
 
@@ -234,14 +244,13 @@ function gives(input: Readonly<Record<string, unknown>>) {
   return [input.items, input.pictures].some((list) => Array.isArray(list) && list.length > 0)
 }
 
-/** Whether `call` gave one of `tasks` items, and was not refused. */
-function gaveItems(call: Call, tasks: ReadonlyArray<string>) {
+/** Whether `call` gave task `task` items, and was not refused. */
+function gaveItems(call: Call, task: string) {
   return (
     call.tool === "task" &&
     call.status === "completed" &&
     isRecord(call.input) &&
-    typeof call.input.id === "string" &&
-    tasks.includes(call.input.id) &&
+    call.input.id === task &&
     gives(call.input)
   )
 }
@@ -250,10 +259,16 @@ function closed(task: { readonly state: string }) {
   return task.state === "done" || task.state === "dropped"
 }
 
-/** When the task last went active: its newest change to active that is no edit, else when it was made. */
-function wentActive(read: MemoryClient.TaskRead) {
+/**
+ * When the task last went active or back to todo, as a deny sends it: its newest such change that is no edit, else
+ * when it was made. Its earlier rounds' items then no longer let a hand-in go.
+ */
+function opened(read: MemoryClient.TaskRead) {
   const change = read.changes.find(
-    (change) => change.state === "active" && (change.title ?? null) === null && (change.description ?? null) === null,
+    (change) =>
+      (change.state === "active" || change.state === "todo") &&
+      (change.title ?? null) === null &&
+      (change.description ?? null) === null,
   )
   return change?.at ?? read.task.at
 }

@@ -17,6 +17,7 @@ import { EffectFlock } from "@opencode/util/effect-flock"
 import { Heap } from "./heap"
 import { CpuProfile } from "./cpu-profile"
 import { ShutdownDeadline } from "./shutdown-deadline"
+import { FileLog } from "./file-log"
 
 // Keep requests to the local service off any proxy. Bun reads lowercase `no_proxy` alone whenever it is set, so both
 // spellings get the same merged list.
@@ -159,13 +160,17 @@ Effect.gen(function* () {
     }),
   ),
   Effect.provide(
-    Observability.layer({
-      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-      headers: process.env.OTEL_EXPORTER_OTLP_HEADERS,
-      client: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
-      version: OPENCODE_VERSION,
-      channel: OPENCODE_CHANNEL,
-    }),
+    // openforge: a client command runs on without the file log where it can't open it (workspace task 92h1sva2hb2j).
+    FileLog.layer(
+      Observability.layer({
+        endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        headers: process.env.OTEL_EXPORTER_OTLP_HEADERS,
+        client: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
+        version: OPENCODE_VERSION,
+        channel: OPENCODE_CHANNEL,
+      }),
+      process.argv.slice(2),
+    ),
   ),
   Effect.provide(NodeServices.layer),
   Effect.scoped,

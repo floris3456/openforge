@@ -192,7 +192,8 @@ const ancestorsLayer = Layer.effect(
   }),
 )
 
-// Typed, as Session.node is: an ancestor's location's services hold this location node's own.
+// Typed, as Session.node is, to break a type cycle: its layer reads an ancestor's location's services, which hold
+// PacerProject, whose node depends on this one.
 export const ancestorsNode: LayerNode.Provider<Ancestors, never, typeof Node.tags.values.global> = Node.makeGlobalNode({
   service: Ancestors,
   layer: ancestorsLayer,

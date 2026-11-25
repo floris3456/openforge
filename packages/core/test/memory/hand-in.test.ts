@@ -481,31 +481,33 @@ describe("a helper's hand-in", () => {
     }),
   )
 
-  it.live("review on a step of its task is refused in its task's words, asking for items on the step, and goes with them", () =>
-    Effect.gen(function* () {
-      const h = yield* setup({ steps: 2, onTask: true, catalog: stepping() })
-      const step = h.steps[0]!
-      const front = made("front.png")
-      yield* h.llm.push(
-        TestLLM.toolCall("call-read", "read", { path: front }),
-        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Drawn." }),
-        TestLLM.toolCall("call-items", "task", {
-          id: step,
-          state: "review",
-          items: [{ picture: front, comment: "The front." }],
-        }),
-        TestLLM.text("Handed in.", "after"),
-      )
-      yield* h.prompt("draw the counter")
-      expect(yield* h.results()).toEqual([
-        ok("read"),
-        { name: "task", status: "error", error: onTask(h.task, front) },
-        ok("task"),
-      ])
-      // Only the call with items reached the server, on the step: nothing was given on the task.
-      expect(h.sent().map((call) => call.body)).toMatchObject([{ id: step, state: "review" }])
-      expect(yield* h.state(step)).toBe("review")
-    }),
+  it.live(
+    "review on a step of its task is refused in its task's words, asking for items on the step, and goes with them",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ steps: 2, onTask: true, catalog: stepping() })
+        const step = h.steps[0]!
+        const front = made("front.png")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-read", "read", { path: front }),
+          TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Drawn." }),
+          TestLLM.toolCall("call-items", "task", {
+            id: step,
+            state: "review",
+            items: [{ picture: front, comment: "The front." }],
+          }),
+          TestLLM.text("Handed in.", "after"),
+        )
+        yield* h.prompt("draw the counter")
+        expect(yield* h.results()).toEqual([
+          ok("read"),
+          { name: "task", status: "error", error: onTask(h.task, front) },
+          ok("task"),
+        ])
+        // Only the call with items reached the server, on the step: nothing was given on the task.
+        expect(h.sent().map((call) => call.body)).toMatchObject([{ id: step, state: "review" }])
+        expect(yield* h.state(step)).toBe("review")
+      }),
   )
 
   it.live("done on its task's last open step is refused the same way, and goes with items on the step", () =>

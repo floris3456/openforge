@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test"
 import fs from "fs"
 import net from "net"
 import path from "path"
-import { Deferred, Effect, Fiber, Layer, Queue, Stream } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Queue, Stream } from "effect"
 import { RunnerClient } from "@opencode/runner/client"
 import { RunnerOutput } from "@opencode/runner/output"
 import { RunnerPaths } from "@opencode/runner/paths"
@@ -237,6 +237,8 @@ describe("Shell through the tool runner", () => {
       fs.mkdirSync(directory, { recursive: true })
       fs.writeFileSync(RunnerPaths.token(directory), "token")
       const sockets = new Set<net.Socket>()
+      // The service's look at the runners already there asks this one for its commands.
+      const listed = yield* Deferred.make<void>()
       const server = net.createServer((socket) => {
         sockets.add(socket)
         const write = (frame: RunnerProtocol.Frame | RunnerProtocol.Hello) => socket.write(JSON.stringify(frame) + "\n")
@@ -250,7 +252,10 @@ describe("Shell through the tool runner", () => {
               const request = RunnerProtocol.decodeRequest(line)
               if (request._tag === "None") return
               if (request.value.op === "hello") return write({ id: request.value.id, type: "ok" })
-              if (request.value.op === "list") return write({ id: request.value.id, type: "list", commands: [] })
+              if (request.value.op === "list") {
+                Deferred.doneUnsafe(listed, Exit.void)
+                return write({ id: request.value.id, type: "list", commands: [] })
+              }
               if (request.value.op !== "start") return
               server.close()
               fs.rmSync(RunnerPaths.socket(directory), { force: true })
@@ -269,6 +274,10 @@ describe("Shell through the tool runner", () => {
 
       const finished = yield* Effect.gen(function* () {
         const shell = yield* Shell.Service
+        // As in use, the command starts once the service has reached the runner already there, which then holds the
+        // only connection to it: one started meanwhile holds a second, which a resend can take after its bye (task
+        // bfyhkrcqnftv).
+        yield* Deferred.await(listed)
         const info = yield* shell.create({ shell: "/bin/sh", command: "printf ran", timeout: 0 })
         return { info: yield* shell.wait(info.id), output: (yield* shell.output(info.id)).output }
       }).pipe(Effect.scoped, Effect.provide(host.service()))

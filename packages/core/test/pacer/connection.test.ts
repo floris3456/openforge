@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Clock, Context, Deferred, Effect, Fiber, Layer, Schema, Stream, SubscriptionRef } from "effect"
-import { FetchHttpClient } from "effect/http"
+import { FetchHttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
@@ -15,6 +15,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Location } from "@opencode/core/location"
 import { PacerConnection } from "@opencode/core/pacer/connection"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
+import { PacerEnv } from "@opencode/core/pacer/env"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
@@ -97,6 +98,11 @@ interface Cpp {
   readonly release: () => void
   /** View reads in flight now, and at most. */
   readonly inflight: { now: number; most: number }
+  /**
+   * The digests of the .env value sets this instance holds (workspace spec env-redaction, section 3), each `PUT`
+   * to `/pacer/v1/redaction/env`; in memory only, so a fresh instance holds none.
+   */
+  readonly sets: Set<string>
   /** Open change streams. */
   readonly streams: () => number
   readonly notice: (event: string, data: Json) => void
@@ -175,6 +181,10 @@ const fakeCpp = (now: () => number) =>
             next: [],
           })
         if (path === "/pacer/v1/meters") return answer(cpp.meters)
+        if (path === "/pacer/v1/redaction/env" && method === "PUT") {
+          cpp.sets.add(String((body as Json).digest))
+          return new Response(null, { status: 204 })
+        }
         if (path === "/pacer/v1/attention")
           return cpp.attention
             ? answer({ items: cpp.attention })
@@ -323,6 +333,7 @@ const fakeCpp = (now: () => number) =>
           for (const resolve of waiting.splice(0)) resolve()
         },
         inflight: { now: 0, most: 0 },
+        sets: new Set(),
         streams: () => controllers.size,
         notice: (event, data) => {
           for (const controller of controllers)
@@ -501,6 +512,8 @@ interface Harness {
   readonly shared: PacerStatus.Interface
   /** Each chat's warmth as a step reads it (`PacerWarmth`). */
   readonly warmth: PacerWarmth.Interface
+  /** The chats' .env values, over the same CPP (`PacerEnv`). */
+  readonly env: PacerEnv.Interface
 }
 
 /**
@@ -590,26 +603,33 @@ const harness = Effect.fnUntraced(function* (server?: Cpp) {
   )
   const shared = Context.get(yield* Layer.build(PacerStatus.layer), PacerStatus.Service)
   const warmth = Context.get(yield* Layer.build(PacerWarmth.layer), PacerWarmth.Service)
+  const catalogs = Layer.succeed(
+    PacerModels.Service,
+    PacerModels.Service.of({
+      get: () => SubscriptionRef.get(models),
+      changes: () => SubscriptionRef.changes(models),
+      refresh: () =>
+        Effect.gen(function* () {
+          refreshes.count++
+          if (refreshes.hold) yield* Deferred.await(refreshes.hold)
+        }),
+    }),
+  )
+  const http = PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints))
+  const env = Context.get(
+    yield* Layer.build(PacerEnv.layer.pipe(Layer.provide(Layer.mergeAll(http, endpoints, catalogs)))),
+    PacerEnv.Service,
+  )
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(PacerStatus.Service, shared),
           Layer.succeed(PacerWarmth.Service, warmth),
-          PacerHttp.layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(endpoints)),
+          http,
           endpoints,
-          Layer.succeed(
-            PacerModels.Service,
-            PacerModels.Service.of({
-              get: () => SubscriptionRef.get(models),
-              changes: () => SubscriptionRef.changes(models),
-              refresh: () =>
-                Effect.gen(function* () {
-                  refreshes.count++
-                  if (refreshes.hold) yield* Deferred.await(refreshes.hold)
-                }),
-            }),
-          ),
+          catalogs,
+          Layer.succeed(PacerEnv.Service, env),
           Layer.succeed(Bus.Service, bus),
           Layer.succeed(Job.Service, Context.get(context, Job.Service)),
           Layer.succeed(Session.Service, counted),
@@ -645,6 +665,7 @@ const harness = Effect.fnUntraced(function* (server?: Cpp) {
       SubscriptionRef.set(endpoint, PacerEndpoint.resolve({ baseURL: `${cpp.origin}/v1`, apiKey: key }, undefined)),
     shared,
     warmth,
+    env,
   } satisfies Harness
 })
 
@@ -3610,6 +3631,95 @@ describe("PacerConnection news", () => {
       yield* until("acked", () => h.cpp.told.has("news-1"))
       expect(seen(h, "/pacer/v1/news")).toHaveLength(1)
       expect(h.execution.woken).toEqual([sessionID])
+    }),
+  )
+})
+
+describe("PacerConnection and the chats' .env values", () => {
+  /** A catalog of a CPP that takes the chats' .env values (workspace spec env-redaction, section 4). */
+  const redacting = (at: number): PacerModels.Catalog => ({
+    at,
+    pacer: { compactTokens: ["auto", "before-cold"], webTools: false, redaction: { env: true } },
+    models: [],
+  })
+  /** A model request through PacerEnv's middleware onto the instance, which refuses a digest it does not hold. */
+  const request = (h: Harness, place: PacerEnv.Place) =>
+    Effect.gen(function* () {
+      const sent: string[] = []
+      const response = yield* h.env.http(place)(HttpClientRequest.post(`${h.cpp.origin}/v1/messages`), (request) =>
+        Effect.sync(() => {
+          const digest = request.headers["x-pacer-env"] ?? ""
+          sent.push(digest)
+          return HttpClientResponse.fromWeb(
+            request,
+            h.cpp.sets.has(digest)
+              ? Response.json({ id: "msg_1" })
+              : Response.json(
+                  {
+                    type: "error",
+                    error: { type: "invalid_request_error", code: "env_values_unknown", message: "no set" },
+                  },
+                  { status: 428 },
+                ),
+          )
+        }),
+      )
+      return { status: response.status, sent }
+    })
+  const repository = Effect.gen(function* () {
+    const root = (yield* tmpdirScoped("opencode-pacer-env-")).path
+    yield* Effect.promise(() => Bun.write(`${root}/.env`, "BUILD_REF=0123456789abcdef0123456789abcdef01234567\n"))
+    return { root, deep: true }
+  })
+  const puts = (h: Harness) => seen(h, "/pacer/v1/redaction/env", "PUT").length
+
+  it.effect("hands a fresh instance every set it holds as the change stream opens again, before the next request", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* SubscriptionRef.set(h.catalog, redacting(0))
+      const place = yield* repository
+      yield* online(h)
+      const first = yield* request(h, place)
+      expect(first.status).toBe(200)
+      const handed = puts(h)
+
+      // CPP restarts, or the pair fails over: the serving instance holds no set, and the stream ends.
+      h.cpp.sets.clear()
+      h.cpp.end()
+      yield* ahead("the stream open again, the set handed over", () => h.cpp.streams() === 1 && puts(h) > handed)
+      const next = yield* request(h, place)
+      expect(next).toEqual({ status: 200, sent: [first.sent.at(-1)!] })
+    }),
+  )
+
+  it.effect("hands a set over before the request that first names it, as when a .env file changed", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* SubscriptionRef.set(h.catalog, redacting(0))
+      const place = yield* repository
+      yield* online(h)
+      expect((yield* request(h, place)).sent).toHaveLength(1)
+      yield* Effect.promise(() =>
+        Bun.write(`${place.root}/.env`, "BUILD_REF=fedcba9876543210fedcba9876543210fedcba98\n"),
+      )
+      const changed = yield* request(h, place)
+      expect(changed.status).toBe(200)
+      expect(changed.sent).toHaveLength(1)
+      expect(puts(h)).toBe(2)
+    }),
+  )
+
+  it.effect("hands nothing to a CPP without the capability as the stream opens", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      const place = yield* repository
+      yield* online(h)
+      // Without the capability the request names no set, and CPP holds none.
+      expect((yield* request(h, place)).sent).toEqual([""])
+      h.cpp.end()
+      yield* ahead("the stream open again", () => h.cpp.streams() === 1)
+      yield* settle
+      expect(puts(h)).toBe(0)
     }),
   )
 })

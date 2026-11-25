@@ -8,7 +8,7 @@ import { RunnerOutput } from "../src/output.js"
 import { RunnerPaths } from "../src/paths.js"
 import { RunnerProtocol } from "../src/protocol.js"
 import { RunnerServer } from "../src/server.js"
-import { alive, command, folder, graceClock, run, serve, served, until } from "./fixture/runner.js"
+import { alive, clock, command, folder, run, serve, served, until } from "./fixture/runner.js"
 
 const collect = (connection: RunnerClient.Connection, id: string, offset = 0, output = true) =>
   connection.watch(id, { offset, output }).pipe(Stream.runCollect)
@@ -122,8 +122,11 @@ describe("runner", () => {
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
+        const ready = path.join(host.path, "ready")
         const timed = command(host.path, "sleep 30", { deadline: Date.now() + 60_000 })
-        const cleared = command(host.path, "sleep 0.5; printf done", { deadline: Date.now() + 100 })
+        const cleared = command(host.path, `while [ ! -e ${ready} ]; do sleep 0.01; done; printf done`, {
+          deadline: Date.now() + 100,
+        })
         yield* connection.start(timed)
         yield* connection.start(cleared)
         const timedExit = yield* watching(connection, timed.id, 0, false)
@@ -131,9 +134,18 @@ describe("runner", () => {
         expect((yield* connection.deadline(cleared.id, null)).deadline).toBeNull()
         const moved = Date.now() + 100
         expect((yield* connection.deadline(timed.id, moved)).deadline).toBe(moved)
+        const answered = Date.now()
+        // The runner waits for the moved deadline alone, from when it moved it: the cleared one's wait is gone.
+        expect(host.clock.waits).toHaveLength(1)
+        expect(host.clock.waits[0]).toBeLessThanOrEqual(100)
+        expect(host.clock.waits[0]).toBeGreaterThanOrEqual(moved - answered)
+        // Both deadlines are past once the moved one is, and every wait passes: only the timed command ends.
+        yield* Effect.promise(() => until(() => Date.now() >= moved, "the moved deadline"))
+        host.clock.pass()
         const exit = exitOf(yield* Fiber.join(timedExit))
         expect(exit).toMatchObject({ status: "timeout", signal: "SIGTERM" })
         expect(exit.ended).toBeGreaterThanOrEqual(moved)
+        fs.writeFileSync(ready, "")
         const finished = yield* Fiber.join(clearedExit)
         expect(exitOf(finished)).toMatchObject({ status: "exited", code: 0 })
         expect(text(finished)).toBe("done")
@@ -145,27 +157,27 @@ describe("runner", () => {
   test("after its last command it waits its grace period for another, then stops listening, says bye and frees the folder", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    const grace = graceClock()
-    await using runner = await serve({ directory: folderPath, version: "test", grace: 300, schedule: grace.schedule })
+    const time = clock()
+    await using runner = await serve({ directory: folderPath, version: "test", grace: 300, schedule: time.schedule })
     const closed = await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(folderPath)
         const first = command(directory.path, "printf one")
         yield* connection.start(first)
         // Nothing runs now: the runner waits its grace for another command.
-        yield* Effect.promise(() => until(() => grace.waiting !== undefined, "the runner resting"))
-        expect(grace.waiting).toBe(300)
+        yield* Effect.promise(() => until(() => time.waits.length > 0, "the runner resting"))
+        expect(time.waits).toEqual([300])
         expect(fs.existsSync(RunnerPaths.exit(first.output))).toBe(true)
         // A late watch still gets the end, and the next command shares this runner.
         expect(exitOf(yield* collect(connection, first.id))).toMatchObject({ status: "exited", code: 0 })
         const second = command(directory.path, "printf two")
         expect((yield* connection.start(second)).existing).toBe(false)
-        yield* Effect.promise(() => until(() => grace.waiting !== undefined, "the runner resting again"))
-        expect(grace.waiting).toBe(300)
+        yield* Effect.promise(() => until(() => time.waits.length > 0, "the runner resting again"))
+        expect(time.waits).toEqual([300])
         expect(readExit(second.output)).toMatchObject({ status: "exited", code: 0 })
         // It listens until its grace has passed.
         expect(fs.existsSync(RunnerPaths.socket(folderPath))).toBe(true)
-        grace.pass()
+        time.pass()
         const ended = yield* connection.closed
         expect(fs.existsSync(RunnerPaths.socket(folderPath))).toBe(false)
         return ended
@@ -185,7 +197,7 @@ describe("runner", () => {
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
-        host.grace.pass()
+        host.clock.pass()
         expect(yield* connection.closed).toBe("bye")
         const input = command(host.path, "printf late")
         expect(yield* connection.start(input).pipe(Effect.flip)).toMatchObject({ reason: "closing" })
@@ -208,12 +220,12 @@ describe("runner", () => {
   test("only one runner serves a folder at a time", async () => {
     await using directory = await folder()
     const folderPath = path.join(directory.path, "runner")
-    const grace = graceClock()
-    await using first = await serve({ directory: folderPath, version: "test", schedule: grace.schedule })
+    const time = clock()
+    await using first = await serve({ directory: folderPath, version: "test", schedule: time.schedule })
     expect(
       await RunnerServer.serve({ directory: folderPath, version: "test", wait: 100 }).catch((error) => error),
     ).toBeInstanceOf(RunnerServer.LockedError)
-    grace.pass()
+    time.pass()
     await first.closed
   })
 

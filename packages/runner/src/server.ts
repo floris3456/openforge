@@ -16,8 +16,8 @@ export type Options = {
   /** How long a runner with nothing to run, fresh or after its last command, waits for a command before it exits. */
   readonly grace?: number
   /**
-   * Waits `ms` and then calls `passed`, returning what cancels the wait: how the runner waits out its grace, a timer
-   * by default. A test passes its own to say when the grace has passed.
+   * Waits `ms` and then calls `passed`, returning what cancels the wait: how the runner waits out its grace and its
+   * commands' deadlines, a timer by default. A test passes its own to say when a wait has passed.
    */
   readonly schedule?: (passed: () => void, ms: number) => () => void
   /** How long a group gets between SIGTERM and SIGKILL. */
@@ -76,7 +76,7 @@ type Entry = {
   /** Writing its output failed once, which was reported; later failures are not. */
   lost: boolean
   exit?: RunnerProtocol.Exit
-  deadlineTimer?: ReturnType<typeof setTimeout>
+  cancelDeadline?: () => void
   killTimer?: ReturnType<typeof setTimeout>
 }
 
@@ -282,7 +282,7 @@ export async function serve(options: Options): Promise<Runner> {
     })
     let drain: ReturnType<typeof setTimeout> | undefined
     void child.exited.then(() => {
-      clearTimeout(entry.deadlineTimer)
+      entry.cancelDeadline?.()
       // Pipes still held by the group's other processes are closed after a moment, so the command still ends.
       drain = setTimeout(
         () =>
@@ -306,16 +306,18 @@ export async function serve(options: Options): Promise<Runner> {
   }
 
   function arm(entry: Entry, deadline: number | null) {
-    clearTimeout(entry.deadlineTimer)
+    entry.cancelDeadline?.()
     entry.deadline = deadline
     if (deadline === null) return
-    const wait = Math.min(Math.max(0, deadline - Date.now()), 2 ** 31 - 1)
-    entry.deadlineTimer = setTimeout(() => {
-      if (entry.ended || entry.deadline !== deadline) return
-      if (Date.now() < deadline) return arm(entry, deadline)
-      entry.reason ??= "timeout"
-      signal(entry, "SIGTERM")
-    }, wait)
+    entry.cancelDeadline = schedule(
+      () => {
+        if (entry.ended || entry.deadline !== deadline) return
+        if (Date.now() < deadline) return arm(entry, deadline)
+        entry.reason ??= "timeout"
+        signal(entry, "SIGTERM")
+      },
+      Math.min(Math.max(0, deadline - Date.now()), 2 ** 31 - 1),
+    )
   }
 
   function signal(entry: Entry, name: string) {
@@ -338,7 +340,7 @@ export async function serve(options: Options): Promise<Runner> {
   }
 
   function end(entry: Entry, status: { code: number | null; signal: string | null }) {
-    clearTimeout(entry.deadlineTimer)
+    entry.cancelDeadline?.()
     entry.ended = true
     const layout = finalize(entry)
     const exit: RunnerProtocol.Exit = {

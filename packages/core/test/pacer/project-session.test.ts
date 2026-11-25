@@ -170,6 +170,7 @@ const settled = <A, E, R>(effect: Effect.Effect<A, E, R>, done: (value: A) => bo
 const named = (project: string, directory: string, name: string) => ({
   project,
   headers: PacerHeaders.project(project, { name, remote: remotes[directory] }),
+  repository: directory,
 })
 const none = { project: undefined, headers: {}, why: PacerProject.OUTSIDE_GIT }
 
@@ -307,10 +308,12 @@ describe("a helper's project in the service's Location graphs", () => {
       expect(yield* projectIn(lead)).toEqual({
         project: resolved.id,
         headers: PacerHeaders.project(resolved.id, { name: "theorysnap" }),
+        repository: resolved.directory,
       })
       expect(yield* settled(projectIn(helper), (found) => found.project !== undefined)).toEqual({
         project: resolved.id,
         headers: PacerHeaders.project(resolved.id, { name: "theorysnap" }),
+        repository: resolved.directory,
       })
     }),
   )

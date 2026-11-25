@@ -76,6 +76,9 @@ export function agent(name: string | undefined): Readonly<Record<string, string>
 
 export const WHERE = "X-Pacer-Where"
 
+/** The digest of the chat's .env values on a model request (`PacerEnv`), set as the request goes out. */
+export const ENV = "X-Pacer-Env"
+
 /**
  * Where the chat works (`PacerWhere`): on every request for a chat. The model request passes it to {@link make};
  * `PacerHttp` adds it to each request that names a chat by `X-Pacer-Session`.

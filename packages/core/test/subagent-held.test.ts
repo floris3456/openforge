@@ -235,8 +235,8 @@ const it = testEffect(
         Layer.succeed(
           PacerProject.Service,
           PacerProject.Service.of({
-            chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
-            session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT } }),
+            chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
+            session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
             headers: () => ({ "X-Pacer-Project": PROJECT }),
           }),
         ),

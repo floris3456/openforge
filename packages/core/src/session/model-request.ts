@@ -18,7 +18,7 @@ import {
   type ToolResultPart,
   UserMessage,
 } from "@opencode/ai/effect"
-import type { StreamOptions } from "@opencode/ai/route"
+import { composeMiddleware, type StreamOptions } from "@opencode/ai/route"
 import type {
   SessionCompaction,
   SessionContext,
@@ -41,6 +41,7 @@ import { ImageBudget } from "../image/budget.js"
 import { ImageFit } from "../image/fit.js"
 import { PacerHeaders } from "../pacer/headers.js"
 import { PacerEndpoint } from "../pacer/endpoint.js"
+import { PacerEnv } from "../pacer/env.js"
 import { PacerWhere } from "../pacer/where.js"
 import { PacerOffer } from "../pacer/offer.js"
 import type { PacerPins } from "../pacer/pins.js"
@@ -371,6 +372,7 @@ export const layer = Layer.effect(
     const database = yield* Effect.serviceOption(Database.Service)
     const starts = yield* Effect.serviceOption(SessionPromptStart.Service)
     const where = yield* Effect.serviceOption(PacerWhere.Service)
+    const env = yield* Effect.serviceOption(PacerEnv.Service)
     // openforge: the tool's images arrive whole in its result and are fitted once, here (ImageBank).
     const bankImages = (
       execution: Effect.Effect<Tool.NormalizedResult, Tool.Error>,
@@ -394,11 +396,19 @@ export const layer = Layer.effect(
       const session = input.session
       const model = input.model
       const scope = { sessionID: session.id, agent: input.agent, model: model.ref, kind }
-      const project = (yield* pacerProject.session(session)).headers
+      const projected = yield* pacerProject.session(session)
+      const project = projected.headers
       const place =
         String(model.ref.providerID) === PacerEndpoint.id && Option.isSome(where)
           ? yield* where.value.folder(session.location.directory)
           : undefined
+      // openforge: the .env values CPP hides as exact ones are its project's repository's, else its own folder's.
+      const envPlace =
+        projected.project !== undefined
+          ? { root: projected.repository, deep: true }
+          : { root: session.location.directory, deep: false }
+      const envHttp =
+        String(model.ref.providerID) === PacerEndpoint.id && Option.isSome(env) ? env.value.http(envPlace) : undefined
       const tools = input.tools ?? {
         definitions: [],
         execute: () => new Tool.Error({ message: "Tools are not available for this request" }),
@@ -657,7 +667,8 @@ export const layer = Layer.effect(
         request.model.route.protocol === "ai-sdk" || webSocket
           ? undefined
           : SessionProxyRequest.capture(httpHooks, (version) => pacerTools.seen(session.id, version))
-      const http = proxy?.http ?? httpHooks
+      // The set goes nearest the wire: the hooks and the request ID see one request and its last answer.
+      const http = composeMiddleware(proxy?.http ?? httpHooks, envHttp)
 
       return {
         event: shaped,
@@ -674,6 +685,10 @@ export const layer = Layer.effect(
         executeTool: (call: Parameters<Prepared["executeTool"]>[0]) =>
           tools.execute({ ...call, definitions: runs }).pipe(
             (execution) => (input.images ? bankImages(execution, session.id, input.images, call.call.name) : execution),
+            (execution) =>
+              envHttp && Option.isSome(env)
+                ? Effect.ensuring(execution, env.value.named(envPlace, call.call.input, session.location.directory))
+                : execution,
             Effect.catchCauseFilter(
               (cause) => {
                 const decline = cause.reasons
@@ -715,5 +730,6 @@ export const node = makeLocationNode({
     Database.node,
     SessionPromptStart.node,
     PacerWhere.node,
+    PacerEnv.node,
   ],
 })

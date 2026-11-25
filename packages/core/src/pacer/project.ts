@@ -43,6 +43,8 @@ export type Chat =
       readonly project: string
       /** The headers naming it ({@link PacerHeaders.project}). */
       readonly headers: Readonly<Record<string, string>>
+      /** The root of the checkout the project comes from, whose .env files CPP is handed (`PacerEnv`). */
+      readonly repository: string
     }
   | {
       /** A chat outside any project (outside git), which has no memory, and names none. */
@@ -116,7 +118,7 @@ export const layer = Layer.effect(
           const chat =
             project === undefined
               ? { project, headers: {}, why: git ? NO_IDENTITY : OUTSIDE_GIT }
-              : { project, headers: headers(project) }
+              : { project, headers: headers(project), repository: location.project.directory }
           if (chats.size >= KEPT) chats.clear()
           chats.set(projectID, { entries, chat })
           return chat

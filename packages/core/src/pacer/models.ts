@@ -129,6 +129,11 @@ export interface Memory {
    */
   readonly reviewItems: boolean
   /**
+   * Whether a step takes items and holds review rounds of its own (workspace spec `docs/specs/picture-hand-ins.md`,
+   * section 5): a helper on a step then hands its pictures in on the step, and `MemoryHandIn` checks that hand-in.
+   */
+  readonly stepItems: boolean
+  /**
    * Whether the server says what a lead owes its helper's handed-in rounds (`GET …/owed`, the workspace's task
    * khtzd8a7qje3): openforge then holds a lead's message to that helper until it answers them (`MemoryHeld`).
    */
@@ -325,6 +330,7 @@ const MemoryBlock = Schema.Struct({
   goals: Schema.optional(Schema.Unknown),
   later: Schema.optional(Schema.Unknown),
   review_items: Schema.optional(Schema.Unknown),
+  step_items: Schema.optional(Schema.Unknown),
   review_owed: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
   identities: Schema.optional(Schema.Unknown),
@@ -524,6 +530,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           goals: memory.goals === true,
           later: memory.later === true,
           reviewItems: memory.review_items === true,
+          stepItems: memory.step_items === true,
           reviewOwed: memory.review_owed === true,
           inspect: memory.inspect === true,
           identities: memory.identities === true,

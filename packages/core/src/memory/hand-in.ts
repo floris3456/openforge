@@ -22,6 +22,12 @@ import { MemoryTask } from "./task.js"
 // that moment, a picture its work made. When its task went active is CPP's to say (`GET …/tasks/{id}`); what the chat
 // looked at is its own history, each picture a tool's result named by the path it was read from. The rule and its words
 // are openforge's. A lead is never refused, and a hand-in is never stopped by a read that failed.
+//
+// A step holds review rounds of its own on a server that says `step_items` (section 5, the lead's decision of
+// 2026-11-25): a helper on a step hands its pictures in on the step, checked against when the step went active, and a
+// refusal always asks for the items on the call's own task or step. Without `step_items` a step's items could only go
+// on its task, whose open round may be a lead's hand-in waiting for the person, so a chat on a step and a call on a
+// step are never refused there.
 
 /** How long the read of the chat's task may take; without an answer the call goes as before. */
 export const READ = "5 seconds"
@@ -31,8 +37,9 @@ export const NAMED = 20
 export interface Interface {
   /**
    * Why `input`, a call of CPP's task tool by `session` as `agent` (its role), is not sent ({@link refusedText}): the
-   * pictures it should hand in as items, and how. Undefined when it goes: a lead's, one with items or that hands nothing in, on a server
-   * without review items, or when its task cannot be read (logged). Never fails.
+   * pictures it should hand in as items, and how. Undefined when it goes: a lead's, one with items or that hands nothing
+   * in, on a server without review items, one on a step where steps take no items, or when its task or step cannot be
+   * read (logged). Never fails.
    */
   readonly refusal: (session: SessionSchema.Info, agent: string, input: unknown) => Effect.Effect<string | undefined>
 }
@@ -113,44 +120,55 @@ const layer = Layer.effect(
       input: unknown,
     ) {
       if (session.parentID === undefined || !isRecord(input) || typeof input.id !== "string") return undefined
+      const id = input.id
       if ((input.state !== "review" && input.state !== "done") || gives(input)) return undefined
       const inside = MemoryTask.inside(session.metadata)
       if (inside === undefined) return undefined
-      if ((yield* catalogs.get())?.pacer?.memory?.reviewItems !== true) return undefined
+      const memory = (yield* catalogs.get())?.pacer?.memory
+      if (memory?.reviewItems !== true) return undefined
+      // Where steps take no items, a step's could only go on its task, where they could replace a lead's hand-in.
+      if (memory.stepItems !== true && (inside.subtask !== undefined || id !== inside.task)) return undefined
+      // A chat on a step hands in only that step: its calls on another step or on the task go.
+      if (inside.subtask !== undefined && id !== inside.subtask) return undefined
       const began = DateTime.toEpochMillis(session.time.created)
       const calls = yield* callsSince(session.id, began)
       // Most hand-ins looked at no picture: they go without a read of the task.
       if (!calls.some((call) => call.pictures.length > 0)) return undefined
       const chat = yield* projects.session(session)
       if (chat.project === undefined) return undefined
+      // What the chat works on, whose going active the pictures are counted from: its step, or its task.
+      const own = inside.subtask ?? inside.task
+      const kind = inside.subtask === undefined ? "task" : "step"
       const read = yield* client
         .withHeaders(
           PacerHeaders.chat({ sessionID: session.id, parentID: session.parentID, project: chat.headers, agent }),
         )
-        .task(chat.project, inside.task, { timeout: READ })
+        .task(chat.project, own, { timeout: READ })
         .pipe(
           Effect.catch((error) =>
-            Effect.logWarning("sent a helper's hand-in without knowing when its task went active", {
+            Effect.logWarning(`sent a helper's hand-in without knowing when its ${kind} went active`, {
               reason: error.message,
             }).pipe(Effect.as(undefined)),
           ),
         )
       if (read === undefined) return undefined
-      const step = read.subtasks.find((subtask) => subtask.id === input.id)
-      if (input.id !== inside.task && step === undefined) return undefined
-      // Done hands in only on the last open step, which sends the task to review.
-      if (
-        input.state === "done" &&
-        (step === undefined || closed(step) || read.subtasks.some((other) => other !== step && !closed(other)))
-      )
-        return undefined
+      if (inside.subtask === undefined) {
+        const step = read.subtasks.find((subtask) => subtask.id === id)
+        if (id !== inside.task && step === undefined) return undefined
+        // On its task's step, done hands in only on the last open one, which sends the task to review.
+        if (
+          input.state === "done" &&
+          (step === undefined || closed(step) || read.subtasks.some((other) => other !== step && !closed(other)))
+        )
+          return undefined
+      }
       // A helper on a step of its lead's task, which went active long before, counts from its own start.
       const moment = Math.max(wentActive(read), began)
       const since = calls.filter((call) => call.at >= moment)
-      if (since.some((call) => gaveItems(call, inside.task))) return undefined
+      if (since.some((call) => gaveItems(call, [id, own]))) return undefined
       const pictures = yield* changedAfter(since, moment)
       if (pictures.length === 0) return undefined
-      return refusedText(inside.task, step !== undefined, pictures)
+      return refusedText(kind, own, pictures)
     })
 
     return Service.of({ refusal })
@@ -164,19 +182,16 @@ export const node = makeLocationNode({
 })
 
 /**
- * Why the call is not sent, after `Not sent: `: the pictures, and that the ones showing the work go as items, on the
- * task itself for a step.
+ * Why the call is not sent, after `Not sent: `: the pictures looked at since the chat's task or step `id` went active,
+ * and that the ones showing the work go as items in the call itself, on its own task or step.
  */
-export function refusedText(task: string, step: boolean, pictures: ReadonlyArray<string>) {
+export function refusedText(kind: "task" | "step", id: string, pictures: ReadonlyArray<string>) {
   const more = pictures.length - NAMED
   const named = `${pictures.slice(0, NAMED).join(", ")}${more > 0 ? ` and ${more} more` : ""}`
-  const how = "each {picture, comment} saying what it shows and what to judge"
   return [
-    `since task ${task} went active you looked at pictures changed after that: ${named}.`,
+    `since ${kind} ${id} went active you looked at pictures changed after that: ${named}.`,
     "Work that made pictures goes to review with them as items:",
-    step
-      ? `first give those that show the work as items on task ${task} (task with id ${task} and items, ${how}), then send this again.`
-      : `send this again with items, those that show the work, ${how}.`,
+    "send this again with items, those that show the work, each {picture, comment} saying what it shows and what to judge.",
   ].join(" ")
 }
 
@@ -219,13 +234,14 @@ function gives(input: Readonly<Record<string, unknown>>) {
   return [input.items, input.pictures].some((list) => Array.isArray(list) && list.length > 0)
 }
 
-/** Whether `call` gave `task` items, and was not refused. */
-function gaveItems(call: Call, task: string) {
+/** Whether `call` gave one of `tasks` items, and was not refused. */
+function gaveItems(call: Call, tasks: ReadonlyArray<string>) {
   return (
     call.tool === "task" &&
     call.status === "completed" &&
     isRecord(call.input) &&
-    call.input.id === task &&
+    typeof call.input.id === "string" &&
+    tasks.includes(call.input.id) &&
     gives(call.input)
   )
 }

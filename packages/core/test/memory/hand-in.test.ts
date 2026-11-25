@@ -81,6 +81,8 @@ afterAll(async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 const reviewing = () => catalogOf(true, { prompt: false, plans: true, reviewItems: true })
+/** A server whose steps take items and hold rounds of their own (section 5). */
+const stepping = () => catalogOf(true, { prompt: false, plans: true, reviewItems: true, stepItems: true })
 const configs = Effect.runSync(Layer.build(Config.testLayer()).pipe(Effect.scoped))
 
 const endpointRef = Effect.runSync(SubscriptionRef.make<PacerEndpoint.Endpoint | undefined>(endpointAt(server.origin)))
@@ -225,10 +227,15 @@ const STARTED = 60_000
 
 /**
  * A chat in a project of its own, a helper (a child of its lead) unless `lead`, inside its task, which went active
- * as the chat began: on the task itself, or on its first step of `steps`.
+ * as the chat began, its first step of `steps` too: on that step, or on the task itself with `onTask` or no steps.
  */
 const setup = Effect.fnUntraced(function* (
-  input: { readonly lead?: boolean; readonly steps?: number; readonly catalog?: PacerModels.Catalog } = {},
+  input: {
+    readonly lead?: boolean
+    readonly steps?: number
+    readonly onTask?: boolean
+    readonly catalog?: PacerModels.Catalog
+  } = {},
 ) {
   Effect.runSync(SubscriptionRef.set(catalogRef, input.catalog ?? reviewing()))
   server.reset()
@@ -260,17 +267,18 @@ const setup = Effect.fnUntraced(function* (
       }).then((answer) => answer.json() as Promise<{ task: { id: string } }>),
     ).pipe(Effect.map((answer) => answer.task.id))
   const make = (title: string, parent?: string) => api("/tasks", { title, ...(parent ? { parent } : {}), by })
-  const activate = (id: string) => api(`/tasks/${id}/state`, { state: "active", by })
+  const change = (id: string, state: string) => api(`/tasks/${id}/state`, { state, by })
   const task = yield* make("Draw the counter")
-  yield* activate(task)
+  yield* change(task, "active")
   const steps = yield* Effect.forEach(
     Array.from({ length: input.steps ?? 0 }, (_, n) => `Step ${n + 1}`),
     (title) => make(title, task),
   )
-  if (steps[0]) yield* activate(steps[0])
-  const inside = { task, ...(steps[0] ? { subtask: steps[0] } : {}) }
+  if (steps[0]) yield* change(steps[0], "active")
+  const step = input.onTask ? undefined : steps[0]
+  const inside = { task, ...(step ? { subtask: step } : {}) }
   // CPP keeps the chat's place; openforge's metadata says the same, as after the call that put it there.
-  server.store.place(key, PacerSessionID.make(sessionID), { task, subtask: steps[0] ?? null })
+  server.store.place(key, PacerSessionID.make(sessionID), { task, subtask: step ?? null })
   const began = Date.now() - STARTED
   const insert = (id: Session.ID, parent?: Session.ID) =>
     db
@@ -309,6 +317,8 @@ const setup = Effect.fnUntraced(function* (
     steps,
     /** Task `id`'s state on the server. */
     state: read,
+    /** Sets task `id`'s state on the server, as another chat would. */
+    change: (id: string, state: string) => change(id, state).pipe(Effect.asVoid),
     prompt: (text: string) =>
       session.prompt({ sessionID, text, resume: false }).pipe(Effect.andThen(session.resume(sessionID))),
     /** The results of the chat's tool calls, by call. */
@@ -359,8 +369,8 @@ const older = (name: string) => picture(name, Date.now() - 3_600_000)
 const ok = (name: string) => ({ name, status: "completed" as const, error: undefined })
 const onTask = (task: string, pictures: string) =>
   `Not sent: since task ${task} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: send this again with items, those that show the work, each {picture, comment} saying what it shows and what to judge.`
-const onStep = (task: string, pictures: string) =>
-  `Not sent: since task ${task} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: first give those that show the work as items on task ${task} (task with id ${task} and items, each {picture, comment} saying what it shows and what to judge), then send this again.`
+const onStep = (step: string, pictures: string) =>
+  `Not sent: since step ${step} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: send this again with items, those that show the work, each {picture, comment} saying what it shows and what to judge.`
 
 describe("a helper's hand-in", () => {
   it.live("that looked at a picture its work made is refused without items, naming it, and goes with them", () =>
@@ -471,33 +481,64 @@ describe("a helper's hand-in", () => {
     }),
   )
 
-  it.live("done on its last open step is refused without the task's items, and goes once it gave them", () =>
+  it.live(
+    "review on a step of its task is refused in its task's words, asking for items on the step, and goes with them",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup({ steps: 2, onTask: true, catalog: stepping() })
+        const step = h.steps[0]!
+        const front = made("front.png")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-read", "read", { path: front }),
+          TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Drawn." }),
+          TestLLM.toolCall("call-items", "task", {
+            id: step,
+            state: "review",
+            items: [{ picture: front, comment: "The front." }],
+          }),
+          TestLLM.text("Handed in.", "after"),
+        )
+        yield* h.prompt("draw the counter")
+        expect(yield* h.results()).toEqual([
+          ok("read"),
+          { name: "task", status: "error", error: onTask(h.task, front) },
+          ok("task"),
+        ])
+        // Only the call with items reached the server, on the step: nothing was given on the task.
+        expect(h.sent().map((call) => call.body)).toMatchObject([{ id: step, state: "review" }])
+        expect(yield* h.state(step)).toBe("review")
+      }),
+  )
+
+  it.live("done on its task's last open step is refused the same way, and goes with items on the step", () =>
     Effect.gen(function* () {
-      const h = yield* setup({ steps: 1 })
+      const h = yield* setup({ steps: 1, onTask: true, catalog: stepping() })
       const step = h.steps[0]!
       const front = made("front.png")
       yield* h.llm.push(
         TestLLM.toolCall("call-read", "read", { path: front }),
         TestLLM.toolCall("call-done", "task", { id: step, state: "done", note: "Drawn." }),
-        TestLLM.toolCall("call-items", "task", { id: h.task, items: [{ picture: front, comment: "The front." }] }),
-        TestLLM.toolCall("call-done-again", "task", { id: step, state: "done", note: "Drawn." }),
+        TestLLM.toolCall("call-done-again", "task", {
+          id: step,
+          state: "done",
+          items: [{ picture: front, comment: "The front." }],
+        }),
         TestLLM.text("Handed in.", "after"),
       )
       yield* h.prompt("draw the counter")
       expect(yield* h.results()).toEqual([
         ok("read"),
-        { name: "task", status: "error", error: onStep(h.task, front) },
-        ok("task"),
+        { name: "task", status: "error", error: onTask(h.task, front) },
         ok("task"),
       ])
+      expect(h.sent().map((call) => call.body)).toMatchObject([{ id: step, state: "done" }])
       expect(yield* h.state(step)).toBe("done")
-      expect(yield* h.state(h.task)).toBe("review")
     }),
   )
 
-  it.live("done on a step that is not the last goes: nothing goes to review", () =>
+  it.live("done on a step of its task that is not the last goes: nothing goes to review", () =>
     Effect.gen(function* () {
-      const h = yield* setup({ steps: 2 })
+      const h = yield* setup({ steps: 2, onTask: true, catalog: stepping() })
       const front = made("front.png")
       yield* h.llm.push(
         TestLLM.toolCall("call-read", "read", { path: front }),
@@ -508,6 +549,24 @@ describe("a helper's hand-in", () => {
       expect(yield* h.results()).toEqual([ok("read"), ok("task")])
       expect(yield* h.state(h.steps[0]!)).toBe("done")
       expect(yield* h.state(h.task)).toBe("active")
+    }),
+  )
+
+  it.live("on a step of its task goes on a server whose steps take no items: they could only go on the task", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 2, onTask: true })
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-done", "task", { id: h.steps[0], state: "done", note: "Drawn." }),
+        TestLLM.toolCall("call-review", "task", { id: h.steps[1], state: "review", note: "Drawn too." }),
+        // Now its last open step.
+        TestLLM.toolCall("call-done-last", "task", { id: h.steps[1], state: "done", note: "Drawn too." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task"), ok("task"), ok("task")])
+      expect(yield* h.state(h.steps[1]!)).toBe("done")
     }),
   )
 
@@ -542,6 +601,158 @@ describe("a helper's hand-in", () => {
       yield* h.prompt("draw the counter")
       expect(yield* h.results()).toEqual([ok("read"), ok("task")])
       expect(yield* h.state(h.task)).toBe("review")
+    }),
+  )
+})
+
+// Section 5, item 4: a helper that works on a step of its lead's task hands its pictures in on the step, where they
+// open the step's own round, never on the task, whose open round may be its lead's.
+describe("a helper's hand-in on its step", () => {
+  it.live("that looked at a picture it made is refused without items, in its step's words, and goes with them", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 2, catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "The counter is drawn." }),
+        TestLLM.toolCall("call-items", "task", {
+          id: step,
+          state: "review",
+          items: [{ picture: front, comment: "The counter from the front." }],
+        }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onStep(step, front) },
+        ok("task"),
+      ])
+      // Only the call with items reached the server, on the step; the task was not touched.
+      expect(h.sent().map((call) => call.body)).toMatchObject([{ id: step, state: "review" }])
+      expect(yield* h.state(step)).toBe("review")
+      expect(yield* h.state(h.task)).toBe("active")
+    }),
+  )
+
+  it.live("done on its step is refused the same way, last open step or not, and goes with items", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 2, catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-done", "task", { id: step, state: "done", note: "Drawn." }),
+        TestLLM.toolCall("call-done-again", "task", {
+          id: step,
+          state: "done",
+          items: [{ picture: front, comment: "The front." }],
+        }),
+        TestLLM.text("On to the next.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onStep(step, front) },
+        ok("task"),
+      ])
+      expect(yield* h.state(step)).toBe("done")
+    }),
+  )
+
+  it.live("that gave its step the pictures as items earlier hands in with a note", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-items", "task", { id: step, items: [{ picture: front, comment: "The front." }] }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "The counter is drawn." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task"), ok("task")])
+      expect(yield* h.state(step)).toBe("review")
+    }),
+  )
+
+  it.live("counts from its step's going active, not its task's", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, catalog: stepping() })
+      const step = h.steps[0]!
+      // Changed after the task went active and before its step went active again.
+      yield* Effect.sleep("10 millis")
+      const between = picture("between.png", Date.now())
+      yield* Effect.sleep("10 millis")
+      yield* h.change(step, "todo")
+      yield* h.change(step, "active")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: between }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Nothing new to show." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("look again")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task")])
+      expect(yield* h.state(step)).toBe("review")
+    }),
+  )
+
+  it.live("goes on another step and on its task: only its own step's hand-in is checked", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 2, catalog: stepping() })
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-other", "task", { id: h.steps[1], state: "review", note: "The other is drawn." }),
+        TestLLM.toolCall("call-task", "task", { id: h.task, state: "review", note: "All drawn." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task"), ok("task")])
+      expect(h.sent()).toHaveLength(2)
+      expect(yield* h.state(h.steps[1]!)).toBe("review")
+      expect(yield* h.state(h.task)).toBe("review")
+    }),
+  )
+
+  it.live("goes on a server whose steps take no items: they could only go on the task", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1 })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Drawn." }),
+        // Its task's last open step: done sends the task to review.
+        TestLLM.toolCall("call-done", "task", { id: step, state: "done", note: "Drawn." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task"), ok("task")])
+      expect(yield* h.state(step)).toBe("done")
+      expect(yield* h.state(h.task)).toBe("review")
+    }),
+  )
+
+  it.live("goes as before when the server cannot read its step", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      server.control.answer = (request) =>
+        request.method === "GET" && request.path === `/pacer/v1/memory/${h.project}/tasks/${step}`
+          ? Response.json({ error: { type: "internal", message: "down" } }, { status: 503 })
+          : server.pass(request)
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "The counter is drawn." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([ok("read"), ok("task")])
+      expect(yield* h.state(step)).toBe("review")
     }),
   )
 })

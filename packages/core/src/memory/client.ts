@@ -110,8 +110,8 @@ export interface Owed extends Schema.Schema.Type<typeof Owed> {}
 const OwedAnswer = Schema.Struct({ owed: Schema.Array(Owed) })
 /**
  * A task as `GET …/tasks/{id}` answers it, as far as openforge reads it: its state and when it was made, its changes
- * newest first (at most 20, the making not among them; an edit's holds the `title` or `description` it set), and its
- * subtasks in their order.
+ * newest first (at most 20, the making not among them; an edit's holds the `title` or `description` it set; `by.chat`
+ * the chat that made it, openforge's session id for its chats), and its subtasks in their order.
  */
 export const TaskRead = Schema.Struct({
   task: Schema.Struct({ id: Schema.String, state: Schema.String, at: Schema.Number }),
@@ -121,6 +121,7 @@ export const TaskRead = Schema.Struct({
       at: Schema.Number,
       title: maybe(Schema.String),
       description: maybe(Schema.String),
+      by: maybe(Schema.Struct({ chat: maybe(Schema.String) })),
     }),
   ),
   subtasks: Schema.Array(Schema.Struct({ id: Schema.String, state: Schema.String })),

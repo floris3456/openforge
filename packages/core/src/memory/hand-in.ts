@@ -28,7 +28,8 @@ import { MemoryTask } from "./task.js"
 // `done` there is asked to go to review instead, so that its lead judges the step. Without `step_items` its items could
 // only go on the lead's task, whose open round may be a lead's hand-in waiting for the person, so a chat on a step is
 // never refused there. A helper whose chat works on its task itself hands in on the task, as above: that round is its
-// hand-in. Either counts from its task's or step's last going active or back to todo, as a deny sends it.
+// hand-in. Either counts from its task's or step's last going active or back to todo, as a deny sends it; the chat's
+// own notes on it, kept as changes to the same state, do not count.
 
 /** How long the read of the chat's task may take; without an answer the call goes as before. */
 export const READ = "5 seconds"
@@ -163,7 +164,7 @@ const layer = Layer.effect(
           return undefined
       }
       // A helper on a step of its lead's task, which went active long before, counts from its own start.
-      const moment = Math.max(opened(read), began)
+      const moment = Math.max(opened(read, session.id), began)
       const since = calls.filter((call) => call.at >= moment)
       if (since.some((call) => gaveItems(call, own))) return undefined
       const pictures = yield* changedAfter(since, moment)
@@ -260,15 +261,18 @@ function closed(task: { readonly state: string }) {
 }
 
 /**
- * When the task last went active or back to todo, as a deny sends it: its newest such change that is no edit, else
- * when it was made. Its earlier rounds' items then no longer let a hand-in go.
+ * When the task last went active or back to todo, as a deny sends it: its newest such change that is no edit, made by
+ * another chat than `chat` (a lead's new round) or changing the state (the next older change has another, or none is
+ * listed), else when it was made. A note is kept as a change to the same state, and the chat's own notes on its active
+ * task do not restart the moment. Its earlier rounds' items then no longer let a hand-in go.
  */
-function opened(read: MemoryClient.TaskRead) {
+function opened(read: MemoryClient.TaskRead, chat: string) {
   const change = read.changes.find(
-    (change) =>
+    (change, n) =>
       (change.state === "active" || change.state === "todo") &&
       (change.title ?? null) === null &&
-      (change.description ?? null) === null,
+      (change.description ?? null) === null &&
+      (change.by?.chat !== chat || read.changes[n + 1]?.state !== change.state),
   )
   return change?.at ?? read.task.at
 }

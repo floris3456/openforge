@@ -267,7 +267,8 @@ const setup = Effect.fnUntraced(function* (
       }).then((answer) => answer.json() as Promise<{ task: { id: string } }>),
     ).pipe(Effect.map((answer) => answer.task.id))
   const make = (title: string, parent?: string) => api("/tasks", { title, ...(parent ? { parent } : {}), by })
-  const change = (id: string, state: string) => api(`/tasks/${id}/state`, { state, by })
+  const change = (id: string, state: string, note?: string) =>
+    api(`/tasks/${id}/state`, { state, ...(note === undefined ? {} : { note }), by })
   const task = yield* make("Draw the counter")
   yield* change(task, "active")
   const steps = yield* Effect.forEach(
@@ -317,8 +318,8 @@ const setup = Effect.fnUntraced(function* (
     steps,
     /** Task `id`'s state on the server. */
     state: read,
-    /** Sets task `id`'s state on the server, as another chat would. */
-    change: (id: string, state: string) => change(id, state).pipe(Effect.asVoid),
+    /** Sets task `id`'s state on the server, with `note` if given, as another chat would. */
+    change: (id: string, state: string, note?: string) => change(id, state, note).pipe(Effect.asVoid),
     prompt: (text: string) =>
       session.prompt({ sessionID, text, resume: false }).pipe(Effect.andThen(session.resume(sessionID))),
     /** The results of the chat's tool calls, by call. */
@@ -831,6 +832,114 @@ describe("a helper's hand-in on its step", () => {
       expect(yield* h.state(step)).toBe("review")
     }),
   )
+})
+
+// The moment is the newest change to active or todo that another chat made or that changed the state (the lead's rule
+// of 2026-11-25): a note on an active task or step is kept as a change to the same state, and the chat's own notes
+// must not restart it. A note is sent here with `state: "active"`, which the small server keeps as CLIProxyPacer
+// keeps a note: a change to the same state, by the chat.
+const places = [
+  {
+    on: "task",
+    setup: () => setup(),
+    own: (h: { readonly task: string }) => h.task,
+    refused: onTask,
+  },
+  {
+    on: "step",
+    setup: () => setup({ steps: 1, catalog: stepping() }),
+    own: (h: { readonly steps: ReadonlyArray<string> }) => h.steps[0]!,
+    refused: onStep,
+  },
+]
+
+describe("a helper's notes and the moment", () => {
+  for (const place of places) {
+    it.live(`a note of its own on its active ${place.on} does not restart it: the pictures before it count`, () =>
+      Effect.gen(function* () {
+        const h = yield* place.setup()
+        const own = place.own(h)
+        const front = made("front.png")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-read", "read", { path: front }),
+          TestLLM.toolCall("call-note", "task", {
+            id: own,
+            state: "active",
+            note: "Rendered the front; the side next.",
+          }),
+          TestLLM.toolCall("call-review", "task", { id: own, state: "review", note: "The counter is drawn." }),
+          TestLLM.text("Refused.", "after"),
+        )
+        yield* h.prompt("draw the counter")
+        expect(yield* h.results()).toEqual([
+          ok("read"),
+          ok("task"),
+          { name: "task", status: "error", error: place.refused(own, front) },
+        ])
+        // The note reached the server; the hand-in did not.
+        expect(h.sent().map((call) => call.body)).toMatchObject([{ id: own, state: "active" }])
+        expect(yield* h.state(own)).toBe("active")
+      }),
+    )
+
+    it.live(
+      `a note from another chat on its active ${place.on}, as a lead's new round, restarts it: the pictures before it do not count`,
+      () =>
+        Effect.gen(function* () {
+          const h = yield* place.setup()
+          const own = place.own(h)
+          const front = made("front.png")
+          yield* h.llm.push(
+            TestLLM.toolCall("call-read", "read", { path: front }),
+            TestLLM.text("Rendered the front.", "after"),
+          )
+          yield* h.prompt("draw the counter")
+          // The times are in milliseconds: the lead's note comes after the chat's read.
+          yield* Effect.sleep("10 millis")
+          yield* h.change(own, "active", "Second round: draw the side too.")
+          yield* h.llm.push(
+            TestLLM.toolCall("call-review", "task", { id: own, state: "review", note: "The side needs nothing new." }),
+            TestLLM.text("Handed in.", "after"),
+          )
+          yield* h.prompt("draw the side too")
+          expect(yield* h.results()).toEqual([ok("read"), ok("task")])
+          expect(yield* h.state(own)).toBe("review")
+        }),
+    )
+
+    it.live(`its own move of its ${place.on} from todo to active after a deny restarts it`, () =>
+      Effect.gen(function* () {
+        const h = yield* place.setup()
+        const own = place.own(h)
+        const front = made("front.png")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-read", "read", { path: front }),
+          TestLLM.toolCall("call-items", "task", {
+            id: own,
+            state: "review",
+            items: [{ picture: front, comment: "The counter from the front." }],
+          }),
+          TestLLM.text("Handed in.", "after"),
+        )
+        yield* h.prompt("draw the counter")
+        // The times are in milliseconds: the deny, then a picture changed after it, then the chat takes the work up.
+        yield* Effect.sleep("10 millis")
+        yield* h.change(own, "todo", "The front is too dark.")
+        yield* Effect.sleep("10 millis")
+        const between = picture("between.png", Date.now())
+        yield* Effect.sleep("10 millis")
+        yield* h.llm.push(
+          TestLLM.toolCall("call-active", "task", { id: own, state: "active" }),
+          TestLLM.toolCall("call-read-between", "read", { path: between }),
+          TestLLM.toolCall("call-review", "task", { id: own, state: "review", note: "Nothing new to show." }),
+          TestLLM.text("Handed in.", "after"),
+        )
+        yield* h.prompt("the front is too dark")
+        expect(yield* h.results()).toEqual([ok("read"), ok("task"), ok("task"), ok("read"), ok("task")])
+        expect(yield* h.state(own)).toBe("review")
+      }),
+    )
+  }
 })
 
 describe("a lead's hand-in", () => {

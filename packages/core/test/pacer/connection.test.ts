@@ -465,6 +465,7 @@ const memoryCatalog = (at: number, news: boolean): PacerModels.Catalog => ({
       goals: true,
       later: true,
       reviewItems: true,
+      reviewOwed: false,
       inspect: false,
       news,
     },

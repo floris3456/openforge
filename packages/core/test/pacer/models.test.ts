@@ -542,6 +542,7 @@ describe("PacerModels", () => {
             goals: false,
             later: false,
             reviewItems: false,
+            reviewOwed: false,
             inspect: false,
             news: false,
           },
@@ -588,6 +589,11 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, review_items: true }))?.pacer?.memory).toMatchObject({
           later: false,
           reviewItems: true,
+        })
+        // A server that says what a lead owes its helper's rounds says so (task khtzd8a7qje3).
+        expect((yield* told({ ...block, embedding: null, review_owed: true }))?.pacer?.memory).toMatchObject({
+          reviewItems: false,
+          reviewOwed: true,
         })
         // A server with the reads of other projects says so (workspace spec cpp-inspect-cli).
         expect((yield* told({ ...block, embedding: null, inspect: true }))?.pacer?.memory).toMatchObject({

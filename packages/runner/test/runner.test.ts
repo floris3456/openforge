@@ -249,7 +249,11 @@ describe("runner", () => {
   })
 
   test("an end is told only once its exit file is written, and removed commands leave no files", async () => {
-    await using host = await served()
+    // A runner with nothing running exits once its grace has run out, and refuses a later request. The service sends
+    // a refused start to the next runner (shell-runner.test.ts in core); this bare connection would fail. On a loaded
+    // host the loop's next request, or even the first one after the runner is served, can come later than a short
+    // grace, so this runner never exits on its own, and the test stops it.
+    await using host = await served({ grace: Infinity })
     await run(
       Effect.gen(function* () {
         const connection = yield* RunnerClient.connect(host.runner.directory)
@@ -263,7 +267,7 @@ describe("runner", () => {
         }
       }),
     )
-    await host.runner.closed
+    await host.runner.shutdown()
     expect(fs.readdirSync(host.path).filter((name) => name !== "runner")).toEqual([])
   })
 

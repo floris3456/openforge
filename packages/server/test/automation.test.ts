@@ -2,11 +2,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
 import { OpenCode } from "@opencode/client"
-import { Effect } from "effect"
+import { Effect, Exit, Scope } from "effect"
 import { tmpdirScoped } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
 import { ServerProcess } from "../src/process"
+import { startChildServer } from "./fixture/child-server"
 import { startServer } from "./fixture/server"
 
 const client = (handler: (request: Request) => Promise<Response>) =>
@@ -266,8 +267,9 @@ it.live("starts one child for a due automation when two servers share a database
       ),
     )
 
-    // Seed an active automation in a short-lived scope so it falls due while no server is running.
-    const createdID = yield* Effect.scoped(
+    // Seed an active automation in a short-lived scope so it falls due while no server is running, and a probe, paused
+    // until the end.
+    const [createdID, probeID] = yield* Effect.scoped(
       Effect.gen(function* () {
         const handler = yield* ServerFetch.make({
           app: { version: "test" },
@@ -285,39 +287,73 @@ it.live("starts one child for a due automation when two servers share a database
             trigger: { type: "at", at: "in 80 millis" },
             action: { type: "prompt", prompt: "single leader check", to: { subagent: "general" } },
           })
-          return created.id
+          const probe = await seededApi.experimental.automation.create({
+            sessionID: parent.id,
+            name: "probe",
+            trigger: { type: "at", at: "in 80 millis" },
+            action: { type: "prompt", prompt: "probe", to: { session: parent.id } },
+          })
+          await seededApi.experimental.automation.pause({ automationID: probe.id })
+          return [created.id, probe.id]
         })
       }),
     )
     yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 120)))
 
-    const boot = () =>
-      ServerProcess.start<never, never>({
-        hostname: "127.0.0.1",
-        port: 0,
-        password: "secret",
-        app: { version: "test-version" },
-        database: { path: dbPath },
-        config: { directory: dir },
-        fs: { filewatcher: false },
-        models: { fetch: false },
-      })
-    const [first] = yield* Effect.all([boot(), boot()], { concurrency: 2 })
+    // The second server runs in a process of its own (fixture/child-server.ts) and so boots later than the first. Both
+    // start paused and are resumed together, so that their schedulers find the due automation at the same time.
+    const options = {
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      paused: true,
+      app: { version: "test-version" },
+      database: { path: dbPath },
+      config: { directory: dir },
+      fs: { filewatcher: false },
+      models: { fetch: false },
+    }
+    const scope = yield* Scope.Scope
+    const firstScope = yield* Scope.fork(scope)
+    const [first, second] = yield* Effect.all(
+      [
+        ServerProcess.start<never, never>(options).pipe(Effect.provideService(Scope.Scope, firstScope)),
+        startChildServer(options),
+      ],
+      { concurrency: 2 },
+    )
     const base = `http://127.0.0.1:${"port" in first.address ? first.address.port : 0}`
-    const api = OpenCode.make({
-      baseUrl: base,
-      headers: { authorization: `Basic ${btoa("opencode:secret")}` },
-    })
+    const headers = { authorization: `Basic ${btoa("opencode:secret")}` }
+    const api = OpenCode.make({ baseUrl: base, headers })
+    const other = OpenCode.make({ baseUrl: second, headers })
+    yield* Effect.promise(() => Promise.all([api, other].map((server) => server.experimental.service.resume())))
+
+    const done = (server: typeof api, automationID: string) =>
+      Effect.promise(async () => {
+        const deadline = Date.now() + 5_000
+        let current = await server.experimental.automation.get({ automationID })
+        while (current.status === "active" && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+          current = await server.experimental.automation.get({ automationID })
+        }
+        return current
+      })
+    // A run the second server began before the automation was done may not have started its child yet. With the first
+    // server stopped, which gives up the lease, the second runs the probe, and its scheduler runs one pass at a time:
+    // once the probe is done, every earlier run of the second server has ended, and its children exist. Meanwhile the
+    // second server loads the directory the probe runs in.
+    const [current] = yield* Effect.all(
+      [done(api, createdID), Effect.promise(() => other.agent.list({ location: { directory: dir } }))],
+      { concurrency: 2 },
+    )
+    yield* Scope.close(firstScope, Exit.void)
+    yield* Effect.promise(() => other.experimental.automation.resume({ automationID: probeID }))
+    const probed = yield* done(other, probeID)
 
     yield* Effect.promise(async () => {
-      const deadline = Date.now() + 5_000
-      let current = await api.experimental.automation.get({ automationID: createdID })
-      while (current.status === "active" && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 50))
-        current = await api.experimental.automation.get({ automationID: createdID })
-      }
-      const started = (await api.session.list({})).data.filter((session) => session.title === "single leader")
+      const started = (await other.session.list({})).data.filter((session) => session.title === "single leader")
       expect(current).toMatchObject({ status: "done", runCount: 1 })
+      expect(probed).toMatchObject({ status: "done", runCount: 1 })
       expect(started).toHaveLength(1)
     })
   }).pipe(Effect.scoped),

@@ -546,6 +546,7 @@ describe("PacerModels", () => {
             reviewOwed: false,
             inspect: false,
             identities: false,
+            badges: false,
             news: false,
           },
         })
@@ -612,6 +613,13 @@ describe("PacerModels", () => {
         expect((yield* told({ ...block, embedding: null, identities: true }))?.pacer?.memory).toMatchObject({
           inspect: false,
           identities: true,
+        })
+        // A server that gives each chat's agent's badge says so (workspace spec agent-badges, 3.3).
+        expect(
+          (yield* told({ ...block, embedding: null, identities: true, badges: true }))?.pacer?.memory,
+        ).toMatchObject({
+          identities: true,
+          badges: true,
         })
         // A server that keeps blocker news for the chats to tell says so (workspace spec blocker-tasks).
         expect((yield* told({ ...block, embedding: null, news: true }))?.pacer?.memory).toMatchObject({

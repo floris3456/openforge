@@ -290,7 +290,40 @@ export const Features = Schema.Struct({
    * `/identity` is offered only then.
    */
   identities: Schema.Boolean,
+  /**
+   * Each chat's agent's badge with the chat (the workspace's spec `docs/specs/agent-badges.md`, section 3, item 3):
+   * the TUI colours titles only then.
+   */
+  badges: Schema.Boolean,
 }).annotate({ identifier: "Pacer.Features" })
+
+/**
+ * A chat's agent's badge as the TUI uses it (the workspace's spec `docs/specs/agent-badges.md`, section 3, item 3): the
+ * background of the identity's one colour scheme, which the chat's title shows in, made readable on what it is drawn
+ * on, and its hue, which the agent theme takes for the root chat.
+ */
+export interface Badge extends Schema.Schema.Type<typeof Badge> {}
+export const Badge = Schema.Struct({
+  /** `#rrggbb`, lower case. */
+  background: Schema.String,
+  /** 0 to 345, in steps of 15. */
+  hue: Schema.Finite,
+}).annotate({ identifier: "Pacer.Badge" })
+
+/** The chats a TUI asks the badges of. */
+export interface BadgesQuery extends Schema.Schema.Type<typeof BadgesQuery> {}
+export const BadgesQuery = Schema.Struct({
+  sessionIDs: Schema.Array(SessionID).check(Schema.isMaxLength(500)),
+}).annotate({ identifier: "Pacer.BadgesQuery" })
+
+/**
+ * The badges known of the chats asked: `null` for a chat without an identity. A chat the service doesn't know yet is
+ * left out and read; its badge comes as `pacer.badge.updated`.
+ */
+export interface Badges extends Schema.Schema.Type<typeof Badges> {}
+export const Badges = Schema.Struct({
+  items: Schema.Array(Schema.Struct({ sessionID: SessionID, badge: Schema.NullOr(Badge) })),
+}).annotate({ identifier: "Pacer.Badges" })
 
 /** A chat that joined an agent's identity. */
 export interface IdentityChat extends Schema.Schema.Type<typeof IdentityChat> {}
@@ -689,6 +722,14 @@ const ModelsUpdated = ephemeral({ type: "pacer.models.updated", schema: { models
  */
 const ChatUpdated = ephemeral({ type: "pacer.chat.updated", schema: { chat: Chat } })
 /**
+ * A chat's badge became known, or changed with its identity, for a chat a TUI asked the badge of
+ * (`POST /api/experimental/pacer/badges`): `null` for a chat without an identity.
+ */
+const BadgeUpdated = ephemeral({
+  type: "pacer.badge.updated",
+  schema: { sessionID: SessionID, badge: Schema.NullOr(Badge) },
+})
+/**
  * CPP recorded new requests for a chat or one of its subagents: one event for the chat and one for each of its
  * parents. Requests of a chat this service doesn't hold yet are told once it does, for the newest 200 such chats.
  * Without `sessionID` when CPP had more new requests than one read takes (50 on the first read, 500 after): any chat
@@ -729,6 +770,7 @@ export const Event = {
   LoginsReady,
   ModelsUpdated,
   ChatUpdated,
+  BadgeUpdated,
   RequestsUpdated,
   NoticeAdded,
   NoticeDismissed,
@@ -739,6 +781,7 @@ export const Event = {
     LoginsReady,
     ModelsUpdated,
     ChatUpdated,
+    BadgeUpdated,
     RequestsUpdated,
     NoticeAdded,
     NoticeDismissed,

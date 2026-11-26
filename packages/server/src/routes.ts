@@ -30,6 +30,7 @@ import { ShellWrap } from "@opencode/core/shell/wrap"
 import { Job } from "@opencode/core/job"
 import { KV } from "@opencode/core/kv"
 import { Mcp } from "@opencode/core/mcp/index"
+import { PacerBadges } from "@opencode/core/pacer/badges"
 import { PacerConnection } from "@opencode/core/pacer/connection"
 import { Global } from "@opencode/util/global"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -122,6 +123,7 @@ const applicationServiceNodes = [
   PacerIdle.node,
   PacerInspect.node,
   PacerIdentity.node,
+  PacerBadges.node,
   AutoUpdate.node,
   // openforge: its work on the media files runs in the server process (spec pictures-files).
   MediaKeeper.node,

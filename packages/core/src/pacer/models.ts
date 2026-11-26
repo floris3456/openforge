@@ -149,6 +149,11 @@ export interface Memory {
    */
   readonly identities: boolean
   /**
+   * Whether the server gives each chat's agent's badge with the chat, `agent_badge` on its session view and list
+   * (workspace spec `docs/specs/agent-badges.md`, section 3, item 3): the TUI colours titles only then (`PacerBadges`).
+   */
+  readonly badges: boolean
+  /**
    * Whether the server keeps blocker news for the chats to tell (workspace spec `docs/specs/blocker-tasks.md`): the
    * connection then claims the news of the chats this install holds and wakes them with it (`PacerNews`).
    */
@@ -334,6 +339,7 @@ const MemoryBlock = Schema.Struct({
   review_owed: Schema.optional(Schema.Unknown),
   inspect: Schema.optional(Schema.Unknown),
   identities: Schema.optional(Schema.Unknown),
+  badges: Schema.optional(Schema.Unknown),
   news: Schema.optional(Schema.Unknown),
 })
 const decodeMemory = Schema.decodeUnknownOption(MemoryBlock)
@@ -534,6 +540,7 @@ export function pacerOf(pacer: NonNullable<typeof CapabilitiesAnswer.Type.pacer>
           reviewOwed: memory.review_owed === true,
           inspect: memory.inspect === true,
           identities: memory.identities === true,
+          badges: memory.badges === true,
           news: memory.news === true,
         },
       }),

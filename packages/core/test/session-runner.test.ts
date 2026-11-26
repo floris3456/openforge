@@ -6242,6 +6242,35 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests[0]?.promptCacheKey).toBe(parentID)
   })
 
+  // openforge: a subagent's question belongs to its lead, never on the person's screen (workspace task qty37j716xs8).
+  scenario("offers a subagent no question tool and tells it to put its question in its reply", function* (s) {
+    const registry = yield* Tool.Service
+    yield* transformTools(
+      registry,
+      {
+        [QuestionTool.name]: {
+          name: QuestionTool.name,
+          description: "Ask the user",
+          input: Schema.Struct({}),
+          output: Schema.Struct({}),
+          execute: () => Effect.die("a subagent asked the person"),
+        },
+      },
+      { codemode: false },
+    )
+    yield* insertSession(otherSessionID, sessionID)
+    yield* s.runPrompt("Lead's request")
+    yield* s.session.prompt({ sessionID: otherSessionID, text: "Helper's request", resume: false })
+    yield* s.session.resume(otherSessionID)
+
+    const [leadStep, helperStep] = s.requests
+    expect(leadStep?.tools.map((tool) => tool.name)).toContain(QuestionTool.name)
+    expect(helperStep?.tools.map((tool) => tool.name)).toContain("echo")
+    expect(helperStep?.tools.map((tool) => tool.name)).not.toContain(QuestionTool.name)
+    expect(helperStep?.system.map((part) => part.text).join("\n")).toMatch(/question for your lead in your reply/i)
+    expect(leadStep?.system.map((part) => part.text).join("\n")).not.toMatch(/your lead/i)
+  })
+
   scenario("runs different sessions concurrently", function* (s) {
     yield* insertSession(otherSessionID)
     yield* s.admit("Run first")

@@ -10389,6 +10389,7 @@
                     "pacer.logins.ready",
                     "pacer.models.updated",
                     "pacer.chat.updated",
+                    "pacer.badge.updated",
                     "pacer.requests.updated",
                     "pacer.notice.added",
                     "pacer.notice.dismissed",
@@ -10514,6 +10515,7 @@
                           "pacer.logins.ready",
                           "pacer.models.updated",
                           "pacer.chat.updated",
+                          "pacer.badge.updated",
                           "pacer.requests.updated",
                           "pacer.notice.added",
                           "pacer.notice.dismissed",
@@ -14953,8 +14955,67 @@
             }
           }
         },
-        "description": "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then). All false before they are read, and without CPP. Never waits on CPP. Experimental: may change without compatibility guarantees.",
+        "description": "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then); `badges`, whether it gives each chat's agent's badge (the TUI colours chats' titles only then). All false before they are read, and without CPP. Never waits on CPP. Experimental: may change without compatibility guarantees.",
         "summary": "Get what CLIProxyPacer offers the TUI's commands"
+      }
+    },
+    "/api/experimental/pacer/badges": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.pacer.badges",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Pacer.Badges"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The badge of each chat named whose badge the service knows, learnt from the chats' views and list it reads from CLIProxyPacer: the background of the chat's agent's colour scheme, which its title shows in, and its hue; null for a chat without an identity. Each chat it doesn't know yet is left out and read from its view in the background; `pacer.badge.updated` follows once its badge is known, and whenever a chat named here gets another. Empty unless CLIProxyPacer's capabilities say `memory.badges`. Never waits on CPP. Experimental: may change without compatibility guarantees.",
+        "summary": "Get chats' agents' badges",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pacer.BadgesQuery"
+              }
+            }
+          },
+          "required": true
+        }
       }
     },
     "/api/experimental/pacer/chat/{sessionID}/identities": {
@@ -24618,6 +24679,63 @@
         "required": ["items", "asOf"],
         "additionalProperties": false
       },
+      "Pacer.Badge": {
+        "type": "object",
+        "properties": {
+          "background": {
+            "type": "string"
+          },
+          "hue": {
+            "type": "number"
+          }
+        },
+        "required": ["background", "hue"],
+        "additionalProperties": false
+      },
+      "Pacer.Badges": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sessionID": {
+                  "$ref": "#/components/schemas/Session.ID"
+                },
+                "badge": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Pacer.Badge"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": ["sessionID", "badge"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+      },
+      "Pacer.BadgesQuery": {
+        "type": "object",
+        "properties": {
+          "sessionIDs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session.ID"
+            },
+            "maxItems": 500
+          }
+        },
+        "required": ["sessionIDs"],
+        "additionalProperties": false
+      },
       "Pacer.Chat": {
         "type": "object",
         "properties": {
@@ -24701,9 +24819,12 @@
         "properties": {
           "identities": {
             "type": "boolean"
+          },
+          "badges": {
+            "type": "boolean"
           }
         },
-        "required": ["identities"],
+        "required": ["identities", "badges"],
         "additionalProperties": false
       },
       "Pacer.Filter": {
@@ -29798,6 +29919,9 @@
             "$ref": "#/components/schemas/pacer.chat.updated"
           },
           {
+            "$ref": "#/components/schemas/pacer.badge.updated"
+          },
+          {
             "$ref": "#/components/schemas/pacer.requests.updated"
           },
           {
@@ -31166,6 +31290,49 @@
               }
             },
             "required": ["batch", "title", "message", "link", "items"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "created", "type", "data"],
+        "additionalProperties": false
+      },
+      "pacer.badge.updated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Event.ID"
+          },
+          "created": {
+            "type": "number"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["pacer.badge.updated"]
+          },
+          "location": {
+            "$ref": "#/components/schemas/Location.Ref"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "sessionID": {
+                "$ref": "#/components/schemas/Session.ID"
+              },
+              "badge": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Pacer.Badge"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": ["sessionID", "badge"],
             "additionalProperties": false
           }
         },

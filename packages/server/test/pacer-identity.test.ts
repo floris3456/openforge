@@ -147,7 +147,7 @@ it.live("reads a chat's project's identities and links it with the headers of th
     const svc = yield* service(stand.origin, true)
     expect(yield* svc.call("GET", "/api/experimental/pacer/features")).toEqual({
       status: 200,
-      body: { data: { identities: true } },
+      body: { data: { identities: true, badges: false } },
     })
     chats.push(yield* svc.session(repo), yield* svc.session(repo))
     const listed = yield* svc.call("GET", `/api/experimental/pacer/chat/${chats[0]}/identities`)
@@ -205,7 +205,9 @@ it.live("refuses in words: a chat outside git, CPP's refusal, a CPP without iden
       body: { message: "No chat 0b6d1c52 with an identity in this project." },
     })
     const older = yield* service(stand.origin, false)
-    expect((yield* older.call("GET", "/api/experimental/pacer/features")).body).toEqual({ data: { identities: false } })
+    expect((yield* older.call("GET", "/api/experimental/pacer/features")).body).toEqual({
+      data: { identities: false, badges: false },
+    })
     const refused = yield* older.call("GET", `/api/experimental/pacer/chat/${yield* older.session(repo)}/identities`)
     expect(refused).toMatchObject({ status: 400, body: { message: PacerIdentity.NOT_OFFERED } })
     expect(stand.seen).toHaveLength(1)

@@ -4,6 +4,7 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import type { Pacer } from "@opencode/schema/pacer"
 import type { SessionID } from "@opencode/schema/session-id"
+import { PacerBadges } from "./badges.js"
 import { PacerHeaders } from "./headers.js"
 import { PacerHttp } from "./http.js"
 import { PacerModels } from "./models.js"
@@ -94,6 +95,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const http = yield* PacerHttp.Service
     const models = yield* PacerModels.Service
+    const badges = yield* PacerBadges.Service
 
     const offered = Effect.map(models.get(), (catalog) => catalog?.pacer?.memory?.identities === true)
     const refuseUnoffered = Effect.flatMap(offered, (yes) =>
@@ -108,7 +110,11 @@ export const layer = Layer.effect(
       })
 
     return Service.of({
-      features: () => Effect.map(offered, (identities) => ({ identities })),
+      features: () =>
+        Effect.map(models.get(), (catalog) => ({
+          identities: catalog?.pacer?.memory?.identities === true,
+          badges: catalog?.pacer?.memory?.badges === true,
+        })),
 
       list: Effect.fn("PacerIdentity.list")(function* (chat: Chat) {
         yield* refuseUnoffered
@@ -146,13 +152,19 @@ export const layer = Layer.effect(
             { headers: headers(chat) },
           )
           .pipe(Effect.mapError(failure))
+        // The chat now shows the badge of the identity it is linked to.
+        if (answer.body.changed) yield* badges.forget(chat.sessionID)
         return { identity: identityOf(answer.body.identity, skewOf(answer.offset)), changed: answer.body.changed }
       }),
     })
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [PacerHttp.node, PacerModels.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer,
+  deps: [PacerHttp.node, PacerModels.node, PacerBadges.node],
+})
 
 /** CPP's clock minus this one's, from an answer's `Date`; 0 without one. */
 function skewOf(offset: PacerHttp.Offset | undefined) {

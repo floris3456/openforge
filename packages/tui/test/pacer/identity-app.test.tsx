@@ -51,7 +51,7 @@ const transcript = [
 async function app(identities: boolean) {
   const fake = pacerFake()
   fake.status = status("on")
-  fake.features = { identities }
+  fake.features = { identities, badges: false }
   fake.chats[CHAT] = chat()
   fake.identities = { items: [LEAD] }
   fake.link = (body) => ({ identity: LEAD, changed: (body as { new?: boolean }).new !== true })

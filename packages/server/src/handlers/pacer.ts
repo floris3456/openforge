@@ -1,5 +1,6 @@
 import { Agent } from "@opencode/core/agent"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
+import { PacerBadges } from "@opencode/core/pacer/badges"
 import { PacerConnection } from "@opencode/core/pacer/connection"
 import { PacerIdentity } from "@opencode/core/pacer/identity"
 import { PacerInspect } from "@opencode/core/pacer/inspect"
@@ -30,6 +31,7 @@ export const makePacer = Effect.gen(function* () {
   const models = yield* PacerModels.Service
   const inspect = yield* PacerInspect.Service
   const identity = yield* PacerIdentity.Service
+  const badges = yield* PacerBadges.Service
   const sessions = yield* Session.Service
   const locations = yield* LocationServiceMap.Service
 
@@ -92,6 +94,7 @@ export const makePacer = Effect.gen(function* () {
         Effect.mapError(unavailable),
       ),
     features: Effect.map(identity.features(), (data) => ({ data })),
+    badges: (input: Pacer.BadgesQuery) => Effect.map(badges.get(input.sessionIDs), (data) => ({ data })),
     identities: (sessionID: Session.ID) =>
       identityChat(sessionID).pipe(
         Effect.flatMap((chat) => identity.list(chat).pipe(Effect.mapError(identityError))),

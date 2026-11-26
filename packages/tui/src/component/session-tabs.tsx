@@ -53,6 +53,7 @@ import "./spinner-renderable"
 import { SPINNER_FRAMES } from "./spinner-frames"
 import { SessionTabsRailControls, SessionTabHalfRow } from "./session-tabs-rail"
 import "./title-shimmer"
+import { useTitleColour } from "../pacer/title-colour"
 
 export const TAB_SPINNERS = {
   dots: { frames: SPINNER_FRAMES, interval: 80 },
@@ -565,6 +566,7 @@ function VerticalSessionTabs(props: {
   const unreadColor = () => theme.hue.accent[200]
   const activeNumber = () => theme.hue.interactive[200]
   const idleNumber = () => tint(theme.text.formfield.base, background(), 0.55)
+  const titleColour = useTitleColour()
   const separatorUpperPulseColor = createMemo(() => tint(background(), theme.text.base, 0.04))
   const separatorLowerPulseColor = createMemo(() => tint(background(), theme.text.base, 0.05))
   const [addHovered, setAddHovered] = createSignal(false)
@@ -781,7 +783,7 @@ function VerticalSessionTabs(props: {
               const numberColor = () => {
                 const base =
                   hovered() === tab.sessionID && !selected()
-                    ? foreground()
+                    ? plain()
                     : tint(idleNumber(), tint(theme.text.base, pulseBackground(), 0.25), Number(selected()))
                 const color = tabFeedbackColor(status(), theme) ?? tint(base, glowHue(), numberGlow.value().level)
                 const runningColor = runs() ? activeNumber() : color
@@ -789,10 +791,12 @@ function VerticalSessionTabs(props: {
                   ? tint(runningColor, theme.text.base, numberIgnition.value().level)
                   : tint(runningColor, theme.text.base, Math.max(numberIgnition.value().level, 0.35 * sweepLevel()))
               }
-              const foreground = () => {
+              const plain = () => {
                 if (hovered() === tab.sessionID) return theme.text.base
                 return selected() ? theme.text.base : theme.text.muted
               }
+              // openforge (workspace spec agent-badges, 3.3): the title in its chat's agent's colour.
+              const foreground = () => titleColour(session() ? tab.sessionID : undefined, pulseBackground()) ?? plain()
               const complete = () => status().complete
               // Latched so a resolving glow fades out in the hue it lit with instead of snapping to the unread color.
               let lastGlowHue: RGBA | undefined
@@ -949,7 +953,7 @@ function VerticalSessionTabs(props: {
                             ? theme.text.base
                             : props.numbers
                               ? numberColor()
-                              : (tabFeedbackColor(status(), theme) ?? (runs() ? activeNumber() : foreground()))
+                              : (tabFeedbackColor(status(), theme) ?? (runs() ? activeNumber() : plain()))
                         }
                         unreadColor={tabFeedbackColor(status(), theme) ?? unreadColor()}
                         backgroundColor={pulseBackground()}
@@ -1284,6 +1288,7 @@ function HorizontalSessionTabs(props: {
   const dimensions = useTerminalDimensions()
   const theme = useTheme()
   const config = useConfig().data
+  const titleColour = useTitleColour()
   const animations = () => props.animations ?? config.animations ?? true
   const [addHovered, setAddHovered] = createSignal(false)
   const marquee = createTabMarquee(animations)
@@ -1595,10 +1600,13 @@ function HorizontalSessionTabs(props: {
           )
           const runs = () => status().busy && !status().attention
           const numberIgnition = createNumberIgnition(runs, () => status().promptPulse, animations)
-          const foreground = () => {
+          const plain = () => {
             if (hovered() === tab.sessionID) return theme.text.base
             return tint(theme.text.muted, theme.text.base, selection())
           }
+          // openforge (workspace spec agent-badges, 3.3): the title in its chat's agent's colour.
+          const foreground = () =>
+            titleColour(data?.session.get(tab.sessionID) ? tab.sessionID : undefined, background()) ?? plain()
           // Title characters sitting over the glow tinge toward its color, following the same
           // spatial falloff as the glow itself; characters beyond the tail stay neutral.
           const characterColor = (index: number, separator: boolean) => {
@@ -1622,7 +1630,7 @@ function HorizontalSessionTabs(props: {
             const feedback = feedbackColor()
             const base =
               hovered() === tab.sessionID && !selected()
-                ? foreground()
+                ? plain()
                 : tint(idleNumber(), tint(theme.text.base, background(), 0.25), selection())
             const color = runs() ? activeNumber() : (feedback ?? tint(base, unreadColor(), activity()))
             // The number brightens faintly as the running sweep passes beneath it.

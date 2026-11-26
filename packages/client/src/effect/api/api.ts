@@ -2193,6 +2193,7 @@ export type EventSubscribeInput = {
         | "pacer.logins.ready"
         | "pacer.models.updated"
         | "pacer.chat.updated"
+        | "pacer.badge.updated"
         | "pacer.requests.updated"
         | "pacer.notice.added"
         | "pacer.notice.dismissed"
@@ -2847,6 +2848,12 @@ export type ExperimentalPacerSettingsUpdateOperation<E = never> = (
 export type ExperimentalPacerFeaturesOutput = Pacer.Features
 export type ExperimentalPacerFeaturesOperation<E = never> = () => Effect.Effect<ExperimentalPacerFeaturesOutput, E>
 
+export type ExperimentalPacerBadgesInput = { readonly sessionIDs: ReadonlyArray<Session.ID> }
+export type ExperimentalPacerBadgesOutput = Pacer.Badges
+export type ExperimentalPacerBadgesOperation<E = never> = (
+  input: ExperimentalPacerBadgesInput,
+) => Effect.Effect<ExperimentalPacerBadgesOutput, E>
+
 export type ExperimentalPacerChatIdentitiesInput = { readonly sessionID: Session.ID }
 export type ExperimentalPacerChatIdentitiesOutput = Pacer.Identities
 export type ExperimentalPacerChatIdentitiesOperation<E = never> = (
@@ -2952,6 +2959,7 @@ export interface ExperimentalApi<E = never> {
       readonly update: ExperimentalPacerSettingsUpdateOperation<E>
     }
     readonly features: ExperimentalPacerFeaturesOperation<E>
+    readonly badges: ExperimentalPacerBadgesOperation<E>
     readonly notices: {
       readonly list: ExperimentalPacerNoticesListOperation<E>
       readonly dismiss: ExperimentalPacerNoticesDismissOperation<E>

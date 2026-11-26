@@ -35,6 +35,31 @@ const Marks = Schema.Struct({
   settings_at: maybe(Schema.Number),
 })
 
+/**
+ * The chat's agent's identity and its badge, beside it (workspace spec `docs/specs/agent-badges.md`, section 3, item 3;
+ * CPP 236985ae): each `null` for a chat without an identity, absent from a CPP without them. The badge is read by
+ * {@link badge}, so one this version can't read colours nothing and drops nothing else.
+ */
+const Badged = Schema.Struct({ agent_identity: maybe(Schema.String), agent_badge: maybe(Schema.Unknown) })
+export type Badged = typeof Badged.Type
+const decodeBadge = Schema.decodeUnknownOption(
+  Schema.Struct({
+    scheme: Schema.Struct({ hue: Schema.Finite, background: Schema.String.check(Schema.isPattern(/^#[0-9a-f]{6}$/i)) }),
+  }),
+)
+
+/**
+ * The badge an item of CPP names for its chat, as the TUI uses it: its scheme's background and hue; `null` for a chat
+ * without an identity, or a badge this version can't read; undefined when CPP said nothing of badges.
+ */
+export function badge(item: { readonly agent_badge?: unknown }): Pacer.Badge | null | undefined {
+  if (item.agent_badge === undefined) return undefined
+  return Option.match(decodeBadge(item.agent_badge), {
+    onNone: () => null,
+    onSome: (found) => ({ background: found.scheme.background.toLowerCase(), hue: found.scheme.hue }),
+  })
+}
+
 /** `GET|PATCH /pacer/v1/sessions/{id}`: one chat's state. */
 export const View = Schema.Struct({
   id: Schema.String,
@@ -80,6 +105,7 @@ export const View = Schema.Struct({
   next_use: maybe(Schema.Struct({ credential: Schema.String, reason: maybe(Schema.String) })),
   force_use: maybe(Schema.Struct({ credential: Schema.String, when: maybe(Schema.String) })),
   label: maybe(Schema.Unknown),
+  ...Badged.fields,
   ...Marks.fields,
 })
 export type View = typeof View.Type
@@ -96,6 +122,7 @@ const Listed = Schema.Struct({
   warm: maybe(Schema.Boolean),
   warm_until: maybe(Schema.Number),
   pings: maybe(Pings),
+  ...Badged.fields,
   ...Marks.fields,
 })
 export type Listed = typeof Listed.Type

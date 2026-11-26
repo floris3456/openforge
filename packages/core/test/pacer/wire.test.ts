@@ -63,6 +63,29 @@ describe("PacerWire", () => {
     })
   })
 
+  test("reads a chat's agent's badge from its view and from the list: the scheme's background and hue", () => {
+    // Production's shape (CPP 236985ae, the workspace's draft run/evidence/g0fww9enx9qh/api.md, section 1).
+    const agent_badge = {
+      scheme: { hue: 15, level: 3, opposite: false, background: "#DA6A76", subject: "#520116", detail: "#fff1f2" },
+      family: "zqjtsw80542n",
+      pattern: 273,
+      letter: "F",
+      subject: null,
+      picture: null,
+      state: "picture",
+      ring: "#9dcdf7",
+    }
+    const badge = { background: "#da6a76", hue: 15 }
+    expect(PacerWire.badge(decodeView({ id: "uuid-a", agent_identity: "3depsnxqet8q", agent_badge }))).toEqual(badge)
+    expect(PacerWire.badge(PacerWire.listed([{ id: "uuid-b", agent_badge }])[0]!)).toEqual(badge)
+    // No identity: CPP says so; a CPP without badges says nothing.
+    expect(PacerWire.badge(decodeView({ id: "uuid-a", agent_identity: null, agent_badge: null }))).toBeNull()
+    expect(PacerWire.badge(decodeView({ id: "uuid-a" }))).toBeUndefined()
+    // One this version can't read colours nothing.
+    for (const unread of [{}, { scheme: { hue: 15 } }, { scheme: { hue: 15, background: "red" } }])
+      expect(PacerWire.badge(decodeView({ id: "uuid-a", agent_badge: unread }))).toBeNull()
+  })
+
   test("tells the chat's size only while CPP knows it, and each switch only when CPP's value for the chat is on", () => {
     const at = (fields: Record<string, unknown>) =>
       PacerWire.chat(decodeView({ id: "uuid-a", ...fields }), sessionID, { offset: 0, now: 0, alias: (a) => a })

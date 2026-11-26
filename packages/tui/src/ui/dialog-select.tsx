@@ -112,6 +112,11 @@ export interface DialogSelectOption<T = any> {
   disabled?: boolean
   bg?: RGBA
   fg?: RGBA
+  /**
+   * openforge (workspace spec agent-badges, 3.3): the title's own colour on the row's background, as it is now (a chat's
+   * agent's); undefined keeps the row's.
+   */
+  titleColor?: (background: RGBA) => RGBA | undefined
   gutter?: (color: RGBA) => JSX.Element
   margin?: JSX.Element
   /**
@@ -847,6 +852,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                             current={current()}
                             activeBackground={option.bg}
                             activeColor={option.fg}
+                            titleColor={option.titleColor}
                             gutter={option.gutter}
                             margin={option.margin}
                           />
@@ -944,6 +950,7 @@ function DialogSelectRow(props: {
   margin?: JSX.Element
   activeBackground?: RGBA
   activeColor?: RGBA
+  titleColor?: (background: RGBA) => RGBA | undefined
 }) {
   const theme = useTheme().surface("dialog")
   const newDesigns = useNewDesigns()
@@ -952,6 +959,10 @@ function DialogSelectRow(props: {
     if (props.current && !newDesigns()) return theme.text.formfield.selected
     return theme.text.base
   })
+  const titleText = () =>
+    props.titleColor?.(
+      props.active ? (props.activeBackground ?? theme.background.action.primary.focused) : theme.background.base,
+    ) ?? text()
   // Secondary text (description and footer).
   const secondary = () => {
     if (!newDesigns()) return props.active ? text() : theme.text.muted
@@ -986,7 +997,7 @@ function DialogSelectRow(props: {
       </Show>
       <text
         flexGrow={1}
-        fg={text()}
+        fg={titleText()}
         attributes={props.active && !newDesigns() ? TextAttributes.BOLD : undefined}
         overflow="hidden"
         wrapMode="none"

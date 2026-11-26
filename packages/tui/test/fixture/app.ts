@@ -20,10 +20,14 @@ export async function createAppFixture(
     log?: TuiInput["log"]
     // A renderer whose owner already set up its terminal, such as the simulation renderer.
     setup?: TestRendererSetup
+    /** Custom themes in the global themes folder, by name, there before the app reads it. */
+    themes?: Record<string, unknown>
   } = {},
 ) {
   const { run } = await import("../../src/app")
   const root = await tmpdir()
+  for (const [name, theme] of Object.entries(input.themes ?? {}))
+    await Bun.write(path.join(root.path, "config", "themes", `${name}.json`), JSON.stringify(theme))
   const setup =
     input.setup ??
     (await createTestRenderer({

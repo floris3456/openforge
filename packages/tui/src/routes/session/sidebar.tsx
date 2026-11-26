@@ -12,6 +12,7 @@ import "../../component/title-shimmer"
 import { getScrollAcceleration } from "../../util/scroll"
 import { SESSION_SIDEBAR_WIDTH } from "../../ui/layout"
 import { PacerUsage } from "../../pacer/usage"
+import { useTitleColour } from "../../pacer/title-colour"
 import { sidebarModel } from "./sidebar-model"
 
 export function Sidebar(props: { sessionID: string }) {
@@ -19,6 +20,7 @@ export function Sidebar(props: { sessionID: string }) {
   const local = useLocal()
   const theme = useTheme()
   const config = useConfig().data
+  const titleColour = useTitleColour()
   const session = createMemo(() => data.session.get(props.sessionID))
   const scrollAcceleration = createMemo(() => getScrollAcceleration(config))
   const pacerModel = () => {
@@ -44,7 +46,7 @@ export function Sidebar(props: { sessionID: string }) {
       >
         <box flexShrink={0} paddingRight={2} paddingBottom={1}>
           <title_shimmer
-            fg={theme.text.base}
+            fg={titleColour(props.sessionID, theme.background.raised.base) ?? theme.text.base}
             rename={{
               pending: data.session.title.pending(props.sessionID),
               title: withTimestampedFallback(session()),

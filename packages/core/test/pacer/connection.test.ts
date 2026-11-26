@@ -20,6 +20,7 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerNotices } from "@opencode/core/pacer/notices"
 import { PacerAttention } from "@opencode/core/pacer/attention"
+import { PacerBadges } from "@opencode/core/pacer/badges"
 import { KV } from "@opencode/core/kv"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { PacerStatus } from "@opencode/core/pacer/status"
@@ -454,8 +455,11 @@ const catalog = (at: number, pacer = true): PacerModels.Catalog => ({
   models: [],
 })
 
-/** A catalog of a CPP with memory, whose memory block says it has blocker news (`memory.news`) when `news` is set. */
-const memoryCatalog = (at: number, news: boolean): PacerModels.Catalog => ({
+/**
+ * A catalog of a CPP with memory, whose memory block says it has blocker news (`memory.news`) when `news` is set, and
+ * gives each chat's agent's badge (`memory.badges`) when `badges` is.
+ */
+const memoryCatalog = (at: number, news: boolean, badges = false): PacerModels.Catalog => ({
   at,
   pacer: {
     compactTokens: ["auto", "before-cold"],
@@ -480,6 +484,7 @@ const memoryCatalog = (at: number, news: boolean): PacerModels.Catalog => ({
       reviewOwed: false,
       inspect: false,
       identities: false,
+      badges,
       news,
     },
   },
@@ -491,6 +496,8 @@ interface Harness {
   /** A folder of its own, where the test's chats are. */
   readonly location: Location.Ref
   readonly connection: PacerConnection.Interface
+  /** The chats' badges, which the connection gives the views and list items it reads to. */
+  readonly badges: PacerBadges.Interface
   /** The cache notices the connection gives its rows to. */
   readonly notices: PacerNotices.Interface
   readonly bus: Bus.Interface
@@ -621,10 +628,17 @@ const harness = Effect.fnUntraced(function* (server?: Cpp) {
     yield* Layer.build(PacerEnv.layer.pipe(Layer.provide(Layer.mergeAll(http, endpoints, catalogs)))),
     PacerEnv.Service,
   )
+  const badges = Context.get(
+    yield* Layer.build(
+      PacerBadges.layer.pipe(Layer.provide(Layer.mergeAll(http, catalogs, Layer.succeed(Bus.Service, bus)))),
+    ),
+    PacerBadges.Service,
+  )
   const pacer = yield* Layer.build(
     PacerConnection.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.succeed(PacerBadges.Service, badges),
           Layer.succeed(PacerStatus.Service, shared),
           Layer.succeed(PacerWarmth.Service, warmth),
           http,
@@ -644,6 +658,7 @@ const harness = Effect.fnUntraced(function* (server?: Cpp) {
     cpp,
     location: Location.Ref.make({ directory: AbsolutePath.make(folder.path) }),
     connection: Context.get(pacer, PacerConnection.Service),
+    badges,
     notices,
     bus,
     sessions,
@@ -1258,6 +1273,47 @@ describe("PacerConnection notices", () => {
       expect(held?.pings).toMatchObject({ active: true, left: 3 })
       // One view read, asked for; the notice read only the list.
       expect(seen(h, viewPath(id))).toHaveLength(1)
+    }),
+  )
+
+  // Agents' colours (workspace spec agent-badges, 3.3): each view and list item names its chat's agent's badge.
+  it.effect("gives the badges the views and the list it reads name, reading no view for them", () =>
+    Effect.gen(function* () {
+      const h = yield* harness()
+      yield* SubscriptionRef.set(h.catalog, memoryCatalog(0, false, true))
+      yield* online(h)
+      const id = yield* chat(h)
+      const other = yield* chat(h)
+      const uuid = PacerSessionID.make(id)
+      const scheme = { hue: 240, level: 1, opposite: false, background: "#00537c", subject: "#cce9ff" }
+      const badged = { agent_identity: "k3m9x2v7p0qa", agent_badge: { scheme } }
+      h.cpp.views.set(uuid, { ...chatView(uuid, h.cpp.time(), { pings: { active: false, pings_left: 0 } }), ...badged })
+      yield* step(h, id)
+      yield* ask(h, id)
+      h.published.length = 0
+      // The held chat last, its pings moved: its view's update comes once both items were read.
+      h.cpp.listed = [
+        { id: PacerSessionID.make(other), session_id: 8, agent_identity: null, agent_badge: null },
+        {
+          id: uuid,
+          session_id: 7,
+          warm: true,
+          warm_until: h.cpp.time() + 300_000,
+          pings: chatView(uuid, h.cpp.time()).pings,
+          ...badged,
+        },
+      ]
+      h.cpp.notice("session", { keys: [1], at: 1 })
+      yield* until("merged", () => h.published.some((event) => event.type === "pacer.chat.updated"))
+      expect(yield* h.badges.get([id, other])).toEqual({
+        items: [
+          { sessionID: id, badge: { background: "#00537c", hue: 240 } },
+          { sessionID: other, badge: null },
+        ],
+      })
+      // The view was read once, asked for; the other chat's not at all.
+      expect(seen(h, viewPath(id))).toHaveLength(1)
+      expect(seen(h, viewPath(other))).toHaveLength(0)
     }),
   )
 

@@ -77,6 +77,7 @@ import { compactionLine } from "../../pacer/format"
 import { usePacerSession } from "../../pacer/jump"
 import { usePacer } from "../../context/pacer"
 import { webTool, webToolJobRunning, webToolProvider, webToolSubject, webToolTitle } from "../../pacer/web-tools"
+import { useTitleColour } from "../../pacer/title-colour"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -3355,6 +3356,12 @@ function Subagent(props: ToolProps) {
     return id ? data.session.retry(id) : undefined
   })
   const theme = useTheme()
+  const titleColour = useTitleColour()
+  const permission = useToolPermission(() => props.part)
+  // openforge (workspace spec agent-badges, 3.3): the description, the subagent's title, in its chat's agent's colour;
+  // an error or a permission wait keeps the row's own.
+  const descriptionColour = () =>
+    props.part.state.status === "error" || permission() ? undefined : titleColour(sessionID(), theme.background.base)
 
   return (
     <InlineTool
@@ -3385,7 +3392,9 @@ function Subagent(props: ToolProps) {
         ) : undefined
       }
     >
-      {`${continuation() ? "Continue subagent" : `${Locale.titlecase(stringValue(props.input.agent) ?? stringValue(props.input.subagent_type) ?? "General")} Subagent`} — ${description() ?? "Subagent"}${model() ? ` · ${model()}` : ""}`}
+      {`${continuation() ? "Continue subagent" : `${Locale.titlecase(stringValue(props.input.agent) ?? stringValue(props.input.subagent_type) ?? "General")} Subagent`} — `}
+      <span style={{ fg: descriptionColour() }}>{description() ?? "Subagent"}</span>
+      {model() ? ` · ${model()}` : ""}
     </InlineTool>
   )
 }

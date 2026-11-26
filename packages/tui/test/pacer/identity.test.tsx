@@ -52,7 +52,7 @@ async function picker(fake: ReturnType<typeof pacerFake>) {
     return null
   }
   fake.status = status("on")
-  fake.features = { identities: true }
+  fake.features = { identities: true, badges: false }
   const setup = await renderPacer({ fake, content: () => <Toasts />, width: 100, height: 30 })
   setup.dialog.replace(() => <DialogIdentityList sessionID={CHAT} now={() => NOW} />)
   return {

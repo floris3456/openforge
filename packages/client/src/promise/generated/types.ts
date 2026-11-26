@@ -357,6 +357,8 @@ export type PacerSwitches = { warming: boolean; compactBeforeCold: boolean; comp
 
 export type PacerSize = { tokens: number; threshold: number }
 
+export type PacerBadge = { background: string; hue: number }
+
 export type SessionStatus =
   | { type: "idle" }
   | {
@@ -468,7 +470,7 @@ export type PacerPromptItem = {
 
 export type PacerSummaryWriter = "cliproxypacer" | "openforge"
 
-export type PacerFeatures = { identities: boolean }
+export type PacerFeatures = { identities: boolean; badges: boolean }
 
 export type PacerIdentityChat = { chat: string; how: "made" | "linked" | "own"; since: number; current: boolean }
 
@@ -1120,6 +1122,8 @@ export type PacerChat = {
   size?: PacerSize
   asOf: number
 }
+
+export type PacerBadges = { items: Array<{ sessionID: SessionID; badge: PacerBadge | null }> }
 
 export type AutoUpdateStatus = { enabled: boolean; unavailable?: string; failure?: AutoUpdateFailure }
 
@@ -2286,6 +2290,15 @@ export type PacerLoginsReady = {
   type: "pacer.logins.ready"
   location?: LocationRef
   data: { providers: Array<string>; models: Array<string> }
+}
+
+export type PacerBadgeUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "pacer.badge.updated"
+  location?: LocationRef
+  data: { sessionID: SessionID; badge: PacerBadge | null }
 }
 
 export type PacerRequestsUpdated = {
@@ -3473,6 +3486,7 @@ export type V2Event =
   | PacerLoginsReady
   | PacerModelsUpdated
   | PacerChatUpdated
+  | PacerBadgeUpdated
   | PacerRequestsUpdated
   | PacerNoticeAdded
   | PacerNoticeDismissed
@@ -5025,6 +5039,7 @@ export type EventSubscribeInput = {
         | "pacer.logins.ready"
         | "pacer.models.updated"
         | "pacer.chat.updated"
+        | "pacer.badge.updated"
         | "pacer.requests.updated"
         | "pacer.notice.added"
         | "pacer.notice.dismissed"
@@ -5408,6 +5423,10 @@ export type ExperimentalPacerSettingsUpdateInput = {
 export type ExperimentalPacerSettingsUpdateOutput = { data: PacerSettings }["data"]
 
 export type ExperimentalPacerFeaturesOutput = { data: PacerFeatures }["data"]
+
+export type ExperimentalPacerBadgesInput = { readonly sessionIDs: ReadonlyArray<string> }
+
+export type ExperimentalPacerBadgesOutput = { data: PacerBadges }["data"]
 
 export type ExperimentalPacerChatIdentitiesInput = { readonly sessionID: string }
 

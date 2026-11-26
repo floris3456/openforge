@@ -48,7 +48,8 @@ export const catalogOf = (
    * whether it has agents' notes on review items (`image.show({ task, item })`); `stepItems`: whether a step takes items
    * and holds rounds of its own; `reviewOwed`: whether it says what a lead owes its helper's rounds (`GET …/owed`);
    * `inspect`: whether it has the reads of
-   * other projects (`openforge cpp`); `identities`: whether it keeps agents' identities (`/identity`); `codemode`: the
+   * other projects (`openforge cpp`); `identities`: whether it keeps agents' identities (`/identity`); `badges`: whether
+   * it gives each chat's agent's badge (coloured titles, workspace spec agent-badges 3.3); `codemode`: the
    * tools its capabilities say run in Code Mode (`tools.task_codemode`), whose list keeps them direct otherwise.
    */
   options: {
@@ -63,6 +64,7 @@ export const catalogOf = (
     readonly reviewOwed?: boolean
     readonly inspect?: boolean
     readonly identities?: boolean
+    readonly badges?: boolean
     readonly codemode?: ReadonlyArray<string>
   } = {},
 ): PacerModels.Catalog => ({
@@ -105,6 +107,7 @@ export const catalogOf = (
                   reviewOwed: options.reviewOwed ?? false,
                   inspect: options.inspect ?? false,
                   identities: options.identities ?? false,
+                  badges: options.badges ?? false,
                   news: false,
                 },
               }

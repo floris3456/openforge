@@ -2,6 +2,7 @@
 import type {
   OpenCodeEvent,
   PacerAccounts,
+  PacerBadge,
   PacerChat,
   PacerFeatures,
   PacerIdentities,
@@ -257,8 +258,13 @@ export function pacerFake(input: { delay?: number } = {}) {
     settings: { compactColdFirst: false, compactBeforeCold: false } as PacerSettings,
     /** The cache notices the service holds, newest first; a dismissal drops one. */
     notices: [] as PacerNotice[],
-    /** What CPP offers the TUI's commands: without identities, no `/identity`. */
-    features: { identities: false } as PacerFeatures,
+    /** What CPP offers the TUI's commands: without identities, no `/identity`; without badges, no coloured titles. */
+    features: { identities: false, badges: false } as PacerFeatures,
+    /**
+     * Each chat's badge as the service knows it (workspace spec agent-badges, 3.3): `null` for a chat without an
+     * identity; a chat not named here the service doesn't know yet, and leaves out of its answer.
+     */
+    badges: {} as Record<string, PacerBadge | null>,
     /** The chat's project's agents' identities (`/identity`'s picker), or the service's refusal in words. */
     identities: { items: [] } as PacerIdentities | { refused: string },
     /** What a link answers, from its body (`/identity`); a string is the service's refusal in words. */
@@ -297,6 +303,16 @@ export function pacerFake(input: { delay?: number } = {}) {
     const parts = call.path.split("/")
     if (call.path === "status") return json({ data: fake.status })
     if (call.path === "features") return json({ data: fake.features })
+    if (call.path === "badges" && call.method === "POST") {
+      const asked = (call.body as { sessionIDs: string[] }).sessionIDs
+      return json({
+        data: {
+          items: asked.flatMap((sessionID) =>
+            sessionID in fake.badges ? [{ sessionID, badge: fake.badges[sessionID] }] : [],
+          ),
+        },
+      })
+    }
     if (parts[0] === "chat" && parts[2] === "identities" && call.method === "GET")
       return "refused" in fake.identities ? refused(fake.identities.refused) : json({ data: fake.identities })
     if (parts[0] === "chat" && parts[2] === "identity" && call.method === "POST") {

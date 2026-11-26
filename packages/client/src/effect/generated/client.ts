@@ -301,6 +301,8 @@ import type {
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
   ExperimentalPacerFeaturesOutput,
+  ExperimentalPacerBadgesInput,
+  ExperimentalPacerBadgesOutput,
   ExperimentalPacerChatIdentitiesInput,
   ExperimentalPacerChatIdentitiesOutput,
   ExperimentalPacerChatIdentityInput,
@@ -1972,6 +1974,15 @@ const EndpointExperimentalPacerFeatures = (raw: RawClient["server.experimental"]
     ),
   )
 
+const EndpointExperimentalPacerBadges =
+  (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerBadgesInput) =>
+    preserveEffect<ExperimentalPacerBadgesOutput>()(
+      raw["pacer.badges"]({ payload: { sessionIDs: input["sessionIDs"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
 const EndpointExperimentalPacerChatIdentities =
   (raw: RawClient["server.experimental"]) => (input: ExperimentalPacerChatIdentitiesInput) =>
     preserveEffect<ExperimentalPacerChatIdentitiesOutput>()(
@@ -2082,6 +2093,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     prompt: EndpointExperimentalPacerPrompt(raw),
     settings: { get: EndpointExperimentalPacerSettingsGet(raw), update: EndpointExperimentalPacerSettingsUpdate(raw) },
     features: EndpointExperimentalPacerFeatures(raw),
+    badges: EndpointExperimentalPacerBadges(raw),
     notices: { list: EndpointExperimentalPacerNoticesList(raw), dismiss: EndpointExperimentalPacerNoticesDismiss(raw) },
   },
   update: { get: EndpointExperimentalUpdateGet(raw), set: EndpointExperimentalUpdateSet(raw) },

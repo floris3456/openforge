@@ -249,7 +249,17 @@ export const PacerEndpoints = [
     annotations(
       "features",
       "Get what CLIProxyPacer offers the TUI's commands",
-      "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then). All false before they are read, and without CPP. Never waits on CPP.",
+      "From CLIProxyPacer's capabilities as last read: `identities`, whether it keeps agents' identities (the TUI offers `/identity` only then); `badges`, whether it gives each chat's agent's badge (the TUI colours chats' titles only then). All false before they are read, and without CPP. Never waits on CPP.",
+    ),
+  ),
+  HttpApiEndpoint.post("pacer.badges", "/api/experimental/pacer/badges", {
+    payload: Pacer.BadgesQuery,
+    success: Schema.Struct({ data: Pacer.Badges }),
+  }).annotateMerge(
+    annotations(
+      "badges",
+      "Get chats' agents' badges",
+      "The badge of each chat named whose badge the service knows, learnt from the chats' views and list it reads from CLIProxyPacer: the background of the chat's agent's colour scheme, which its title shows in, and its hue; null for a chat without an identity. Each chat it doesn't know yet is left out and read from its view in the background; `pacer.badge.updated` follows once its badge is known, and whenever a chat named here gets another. Empty unless CLIProxyPacer's capabilities say `memory.badges`. Never waits on CPP.",
     ),
   ),
   HttpApiEndpoint.get("pacer.chat.identities", "/api/experimental/pacer/chat/:sessionID/identities", {

@@ -18,6 +18,7 @@ import { PacerModels } from "./models.js"
 import { PacerNews } from "./news.js"
 import { PacerNotices } from "./notices.js"
 import { PacerAttention } from "./attention.js"
+import { PacerBadges } from "./badges.js"
 import { PacerSessionID } from "./session-id.js"
 import { PacerStatus } from "./status.js"
 import { PacerWarmth } from "./warmth.js"
@@ -320,6 +321,8 @@ export const layer = Layer.effect(
     const jobs = yield* Job.Service
     const notices = yield* PacerNotices.Service
     const attention = yield* PacerAttention.Service
+    // Every view and list item names its chat's agent's badge (workspace spec agent-badges, 3.3).
+    const badges = yield* PacerBadges.Service
     // Compaction reads the state there: it can't depend on this service.
     const shared = yield* PacerStatus.Service
     // A step reads there whether its chat's cache is still warm: it can't depend on this service either.
@@ -617,6 +620,7 @@ export const layer = Layer.effect(
 
     /** Holds a view CPP answered (`fresh` cleared its staleness as it was asked for). */
     const hold = Effect.fnUntraced(function* (chat: Chat, view: PacerWire.View) {
+      yield* badges.learn(chat.uuid, view)
       chat.raw = view
       chat.on = true
       chat.labelled = true
@@ -966,7 +970,10 @@ export const layer = Layer.effect(
       const answer = yield* get(`/pacer/v1/sessions?limit=${LISTED}`, PacerWire.Sessions)
       const items = PacerWire.listed(answer.items)
       link.active = new Set()
-      for (const item of items) yield* merge(item)
+      for (const item of items) {
+        yield* badges.learn(item.id, item)
+        yield* merge(item)
+      }
       // A held view the list left out may have changed as any: it is read again when asked for.
       for (const chat of chats.values()) if (chat.raw && !link.active.has(chat.uuid)) chat.stale = true
       return { items, full: (answer.items?.length ?? 0) >= LISTED }
@@ -1801,6 +1808,7 @@ export const node = makeGlobalNode({
     PacerEnv.node,
     PacerNotices.node,
     PacerAttention.node,
+    PacerBadges.node,
     PacerStatus.node,
     PacerWarmth.node,
     Bus.node,

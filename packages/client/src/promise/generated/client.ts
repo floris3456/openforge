@@ -305,6 +305,8 @@ import type {
   ExperimentalPacerSettingsUpdateInput,
   ExperimentalPacerSettingsUpdateOutput,
   ExperimentalPacerFeaturesOutput,
+  ExperimentalPacerBadgesInput,
+  ExperimentalPacerBadgesOutput,
   ExperimentalPacerChatIdentitiesInput,
   ExperimentalPacerChatIdentitiesOutput,
   ExperimentalPacerChatIdentityInput,
@@ -2051,6 +2053,18 @@ export function make(options: ClientOptions) {
             {
               method: "GET",
               path: `/api/experimental/pacer/features`,
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        badges: (input: ExperimentalPacerBadgesInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalPacerBadgesOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/pacer/badges`,
+              body: { sessionIDs: input["sessionIDs"] },
               successStatus: 200,
               declaredStatuses: [400, 401],
               empty: false,

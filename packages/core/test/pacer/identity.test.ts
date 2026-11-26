@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer, Stream } from "effect"
 import { FetchHttpClient } from "effect/http"
+import { PacerBadges } from "@opencode/core/pacer/badges"
 import { PacerEndpoint } from "@opencode/core/pacer/endpoint"
 import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerIdentity } from "@opencode/core/pacer/identity"
@@ -64,11 +65,21 @@ const service = (origin: string | undefined, catalog: PacerModels.Catalog | unde
       refresh: () => Effect.void,
     }),
   )
+  // The chats whose badge a link forgot, as `PacerBadges` would to read it again (workspace spec agent-badges, 3.3).
+  const badges = Layer.succeed(
+    PacerBadges.Service,
+    PacerBadges.Service.of({
+      learn: () => Effect.void,
+      get: () => Effect.succeed({ items: [] }),
+      forget: (sessionID) => Effect.sync(() => void forgotten.push(sessionID)),
+    }),
+  )
   return PacerIdentity.layer.pipe(
     Layer.provide(PacerHttp.layer.pipe(Layer.provide(endpoints), Layer.provide(FetchHttpClient.layer))),
-    Layer.provide([endpoints, models]),
+    Layer.provide([endpoints, models, badges]),
   )
 }
+const forgotten: SessionID[] = []
 
 const using = <A, E>(
   layer: ReturnType<typeof service>,
@@ -126,7 +137,7 @@ describe("PacerIdentity", () => {
         [undefined, false],
       ] as const) {
         const layer = service(cpp.origin, catalog)
-        expect(yield* using(layer, (identity) => identity.features())).toEqual({ identities: offered })
+        expect(yield* using(layer, (identity) => identity.features())).toEqual({ identities: offered, badges: false })
         if (offered) continue
         // Without them nothing is asked of CPP.
         const listed = yield* using(layer, (identity) => identity.list(chat).pipe(Effect.flip))
@@ -135,6 +146,12 @@ describe("PacerIdentity", () => {
         expect(linked).toEqual(new PacerIdentity.Refused({ reason: PacerIdentity.NOT_OFFERED }))
       }
       expect(cpp.seen).toEqual([])
+      // A CPP that gives each chat's agent's badge says so too.
+      expect(
+        yield* using(service(cpp.origin, catalogOf(true, { identities: true, badges: true })), (identity) =>
+          identity.features(),
+        ),
+      ).toEqual({ identities: true, badges: true })
     }),
   )
 
@@ -202,8 +219,14 @@ describe("PacerIdentity", () => {
 
   it.live("sends a link as an identity event on the chat's events: an identity, a session, or new", () =>
     Effect.gen(function* () {
-      const cpp = yield* serve(() =>
-        Response.json({ id: "x", type: "identity", identity: wire("k3m9x2v7p0qa"), changed: true }),
+      forgotten.length = 0
+      const cpp = yield* serve((seen) =>
+        Response.json({
+          id: "x",
+          type: "identity",
+          identity: wire("k3m9x2v7p0qa"),
+          changed: (seen.body as { new?: boolean }).new !== true,
+        }),
       )
       const linked = yield* using(service(cpp.origin, offering), (identity) =>
         Effect.all([
@@ -214,6 +237,8 @@ describe("PacerIdentity", () => {
         ]),
       )
       expect(linked[0]).toMatchObject({ identity: { id: "k3m9x2v7p0qa", name: "floris's lead" }, changed: true })
+      // Each link that changed the chat's identity forgets its badge, so that it is read again; one that didn't, not.
+      expect(forgotten).toEqual([CHAT, CHAT, CHAT])
       expect(cpp.seen.map((seen) => [seen.method, seen.path])).toEqual(
         Array.from({ length: 4 }, () => ["POST", `/pacer/v1/sessions/${PacerSessionID.make(CHAT)}/events`]),
       )

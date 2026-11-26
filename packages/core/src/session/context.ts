@@ -40,6 +40,7 @@ import { SessionPromptStart } from "./prompt-start.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
+import { SubagentQuestions } from "./subagent-questions.js"
 
 export interface Selection {
   readonly session: SessionSchema.Info
@@ -282,7 +283,9 @@ const layer = Layer.effect(
       const variant = chatModel === undefined ? undefined : ImageTool.variant(yield* images(chatModel))
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions, location, pins, variant),
+          tools: registry
+            .snapshot(permissions, location, pins, variant)
+            .pipe(Effect.map((tools) => SubagentQuestions.tools(session, tools))),
           builtins: builtins.load(),
           discovery: discovery.load(),
           skills: skillInstructions.load(permissions),
@@ -309,6 +312,7 @@ const layer = Layer.effect(
           loaded.skills,
           loaded.discovery,
           loaded.builtins,
+          SubagentQuestions.instructions(session),
           loaded.entries,
         ]),
         tools: loaded.tools,

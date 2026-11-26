@@ -49,6 +49,7 @@ describe("pacer shapes", () => {
       "pacer.logins.ready",
       "pacer.models.updated",
       "pacer.chat.updated",
+      "pacer.badge.updated",
       "pacer.requests.updated",
       "pacer.notice.added",
       "pacer.notice.dismissed",

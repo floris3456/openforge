@@ -28,8 +28,10 @@ import { MemoryTask } from "./task.js"
 // `done` there is asked to go to review instead, so that its lead judges the step. Without `step_items` its items could
 // only go on the lead's task, whose open round may be a lead's hand-in waiting for the person, so a chat on a step is
 // never refused there. A helper whose chat works on its task itself hands in on the task, as above: that round is its
-// hand-in. Either counts from its task's or step's last going active or back to todo, as a deny sends it; the chat's
-// own notes on it, kept as changes to the same state, do not count.
+// hand-in, and its items on any of the task's steps go on it. CPP places a helper working through its own plan on its
+// current step, as it places one started on a step, so such a helper is told by the task's read naming it the worker
+// (the lead's decision of 2026-11-26). Either counts from its task's or step's last going active or back to todo, as a
+// deny sends it; the chat's own notes on it, kept as changes to the same state, do not count.
 
 /** How long the read of the chat's task may take; without an answer the call goes as before. */
 export const READ = "5 seconds"
@@ -128,45 +130,55 @@ const layer = Layer.effect(
       if (inside === undefined) return undefined
       const memory = (yield* catalogs.get())?.pacer?.memory
       if (memory?.reviewItems !== true) return undefined
-      // A chat on a step hands in only that step, and only where steps take items: elsewhere they could only go on its
-      // lead's task, where they could replace the lead's hand-in. Its calls on another step or on the task go.
-      if (inside.subtask !== undefined && (memory.stepItems !== true || id !== inside.subtask)) return undefined
       const began = DateTime.toEpochMillis(session.time.created)
       const calls = yield* callsSince(session.id, began)
       // Most hand-ins looked at no picture: they go without a read of the task.
       if (!calls.some((call) => call.pictures.length > 0)) return undefined
       const chat = yield* projects.session(session)
       if (chat.project === undefined) return undefined
-      // What the chat works on, whose round its items go in and whose going active the pictures are counted from.
-      const own = inside.subtask ?? inside.task
-      const kind = inside.subtask === undefined ? "task" : "step"
-      const read = yield* client
-        .withHeaders(
-          PacerHeaders.chat({ sessionID: session.id, parentID: session.parentID, project: chat.headers, agent }),
-        )
-        .task(chat.project, own, { timeout: READ })
-        .pipe(
+      const project = chat.project
+      const named = client.withHeaders(
+        PacerHeaders.chat({ sessionID: session.id, parentID: session.parentID, project: chat.headers, agent }),
+      )
+      const readOf = (own: string, kind: "task" | "step") =>
+        named.task(project, own, { timeout: READ }).pipe(
           Effect.catch((error) =>
             Effect.logWarning(`sent a helper's hand-in without knowing when its ${kind} went active`, {
               reason: error.message,
             }).pipe(Effect.as(undefined)),
           ),
         )
-      if (read === undefined) return undefined
-      const step = inside.subtask === undefined ? read.subtasks.find((subtask) => subtask.id === id) : undefined
-      if (inside.subtask === undefined) {
+      const task = yield* readOf(inside.task, "task")
+      if (task === undefined) return undefined
+      // CPP places a helper working through its own plan on its current step, as it places one started on a step of its
+      // lead's task: the task's worker tells them apart. Its worker hands in on the task from any of its steps.
+      const worker = task.task.worker?.chat === session.id
+      const onTask = inside.subtask === undefined || worker
+      const step = onTask ? task.subtasks.find((subtask) => subtask.id === id) : undefined
+      if (onTask) {
         if (id !== inside.task && step === undefined) return undefined
         // On its task's step, done hands in only on the last open one, which sends the task to review.
         if (
           input.state === "done" &&
-          (step === undefined || closed(step) || read.subtasks.some((other) => other !== step && !closed(other)))
+          (step === undefined || closed(step) || task.subtasks.some((other) => other !== step && !closed(other)))
         )
           return undefined
       }
+      // A chat on a step of its lead's task hands in only that step, and only where steps take items: elsewhere they
+      // could only go on the task, where they could replace the lead's hand-in. Its calls on another step or on the task
+      // go.
+      if (!onTask && (memory.stepItems !== true || id !== inside.subtask)) return undefined
+      // What the chat works on, whose round its items go in and whose going active the pictures are counted from.
+      const own = onTask ? inside.task : inside.subtask
+      const kind = onTask ? "task" : "step"
+      const read = onTask ? task : yield* readOf(own, kind)
+      if (read === undefined) return undefined
       // A helper on a step of its lead's task, which went active long before, counts from its own start.
       const moment = Math.max(opened(read, session.id), began)
       const since = calls.filter((call) => call.at >= moment)
-      if (since.some((call) => gaveItems(call, own))) return undefined
+      // CPP puts the items a task's worker gives on one of its steps on the task.
+      const given = worker ? [inside.task, ...task.subtasks.map((subtask) => subtask.id)] : [own]
+      if (since.some((call) => gaveItems(call, given))) return undefined
       const pictures = yield* changedAfter(since, moment)
       if (pictures.length === 0) return undefined
       if (step !== undefined) return refusedText(kind, own, "first", pictures)
@@ -245,13 +257,14 @@ function gives(input: Readonly<Record<string, unknown>>) {
   return [input.items, input.pictures].some((list) => Array.isArray(list) && list.length > 0)
 }
 
-/** Whether `call` gave task `task` items, and was not refused. */
-function gaveItems(call: Call, task: string) {
+/** Whether `call` gave one of the tasks `tasks` items, and was not refused. */
+function gaveItems(call: Call, tasks: ReadonlyArray<string>) {
   return (
     call.tool === "task" &&
     call.status === "completed" &&
     isRecord(call.input) &&
-    call.input.id === task &&
+    typeof call.input.id === "string" &&
+    tasks.includes(call.input.id) &&
     gives(call.input)
   )
 }

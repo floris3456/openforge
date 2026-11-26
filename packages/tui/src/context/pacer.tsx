@@ -1,6 +1,7 @@
 import type {
   ExperimentalPacerChatIdentityInput,
   PacerAccounts,
+  PacerBadge,
   PacerChat,
   PacerFeatures,
   PacerModels,
@@ -269,6 +270,36 @@ function createPacer(input: { clock: Clock }) {
       setStore("notices", (notices) => notices.filter((notice) => notice.requestID !== event.data.requestID)),
     ),
   )
+
+  // Agents' colours (the workspace's spec docs/specs/agent-badges.md, section 3, item 3): the badge of each chat whose
+  // title shows, asked of the service once per chat, the chats a frame names in one call. A chat the service doesn't
+  // know yet comes as `pacer.badge.updated`; so does one whose identity changed. A badge never changes on its own, so
+  // what is held stays. Nothing is asked while CPP doesn't say `memory.badges`.
+  const [badges, setBadges] = createStore<Record<string, PacerBadge | null>>({})
+  const badgesOn = () => state() !== "unset" && store.features?.badges === true
+  const askedBadges = new Set<string>()
+  let wantedBadges: string[] = []
+  const askBadges = () => {
+    const sessionIDs = wantedBadges
+    wantedBadges = []
+    void client.api.experimental.pacer.badges({ sessionIDs }).then(
+      (answer) => batch(() => answer.items.forEach((item) => setBadges(item.sessionID, item.badge))),
+      // Asked for again when next drawn.
+      () => sessionIDs.forEach((sessionID) => askedBadges.delete(sessionID)),
+    )
+  }
+  const badge = (sessionID: string) => {
+    if (!badgesOn()) return undefined
+    const held = badges[sessionID]
+    if (held !== undefined) return held ?? undefined
+    if (!askedBadges.has(sessionID)) {
+      askedBadges.add(sessionID)
+      wantedBadges.push(sessionID)
+      if (wantedBadges.length === 1) queueMicrotask(askBadges)
+    }
+    return undefined
+  }
+  onCleanup(event.on("pacer.badge.updated", (event) => setBadges(event.data.sessionID, event.data.badge)))
 
   // The shown chat's view and first pages: when it is shown, when CPP comes back, after a reconnect.
   const held: string[] = []
@@ -593,6 +624,11 @@ function createPacer(input: { clock: Clock }) {
      * offered only then, so nothing changes against a CPP without them.
      */
     identities: () => state() !== "unset" && store.features?.identities === true,
+    /**
+     * The chat's agent's badge (the workspace's spec `docs/specs/agent-badges.md`, section 3, item 3): undefined for a
+     * chat without an identity, while it isn't known yet (it is asked for), and while CPP doesn't say `memory.badges`.
+     */
+    badge,
     /** The identities of the chat's project, the most recently active first, and the one it is now; read each time. */
     identityList: (sessionID: string) => client.api.experimental.pacer.chat.identities({ sessionID }),
     /** Links the chat to an identity (`/identity`); answers the one it is now. */

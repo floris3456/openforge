@@ -1,7 +1,8 @@
-import { createComputed } from "solid-js"
+import { createComputed, onCleanup } from "solid-js"
 import { projectName } from "../util/project"
 import { useData } from "./data"
 import { useLocation } from "./location"
+import { usePacer } from "./pacer"
 import { useRoute } from "./route"
 import { useThemes, type ThemeSubject } from "./theme"
 
@@ -39,4 +40,17 @@ export function ThemeSubjectSync() {
     if (!info) return
     return { project: project(info.project.id, info.project.canonical) }
   }
+}
+
+/**
+ * openforge (the workspace's spec docs/specs/agent-badges.md, section 3, item 3): the agent theme takes a chat's hue
+ * from its agent's badge, the source of its title's colour too. Mounted inside the pacer's context, which the theme
+ * sits outside of.
+ */
+export function ThemeHueSync() {
+  const themes = useThemes()
+  const pacer = usePacer()
+  themes.hues((chat) => pacer?.badge(chat)?.hue)
+  onCleanup(() => themes.hues(undefined))
+  return null
 }

@@ -23,12 +23,14 @@ import { useConfig, useNewDesigns } from "../config"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { projectName } from "../util/project"
 import { useLocation } from "../context/location"
+import { useTitleColour } from "../pacer/title-colour"
 
 export function DialogSessionList() {
   const dialog = useDialog()
   const route = useRoute()
   const data = useData()
   const theme = useTheme().surface("dialog")
+  const titleColour = useTitleColour()
   const client = useClient()
   const local = useLocal()
   const sessionTabs = useSessionTabs()
@@ -173,6 +175,8 @@ export function DialogSessionList() {
         footer,
         bg: deleting ? theme.background.action.destructive.focused : undefined,
         fg: deleting ? theme.text.action.destructive.focused : undefined,
+        // openforge (workspace spec agent-badges, 3.3): the title in its chat's agent's colour.
+        titleColor: deleting ? undefined : (background: RGBA) => titleColour(session.id, background),
         gutter: sessionStatusGutter(
           theme,
           attention,

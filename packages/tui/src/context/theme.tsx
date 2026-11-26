@@ -176,6 +176,11 @@ type Themes = {
   setAgent(settings: Partial<AgentSettings>): void
   /** Shows the agent theme with these settings over the ones in force, on this screen only, until cleared. */
   previewAgent(settings: Partial<AgentSettings> | undefined): void
+  /**
+   * openforge (workspace spec agent-badges, 3.3): where a chat's agent's hue comes from, its badge's, which its title
+   * shows in too; a chat it gives none for, or with none set, takes the hash of its id (`agentHue`).
+   */
+  hues(source: ((chat: string) => number | undefined) | undefined): void
   show(subject: ThemeSubject): void
   afterPaint(): void
   onError(handler: ThemeErrorHandler): () => void
@@ -402,13 +407,18 @@ const themeContext = createSimpleContext({
       return available()[settings.base] ? settings : { ...settings, base: "opencode" }
     }
     const agentDocuments = new WeakMap<object, Map<string, ThemeDocumentSource>>()
+    const [hueSource, setHueSource] = createSignal<(chat: string) => number | undefined>()
     function loadAgent() {
       const settings = { ...agent(), ...store.agentPreview }
       const sources = available()
       const base = sources[settings.base] ? settings.base : "opencode"
       const source = sources[base]!
       const chat = store.subject.chat
-      const hue = chat ? agentHue(chat) : store.preview === AGENT_THEME ? AGENT_SAMPLE_HUE : undefined
+      const hue = chat
+        ? (hueSource()?.(chat) ?? agentHue(chat))
+        : store.preview === AGENT_THEME
+          ? AGENT_SAMPLE_HUE
+          : undefined
       if (hue === undefined || !settings.follow.length) return loadTheme(source, base, store.mode, newDesigns())
       const key = `${hue}|${[...settings.follow].sort().join(",")}|${settings.strength}|${newDesigns()}`
       const documents = agentDocuments.get(source) ?? new Map<string, ThemeDocumentSource>()
@@ -576,6 +586,9 @@ const themeContext = createSimpleContext({
       },
       previewAgent(settings) {
         setStore("agentPreview", settings ? reconcile(settings) : undefined)
+      },
+      hues(source) {
+        setHueSource(() => source)
       },
       show(subject) {
         const project = subject.project && subject.project.id !== "global" ? subject.project : undefined

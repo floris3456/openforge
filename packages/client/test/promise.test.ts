@@ -87,6 +87,7 @@ test("exposes every standard HTTP API group", () => {
     "prompt",
     "settings",
     "features",
+    "badges",
     "notices",
   ])
   expect(Object.keys(client.experimental.pacer.chat)).toEqual(["get", "update", "requests", "identities", "identity"])

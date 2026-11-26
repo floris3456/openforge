@@ -16,6 +16,7 @@ import { openRowHelp } from "../../../ui/row-help"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { sessionFamily } from "../../../util/session"
 import { useRetryWait } from "../../../util/retry-wait"
+import { useTitleColour } from "../../../pacer/title-colour"
 
 interface SubagentEntry {
   sessionID: string
@@ -36,6 +37,7 @@ export function SubagentsTab(props: { sessionID: string }) {
   const composer = useComposerTab()
   const shortcuts = Keymap.useShortcuts()
   const dialog = useDialog()
+  const titleColour = useTitleColour()
 
   const session = createMemo(() => data.session.get(props.sessionID))
   const [store, setStore] = createStore({ selected: 0 })
@@ -228,18 +230,18 @@ export function SubagentsTab(props: { sessionID: string }) {
                 // A child waiting on a retry says so, so it does not look like one that never started.
                 return wait() ?? "Running"
               })
+              const background = () =>
+                active()
+                  ? theme.background.action.primary.focused
+                  : entry.current
+                    ? theme.background.action.primary.selected
+                    : theme.background.action.primary.base
               return (
                 <box
                   flexDirection="row"
                   paddingLeft={1}
                   paddingRight={1}
-                  backgroundColor={
-                    active()
-                      ? theme.background.action.primary.focused
-                      : entry.current
-                        ? theme.background.action.primary.selected
-                        : theme.background.action.primary.base
-                  }
+                  backgroundColor={background()}
                   onMouseMove={() => setStore("selected", index())}
                   onMouseUp={() => {
                     setStore("selected", index())
@@ -259,7 +261,9 @@ export function SubagentsTab(props: { sessionID: string }) {
                       wrapMode="none"
                     >
                       {entry.prefix}
-                      {entry.agent}: {entry.title}
+                      {entry.agent}:{" "}
+                      {/* openforge (workspace spec agent-badges, 3.3): the title in its chat's agent's colour. */}
+                      <span style={{ fg: titleColour(entry.sessionID, background()) }}>{entry.title}</span>
                     </text>
                   </box>
                   <Show when={status()}>

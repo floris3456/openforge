@@ -54,32 +54,41 @@ const BADGES: Record<string, PacerBadge | null> = {
 }
 const NONE = Object.fromEntries(sessions.map((item) => [item.id, null]))
 
-const transcript = [
-  { type: "user", id: "msg_u1", text: "Alpha transcript line", time: { created: 1 } },
-  {
-    type: "assistant",
-    id: "msg_a1",
-    agent: "build",
-    model: { providerID: "cliproxypacer", id: "claude-opus-4-5" },
-    time: { created: 2, completed: 3 },
-    finish: "stop",
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    content: [
-      {
-        type: "tool",
-        id: "call_sub",
-        name: "subagent",
-        time: { created: 2, completed: 3 },
-        state: {
-          status: "completed",
-          input: { description: "Alpha subagent", agent: "general" },
-          content: [],
-          metadata: { sessionID: SUB.id },
+/** Alpha's transcript, with its call to the subagent done, or failed. */
+const transcript = (failed = false) =>
+  [
+    { type: "user", id: "msg_u1", text: "Alpha transcript line", time: { created: 1 } },
+    {
+      type: "assistant",
+      id: "msg_a1",
+      agent: "build",
+      model: { providerID: "cliproxypacer", id: "claude-opus-4-5" },
+      time: { created: 2, completed: 3 },
+      finish: "stop",
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      content: [
+        {
+          type: "tool",
+          id: "call_sub",
+          name: "subagent",
+          time: { created: 2, completed: 3 },
+          state: failed
+            ? {
+                status: "error",
+                input: { description: "Alpha subagent", agent: "general" },
+                metadata: { sessionID: SUB.id },
+                error: { type: "tool.execution", message: "The subagent stopped" },
+              }
+            : {
+                status: "completed",
+                input: { description: "Alpha subagent", agent: "general" },
+                content: [],
+                metadata: { sessionID: SUB.id },
+              },
         },
-      },
-    ],
-  },
-] as unknown as SessionMessageInfo[]
+      ],
+    },
+  ] as unknown as SessionMessageInfo[]
 
 /** A custom theme of the themes folder without the colours a theme may leave out, on a lighter, bluer background. */
 const { selectedListItemText: _selected, backgroundMenu: _menu, ...nordColours } = nord.theme as Record<string, unknown>
@@ -95,6 +104,8 @@ async function app(input: {
   route?: string
   /** The sidebar hidden, as the agent theme's tests read the screen's colour off its last row. */
   sidebar?: "hide"
+  /** Alpha's call to its subagent failed. */
+  failed?: boolean
 }) {
   const fake = pacerFake()
   fake.status = status("on")
@@ -139,7 +150,7 @@ async function app(input: {
       if (!match[2]) return json({ data: found })
       if (match[2] === "/message")
         return json({
-          data: found.id === ALPHA.id ? transcript.toReversed() : [],
+          data: found.id === ALPHA.id ? transcript(input.failed).toReversed() : [],
           cursor: {},
         })
       if (match[2] === "/children") return json({ data: sessions.filter((item) => item.parentID === found.id) })
@@ -312,9 +323,11 @@ test("a chat without an identity keeps the colour it has without badges, beside 
   const plain = await (async () => {
     await using setup = await app({ badges: BADGES, offered: false })
     await Bun.sleep(100)
+    // Read before the session list opens over them.
+    const places = colours(screenPlaces(setup))
     const list = await listPlaces(setup)
     await setup.renderOnce()
-    return { ...colours(screenPlaces(setup)), ...colours(list()) }
+    return { ...places, ...colours(list()) }
   })()
   await using setup = await app({ badges: BADGES })
   await setup.waitForFrame(
@@ -333,6 +346,19 @@ test("a chat without an identity keeps the colour it has without badges, beside 
   expect([shown.tabGamma, shown.listGamma]).toEqual([plain.tabGamma, plain.listGamma])
   for (const name of ["tabAlpha", "tabBeta", "sidebar", "row", "listAlpha", "listBeta"] as const)
     expect({ name, same: shown[name]!.join() === plain[name]!.join() }).toEqual({ name, same: false })
+})
+
+test("a subagent's row whose call failed keeps the error's colour for its title", async () => {
+  await using setup = await app({ badges: BADGES, failed: true })
+  // Its family's colour is known: the sidebar shows Alpha's.
+  await setup.waitForFrame(() => {
+    const sidebar = screenPlaces(setup).sidebar
+    return sidebar !== undefined && near(hue(sidebar.fg), 240)
+  })
+  const row = screenPlaces(setup).row
+  const label = at(setup, "General Subagent", middle)
+  expect(row).toBeDefined()
+  expect(row!.fg.toInts()).toEqual(label!.fg.toInts())
 })
 
 test("the horizontal tab strip shows each chat with an identity in its colour", async () => {

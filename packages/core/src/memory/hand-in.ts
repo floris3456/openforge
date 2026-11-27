@@ -32,20 +32,42 @@ import { MemoryTask } from "./task.js"
 // current step, as it places one started on a step, so such a helper is told by the task's read naming it the worker
 // (the lead's decision of 2026-11-26). Either counts from its task's or step's last going active or back to todo, as a
 // deny sends it; the chat's own notes on it, kept as changes to the same state, do not count.
+//
+// The way out (section 7; the owner, 2026-11-27, option 1, "Way out, lead always told"): pictures a helper looked at may
+// show none of its work, such as references it fetched or another task's pictures. The refusal says so, and the same
+// call sent right after it (its task and state, no items) goes without them, its note telling its lead and naming them.
+// Any other call between resets it.
 
 /** How long the read of the chat's task may take; without an answer the call goes as before. */
 export const READ = "5 seconds"
 /** How many pictures a refusal names. */
 export const NAMED = 20
+/** The most characters a note may hold, as CPP counts them (code points). */
+export const NOTE = 500
+/** The metadata of a refusal that offers the way out: the same call sent next goes. */
+export const OFFERED = { handIn: "refused" }
+
+/** How a call that hands in does not go as written. */
+export type Check =
+  /** Not sent: why, after `Not sent: `, and the metadata the refusal keeps. */
+  | { readonly refused: string; readonly metadata?: typeof OFFERED }
+  /** Sent with this note in place of the chat's: it goes without its pictures, and the note tells its lead. */
+  | { readonly note: string }
 
 export interface Interface {
   /**
-   * Why `input`, a call of CPP's task tool by `session` as `agent` (its role), is not sent ({@link refusedText}): the
-   * pictures it should hand in as items, and how. Undefined when it goes: a lead's, one with items or that hands nothing
-   * in, on a server without review items, one of a chat on a step where steps take no items, or when its task or step
-   * cannot be read (logged). Never fails.
+   * How `input`, a call `call` of CPP's task tool by `session` as `agent` (its role), does not go as written: refused
+   * ({@link refusedText}), naming the pictures it should hand in as items, how, and the way out; or, sent again right
+   * after that refusal, with a note that tells its lead it went without them ({@link wentWithout}). Undefined when it
+   * goes as written: a lead's, one with items or that hands nothing in, on a server without review items, one of a chat
+   * on a step where steps take no items, or when its task or step cannot be read (logged). Never fails.
    */
-  readonly refusal: (session: SessionSchema.Info, agent: string, input: unknown) => Effect.Effect<string | undefined>
+  readonly check: (
+    session: SessionSchema.Info,
+    agent: string,
+    input: unknown,
+    call: string,
+  ) => Effect.Effect<Check | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MemoryHandIn") {}
@@ -53,11 +75,17 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Me
 /** What a call of the chat's history was: when it was made, its tool and input, and the pictures its result held. */
 interface Call {
   readonly at: number
+  /** Its call ID; a Code Mode script's own calls have none. */
+  readonly id?: string
   readonly tool: string
   readonly status: string
   readonly input?: unknown
   /** The names of its result's pictures, as the tool gave them: the path as written, for a file that was read. */
   readonly pictures: ReadonlyArray<string>
+  /** A Code Mode script whose own calls follow it: they, not the script, are the calls it made. */
+  readonly script: boolean
+  /** A hand-in refused with the way out ({@link OFFERED}). */
+  readonly offered: boolean
 }
 
 const layer = Layer.effect(
@@ -118,10 +146,11 @@ const layer = Layer.effect(
       })
     })
 
-    const refusal = Effect.fn("MemoryHandIn.refusal")(function* (
+    const check = Effect.fn("MemoryHandIn.check")(function* (
       session: SessionSchema.Info,
       agent: string,
       input: unknown,
+      call: string,
     ) {
       if (session.parentID === undefined || !isRecord(input) || typeof input.id !== "string") return undefined
       const id = input.id
@@ -181,11 +210,12 @@ const layer = Layer.effect(
       if (since.some((call) => gaveItems(call, given))) return undefined
       const pictures = yield* changedAfter(since, moment)
       if (pictures.length === 0) return undefined
-      if (step !== undefined) return refusedText(kind, own, "first", pictures)
-      return refusedText(kind, own, kind === "step" && input.state === "done" ? "review" : "again", pictures)
+      if (sentAgain(calls, call, input)) return wentWithout(typeof input.note === "string" ? input.note : "", pictures)
+      const ask = step !== undefined ? "first" : kind === "step" && input.state === "done" ? "review" : "again"
+      return { refused: refusedText(kind, own, ask, pictures), metadata: OFFERED }
     })
 
-    return Service.of({ refusal })
+    return Service.of({ check })
   }),
 )
 
@@ -198,7 +228,8 @@ export const node = makeLocationNode({
 /**
  * Why the call is not sent, after `Not sent: `: the pictures looked at since the chat's task or step `id` went active,
  * and how the ones showing the work go as items: in the call sent again (`again`), sent again for review (`review`, a
- * step's done, so that its lead judges it), or first on task `id`, then the call (`first`, a call on its step).
+ * step's done, so that its lead judges it), or first on task `id`, then the call (`first`, a call on its step). Then the
+ * way out, for pictures that show none of the work.
  */
 export function refusedText(
   kind: "task" | "step",
@@ -215,17 +246,52 @@ export function refusedText(
     ask === "first"
       ? `first give those that show the work as items on task ${id} (task with id ${id} and items, ${how}), then send this again.`
       : `send this again with ${ask === "review" ? 'state "review" and ' : ""}items, those that show the work, ${how}.`,
+    `If none of them shows this ${kind}'s work (references you fetched, another task's pictures), send the same call again and it goes without them, its note telling your lead so.`,
   ].join(" ")
+}
+
+/**
+ * What a hand-in sent again goes with: its note, `written`, then words that tell its lead it went without its
+ * `pictures` and why, by the helper's word, naming as many as the note holds. When `written` leaves no room for those
+ * words and the first name, it is not sent: why, after `Not sent: `, and how long its note may be.
+ */
+export function wentWithout(written: string, pictures: ReadonlyArray<string>): Check {
+  const own = written.trim()
+  const before = own === "" ? "" : /[.!?]$/.test(own) ? `${own} ` : `${own}. `
+  const words = (count: number) => {
+    const more = pictures.length - count
+    const named = count === 0 ? "" : `: ${pictures.slice(0, count).join(", ")}${more > 0 ? ` and ${more} more` : ""}`
+    return pictures.length === 1
+      ? `Handed in without its picture, a reference or another task's picture by the helper's word${named}.`
+      : `Handed in without its ${pictures.length} pictures, references or another task's pictures by the helper's word${named}.`
+  }
+  // Naming one more drops "and 1 more", so the longest that fits is found by trying each.
+  const count = pictures.map((_, n) => pictures.length - n).find((count) => length(before + words(count)) <= NOTE)
+  if (count !== undefined) return { note: before + words(count) }
+  if (own === "") return { note: words(0) }
+  return {
+    refused: `with the words that tell your lead it goes without its pictures, your note would be ${length(before + words(1))} characters, over the ${NOTE} a note may hold: send the same call again with a note of at most ${Math.max(0, NOTE - 2 - length(words(1)))} characters.`,
+  }
+}
+
+function length(text: string) {
+  return [...text].length
 }
 
 const ToolPart = Schema.Struct({
   type: Schema.Literal("tool"),
+  id: Schema.String,
   name: Schema.String,
   state: Schema.Struct({
     status: Schema.String,
     input: Schema.optional(Schema.Unknown),
     content: Schema.optional(Schema.Array(Schema.Unknown)),
-    metadata: Schema.optional(Schema.Struct({ toolCalls: Schema.optional(Schema.Array(Schema.Unknown)) })),
+    metadata: Schema.optional(
+      Schema.Struct({
+        toolCalls: Schema.optional(Schema.Array(Schema.Unknown)),
+        handIn: Schema.optional(Schema.Unknown),
+      }),
+    ),
   }),
   time: Schema.Struct({ created: Schema.Number }),
 })
@@ -233,9 +299,15 @@ const decodeToolPart = Schema.decodeUnknownOption(ToolPart)
 const decodePicture = Schema.decodeUnknownOption(
   Schema.Struct({ type: Schema.Literal("file"), mime: Schema.String, name: Schema.String }),
 )
-// A Code Mode script's own calls, as its `execute` part's settled metadata keeps them (`CodeModeTool`'s rows).
+// A Code Mode script's own calls, as its `execute` part's metadata keeps them (`CodeModeTool`'s rows), each with its
+// metadata once it settled.
 const decodeInner = Schema.decodeUnknownOption(
-  Schema.Struct({ tool: Schema.String, status: Schema.String, input: Schema.optional(Schema.Unknown) }),
+  Schema.Struct({
+    tool: Schema.String,
+    status: Schema.String,
+    input: Schema.optional(Schema.Unknown),
+    metadata: Schema.optional(Schema.Struct({ handIn: Schema.optional(Schema.Unknown) })),
+  }),
 )
 
 /** A stored part's call, if it is a tool's, then the calls its script made, which share its time and leave it the pictures. */
@@ -247,9 +319,51 @@ function callsOf(stored: unknown): ReadonlyArray<Call> {
     Option.toArray(decodePicture(item)).flatMap((file) => (file.mime.startsWith("image/") ? [file.name] : [])),
   )
   const inner = (part.state.metadata?.toolCalls ?? []).flatMap((item) =>
-    Option.toArray(decodeInner(item)).map((call) => ({ ...call, at, pictures: [] })),
+    Option.toArray(decodeInner(item)).map((call) => ({
+      at,
+      tool: call.tool,
+      status: call.status,
+      input: call.input,
+      pictures: [],
+      script: false,
+      offered: call.metadata?.handIn === OFFERED.handIn,
+    })),
   )
-  return [{ at, tool: part.name, status: part.state.status, input: part.state.input, pictures }, ...inner]
+  return [
+    {
+      at,
+      id: part.id,
+      tool: part.name,
+      status: part.state.status,
+      input: part.state.input,
+      pictures,
+      script: inner.length > 0,
+      offered: part.state.metadata?.handIn === OFFERED.handIn,
+    },
+    ...inner,
+  ]
+}
+
+/**
+ * Whether `input` is a call sent again right after a refusal that offered the way out: the chat's settled calls before
+ * `current`, back to that refusal, are each one on its task with its state and no items that failed, as one sent again
+ * fails when its note is too long or CPP refuses it. A script's calls count, not the script.
+ */
+function sentAgain(calls: ReadonlyArray<Call>, current: string, input: Readonly<Record<string, unknown>>) {
+  const at = calls.findIndex((call) => call.id === current)
+  const before = (at === -1 ? calls : calls.slice(0, at))
+    .filter((call) => !call.script && (call.status === "completed" || call.status === "error"))
+    .toReversed()
+  const end = before.findIndex(
+    (call) =>
+      call.status !== "error" ||
+      call.tool !== "task" ||
+      !isRecord(call.input) ||
+      call.input.id !== input.id ||
+      call.input.state !== input.state ||
+      gives(call.input),
+  )
+  return before.slice(0, end === -1 ? before.length : end).some((call) => call.offered)
 }
 
 /** Whether a call's input holds items: a list of them with an entry. */

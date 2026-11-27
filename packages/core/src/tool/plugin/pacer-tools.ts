@@ -44,7 +44,8 @@ export const Plugin = {
     const handIn = yield* MemoryHandIn.Service
 
     /** What the model wrote, when the call does not go: `Not sent:` and why, and nothing reaches CPP. */
-    const notSent = (reason: string) => new ToolFailure({ message: `Not sent: ${reason}` })
+    const notSent = (reason: string, metadata?: Readonly<Record<string, unknown>>) =>
+      new ToolFailure({ message: `Not sent: ${reason}`, ...(metadata ? { metadata } : {}) })
 
     /** Image `number` of the chat, as `image.show` numbers them: its original's hash, and its name `image N`. */
     const fromChat = Effect.fnUntraced(function* (written: string, number: number) {
@@ -172,16 +173,22 @@ export const Plugin = {
                     source: { type: "tool", messageID: context.messageID, id: context.id },
                   })
                   .pipe(Effect.mapError((error) => new ToolFailure({ message: error.message, error })))
-                // What the model wrote stays the call's own input; only what CPP is sent has the files' hashes. The
-                // schema is the chat's own copy of the tool, or Code Mode's for every chat while the chat holds none.
+                // What the model wrote stays the call's own input; only what CPP is sent has the files' hashes, and a
+                // hand-in that goes without its pictures the note that tells its lead. The schema is the chat's own copy
+                // of the tool, or Code Mode's for every chat while the chat holds none.
                 const schema =
                   calls.held(context.sessionID)?.byName.get(name)?.inputSchema ?? meta.definition?.input_schema
                 const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
-                // A helper's work that made pictures goes to review with them (the workspace's spec picture-hand-ins).
-                const refused =
-                  name === "task" && session ? yield* handIn.refusal(session, String(context.agent), input) : undefined
-                if (refused) return yield* notSent(refused)
-                const sent = isRecord(input) ? yield* withFiles(input, meta.files, schema, context) : input
+                // A helper's work that made pictures goes to review with them, unless its pictures show none of its
+                // work (the workspace's spec picture-hand-ins).
+                const checked =
+                  name === "task" && session
+                    ? yield* handIn.check(session, String(context.agent), input, context.id)
+                    : undefined
+                if (checked !== undefined && "refused" in checked)
+                  return yield* notSent(checked.refused, checked.metadata)
+                const written = checked === undefined ? input : { ...args, note: checked.note }
+                const sent = isRecord(written) ? yield* withFiles(written, meta.files, schema, context) : written
                 // A subagent's calls are rows of its own chat, nested under its parent's, as its model requests are.
                 const project = session ? (yield* projects.session(session)).headers : undefined
                 const answer = yield* calls

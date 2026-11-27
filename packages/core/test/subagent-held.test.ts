@@ -53,7 +53,9 @@ import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
 // A lead's message to its helper held until the lead answers the helper's handed-in round (the workspace's task
 // khtzd8a7qje3, `MemoryHeld`). What is owed is CLIProxyPacer's to say; here a stand-in answers `GET …/owed` as the
 // test sets it, the task tool is a stand-in whose marks change what is owed, and the hold, its release and its words are
-// openforge's own, run through the real subagent tool, sessions, inbox and database.
+// openforge's own, run through the real subagent tool, sessions, inbox and database. A release sends nothing: the task
+// call's answer quotes the message back to the lead, who wrote it before it saw what it answered (the workspace's task
+// 2ykxbrh7syva).
 
 const PROJECT = "held-test"
 const parentModel = Model.Ref.make({ id: Model.ID.make("parent"), providerID: Provider.ID.make("test") })
@@ -312,13 +314,14 @@ const withLead = <A, E, R>(body: (h: Effect.Success<ReturnType<typeof prepare>>)
   tmpdirScoped().pipe(Effect.flatMap(prepare), Effect.flatMap(body))
 
 const heldText = (items: string) =>
-  `Held, not sent: this helper handed in work for review that neither you nor the person has answered (task t1 "Draw the counter", round 1: ${items}).\nAnswer each item with the task tool's marks first: pass, deny or dismiss, and a note with words on what you deny. This message goes to the helper right after that call; a newer message to it replaces this one.`
-const sentText = (helper: string, description = "follow up") =>
-  `Your held message to subagent ${helper} ("${description}") is sent now, after this call. You will receive a <subagent> message when it goes idle.`
+  `Held, not sent: this helper handed in work for review that neither you nor the person has answered (task t1 "Draw the counter", round 1: ${items}).\nAnswer each item with the task tool's marks first: pass, deny or dismiss, and a note with words on what you deny. Even then this message is not sent: the task call that leaves nothing owed quotes it back to you, since what you see by then may change it; send it again with the subagent tool, as is or edited, or leave it. A newer message to this helper replaces this one.`
+/** What a task call's answer ends with for a held message it gave back: its prompt as `quote`, after `said`. */
+const backText = (helper: string, description: string, quote: string, said = "It said:") =>
+  `Your held message to subagent ${helper} ("${description}") was not sent: you wrote it before the helper's round was answered, and what you have seen since may change it. Send it again with the subagent tool and sessionID ${helper}, as is or edited, or leave it. ${said}\n${quote}`
 
 describe("a lead's message to its helper", () => {
   it.live(
-    "is held while the helper's handed-in round is unanswered, and goes right after the marks that answer it",
+    "is held while the helper's handed-in round is unanswered, and comes back unsent with the marks that answer it",
     () =>
       withLead((h) =>
         Effect.gen(function* () {
@@ -346,7 +349,7 @@ describe("a lead's message to its helper", () => {
           ])
           expect(yield* h.inbox).toHaveLength(1)
 
-          // The marks that answer the round: the message goes after the call, which says so.
+          // The marks that answer the round: the call's answer quotes the message, which is not sent.
           const seen: number[] = []
           cpp.onTask = () => {
             cpp.owed.set(h.helper, [])
@@ -354,18 +357,24 @@ describe("a lead's message to its helper", () => {
           }
           const answered = yield* h.task({ marks: [{ item: 2, answer: "dismiss" }] })
           expect(answered.content).toEqual([
-            { type: "text", text: `Task t1's round 1: your answers.\n\n${sentText(h.helper)}` },
+            {
+              type: "text",
+              text: `Task t1's round 1: your answers.\n\n${backText(h.helper, "follow up", "> Make the colours match too.")}`,
+            },
           ])
           // Asked again only after the marks ran.
           expect(owedReads().length).toBe(seen[0]! + 1)
+          expect(yield* h.inbox).toEqual(["You are a subagent spawned by another session.\nDraw the counter."])
+          expect(yield* h.rows).toEqual([])
+          // Nothing is held any more: the next task call quotes nothing again.
+          expect((yield* h.task({})).content).toEqual([{ type: "text", text: "Task t1's round 1: your answers." }])
+          expect(yield* h.inbox).toHaveLength(1)
+          // Sent again with the same sessionID, it goes at once.
+          expect((yield* h.follow("Make the colours match too.")).status).toBe("completed")
           expect(yield* h.inbox).toEqual([
             "You are a subagent spawned by another session.\nDraw the counter.",
             "Make the colours match too.",
           ])
-          expect(yield* h.rows).toEqual([])
-          // Nothing is held any more: the next task call sends nothing again.
-          expect((yield* h.task({})).content).toEqual([{ type: "text", text: "Task t1's round 1: your answers." }])
-          expect(yield* h.inbox).toHaveLength(2)
         }),
       ),
   )
@@ -404,9 +413,12 @@ describe("a lead's message to its helper", () => {
         ])
         cpp.onTask = () => cpp.owed.set(h.helper, [])
         expect((yield* h.task({ marks: [{ item: 1, answer: "pass" }] })).content).toEqual([
-          { type: "text", text: `Task t1's round 1: your answers.\n\n${sentText(h.helper, "second")}` },
+          {
+            type: "text",
+            text: `Task t1's round 1: your answers.\n\n${backText(h.helper, "second", "> Second thought.")}`,
+          },
         ])
-        expect((yield* h.inbox).slice(1)).toEqual(["Second thought."])
+        expect((yield* h.inbox).slice(1)).toEqual([])
 
         // Held, then the person answers the round on the dashboard: the next message goes at once, the held one never.
         cpp.owed.set(h.helper, [round([1])])
@@ -415,15 +427,38 @@ describe("a lead's message to its helper", () => {
         expect((yield* h.follow("Fourth thought.")).status).toBe("completed")
         expect(yield* h.rows).toEqual([])
         expect((yield* h.task({})).content).toEqual([{ type: "text", text: "Task t1's round 1: your answers." }])
-        expect((yield* h.inbox).slice(1)).toEqual(["Second thought.", "Fourth thought."])
+        expect((yield* h.inbox).slice(1)).toEqual(["Fourth thought."])
       }),
     ),
   )
 
-  it.live("held is kept in the database, released by the next process under the id it was held with, once", () =>
+  it.live("comes back with its prompt cut to a readable length, each line quoted", () =>
     withLead((h) =>
       Effect.gen(function* () {
-        // What a process that stopped left: a held message, and one it had admitted before it could drop its row.
+        cpp.owed.set(h.helper, [round([1])])
+        expect((yield* h.follow(`Para one.\n\n${"b".repeat(600)}`, "long")).status).toBe("error")
+        cpp.onTask = () => cpp.owed.set(h.helper, [])
+        expect((yield* h.task({ marks: [{ item: 1, answer: "pass" }] })).content).toEqual([
+          {
+            type: "text",
+            text: `Task t1's round 1: your answers.\n\n${backText(
+              h.helper,
+              "long",
+              `> Para one.\n>\n> ${"b".repeat(489)}…`,
+              "It said (its first 500 of 611 characters):",
+            )}`,
+          },
+        ])
+        expect((yield* h.inbox).slice(1)).toEqual([])
+        expect(yield* h.rows).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("held is kept in the database, and the next process's task call quotes it, unsent", () =>
+    withLead((h) =>
+      Effect.gen(function* () {
+        // What a process that stopped left: a message held for each of two helpers.
         const database = yield* Database.Service
         const second = yield* h.call(SubagentTool.name, {
           background: true,
@@ -432,35 +467,31 @@ describe("a lead's message to its helper", () => {
           prompt: "Write the spec.",
         })
         const other = outputSessionID(second.metadata)
-        const kept = SessionMessage.ID.create()
-        const admitted = SessionMessage.ID.create()
-        for (const [helper, id, prompt, at] of [
-          [h.helper, kept, "Kept across the stop.", 1],
-          [other, admitted, "Admitted before the stop.", 2],
+        for (const [helper, prompt, at] of [
+          [h.helper, "Kept across the stop.", 1],
+          [other, "Also kept.", 2],
         ] as const)
           yield* database.db
             .insert(MemoryHeldTable)
             .values({
               helper_id: helper,
               lead_id: h.lead.id,
-              message_id: id,
+              message_id: SessionMessage.ID.create(),
               input: { agent: "reviewer", description: "kept", prompt },
               time_created: at,
             })
             .run()
             .pipe(Effect.orDie)
-        yield* h.sessions.prompt({ sessionID: other, id: admitted, text: "Admitted before the stop.", resume: false })
 
         const answer = yield* h.task({ marks: [{ item: 1, answer: "pass" }] })
         expect(answer.content).toEqual([
           {
             type: "text",
-            text: `Task t1's round 1: your answers.\n\n${sentText(h.helper, "kept")}\n${sentText(other, "kept")}`,
+            text: `Task t1's round 1: your answers.\n\n${backText(h.helper, "kept", "> Kept across the stop.")}\n\n${backText(other, "kept", "> Also kept.")}`,
           },
         ])
-        expect((yield* h.sessions.inbox(h.helper)).map((item) => item.id)).toContain(kept)
-        const admittedOnce = (yield* h.sessions.inbox(other)).filter((item) => item.id === admitted)
-        expect(admittedOnce).toHaveLength(1)
+        expect(yield* h.inbox).toHaveLength(1)
+        expect(yield* h.sessions.inbox(other)).toHaveLength(1)
         expect(yield* h.rows).toEqual([])
       }),
     ),

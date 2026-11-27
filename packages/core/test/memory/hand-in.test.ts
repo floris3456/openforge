@@ -375,24 +375,31 @@ const older = (name: string) => picture(name, Date.now() - 3_600_000)
 
 const ok = (name: string) => ({ name, status: "completed" as const, error: undefined })
 const how = "each {picture, comment} saying what it shows and what to judge"
-const notSent = (since: string, pictures: string, ask: string) =>
-  `Not sent: since ${since} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: ${ask}`
+/** The refusal, and its way out (the owner, 2026-11-27: "Way out, lead always told"). */
+const notSent = (kind: "task" | "step", id: string, pictures: string, ask: string) =>
+  `Not sent: since ${kind} ${id} went active you looked at pictures changed after that: ${pictures}. Work that made pictures goes to review with them as items: ${ask} If none of them shows this ${kind}'s work (references you fetched, another task's pictures), send the same call again and it goes without them, its note telling your lead so.`
 /** The refusal of a hand-in of the chat's task `task` itself. */
 const onTask = (task: string, pictures: string) =>
-  notSent(`task ${task}`, pictures, `send this again with items, those that show the work, ${how}.`)
+  notSent("task", task, pictures, `send this again with items, those that show the work, ${how}.`)
 /** The refusal of a hand-in on a step of the chat's task `task`: its items go on the task. */
 const onTasksStep = (task: string, pictures: string) =>
   notSent(
-    `task ${task}`,
+    "task",
+    task,
     pictures,
     `first give those that show the work as items on task ${task} (task with id ${task} and items, ${how}), then send this again.`,
   )
 /** The refusal of `review` on the chat's step `step`. */
 const onStep = (step: string, pictures: string) =>
-  notSent(`step ${step}`, pictures, `send this again with items, those that show the work, ${how}.`)
+  notSent("step", step, pictures, `send this again with items, those that show the work, ${how}.`)
 /** The refusal of `done` on the chat's step `step`: it asks for review, so that the lead judges the step. */
 const doneOnStep = (step: string, pictures: string) =>
-  notSent(`step ${step}`, pictures, `send this again with state "review" and items, those that show the work, ${how}.`)
+  notSent("step", step, pictures, `send this again with state "review" and items, those that show the work, ${how}.`)
+/** What a hand-in that went without its pictures adds to its note for its lead, naming them. */
+const without = (pictures: ReadonlyArray<string>, named = pictures.join(", ")) =>
+  pictures.length === 1
+    ? `Handed in without its picture, a reference or another task's picture by the helper's word: ${named}.`
+    : `Handed in without its ${pictures.length} pictures, references or another task's pictures by the helper's word: ${named}.`
 
 describe("a helper's hand-in", () => {
   it.live("that looked at a picture its work made is refused without items, naming it, and goes with them", () =>
@@ -1115,6 +1122,205 @@ describe("a helper's notes and the moment", () => {
       }),
     )
   }
+})
+
+// The way out (the owner, 2026-11-27, option 1, "Way out, lead always told"): a helper whose pictures show none of its
+// work (references it fetched, another task's pictures) sends the refused call again, and it goes without them, its
+// note telling its lead so and naming them. Any other next call resets it.
+describe("a helper's way out", () => {
+  it.live(
+    "refused, then the same call sent again goes without its pictures, its note telling its lead, naming them",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* setup()
+        const first = made("street-1.jpg")
+        const second = made("street-2.jpg")
+        const note = "None of them is my work: they are the Street View references I fetched."
+        yield* h.llm.push(
+          TestLLM.toolCall("call-read-1", "read", { path: first }),
+          TestLLM.toolCall("call-read-2", "read", { path: second }),
+          TestLLM.toolCall("call-review", "task", { id: h.task, state: "review", note: "The corner is described." }),
+          // The same task and state, no items: its note may differ.
+          TestLLM.toolCall("call-again", "task", { id: h.task, state: "review", note }),
+          TestLLM.text("Handed in.", "after"),
+        )
+        yield* h.prompt("describe the corner")
+        expect(yield* h.results()).toEqual([
+          ok("read"),
+          ok("read"),
+          { name: "task", status: "error", error: onTask(h.task, `${first}, ${second}`) },
+          ok("task"),
+        ])
+        expect(h.sent().map((call) => call.body)).toEqual([
+          { id: h.task, state: "review", note: `${note} ${without([first, second])}` },
+        ])
+        expect(yield* h.state(h.task)).toBe("review")
+      }),
+  )
+
+  it.live("done on its step sent again goes done, its note, which it gave none, telling its lead", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, catalog: stepping() })
+      const step = h.steps[0]!
+      const other = made("other-task.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: other }),
+        TestLLM.toolCall("call-done", "task", { id: step, state: "done" }),
+        TestLLM.toolCall("call-again", "task", { id: step, state: "done" }),
+        TestLLM.text("Done.", "after"),
+      )
+      yield* h.prompt("check the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: doneOnStep(step, other) },
+        ok("task"),
+      ])
+      expect(h.sent().map((call) => call.body)).toEqual([{ id: step, state: "done", note: without([other]) }])
+      expect(yield* h.state(step)).toBe("done")
+    }),
+  )
+
+  it.live("a call sent again with another state is refused again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: step, state: "review", note: "Drawn." }),
+        TestLLM.toolCall("call-done", "task", { id: step, state: "done", note: "Drawn." }),
+        TestLLM.text("Refused.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onStep(step, front) },
+        { name: "task", status: "error", error: doneOnStep(step, front) },
+      ])
+      expect(h.sent()).toHaveLength(0)
+    }),
+  )
+
+  it.live("a call sent again on another task is refused again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ steps: 1, worker: "task", catalog: stepping() })
+      const step = h.steps[0]!
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-step", "task", { id: step, state: "review", note: "Drawn." }),
+        TestLLM.toolCall("call-task", "task", { id: h.task, state: "review", note: "Drawn." }),
+        TestLLM.text("Refused.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onTasksStep(h.task, front) },
+        { name: "task", status: "error", error: onTask(h.task, front) },
+      ])
+      expect(h.sent()).toHaveLength(0)
+    }),
+  )
+
+  it.live("the same call after another call between is refused again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const front = made("front.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: h.task, state: "review", note: "Drawn." }),
+        TestLLM.toolCall("call-look", "task", { id: h.task }),
+        TestLLM.toolCall("call-again", "task", { id: h.task, state: "review", note: "Drawn." }),
+        TestLLM.text("Refused.", "after"),
+      )
+      yield* h.prompt("draw the counter")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onTask(h.task, front) },
+        ok("task"),
+        { name: "task", status: "error", error: onTask(h.task, front) },
+      ])
+      expect(h.sent().map((call) => call.body)).toEqual([{ id: h.task }])
+    }),
+  )
+
+  it.live("after one way out, a later hand-in with new pictures is refused again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const reference = made("reference.jpg")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: reference }),
+        TestLLM.toolCall("call-review", "task", { id: h.task, state: "review", note: "Described." }),
+        TestLLM.toolCall("call-again", "task", { id: h.task, state: "review", note: "Described." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("describe the corner")
+      expect(yield* h.state(h.task)).toBe("review")
+      // The times are in milliseconds: the deny comes after the hand-in.
+      yield* Effect.sleep("10 millis")
+      yield* h.change(h.task, "todo", "Draw it too.")
+      const drawn = made("drawn.png")
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read-drawn", "read", { path: drawn }),
+        TestLLM.toolCall("call-review-drawn", "task", { id: h.task, state: "review", note: "Drawn." }),
+        TestLLM.text("Refused.", "after"),
+      )
+      yield* h.prompt("draw it too")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onTask(h.task, reference) },
+        ok("task"),
+        ok("read"),
+        { name: "task", status: "error", error: onTask(h.task, drawn) },
+      ])
+      expect(yield* h.state(h.task)).toBe("todo")
+    }),
+  )
+
+  it.live("names as many pictures as its note holds, and how many more", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const pictures = [1, 2, 3].map((n) => made(`${"street".repeat(25)}-${n}.jpg`))
+      yield* h.llm.push(
+        ...pictures.map((written, n) => TestLLM.toolCall(`call-read-${n}`, "read", { path: written })),
+        TestLLM.toolCall("call-review", "task", { id: h.task, state: "review", note: "Described." }),
+        TestLLM.toolCall("call-again", "task", { id: h.task, state: "review", note: "Described." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("describe the corner")
+      const note = `Described. ${without(pictures, `${pictures[0]}, ${pictures[1]} and 1 more`)}`
+      expect(note.length).toBeLessThanOrEqual(500)
+      expect(h.sent().map((call) => call.body)).toEqual([{ id: h.task, state: "review", note }])
+    }),
+  )
+
+  it.live("a note too long to tell its lead too is refused with the length it may have, and a shorter one goes", () =>
+    Effect.gen(function* () {
+      const h = yield* setup()
+      const front = made("front.png")
+      const long = `${"The corner is described in full. ".repeat(14)}Done.`
+      const words = without([front])
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: front }),
+        TestLLM.toolCall("call-review", "task", { id: h.task, state: "review", note: long }),
+        TestLLM.toolCall("call-again", "task", { id: h.task, state: "review", note: long }),
+        TestLLM.toolCall("call-shorter", "task", { id: h.task, state: "review", note: "Described." }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("describe the corner")
+      expect(yield* h.results()).toEqual([
+        ok("read"),
+        { name: "task", status: "error", error: onTask(h.task, front) },
+        {
+          name: "task",
+          status: "error",
+          error: `Not sent: with the words that tell your lead it goes without its pictures, your note would be ${long.length + 1 + words.length} characters, over the 500 a note may hold: send the same call again with a note of at most ${500 - 2 - words.length} characters.`,
+        },
+        ok("task"),
+      ])
+      expect(h.sent().map((call) => call.body)).toEqual([{ id: h.task, state: "review", note: `Described. ${words}` }])
+    }),
+  )
 })
 
 describe("a lead's hand-in", () => {

@@ -212,7 +212,7 @@ export const Plugin = {
               )
               if (limit !== undefined)
                 return yield* new ToolFailure({
-                  message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
+                  message: `Subagent depth limit reached (${limit}): a subagent can't start its own subagents here. Do this work yourself, or tell your lead what needs another helper.`,
                 })
               const agent = yield* agents.resolve(input.agent)
               if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${input.agent}` })

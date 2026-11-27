@@ -438,7 +438,9 @@ describe("SubagentTool", () => {
             status: "error",
             error: {
               type: "tool.execution",
-              message: expect.stringContaining("Subagent depth limit reached (1)"),
+              // openforge: the helper is told what to do; the setting is the owner's (workspace task yw7ks4m68tt9).
+              message:
+                "Subagent depth limit reached (1): a subagent can't start its own subagents here. Do this work yourself, or tell your lead what needs another helper.",
             },
           })
           expect((yield* sessions.list({ parentID: parent.id })).data).toHaveLength(0)

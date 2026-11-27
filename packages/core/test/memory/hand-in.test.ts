@@ -65,7 +65,7 @@ import { testEffect } from "../lib/effect"
 import { imagePassthrough } from "../lib/image"
 import { permissionLayer } from "../lib/permission"
 import { registerToolPlugin } from "../lib/tool"
-import { catalogOf, endpointAt, key, pacerToolsNode, primeTools, startProxied } from "./fixture"
+import { catalogOf, codeModeList, endpointAt, key, pacerToolsNode, primeTools, startProxied } from "./fixture"
 
 // Pictures in hand-ins (the workspace's spec `docs/specs/picture-hand-ins.md`, section 2), through the real runner: a
 // helper that looked at a picture its work made since its task went active, and hands the task in without items, is
@@ -239,10 +239,21 @@ const setup = Effect.fnUntraced(function* (
     readonly onTask?: boolean
     readonly worker?: "task" | "step"
     readonly catalog?: PacerModels.Catalog
+    /** The server's `tools.task_codemode`: `task` runs in Code Mode, as its capabilities and its list say. */
+    readonly codemode?: boolean
   } = {},
 ) {
-  Effect.runSync(SubscriptionRef.set(catalogRef, input.catalog ?? reviewing()))
+  Effect.runSync(
+    SubscriptionRef.set(
+      catalogRef,
+      input.codemode
+        ? catalogOf(true, { prompt: false, plans: true, reviewItems: true, codemode: ["task"] })
+        : (input.catalog ?? reviewing()),
+    ),
+  )
   server.reset()
+  // The list's meta says it too, or a list read would learn `task` back as a direct tool.
+  if (input.codemode) server.control.answer = codeModeList(server, ["task"])
   const { db } = yield* Database.Service
   const agents = yield* Agent.Service
   yield* agents.transform((editor) => {
@@ -1274,6 +1285,25 @@ describe("a helper's way out", () => {
         { name: "task", status: "error", error: onTask(h.task, drawn) },
       ])
       expect(yield* h.state(h.task)).toBe("todo")
+    }),
+  )
+
+  it.live("a call from a Code Mode script, refused, goes when the next script sends it again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup({ codemode: true })
+      const reference = made("reference.jpg")
+      const script = `try { return await tools.task(${JSON.stringify({ id: h.task, state: "review", note: "Described." })}) } catch (error) { return String(error) }`
+      yield* h.llm.push(
+        TestLLM.toolCall("call-read", "read", { path: reference }),
+        TestLLM.toolCall("call-exec", "execute", { code: script }),
+        TestLLM.toolCall("call-exec-again", "execute", { code: script }),
+        TestLLM.text("Handed in.", "after"),
+      )
+      yield* h.prompt("describe the corner")
+      expect(h.sent().map((call) => call.body)).toEqual([
+        { id: h.task, state: "review", note: `Described. ${without([reference])}` },
+      ])
+      expect(yield* h.state(h.task)).toBe("review")
     }),
   )
 

@@ -313,6 +313,12 @@ describe("image.show of a review item", () => {
         }),
         "3": itemOf(3, { sha256: gone, mime: "image/png", bytes: 10, width: 5, height: 5 }, null),
         "4": itemOf(4, { sha256: "c".repeat(64), mime: "image/svg+xml", bytes: 10, width: null, height: null }, null),
+        "5": itemOf(
+          5,
+          { sha256: gone, mime: "image/png", bytes: 10, width: 5, height: 5 },
+          { sha256: "d".repeat(64), mime: "text/markdown", bytes: 120, lines: 4 },
+          { compare_name: "requirements.md" },
+        ),
       }
       cpp.answers.item = (request) => Response.json(items[request.path.split("/").at(-1)!])
       const bank = yield* chat("ses_review_refused")
@@ -331,6 +337,12 @@ describe("image.show of a review item", () => {
       expect(yield* refused({ task: TASK, item: 4 })).toBe(
         `Item 4 of task ${TASK} is an SVG drawing, which image.show cannot show.`,
       )
+      // A comparison that is a text is marked by its lines, never downloaded as a picture.
+      const downloads = cpp.uploads.filter((request) => request.method === "GET").length
+      expect(yield* refused({ task: TASK, item: 5, compare: true })).toBe(
+        `Item 5 of task ${TASK}: its comparison is a text of 4 lines; mark it by its lines, with compare: true.`,
+      )
+      expect(cpp.uploads.filter((request) => request.method === "GET").length).toBe(downloads)
     }).pipe(Effect.scoped),
   )
 

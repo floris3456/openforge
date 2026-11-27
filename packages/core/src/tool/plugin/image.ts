@@ -188,6 +188,11 @@ export const Plugin = {
       if (input.compare === true && !found.compare) return yield* failure(`${named} has no comparison.`)
       const file = input.compare === true ? found.compare : found.file
       if (!file) return yield* failure(`${named} has no picture.`)
+      // A picture item's own file is always a picture: only its comparison may be a text.
+      if (file.mime.startsWith("text/"))
+        return yield* failure(
+          `${named}: its comparison is a text of ${file.lines ?? 0} lines; mark it by its lines, with compare: true.`,
+        )
       if (file.mime === "image/svg+xml") return yield* failure(`${named} is an SVG drawing, which image.show cannot show.`)
       const held = yield* SessionBlob.read(chat.db, file.sha256)
       const bytes = held

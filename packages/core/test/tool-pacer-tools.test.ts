@@ -987,6 +987,49 @@ describe("PacerToolsPlugin files", () => {
     }),
   )
 
+  // The workspace's spec docs/specs/board-feedback.md, section 1: a comparison may be a text.
+  it.effect("uploads a .md or .txt compare as a text beside its picture", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const sheet = new TextEncoder().encode("# Requirements\n\nThe porch has three steps.\n")
+      yield* Effect.promise(() =>
+        Promise.all([
+          Bun.write(`${tmp.path}/after.png`, png),
+          Bun.write(`${tmp.path}/requirements.md`, sheet),
+          Bun.write(`${tmp.path}/measures.txt`, "18 cm a step"),
+        ]),
+      )
+      const h = yield* setup({ list: taskList, directory: tmp.path })
+      yield* h.run("task", {
+        id: "t1",
+        items: [
+          { picture: "after.png", compare: "requirements.md", compareComment: "three steps" },
+          ["after.png", "measures.txt", "the side"],
+        ],
+      })
+      expect(sent(h)).toEqual({
+        id: "t1",
+        items: [
+          {
+            picture: { sha256: sha(png), name: "after.png" },
+            compare: { sha256: sha(sheet), name: "requirements.md" },
+            compareComment: "three steps",
+          },
+          [
+            { sha256: sha(png), name: "after.png" },
+            { sha256: sha(new TextEncoder().encode("18 cm a step")), name: "measures.txt" },
+            "the side",
+          ],
+        ],
+      })
+      expect(h.cpp.puts().map((one) => one.headers.get("content-type"))).toEqual([
+        "image/png",
+        "text/markdown",
+        "text/plain",
+      ])
+    }),
+  )
+
   it.effect("refuses more than 20 items before any of them is read, when the tool's schema gives no maxItems", () =>
     Effect.gen(function* () {
       const h = yield* setup({ list: taskList })

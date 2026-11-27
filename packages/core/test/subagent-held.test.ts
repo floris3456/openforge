@@ -237,8 +237,10 @@ const it = testEffect(
         Layer.succeed(
           PacerProject.Service,
           PacerProject.Service.of({
-            chat: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
-            session: () => Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
+            chat: () =>
+              Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
+            session: () =>
+              Effect.succeed({ project: PROJECT, headers: { "X-Pacer-Project": PROJECT }, repository: "/project" }),
             headers: () => ({ "X-Pacer-Project": PROJECT }),
           }),
         ),
@@ -339,7 +341,7 @@ describe("a lead's message to its helper", () => {
           expect(read.pacer["x-pacer-chat"]).toBe(h.lead.id)
           expect(read.pacer["x-pacer-parent-session"]).toBeUndefined()
           expect((yield* h.rows).map((row) => [row.helper_id, row.input])).toEqual([
-            [h.helper, { agent: "reviewer", description: "follow up", prompt: "Make the colours match too." }],
+            [h.helper, { description: "follow up", prompt: "Make the colours match too." }],
           ])
 
           // Marks that leave the text unanswered release nothing.
@@ -408,9 +410,7 @@ describe("a lead's message to its helper", () => {
         cpp.owed.set(h.helper, [round([1])])
         expect((yield* h.follow("First thought.")).status).toBe("error")
         expect((yield* h.follow("Second thought.", "second")).error?.message).toBe(heldText("item 1 screen 1.png"))
-        expect((yield* h.rows).map((row) => row.input)).toEqual([
-          { agent: "reviewer", description: "second", prompt: "Second thought." },
-        ])
+        expect((yield* h.rows).map((row) => row.input)).toEqual([{ description: "second", prompt: "Second thought." }])
         cpp.onTask = () => cpp.owed.set(h.helper, [])
         expect((yield* h.task({ marks: [{ item: 1, answer: "pass" }] })).content).toEqual([
           {
@@ -458,7 +458,8 @@ describe("a lead's message to its helper", () => {
   it.live("held is kept in the database, and the next process's task call quotes it, unsent", () =>
     withLead((h) =>
       Effect.gen(function* () {
-        // What a process that stopped left: a message held for each of two helpers.
+        // What a process that stopped left: a message held for each of two helpers, as the whole subagent call that an
+        // earlier version kept.
         const database = yield* Database.Service
         const second = yield* h.call(SubagentTool.name, {
           background: true,

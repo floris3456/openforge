@@ -14,7 +14,6 @@ import { Model } from "../../model.js"
 import { PacerModels } from "../../pacer/models.js"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
-import { SessionMessage } from "../../session/message.js"
 import { SessionSchema } from "../../session/schema.js"
 import { SubagentCompletion } from "../../session/subagent-completion.js"
 import { SubagentDepth } from "../../session/subagent-depth.js"
@@ -83,7 +82,7 @@ export const description = [
  * (`review_owed`; `MemoryHeld`, the workspace's task khtzd8a7qje3), to a chat without a parent.
  */
 export const HELD =
-  "A follow-up to a child that handed in a review round you have not answered is held until your task tool marks answer it."
+  "A follow-up to a child that handed in a review round you have not answered is held, and given back to you unsent once your task tool marks answer it."
 
 export const Plugin = {
   id: "opencode.tool.subagent",
@@ -173,103 +172,6 @@ export const Plugin = {
       return ref
     })
 
-    /**
-     * Continues `existing`, or makes a child, with `input`'s message and runs it: in the foreground through `follow` for
-     * the call `callID`, else in the background. A held message (`MemoryHeld`) goes the same way once released, outside
-     * any call, under the id it was held with, `onAccepted` dropping it once the child's inbox has it.
-     */
-    const send = Effect.fnUntraced(function* (args: {
-      readonly parent: SessionSchema.Info
-      readonly agent: Agent.Info
-      readonly existing: SessionSchema.Info | undefined
-      readonly override: Model.Ref | undefined
-      readonly input: typeof Input.Type
-      readonly progress: (sessionID: SessionSchema.ID) => Effect.Effect<void>
-      readonly callID?: string
-      readonly messageID?: SessionMessage.ID
-      readonly onAccepted?: Effect.Effect<void>
-    }) {
-      const { parent, agent, existing, override, input } = args
-      // Continuing with a different agent switches the child, mirroring create semantics
-      // where an explicit model wins over the agent's configured model, which wins over the inherited one.
-      if (existing !== undefined) {
-        const switched = existing.agent !== agent.id
-        const model = override ?? (switched ? agent.model : undefined)
-        yield* Effect.all([
-          switched ? sessions.switchAgent({ sessionID: existing.id, agent: agent.id }) : Effect.void,
-          model === undefined ? Effect.void : sessions.switchModel({ sessionID: existing.id, model }),
-        ]).pipe(
-          Effect.mapError(
-            (error) => new ToolFailure({ message: `Failed to switch subagent session: ${existing.id}`, error }),
-          ),
-        )
-      }
-
-      const model = override ?? agent.model ?? parent.model
-      // A child started or continued on a task moves into the task as a new one does, and its maker gets the
-      // task's state in its reports once the task is no longer active.
-      const taskID = input.taskID
-      const assigned = taskID === undefined ? undefined : yield* tasks.assign(parent, taskID)
-      const child =
-        existing ??
-        (yield* sessions
-          .create({
-            parentID: parent.id,
-            title: input.description,
-            agent: agent.id,
-            model,
-            ...(assigned ? { metadata: assigned.metadata } : {}),
-          })
-          .pipe(
-            Effect.mapError((error) => new ToolFailure({ message: `Parent session not found: ${parent.id}`, error })),
-          ))
-
-      // Known and left so: when setting the task active fails, the child session made above already exists.
-      if (assigned) {
-        const metadata = yield* tasks.activate(assigned, child, agent.id)
-        if (metadata) yield* sessions.setMetadata({ sessionID: child.id, metadata }).pipe(Effect.ignore)
-      }
-      if (taskID !== undefined)
-        yield* ended.set(child.id, (output) =>
-          sessions.get(parent.id).pipe(
-            Effect.flatMap((current) => tasks.ended(current, taskID, output)),
-            Effect.orElseSucceed(() => output),
-          ),
-        )
-      // A child that is not draining yet must be admitted without waking: the job's resume
-      // owns the start, so the period cannot run before its boundary is registered.
-      const running =
-        existing !== undefined &&
-        ((yield* sessions.active).has(existing.id) || (yield* jobs.get(existing.id))?.status === "running")
-      yield* args.progress(child.id)
-
-      yield* sessions
-        .prompt(
-          {
-            sessionID: child.id,
-            ...(args.messageID === undefined ? {} : { id: args.messageID }),
-            text:
-              existing === undefined
-                ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
-                : input.prompt,
-            ...(running ? {} : { resume: false }),
-          },
-          args.onAccepted,
-        )
-        .pipe(Effect.mapError((error) => new ToolFailure({ message: `Failed to prompt subagent: ${child.id}`, error })))
-
-      const recovery = {
-        kind: "subagent" as const,
-        parentSessionID: parent.id,
-        childSessionID: child.id,
-        agent: agent.name,
-        description: input.description,
-      }
-      if (input.background !== true && args.callID !== undefined) return yield* follow(recovery, parent.id, args.callID)
-      yield* subagents.start(recovery)
-      return backgroundResult(child.id)
-    })
-
     yield* ctx.tool
       .transform((editor) =>
         editor.add({
@@ -310,7 +212,7 @@ export const Plugin = {
               )
               if (limit !== undefined)
                 return yield* new ToolFailure({
-                  message: `Subagent depth limit reached (${limit}). Increase "experimental.subagent_depth" to allow nested subagents.`,
+                  message: `Subagent depth limit reached (${limit}): a subagent can't start its own subagents here. Do this work yourself, or tell your lead what needs another helper.`,
                 })
               const agent = yield* agents.resolve(input.agent)
               if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${input.agent}` })
@@ -341,25 +243,97 @@ export const Plugin = {
                   message: `Session ${existing.id} is not a child of the current session`,
                 })
               const override = input.model === undefined ? undefined : yield* resolveModel(input.model)
-              // openforge: a lead's message to a helper whose handed-in round it has not answered waits for its marks,
-              // a newer one in place of the one held (`MemoryHeld`, the workspace's task khtzd8a7qje3).
+              // openforge: a lead's message to a helper whose handed-in round it has not answered is held, a newer one
+              // in place of the one held, until its marks answer it; then it comes back unsent (`MemoryHeld`, the
+              // workspace's tasks khtzd8a7qje3 and 2ykxbrh7syva).
               if (existing !== undefined) {
                 const owed = yield* held.owed(parent, existing)
                 if (owed.length > 0) {
-                  yield* held.hold(parent.id, existing.id, heldInput(input))
+                  yield* held.hold(parent.id, existing.id, { description: input.description, prompt: input.prompt })
                   return yield* new ToolFailure({ message: MemoryHeld.heldText(owed) })
                 }
                 yield* held.drop(existing.id)
               }
-              return yield* send({
-                parent,
-                agent,
-                existing,
-                override,
-                input,
-                progress: (sessionID) => context.progress({ sessionID, status: "running" }),
-                callID: context.id,
-              })
+              // Continuing with a different agent switches the child, mirroring create semantics
+              // where an explicit model wins over the agent's configured model, which wins over the inherited one.
+              if (existing !== undefined) {
+                const switched = existing.agent !== agent.id
+                const model = override ?? (switched ? agent.model : undefined)
+                yield* Effect.all([
+                  switched ? sessions.switchAgent({ sessionID: existing.id, agent: agent.id }) : Effect.void,
+                  model === undefined ? Effect.void : sessions.switchModel({ sessionID: existing.id, model }),
+                ]).pipe(
+                  Effect.mapError(
+                    (error) => new ToolFailure({ message: `Failed to switch subagent session: ${existing.id}`, error }),
+                  ),
+                )
+              }
+
+              const model = override ?? agent.model ?? parent.model
+              // A child started or continued on a task moves into the task as a new one does, and its maker gets the
+              // task's state in its reports once the task is no longer active.
+              const taskID = input.taskID
+              const assigned = taskID === undefined ? undefined : yield* tasks.assign(parent, taskID)
+              const child =
+                existing ??
+                (yield* sessions
+                  .create({
+                    parentID: context.sessionID,
+                    title: input.description,
+                    agent: agent.id,
+                    model,
+                    ...(assigned ? { metadata: assigned.metadata } : {}),
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      (error) => new ToolFailure({ message: `Parent session not found: ${context.sessionID}`, error }),
+                    ),
+                  ))
+
+              // Known and left so: when setting the task active fails, the child session made above already exists.
+              if (assigned) {
+                const metadata = yield* tasks.activate(assigned, child, agent.id)
+                if (metadata) yield* sessions.setMetadata({ sessionID: child.id, metadata }).pipe(Effect.ignore)
+              }
+              if (taskID !== undefined)
+                yield* ended.set(child.id, (output) =>
+                  sessions.get(context.sessionID).pipe(
+                    Effect.flatMap((current) => tasks.ended(current, taskID, output)),
+                    Effect.orElseSucceed(() => output),
+                  ),
+                )
+              // A child that is not draining yet must be admitted without waking: the job's resume
+              // owns the start, so the period cannot run before its boundary is registered.
+              const running =
+                existing !== undefined &&
+                ((yield* sessions.active).has(existing.id) || (yield* jobs.get(existing.id))?.status === "running")
+              yield* context.progress({ sessionID: child.id, status: "running" })
+
+              yield* sessions
+                .prompt({
+                  sessionID: child.id,
+                  text:
+                    existing === undefined
+                      ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
+                      : input.prompt,
+                  ...(running ? {} : { resume: false }),
+                })
+                .pipe(
+                  Effect.mapError(
+                    (error) => new ToolFailure({ message: `Failed to prompt subagent: ${child.id}`, error }),
+                  ),
+                )
+
+              const recovery = {
+                kind: "subagent" as const,
+                parentSessionID: context.sessionID,
+                childSessionID: child.id,
+                agent: agent.name,
+                description: input.description,
+              }
+              if (input.background !== true) return yield* follow(recovery, context.sessionID, context.id)
+              yield* subagents.start(recovery)
+              return backgroundResult(child.id)
             }).pipe(
               Effect.map((output) => ({
                 output,
@@ -375,53 +349,33 @@ export const Plugin = {
       .pipe(Effect.orDie)
 
     /**
-     * openforge: a message held for `lead`'s helper goes once the lead owes it nothing: as a background follow-up, under
-     * the id it was held with. Undefined while still owed; a line for the lead's answer otherwise. Typed here: the hook
-     * below would otherwise infer it through `send` and `Session.Handle`, which cycles back to this plugin.
+     * openforge: a message held for `lead`'s helper comes back once the lead owes it nothing, unsent: the lead wrote it
+     * before it saw what it answered. Undefined while still owed; its quote for the lead's answer otherwise.
      */
-    const release: (lead: SessionSchema.Info, item: MemoryHeld.Held) => Effect.Effect<string | undefined> =
-      Effect.fnUntraced(function* (lead, item) {
-        const helper = Option.getOrUndefined(yield* sessions.get(item.helper).pipe(Effect.option))
-        if (helper === undefined || helper.parentID !== lead.id)
-          return yield* held.drop(item.helper).pipe(Effect.as(undefined))
-        if ((yield* held.owed(lead, helper)).length > 0) return undefined
-        return yield* Effect.gen(function* () {
-          const agent = yield* agents.resolve(item.input.agent)
-          if (agent === undefined) return yield* new ToolFailure({ message: `Unknown agent: ${item.input.agent}` })
-          const override = item.input.model === undefined ? undefined : yield* resolveModel(item.input.model)
-          yield* send({
-            parent: lead,
-            agent,
-            existing: helper,
-            override,
-            input: { ...item.input, sessionID: helper.id, background: true },
-            progress: () => Effect.void,
-            messageID: item.messageID,
-            onAccepted: held.drop(item.helper, item.messageID),
-          })
-          return MemoryHeld.sentText(item)
-        }).pipe(
-          Effect.catch((failure) =>
-            held.drop(item.helper, item.messageID).pipe(Effect.as(MemoryHeld.failedText(item, failure.message))),
-          ),
-        )
-      })
+    const release = Effect.fnUntraced(function* (lead: SessionSchema.Info, item: MemoryHeld.Held) {
+      const helper = Option.getOrUndefined(yield* sessions.get(item.helper).pipe(Effect.option))
+      if (helper === undefined || helper.parentID !== lead.id)
+        return yield* held.drop(item.helper).pipe(Effect.as(undefined))
+      if ((yield* held.owed(lead, helper)).length > 0) return undefined
+      yield* held.drop(item.helper, item.messageID)
+      return MemoryHeld.backText(item)
+    })
 
-    // openforge: a lead's task call that leaves its helper owed nothing releases the message held for that helper, after
-    // the call, so what its marks changed is there when the helper's next step reads its memory; the call's answer ends
-    // saying so (`MemoryHeld`, the workspace's task khtzd8a7qje3).
+    // openforge: a lead's task call that leaves its helper owed nothing releases the message held for that helper: the
+    // call's answer ends quoting it, for the lead to send again or leave, since what the call answered may change it
+    // (`MemoryHeld`, the workspace's tasks khtzd8a7qje3 and 2ykxbrh7syva).
     yield* ctx.tool.hook("execute.after", (event) =>
       Effect.gen(function* () {
         if (event.tool !== "task" || event.status !== "completed") return
         const waiting = yield* held.held(event.sessionID)
         if (waiting.length === 0) return
         const lead = yield* sessions.get(event.sessionID)
-        const lines = (yield* Effect.forEach(waiting, (item) => release(lead, item))).filter(
-          (line): line is string => line !== undefined,
+        const quotes = (yield* Effect.forEach(waiting, (item) => release(lead, item))).filter(
+          (quote): quote is string => quote !== undefined,
         )
-        if (lines.length === 0) return
+        if (quotes.length === 0) return
         const content = normalizeContent(event.result.content, event.result.output)
-        const notice = lines.join("\n")
+        const notice = quotes.join("\n\n")
         const last = content.findLastIndex((item) => item.type === "text")
         event.result = {
           ...event.result,
@@ -484,15 +438,4 @@ export const Plugin = {
     yield* ctx.session.hook("compaction", hook)
     yield* ctx.session.hook("generate", hook)
   }),
-}
-
-/** The call to hold, as the lead wrote it, without what only its sending decides (the child, the foreground). */
-function heldInput(input: typeof Input.Type): MemoryHeld.Input {
-  return {
-    agent: input.agent,
-    description: input.description,
-    prompt: input.prompt,
-    ...(input.model === undefined ? {} : { model: input.model }),
-    ...(input.taskID === undefined ? {} : { taskID: input.taskID }),
-  }
 }

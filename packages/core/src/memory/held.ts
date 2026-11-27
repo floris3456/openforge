@@ -19,19 +19,20 @@ import { MemoryHeldTable } from "./held.sql.js"
 // random"): a lead's message to its helper waits while a round the helper handed in holds a picture or text with neither
 // the person's answer nor this lead's, until a task tool call of the lead's leaves nothing owed (`SubagentTool`). What
 // is owed is CPP's to say (`GET …/owed`, while its capabilities say `review_owed`); the hold and its words are
-// openforge's. A held message waits in its own table, not in the helper's inbox, whose delivery rules stay upstream's:
-// it enters the inbox, as any message to a helper does, once it is released.
+// openforge's. A held message waits in its own table, never in the helper's inbox. Released, it is not sent: the task
+// call's answer quotes it back to the lead, who wrote it before it saw what it answered, to send again or leave (the
+// workspace's task 2ykxbrh7syva; twice on 2026-11-27 a message sent on release needed a correction at once).
 
 /** How long the read of what a lead owes may take; without an answer the message goes as before. */
 export const READ = "5 seconds"
 
-/** The subagent call that was held, as the lead wrote it. */
+/**
+ * The held message as the lead wrote it, what its release quotes. A row an earlier version held keeps the whole
+ * subagent call; the rest of it is not read.
+ */
 export const Input = Schema.Struct({
-  agent: Schema.String,
   description: Schema.String,
   prompt: Schema.String,
-  model: Schema.optionalKey(Schema.String),
-  taskID: Schema.optionalKey(Schema.String),
 })
 export interface Input extends Schema.Schema.Type<typeof Input> {}
 const decodeInput = Schema.decodeUnknownOption(Input)
@@ -40,7 +41,7 @@ const decodeInput = Schema.decodeUnknownOption(Input)
 export interface Held {
   readonly helper: SessionSchema.ID
   readonly lead: SessionSchema.ID
-  /** The id it enters the helper's inbox with, so a release tried again after a stop admits it once. */
+  /** This hold's own id, so a release drops the message it quotes and not a newer one held in its place meanwhile. */
   readonly messageID: SessionMessage.ID
   readonly input: Input
 }
@@ -154,18 +155,22 @@ export function heldText(owed: ReadonlyArray<MemoryClient.Owed>) {
   const rounds = owed.map((round) => `task ${round.task} "${round.title}", round ${round.round}: ${items(round.items)}`)
   return [
     `Held, not sent: this helper handed in work for review that neither you nor the person has answered (${rounds.join("; ")}).`,
-    "Answer each item with the task tool's marks first: pass, deny or dismiss, and a note with words on what you deny. This message goes to the helper right after that call; a newer message to it replaces this one.",
+    "Answer each item with the task tool's marks first: pass, deny or dismiss, and a note with words on what you deny. Even then this message is not sent: the task call that leaves nothing owed quotes it back to you, since what you see by then may change it; send it again with the subagent tool, as is or edited, or leave it. A newer message to this helper replaces this one.",
   ].join("\n")
 }
 
-/** What a lead's task call answers after it, for a held message the call released. */
-export function sentText(held: Held) {
-  return `Your held message to subagent ${held.helper} ("${held.input.description}") is sent now, after this call. You will receive a <subagent> message when it goes idle.`
-}
+/** How many characters of a held message's prompt its release quotes. */
+export const QUOTED = 500
 
-/** What a lead's task call answers after it, for a held message that could not be sent once released. */
-export function failedText(held: Held, reason: string) {
-  return `Your held message to subagent ${held.helper} ("${held.input.description}") could not be sent: ${reason}. Send it again with the subagent tool.`
+/** What a lead's task call answers after it, for a held message the call released: quoted, not sent. */
+export function backText(held: Held) {
+  const prompt = Array.from(held.input.prompt.trim())
+  const cut = prompt.length > QUOTED
+  const quoted = cut ? `${prompt.slice(0, QUOTED).join("").trimEnd()}…` : prompt.join("")
+  return [
+    `Your held message to subagent ${held.helper} ("${held.input.description}") was not sent: you wrote it before the helper's round was answered, and what you have seen since may change it. Send it again with the subagent tool and sessionID ${held.helper}, as is or edited, or leave it. ${cut ? `It said (its first ${QUOTED} of ${prompt.length} characters):` : "It said:"}`,
+    ...quoted.split("\n").map((line) => (line === "" ? ">" : `> ${line}`)),
+  ].join("\n")
 }
 
 /** `item 1 after.png`, `items 1 after.png and 2 spec.md`, `items 1 a.png, 2 b.png and 3 c.md`. */

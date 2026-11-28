@@ -76,6 +76,33 @@ const forms = [
       basis: "16:13Z (2 min before); login.sh refused [98 s]",
     },
   },
+  // A person's words as CLIProxyPacer writes them since 2026-11-19: what they answered, or where they were found, and
+  // how the agent read them.
+  {
+    line: "- [7k9fxkcbmav3] Yes totally agree. (words of Main, noted as build, answering \"I'll write it after tonight's two deploys, unless you'd rather I didn't.\", read as: approved without a spec review; build it; global; 2026-11-13)",
+    entry: {
+      kind: "words",
+      person: "Main",
+      role: "build",
+      text: "Yes totally agree.",
+      scope: "global",
+      answering: "I'll write it after tonight's two deploys, unless you'd rather I didn't.",
+      read: "approved without a spec review; build it",
+    },
+  },
+  {
+    line: '- [7k9fxkcbmav3] the stripes are weird (words of key-4h8s, noted as build, found in the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely.", read as: his words on it; role build; 2026-11-13)',
+    entry: {
+      kind: "words",
+      person: "key-4h8s",
+      role: "build",
+      text: "the stripes are weird",
+      scope: "role build",
+      found:
+        'the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely."',
+      read: "his words on it",
+    },
+  },
   // A decision, the person's ruling (workspace spec `docs/specs/decisions-in-memory.md`), as CLIProxyPacer writes it
   // from 2026-11-28: the server's own record of a review answer names the task it was noted in, a lead's may not.
   {
@@ -116,6 +143,7 @@ test.each(forms.map((item) => [item.line, item.entry] as const))("reads back %s"
   })
   expect(read?.basis).toBe(entry.basis)
   expect(read?.task).toBe(entry.task)
+  expect([read?.answering, read?.found, read?.read]).toEqual([entry.answering, entry.found, entry.read])
   expect(line).toContain(`(${read?.author}; `)
 })
 

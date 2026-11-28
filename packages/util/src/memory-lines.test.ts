@@ -81,6 +81,42 @@ test("reads a decision, with and without the task it was noted in", () => {
   })
 })
 
+test("reads a person's words with what they answered or where they were found, and how they were read", () => {
+  const answering =
+    "- [ykgknrcrp0hh] Yes totally agree. (words of Main, noted as build, answering \"I'll write it after tonight's two deploys, unless you'd rather I didn't.\", read as: approved without a spec review; build it; global; 2026-11-28)"
+  expect(MemoryLines.entry(answering)).toEqual({
+    id: "ykgknrcrp0hh",
+    text: "Yes totally agree.",
+    kind: "words",
+    person: "Main",
+    role: "build",
+    answering: "I'll write it after tonight's two deploys, unless you'd rather I didn't.",
+    read: "approved without a spec review; build it",
+    author:
+      "words of Main, noted as build, answering \"I'll write it after tonight's two deploys, unless you'd rather I didn't.\", read as: approved without a spec review; build it",
+    scope: "global",
+    day: "2026-11-28",
+  })
+  expect(
+    MemoryLines.entry(
+      '- [s7tr1p3sabcd] the stripes are weird (words of key-4h8s, noted as build, found in the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely.", read as: his words on it; role build; 2026-11-28)',
+    ),
+  ).toEqual({
+    id: "s7tr1p3sabcd",
+    text: "the stripes are weird",
+    kind: "words",
+    person: "key-4h8s",
+    role: "build",
+    found:
+      'the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely."',
+    read: "his words on it",
+    author:
+      'words of key-4h8s, noted as build, found in the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely.", read as: his words on it',
+    scope: "role build",
+    day: "2026-11-28",
+  })
+})
+
 test("keeps lines that are not entries as they are", () => {
   const text = [
     "Memory holds these entries close to this prompt; they may be wrong or out of date:",

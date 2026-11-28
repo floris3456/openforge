@@ -118,6 +118,7 @@ import {
 } from "./rows"
 import { switchLabel } from "../../util/model"
 import { findMessageBoundary, messageNavigationSlack } from "./message-navigation"
+import { finishTime, useToday } from "./finish-time"
 import { stringWidth } from "../../util/string-width"
 import { useArgs } from "../../context/args"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
@@ -2068,6 +2069,31 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
   const interrupted = createMemo(() => props.message.error?.message === "Step interrupted")
   const freeLimit = createMemo(() => props.message.error?.type === "provider.free-limit")
   const limitNotice = useLimitNotice(() => props.message)
+  const shownModel = () => (ctx.terminal.width >= 28 ? model() : undefined)
+  const shownDuration = () =>
+    duration() && (ctx.terminal.width < 28 || ctx.terminal.width >= 36) ? Locale.duration(duration()) : undefined
+  const shownTokensPerSecond = () => {
+    const value = tokensPerSecond()
+    return config.data.session.tps && value ? `${value.toFixed(1)} tok/s` : undefined
+  }
+  // openforge: when the reply finished, shown only while the whole line fits, so it is the first part to give way. The
+  // box's left padding and a shown scrollbar's three columns are not the line's.
+  const today = useToday()
+  const finished = createMemo(() => {
+    const completed = props.message.retry ? undefined : props.message.time.completed
+    if (completed === undefined) return
+    const time = finishTime(completed, today())
+    const line = [
+      Locale.titlecase(props.message.agent),
+      shownModel(),
+      shownDuration(),
+      shownTokensPerSecond(),
+      interrupted() ? "interrupted" : undefined,
+      time,
+    ]
+    const room = ctx.width - 3 - (config.data.session.scrollbar ? 3 : 0)
+    return stringWidth(line.filter(Boolean).join(" · ")) <= room ? time : undefined
+  })
   return (
     <>
       <Show when={props.message.error && !interrupted() && !props.message.retry}>
@@ -2090,18 +2116,15 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
           <span style={{ fg: props.message.error ? theme.text.muted : local.agent.color(props.message.agent) }}>
             {Locale.titlecase(props.message.agent)}
           </span>
-          <Show when={ctx.terminal.width >= 28}>
-            <span style={{ fg: theme.text.muted }}> · {model()}</span>
-          </Show>
-          <Show when={duration() && (ctx.terminal.width < 28 || ctx.terminal.width >= 36)}>
-            <span style={{ fg: theme.text.muted }}> · {Locale.duration(duration())}</span>
-          </Show>
-          <Show when={config.data.session.tps && tokensPerSecond()}>
-            {(value) => <span style={{ fg: theme.text.muted }}> · {value().toFixed(1)} tok/s</span>}
+          <Show when={shownModel()}>{(value) => <span style={{ fg: theme.text.muted }}> · {value()}</span>}</Show>
+          <Show when={shownDuration()}>{(value) => <span style={{ fg: theme.text.muted }}> · {value()}</span>}</Show>
+          <Show when={shownTokensPerSecond()}>
+            {(value) => <span style={{ fg: theme.text.muted }}> · {value()}</span>}
           </Show>
           <Show when={interrupted()}>
             <span style={{ fg: theme.text.muted }}> · interrupted</span>
           </Show>
+          <Show when={finished()}>{(value) => <span style={{ fg: theme.text.muted }}> · {value()}</span>}</Show>
         </text>
       </box>
     </>

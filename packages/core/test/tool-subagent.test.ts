@@ -1311,8 +1311,9 @@ describe("SubagentTool", () => {
     /** An address where nothing listens. */
     const nowhere = Effect.promise(async () => {
       const away = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() })
+      const origin = `http://127.0.0.1:${away.port}`
       await away.stop(true)
-      return `http://127.0.0.1:${away.port}`
+      return origin
     })
     /** The words for `call` with the network's reason, whose wording is the runtime's; it names the address. */
     const unreachable = (message: string | undefined, call: string, id: string, address: string) => {

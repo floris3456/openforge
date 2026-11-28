@@ -85,10 +85,14 @@ export function cppProjects(input: {
   /** A model the server serves, for the one request that makes a subagent's chat known with its parent. */
   readonly model?: string
 }) {
-  const json = async (path: string, init: { method?: string; key: string; body?: unknown }) => {
+  const json = async (
+    path: string,
+    init: { method?: string; key: string; body?: unknown; headers?: Readonly<Record<string, string>> },
+  ) => {
     const response = await fetch(`${input.url}${path}`, {
       method: init.method ?? "GET",
       headers: {
+        ...init.headers,
         authorization: `Bearer ${init.key}`,
         ...(init.body === undefined ? {} : { "content-type": "application/json" }),
       },
@@ -99,11 +103,17 @@ export function cppProjects(input: {
     return JSON.parse(text) as unknown
   }
   const made = new Map<string, Promise<string>>()
-  /** The id of the project `identity` names, made by the client key's read the first time. */
+  /**
+   * The id of the project `identity` names, made by the client key's read the first time: as a chat's request names its
+   * project, in a git repository, the only folder CLIProxyPacer makes a project for (since 2026-11-24).
+   */
   const idOf = (identity: string) => {
     const found = made.get(identity)
     if (found) return found
-    const id = json(`/pacer/v1/projects/${identity}`, { key: input.key }).then(
+    const id = json(`/pacer/v1/projects/${identity}`, {
+      key: input.key,
+      headers: { "x-pacer-project": identity, "x-pacer-project-vcs": "git" },
+    }).then(
       (answer) => (answer as { project: { id: string } }).project.id,
     )
     made.set(identity, id)

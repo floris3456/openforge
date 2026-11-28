@@ -105,6 +105,11 @@ export function makeHarness(store: Store) {
   const calls: Record<string, (who: Caller, input: Fields) => Promise<Response>> = {
     remember: async (who, input) => {
       const place = placeOf(who)
+      // A decision, the person's ruling, is a lead's to save and the whole project's (workspace spec
+      // `docs/specs/decisions-in-memory.md`, section 1).
+      const decision = input.kind === "decision"
+      if (decision && who.parent) throw new Error("only a lead saves a decision")
+      if (decision && (input.scope ?? "global") !== "global") throw new Error("a decision is global")
       const written = await json(
         store.write(
           who.project,
@@ -112,7 +117,7 @@ export function makeHarness(store: Store) {
             kind: input.kind,
             text: input.text,
             ...(input.basis === undefined ? {} : { basis: input.basis }),
-            scope: input.scope ?? (place ? "task" : "role"),
+            scope: input.scope ?? (decision ? "global" : place ? "task" : "role"),
             supersedes: input.supersedes ?? null,
             by: by(who),
           },
@@ -123,10 +128,19 @@ export function makeHarness(store: Store) {
       return answer(who, `Saved as ${entry.id}.`, { id: entry.id, near: [] })
     },
     recall: async (who, input) => {
+      // Decisions alone are listed whole, 20 a page.
+      const decisions = Array.isArray(input.kinds) && input.kinds.length === 1 && input.kinds[0] === "decision"
       const found = await json(
         store.search(
           who.project,
-          { query: input.query, scopes: scopes(who), limit: input.limit ?? 5, by: by(who) },
+          {
+            query: input.query,
+            scopes: scopes(who),
+            ...(input.kinds === undefined ? {} : { kinds: input.kinds }),
+            limit: input.limit ?? (decisions ? 20 : 5),
+            ...(input.offset === undefined ? {} : { offset: input.offset }),
+            by: by(who),
+          },
           who.person,
         ),
       )

@@ -46,7 +46,9 @@ export const capabilities = {
 
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 const BODY_BYTES = 64 * 1024
-const KINDS = ["words", "unverified", "verified"]
+const KINDS = ["words", "unverified", "verified", "decision"]
+/** Most entries a search's `offset` skips. */
+const OFFSET_MOST = 10_000
 /** How long the endpoint may take: for an entry's vector, and for a query's. */
 const ENTRY_MS = 2000
 const QUERY_MS = 1000
@@ -635,8 +637,16 @@ function storeOf(
       if (supersedes !== null && typeof supersedes !== "string") refuse("supersedes: must be an entry id or null")
       if (body.move !== undefined && body.move !== null && typeof body.move !== "boolean")
         refuse("move: must be true, false or null")
-      // A new entry, or a replacement that moves, belongs where the body's scope says.
-      const home = supersedes === null || body.move === true ? homeOf(body.scope, by) : undefined
+      // A new entry, or a replacement that moves, belongs where the body's scope says. A decision, the person's ruling,
+      // is the whole project's, whatever it replaces (workspace spec `docs/specs/decisions-in-memory.md`).
+      const home =
+        supersedes === null || body.move === true
+          ? homeOf(body.scope, by)
+          : kind === "decision"
+            ? homeOf("global", by)
+            : undefined
+      if (kind === "decision" && home?.scope !== "global")
+        refuse("scope: a decision is the whole project's, scope global")
 
       const written = db
         .transaction(() => {
@@ -745,8 +755,9 @@ function storeOf(
       const scopes = scopesOf(body.scopes)
       const kinds = kindsOf(body.kinds)
       const limit = limitOf(body.limit)
+      const offset = offsetOf(body.offset)
       const by = { person, ...byOf(body.by) }
-      const answer = await found({ project, query, scopes, kinds, limit })
+      const answer = await found({ project, query, scopes, kinds, limit, offset })
       const recall = logged(project, "search", query, body, answer, by)
       catchUp()
       return Response.json({ recall, ...answer })
@@ -769,7 +780,11 @@ function storeOf(
         ? { ...(await closeToSummary({ project, summary, scopes, exclude })), waiting: 0 }
         : limit === 0
           ? { entries: [], meaning: false, waiting: 0 }
-          : await found({ project, query: prompt, scopes, kinds, limit })
+          : await found({ project, query: prompt, scopes, kinds, limit, offset: 0 }).then((page) => ({
+              entries: page.entries,
+              meaning: page.meaning,
+              waiting: page.waiting,
+            }))
       // A role entry has no task and a task entry no role, so `coalesce(role, task)` is what each belongs to.
       const count = (scope: string, list: string[] | "all") =>
         db
@@ -1140,14 +1155,28 @@ function storeOf(
     )
   }
 
-  /** What `search` and `start` answer: the entries, each with its score, whether vectors ranked them, and how many wait for one. */
-  async function found(input: { project: string; query: string; scopes: Scopes; kinds: string[]; limit: number }) {
+  /**
+   * What `search` answers: a page of the entries that pass, after the first `offset`, each with its score; whether
+   * vectors ranked them, how many wait for one, and how many more pass after the page. `start` answers its first page
+   * without `more`.
+   */
+  async function found(input: {
+    project: string
+    query: string
+    scopes: Scopes
+    kinds: string[]
+    limit: number
+    offset: number
+  }) {
     const vector = (await embed([input.query], QUERY_MS))?.[0]
     const meaning = vector && embedding ? { vector, model: embedding.model } : undefined
+    const passed = search<Row>(db, { ...input, meaning })
+    const page = passed.slice(input.offset, input.offset + input.limit)
     return {
-      entries: search<Row>(db, { ...input, meaning }).map((row) => ({ ...entryOf(row), score: row.score })),
+      entries: page.map((row) => ({ ...entryOf(row), score: row.score })),
       meaning: meaning !== undefined,
       waiting: embedding ? waiting(db, { ...input, model: embedding.model }) : 0,
+      more: Math.max(0, passed.length - input.offset - page.length),
     }
   }
 
@@ -1508,7 +1537,7 @@ function kindsOf(value: unknown) {
     new Set(value).size !== value.length ||
     !value.every((item) => typeof item === "string" && KINDS.includes(item))
   )
-    refuse(`kinds: must be null or a list of 1 to 3 different kinds of ${KINDS.join(", ")}`)
+    refuse(`kinds: must be null or a list of 1 to ${KINDS.length} different kinds of ${KINDS.join(", ")}`)
   return value.filter((item): item is string => typeof item === "string")
 }
 
@@ -1516,6 +1545,14 @@ function limitOf(value: unknown) {
   if (value === undefined) return 5
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > capabilities.search_limit)
     refuse(`limit: must be a whole number from 1 to ${capabilities.search_limit}`)
+  return value
+}
+
+/** A search's `offset`: how many of the entries that pass come before its page, 0 when absent or null. */
+function offsetOf(value: unknown) {
+  if (value === undefined || value === null) return 0
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > OFFSET_MOST)
+    refuse(`offset: must be a whole number from 0 to ${OFFSET_MOST}`)
   return value
 }
 

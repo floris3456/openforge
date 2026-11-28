@@ -47,6 +47,76 @@ test("reads each kind and scope, with and without a basis", () => {
   ).toBe("task t8n2k4m7q9xz, subtask s1")
 })
 
+test("reads a decision, with and without the task it was noted in", () => {
+  expect(
+    MemoryLines.entry(
+      "- [478p7693cnd7] Which colour does the lead's badge take? Answer: Violet, like decisions. Note: violet reads well on the dark (decision of Dashboard, noted as owner, in task yb7ybhc6jpwf; global; 2026-11-28; basis: The person's answer in review, round 1)",
+    ),
+  ).toEqual({
+    id: "478p7693cnd7",
+    text: "Which colour does the lead's badge take? Answer: Violet, like decisions. Note: violet reads well on the dark",
+    kind: "decision",
+    person: "Dashboard",
+    role: "owner",
+    task: "yb7ybhc6jpwf",
+    author: "decision of Dashboard, noted as owner, in task yb7ybhc6jpwf",
+    scope: "global",
+    day: "2026-11-28",
+    basis: "The person's answer in review, round 1",
+  })
+  expect(
+    MemoryLines.entry(
+      "- [wkkqgyfbm9pc] The red dotted line is enough for a blocked step: no extra label. (decision of key-ca59, noted as build; global; 2026-11-28; basis: his words in the chat on this, read as a rule for every agent)",
+    ),
+  ).toEqual({
+    id: "wkkqgyfbm9pc",
+    text: "The red dotted line is enough for a blocked step: no extra label.",
+    kind: "decision",
+    person: "key-ca59",
+    role: "build",
+    author: "decision of key-ca59, noted as build",
+    scope: "global",
+    day: "2026-11-28",
+    basis: "his words in the chat on this, read as a rule for every agent",
+  })
+})
+
+test("reads a person's words with what they answered or where they were found, and how they were read", () => {
+  const answering =
+    "- [ykgknrcrp0hh] Yes totally agree. (words of Main, noted as build, answering \"I'll write it after tonight's two deploys, unless you'd rather I didn't.\", read as: approved without a spec review; build it; global; 2026-11-28)"
+  expect(MemoryLines.entry(answering)).toEqual({
+    id: "ykgknrcrp0hh",
+    text: "Yes totally agree.",
+    kind: "words",
+    person: "Main",
+    role: "build",
+    answering: "I'll write it after tonight's two deploys, unless you'd rather I didn't.",
+    read: "approved without a spec review; build it",
+    author:
+      "words of Main, noted as build, answering \"I'll write it after tonight's two deploys, unless you'd rather I didn't.\", read as: approved without a spec review; build it",
+    scope: "global",
+    day: "2026-11-28",
+  })
+  expect(
+    MemoryLines.entry(
+      '- [s7tr1p3sabcd] the stripes are weird (words of key-4h8s, noted as build, found in the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely.", read as: his words on it; role build; 2026-11-28)',
+    ),
+  ).toEqual({
+    id: "s7tr1p3sabcd",
+    text: "the stripes are weird",
+    kind: "words",
+    person: "key-4h8s",
+    role: "build",
+    found:
+      'the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely."',
+    read: "his words on it",
+    author:
+      'words of key-4h8s, noted as build, found in the person\'s reply on task t8n2k4m7q9xz, round 1, item 1, to: "The new bumper follows the drawing closely.", read as: his words on it',
+    scope: "role build",
+    day: "2026-11-28",
+  })
+})
+
 test("keeps lines that are not entries as they are", () => {
   const text = [
     "Memory holds these entries close to this prompt; they may be wrong or out of date:",

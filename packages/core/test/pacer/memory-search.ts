@@ -13,7 +13,11 @@ import type { Database } from "bun:sqlite"
 /** The FTS5 tokenizer of `entry_fts`. */
 export const tokenizer = "porter unicode61"
 
-/** How many of the best entries each list holds before the query's own text takes some out. */
+/**
+ * How many of the best entries each list holds before the query's own text takes some out; every one when a search is
+ * of decisions alone, so that every decision that passes is ranked (workspace spec `docs/specs/decisions-in-memory.md`,
+ * section 2).
+ */
 export const CANDIDATES = 50
 
 /** What each list's score, brought to 0..1, weighs in the merged score. */
@@ -83,19 +87,19 @@ export function words(query: string) {
 export const plain = (text: string) => text.toLowerCase().split(/\s+/).filter(Boolean).join(" ")
 
 /**
- * The entries of the selection that a search answers, best first, each with its `score`: at most `limit`, none whose
- * text the query itself contains (the asker has it already). `meaning` is the query's vector (length 1) and the model
- * that made it; only entries with a vector of that model are in the meaning list.
+ * The entries of the selection that pass a search, best first, each with its `score`: none whose text the query itself
+ * contains (the asker has it already). A page of them is the server's to answer. `meaning` is the query's vector
+ * (length 1) and the model that made it; only entries with a vector of that model are in the meaning list.
  */
 export function search<Row extends Ranked>(
   db: Database,
   input: Selection & {
     readonly query: string
-    readonly limit: number
     readonly meaning?: { readonly vector: Float32Array; readonly model: string }
   },
 ) {
   const selection = selected(input)
+  const most = input.kinds.length === 1 && input.kinds[0] === "decision" ? Infinity : CANDIDATES
   const asked = plain(input.query)
   const left = <T extends Ranked>(rows: T[]) => rows.filter((row) => !asked.includes(plain(row.text ?? "")))
   const list = words(input.query)
@@ -106,12 +110,12 @@ export function search<Row extends Ranked>(
             `select entry.*, -bm25(entry_fts) as score from entry_fts join entry on entry.seq = entry_fts.rowid
              where entry_fts match ? and ${selection.where}
              order by score desc, ${NEARER_SQL}, entry.at desc, entry.seq desc
-             limit ${CANDIDATES}`,
+             limit ${most === Infinity ? -1 : most}`,
           )
           .all(list.map((word) => `"${word.replaceAll('"', '""')}"`).join(" OR "), ...selection.values),
       )
     : []
-  if (!input.meaning) return keyword.filter((row) => row.score >= keyword[0]!.score * KEYWORD_CUT).slice(0, input.limit)
+  if (!input.meaning) return keyword.filter((row) => row.score >= keyword[0]!.score * KEYWORD_CUT)
 
   const query = input.meaning.vector
   const meaning = left(
@@ -122,7 +126,7 @@ export function search<Row extends Ranked>(
       .all(...selection.values, input.meaning.model)
       .map((row) => ({ ...row, score: cosine(query, row.vector!) }))
       .toSorted(order)
-      .slice(0, CANDIDATES),
+      .slice(0, most),
   )
   const scores = { keyword: normalized(keyword), meaning: normalized(meaning) }
   const merged = [...new Map([...keyword, ...meaning].map((row) => [row.id, row])).values()]
@@ -131,7 +135,7 @@ export function search<Row extends Ranked>(
       score: WEIGHTS.keyword * (scores.keyword.get(row.id) ?? 0) + WEIGHTS.meaning * (scores.meaning.get(row.id) ?? 0),
     }))
     .toSorted(order)
-  return merged.filter((row) => row.score >= merged[0]!.score * CUT).slice(0, input.limit)
+  return merged.filter((row) => row.score >= merged[0]!.score * CUT)
 }
 
 /**
@@ -202,9 +206,10 @@ export function nearest<Row extends Ranked>(
 export function waiting(db: Database, input: Selection & { readonly model: string }) {
   const selection = selected(input)
   return db
-    .query<{ n: number }, (string | number)[]>(
-      `select count(*) as n from entry where ${selection.where} and (entry.vector is null or entry.vector_model is not ?)`,
-    )
+    .query<
+      { n: number },
+      (string | number)[]
+    >(`select count(*) as n from entry where ${selection.where} and (entry.vector is null or entry.vector_model is not ?)`)
     .get(...selection.values, input.model)!.n
 }
 

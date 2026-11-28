@@ -6,7 +6,12 @@ import { useTheme } from "../../context/theme"
 import { INLINE_TOOL_ICON_WIDTH, InlineToolRow } from "./message-parts"
 
 // openforge: a notice line opens to what its message gave the chat (spec notice-view). Only the view reads the stored
-// text; what the model gets is unchanged.
+// text; what the model gets is unchanged. The person's words and his rulings read as the dashboard labels them: his
+// words, his decision (workspace spec decisions-in-memory); what his words answered and how they were read follow
+// their text.
+
+/** The label of an entry of the person's own, in place of its author line's kind. */
+const HIS: Partial<Record<MemoryLines.Kind, string>> = { words: "his words", decision: "his decision" }
 
 type Block =
   | { readonly type: "entry"; readonly entry: MemoryLines.Entry }
@@ -48,14 +53,54 @@ export function NoticeLine(props: { message: SessionMessageInfo; icon: string; d
                       <box flexDirection="column">
                         <text wrapMode="word">
                           <span style={{ fg: theme.text.base }}>{entry().id}</span>
-                          <span style={{ fg: theme.text.muted }}>
-                            {"  "}
-                            {entry().author} · {entry().scope} · {entry().day}
-                          </span>
+                          <Show
+                            when={HIS[entry().kind]}
+                            fallback={
+                              <span style={{ fg: theme.text.muted }}>
+                                {"  "}
+                                {entry().author} · {entry().scope} · {entry().day}
+                              </span>
+                            }
+                          >
+                            {(label) => (
+                              <>
+                                <span style={{ fg: theme.text.base }}>
+                                  {"  "}
+                                  {label()}
+                                </span>
+                                <span style={{ fg: theme.text.muted }}>
+                                  {" · "}
+                                  of {entry().person}, noted as {entry().role}
+                                  {entry().task ? `, in task ${entry().task}` : ""} · {entry().scope} · {entry().day}
+                                </span>
+                              </>
+                            )}
+                          </Show>
                         </text>
                         <text fg={theme.text.base} wrapMode="word">
                           {entry().text}
                         </text>
+                        <Show when={entry().answering}>
+                          {(answering) => (
+                            <text fg={theme.text.muted} wrapMode="word">
+                              answering "{answering()}"
+                            </text>
+                          )}
+                        </Show>
+                        <Show when={entry().found}>
+                          {(found) => (
+                            <text fg={theme.text.muted} wrapMode="word">
+                              found in {found()}
+                            </text>
+                          )}
+                        </Show>
+                        <Show when={entry().read}>
+                          {(read) => (
+                            <text fg={theme.text.muted} wrapMode="word">
+                              read as: {read()}
+                            </text>
+                          )}
+                        </Show>
                         <Show when={entry().basis}>
                           {(basis) => (
                             <text fg={theme.text.muted} wrapMode="word">

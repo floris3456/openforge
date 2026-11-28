@@ -84,7 +84,7 @@ const InspectEndpoints = [
     query: Schema.Struct({
       q: field("1 to 2,000 characters."),
       scope: field("`all` (the default), `global`, `role:<role>` or `task:<id>`."),
-      kind: field("`words`, `unverified` or `verified`, comma-separated."),
+      kind: field("`words`, `unverified`, `verified` or `decision`, comma-separated."),
       limit: field("1 to 20, 5 when omitted."),
       cursor,
       format,
@@ -102,7 +102,7 @@ const InspectEndpoints = [
     query: Schema.Struct({
       role: field("Only this role's entries."),
       task: field("Only this task's entries."),
-      kind: field("`words`, `unverified` or `verified`."),
+      kind: field("`words`, `unverified`, `verified` or `decision`."),
       state: field("`live` (the default), `replaced`, `deleted` or `all`."),
       limit: field("1 to 100, 20 when omitted."),
       cursor,

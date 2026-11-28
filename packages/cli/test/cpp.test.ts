@@ -125,6 +125,13 @@ describe("openforge cpp", () => {
           "--limit",
           "5",
         ]),
+        // All four kinds, the person's decisions among them (workspace spec `docs/specs/decisions-in-memory.md`).
+        cpp([
+          "recall",
+          "dictu-evals",
+          "badge",
+          ...["words", "unverified", "verified", "decision"].flatMap((kind) => ["--kind", kind]),
+        ]),
       ])
       expect(runs.map((run) => [run.exitCode, run.stderr])).toEqual(runs.map(() => [0, ""]))
       const paths = [
@@ -135,6 +142,7 @@ describe("openforge cpp", () => {
         "tasks/t%2F1/review?format=text",
         "projects/theorysnap/recall?q=key+rotation&scope=task%3At1&kind=verified%2Cwords&limit=3&format=text",
         "projects/theorysnap/entries?role=build&task=t1&kind=verified&state=all&limit=5&format=text",
+        "projects/dictu-evals/recall?q=badge&kind=words%2Cunverified%2Cverified%2Cdecision&format=text",
       ]
       for (const one of paths)
         expect(reached(one.split("?")[0]!)).toEqual([{ path: `${PREFIX}${one}`, authorization: `Bearer ${TOKEN}` }])

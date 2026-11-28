@@ -6,19 +6,31 @@ export * as MemoryLines from "./memory-lines.js"
  *
  *   - [id] text (verified by P as R; scope; YYYY-MM-DD; basis: …)
  *
- * with `words of P, noted as R` for a person's words, and a scope of `global`, `role R` or `task T[, subtask S]`. Its
+ * with `words of P, noted as R[, found in W | , answering "A"][, read as: H]` for a person's words (where they were
+ * found or what they answered, and how the agent read them), `decision of P, noted as R[, in task T]` for his ruling
+ * (workspace spec `docs/specs/decisions-in-memory.md`), and a scope of `global`, `role R` or `task T[, subtask S]`. Its
  * text and basis hold no line break (CLIProxyPacer refuses one) but may hold brackets, parentheses and semicolons; the
  * first place the line reads as an entry wins.
  */
 
+export type Kind = "verified" | "unverified" | "words" | "decision"
+
 export type Entry = {
   readonly id: string
   readonly text: string
-  readonly kind: "verified" | "unverified" | "words"
+  readonly kind: Kind
   readonly person: string
   readonly role: string
-  /** Its kind with who wrote it, as written: `verified by P as R`, `words of P, noted as R`. */
+  /** Its kind with who wrote it, as written: `verified by P as R`, `words of P, noted as R, …`, `decision of P, …`. */
   readonly author: string
+  /** For a decision: the task it was noted in, when its line names one. */
+  readonly task?: string
+  /** For a person's words: what they answered, without its quotes. */
+  readonly answering?: string
+  /** For a person's words found beyond what he typed in the chat: where, and what they answered there. */
+  readonly found?: string
+  /** For a person's words: how the agent read them. */
+  readonly read?: string
   /** `global`, `role R`, or `task T` with `, subtask S`. */
   readonly scope: string
   /** YYYY-MM-DD */
@@ -29,23 +41,34 @@ export type Entry = {
 export type Line = { readonly type: "entry"; readonly entry: Entry } | { readonly type: "text"; readonly text: string }
 
 const ENTRY =
-  /^- \[([^\]]+)\] (.*?) \(((?:(verified|unverified) by (.+?) as (.+?))|(?:words of (.+?), noted as (.+?))); (global|role .+?|task .+?); (\d{4}-\d{2}-\d{2})(?:; basis: (.*))?\)$/
+  /^- \[(?<id>[^\]]+)\] (?<text>.*?) \((?<author>(?<checked>verified|unverified) by (?<checker>.+?) as (?<checkerRole>.+?)|words of (?<speaker>.+?), noted as (?<speakerRole>.+?)(?:, found in (?<found>.+?)|, answering "(?<answering>.*?)")?(?:, read as: (?<read>.+?))?|decision of (?<decider>.+?), noted as (?<deciderRole>.+?)(?:, in task (?<task>[^\s;,]+))?); (?<scope>global|role .+?|task .+?); (?<day>\d{4}-\d{2}-\d{2})(?:; basis: (?<basis>.*))?\)$/
 
 /** One line read as an entry; `undefined` when it is not one as openforge writes it. */
 export function entry(line: string): Entry | undefined {
-  const match = ENTRY.exec(line)
-  if (!match) return undefined
-  const words = match[4] === undefined
+  const group = ENTRY.exec(line)?.groups
+  if (!group) return undefined
+  const kind: Kind =
+    group.checked === "verified" || group.checked === "unverified"
+      ? group.checked
+      : group.speaker === undefined
+        ? "decision"
+        : "words"
+  // Which of the kinds' groups holds its person; its role is the group of that name with `Role`.
+  const who = kind === "words" ? "speaker" : kind === "decision" ? "decider" : "checker"
   return {
-    id: match[1],
-    text: match[2],
-    kind: words ? "words" : (match[4] as "verified" | "unverified"),
-    person: (words ? match[7] : match[5]) ?? "",
-    role: (words ? match[8] : match[6]) ?? "",
-    author: match[3],
-    scope: match[9],
-    day: match[10],
-    ...(match[11] === undefined ? {} : { basis: match[11] }),
+    id: group.id ?? "",
+    text: group.text ?? "",
+    kind,
+    person: group[who] ?? "",
+    role: group[`${who}Role`] ?? "",
+    author: group.author ?? "",
+    ...(group.task === undefined ? {} : { task: group.task }),
+    ...(group.answering === undefined ? {} : { answering: group.answering }),
+    ...(group.found === undefined ? {} : { found: group.found }),
+    ...(group.read === undefined ? {} : { read: group.read }),
+    scope: group.scope ?? "",
+    day: group.day ?? "",
+    ...(group.basis === undefined ? {} : { basis: group.basis }),
   }
 }
 

@@ -1,6 +1,7 @@
 import { afterAll, describe, expect } from "bun:test"
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { FetchHttpClient } from "effect/http"
+import { TestClock } from "effect/testing"
 import { eq } from "drizzle-orm"
 import { AIError, InvalidRequestError, LanguageModel, LLMEvent } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
@@ -43,7 +44,7 @@ import { PacerHttp } from "@opencode/core/pacer/http"
 import { PacerModels } from "@opencode/core/pacer/models"
 import { PacerSessionID } from "@opencode/core/pacer/session-id"
 import { SessionTable } from "@opencode/core/session/sql"
-import { catalogOf, endpointAt, startProxied } from "./memory/fixture"
+import { catalogOf, endpointAt, poll, startProxied } from "./memory/fixture"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
@@ -202,9 +203,11 @@ const completionIt = testEffect(
 // Tasks: the small memory server behind its proxy, and a catalog that says it has tasks.
 const tasksServer = startProxied()
 afterAll(() => tasksServer.stop())
+/** Where CPP is: the proxy, unless a test points it at an address where nothing listens. */
+const tasksAt = { origin: tasksServer.origin }
 const tasksEndpoint = Layer.succeed(
   PacerEndpoint.Service,
-  PacerEndpoint.Service.of({ get: () => Effect.succeed(endpointAt(tasksServer.origin)), changes: () => Stream.empty }),
+  PacerEndpoint.Service.of({ get: () => Effect.sync(() => endpointAt(tasksAt.origin)), changes: () => Stream.empty }),
 )
 const tasksReplacements = [
   MemoryClient.node.replace(
@@ -1128,7 +1131,12 @@ describe("SubagentTool", () => {
         Effect.promise(() => tmpdir()),
         (dir) =>
           Effect.promise(() => dir[Symbol.asyncDispose]()).pipe(
-            Effect.ensuring(Effect.sync(() => tasksServer.reset())),
+            Effect.ensuring(
+              Effect.sync(() => {
+                tasksServer.reset()
+                tasksAt.origin = tasksServer.origin
+              }),
+            ),
           ),
       ).pipe(Effect.flatMap(body))
 
@@ -1260,6 +1268,189 @@ describe("SubagentTool", () => {
           expect(settled.status).toBe("error")
           expect(settled.error?.message).toBe("No task 000000000000 (fake).")
           expect(yield* h.children).toEqual([])
+        }),
+      ),
+    )
+
+    // The lead's call of 2026-11-28 ~01:43 CET (workspace task ty33nrb3v69n): CPP's start hung, and the lead read that
+    // the work went on without memory while nothing had been sent.
+    const failed = (call: string, id: string, reason: string) =>
+      `Nothing was sent to the subagent: ${call} failed (${reason}). Send it again, or send it without taskID and tell the subagent to set task ${id} active itself.`
+    /** What the child got: its queued and its delivered messages. */
+    const received = (sessions: Session.Interface, id: Session.ID) =>
+      Effect.all([sessions.inbox(id), sessions.context(id)]).pipe(Effect.map((both) => both.flat()))
+    /** CPP's answer to the requests whose path ends with `suffix` waits until released, then is a 503. */
+    const stall = (suffix: string) => {
+      const gate = Promise.withResolvers<void>()
+      tasksServer.control.answer = async (request) => {
+        if (!request.path.endsWith(suffix)) return tasksServer.pass(request)
+        await gate.promise
+        return Response.json({ error: { type: "unavailable", message: "too late" } }, { status: 503 })
+      }
+      return gate.resolve
+    }
+
+    /** The assign or the start of a call on task `id` waits for CPP until PacerHttp's 10 s are over. */
+    const late = Effect.fnUntraced(function* (
+      h: Effect.Success<ReturnType<typeof prepare>>,
+      id: string,
+      call: "assign" | "start",
+    ) {
+      const release = stall(`/${call}`)
+      const fiber = yield* h
+        .run({ agent: "reviewer", description: "late", prompt: "do it", taskID: id }, `call-late-${call}`)
+        .pipe(Effect.forkChild({ startImmediately: true }))
+      yield* poll(`the ${call} request arrived`, () =>
+        tasksServer.calls().some((item) => item.path === `${h.base}/tasks/${id}/${call}`),
+      )
+      yield* TestClock.adjust("10 seconds")
+      const settled = yield* Fiber.join(fiber)
+      release()
+      return settled
+    })
+    /** An address where nothing listens. */
+    const nowhere = Effect.promise(async () => {
+      const away = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() })
+      await away.stop(true)
+      return `http://127.0.0.1:${away.port}`
+    })
+    /** The words for `call` with the network's reason, whose wording is the runtime's; it names the address. */
+    const unreachable = (message: string | undefined, call: string, id: string, address: string) => {
+      const shape = /^Nothing was sent to the subagent: .+? failed \((CLIProxyPacer is unreachable: .+)\)\. Send/
+      expect(message).toMatch(shape)
+      const reason = message?.match(shape)?.[1] ?? ""
+      expect(reason).toContain(address)
+      expect(message).toBe(failed(call, id, reason))
+    }
+
+    tasksIt.effect(
+      "when CPP does not answer the assign in time, the lead is told so, why and the way on; no child",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            const task = yield* h.make("Waits on CPP")
+            const settled = yield* late(h, task.id, "assign")
+            expect(settled.status).toBe("error")
+            expect(settled.error?.message).toBe(
+              failed(`assigning task ${task.id} to it`, task.id, "CLIProxyPacer is unreachable: no answer within 10s"),
+            )
+            expect(yield* h.children).toEqual([])
+            expect(tasksServer.calls().some((item) => item.path === `${h.base}/tasks/${task.id}/start`)).toBe(false)
+            expect((yield* h.read(task.id)).state).toBe("todo")
+          }),
+        ),
+    )
+
+    tasksIt.effect(
+      "when CPP does not answer the start in time, the lead is told so, why and the way on; the child made gets nothing",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            const task = yield* h.make("Waits on CPP")
+            const settled = yield* late(h, task.id, "start")
+            expect(settled.status).toBe("error")
+            expect(settled.error?.message).toBe(
+              failed(
+                `setting task ${task.id} active for it`,
+                task.id,
+                "CLIProxyPacer is unreachable: no answer within 10s",
+              ),
+            )
+            // The child's session was made before the start; it got no message.
+            const made = yield* h.children
+            expect(made).toHaveLength(1)
+            for (const child of made) expect(yield* received(h.sessions, child.id)).toEqual([])
+            expect((yield* h.read(task.id)).state).toBe("todo")
+          }),
+        ),
+    )
+
+    tasksIt.live("when CPP is unreachable at the assign, the lead is told so, why and the way on; no child", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("CPP is away")
+          tasksAt.origin = yield* nowhere
+          const settled = yield* h.run({ agent: "reviewer", description: "away", prompt: "do it", taskID: task.id })
+          expect(settled.status).toBe("error")
+          unreachable(settled.error?.message, `assigning task ${task.id} to it`, task.id, tasksAt.origin)
+          expect(yield* h.children).toEqual([])
+        }),
+      ),
+    )
+
+    tasksIt.live(
+      "when CPP is unreachable or busy at the start, the lead is told so, why and the way on; the children made get nothing",
+      () =>
+        withDir((dir) =>
+          Effect.gen(function* () {
+            const h = yield* prepare(dir)
+            const task = yield* h.make("CPP is away")
+            const input = { agent: "reviewer", description: "away", prompt: "do it", taskID: task.id }
+            const address = yield* nowhere
+            // CPP goes away between the assign and the start.
+            tasksServer.control.answer = async (request) => {
+              const answer = await tasksServer.pass(request)
+              if (request.path.endsWith("/assign")) tasksAt.origin = address
+              return answer
+            }
+            const away = yield* h.run(input, "call-away-start")
+            expect(away.status).toBe("error")
+            unreachable(away.error?.message, `setting task ${task.id} active for it`, task.id, address)
+
+            tasksAt.origin = tasksServer.origin
+            tasksServer.control.answer = (request) =>
+              request.path.endsWith("/start")
+                ? Response.json(
+                    { error: { type: "busy", message: "no free turn" } },
+                    { status: 503, headers: { "retry-after": "1" } },
+                  )
+                : tasksServer.pass(request)
+            const busy = yield* h.run(input, "call-busy-start")
+            expect(busy.status).toBe("error")
+            expect(busy.error?.message).toBe(
+              failed(`setting task ${task.id} active for it`, task.id, "CLIProxyPacer is unreachable: no free turn"),
+            )
+
+            const made = yield* h.children
+            expect(made).toHaveLength(2)
+            for (const child of made) expect(yield* received(h.sessions, child.id)).toEqual([])
+            expect((yield* h.read(task.id)).state).toBe("todo")
+          }),
+        ),
+    )
+
+    tasksIt.live("CPP's own refusal of the start keeps its words", () =>
+      withDir((dir) =>
+        Effect.gen(function* () {
+          const h = yield* prepare(dir)
+          const task = yield* h.make("Refused at the start")
+          const input = { agent: "reviewer", description: "refused", prompt: "do it", taskID: task.id }
+          const answers: ReadonlyArray<readonly [() => Response, string]> = [
+            [
+              () =>
+                Response.json({ text: "Not now (fake).", error: { code: "refused", message: "not now" }, place: null }),
+              "Not now (fake).",
+            ],
+            [
+              () => Response.json({ error: { type: "not_found", message: "no such task" } }, { status: 404 }),
+              `There is no task ${task.id} in this project's memory.`,
+            ],
+            [
+              () =>
+                Response.json({ error: { type: "invalid_request", message: "Not a step (fake)." } }, { status: 409 }),
+              "Not a step (fake).",
+            ],
+          ]
+          for (const [index, [answer, words]] of answers.entries()) {
+            tasksServer.control.answer = (request) =>
+              request.path.endsWith("/start") ? answer() : tasksServer.pass(request)
+            const settled = yield* h.run(input, `call-refused-${index}`)
+            expect(settled.status).toBe("error")
+            expect(settled.error?.message).toBe(words)
+          }
         }),
       ),
     )

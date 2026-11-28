@@ -181,7 +181,7 @@ const layer = Layer.effect(
         const chat = yield* projectOf(parent, taskID)
         const answer = yield* named(chat.headers, parent, yield* roleOf(parent))
           .assign(chat.project, taskID)
-          .pipe(Effect.mapError(fail))
+          .pipe(Effect.mapError(fail(`assigning task ${taskID} to it`, taskID)))
         if (answer.error) return yield* new ToolFailure({ message: answer.text || answer.error.message })
         const place = answer.place === undefined ? { task: taskID } : fromPlace(answer.place)
         return {
@@ -195,7 +195,7 @@ const layer = Layer.effect(
       activate: Effect.fn("MemoryTask.activate")(function* (assigned, child, role) {
         const answer = yield* named(assigned.headers, { id: child.id, parentID: assigned.parent }, role)
           .begin(assigned.project, assigned.task)
-          .pipe(Effect.mapError(fail))
+          .pipe(Effect.mapError(fail(`setting task ${assigned.task} active for it`, assigned.task)))
         if (answer.error) return yield* new ToolFailure({ message: answer.text || answer.error.message })
         if (answer.place === undefined) return undefined
         const place = fromPlace(answer.place)
@@ -220,7 +220,17 @@ export const node = makeLocationNode({
   deps: [MemoryClient.node, PacerProject.node, PacerModels.node, Agent.node],
 })
 
-/** Not as the failure's cause, which would make it an unknown error rather than the tool's. */
-function fail(error: { readonly message: string }) {
-  return new ToolFailure({ message: error.message })
+/**
+ * The subagent tool's failure: CPP's own refusal in its words; when CPP could not be asked, which call failed, why and
+ * the way on, since the tool's call ends there ({@link MemoryClient.Unavailable}'s words are for a chat whose work goes
+ * on). Not as the failure's cause, which would make it an unknown error rather than the tool's.
+ */
+function fail(call: string, taskID: string) {
+  return (error: MemoryClient.Error) =>
+    new ToolFailure({
+      message:
+        error._tag === "MemoryClient.Unavailable"
+          ? `Nothing was sent to the subagent: ${call} failed (${error.reason}). Send it again, or send it without taskID and tell the subagent to set task ${taskID} active itself.`
+          : error.message,
+    })
 }

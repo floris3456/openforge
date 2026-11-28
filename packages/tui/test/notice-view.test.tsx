@@ -35,9 +35,15 @@ test.each([44, 120])("a notice opens to its text, memory's entries laid out, at 
         "Memory holds these entries close to this prompt; they may be wrong or out of date:",
         "- [7k9fxkcbmav3] Restart the test server after a put (and drop it; always) (verified by Main as build; global; 2026-11-13; basis: login.sh refused (98 s before))",
         "- [0ga7ba99k1nc] A note goes into his current chat (words of Ada, noted as build; role build; 2026-11-14)",
+        "- [478p7693cnd7] Which colour does the lead's badge take? Answer: Violet. (decision of Dashboard, noted as owner, in task yb7ybhc6jpwf; global; 2026-11-28; basis: The person's answer in review, round 1)",
       ].join("\n"),
       metadata: {
-        memoryPrompt: { project: "p", recall: "r", entries: ["7k9fxkcbmav3", "0ga7ba99k1nc"], prompt: "user-0" },
+        memoryPrompt: {
+          project: "p",
+          recall: "r",
+          entries: ["7k9fxkcbmav3", "0ga7ba99k1nc", "478p7693cnd7"],
+          prompt: "user-0",
+        },
       },
       time: { created: 1 },
     },
@@ -98,12 +104,12 @@ test.each([44, 120])("a notice opens to its text, memory's entries laid out, at 
     await setup.mockMouse.click(lines[y].indexOf(label.slice(0, 12)) + 1, y)
   }
   try {
-    await setup.waitForFrame((frame) => frame.replace(/\s+/g, "").includes(`${MEMORY}·2entries`.replace(/\s+/g, "")))
+    await setup.waitForFrame((frame) => frame.replace(/\s+/g, "").includes(`${MEMORY}·3entries`.replace(/\s+/g, "")))
     await setup.waitForVisualIdle()
     expect(flat()).not.toContain("7k9fxkcbmav3")
 
     await click(MEMORY)
-    await setup.waitForFrame((frame) => frame.includes("0ga7ba99k1nc"))
+    await setup.waitForFrame((frame) => frame.includes("478p7693cnd7"))
     const open = flat()
     const order = [
       "Memory holds these entries close to this prompt; they may be wrong or out of date:",
@@ -114,13 +120,19 @@ test.each([44, 120])("a notice opens to its text, memory's entries laid out, at 
       "0ga7ba99k1nc",
       "of Ada, noted as build · role build · 2026-11-14",
       "A note goes into his current chat",
+      // The person's ruling reads as the dashboard labels it: his decision.
+      "478p7693cnd7",
+      "his decision · of Dashboard, noted as owner, in task yb7ybhc6jpwf · global · 2026-11-28",
+      "Which colour does the lead's badge take? Answer: Violet.",
+      "basis: The person's answer in review, round 1",
     ].map((part) => open.indexOf(part.replace(/\s+/g, "")))
     expect(order.every((at) => at >= 0)).toBe(true)
     expect(order).toEqual(order.toSorted((a, b) => a - b))
     expect(open).not.toContain("(verifiedbyMain")
+    expect(open).not.toContain("decisionofDashboard")
 
     await click(MEMORY)
-    await setup.waitForFrame((frame) => !frame.includes("0ga7ba99k1nc"))
+    await setup.waitForFrame((frame) => !frame.includes("478p7693cnd7"))
 
     expect(flat()).not.toContain("Thetoolread'sdescriptionchanged.")
     await click(REMINDER)

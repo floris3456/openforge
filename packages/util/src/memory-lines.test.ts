@@ -47,6 +47,40 @@ test("reads each kind and scope, with and without a basis", () => {
   ).toBe("task t8n2k4m7q9xz, subtask s1")
 })
 
+test("reads a decision, with and without the task it was noted in", () => {
+  expect(
+    MemoryLines.entry(
+      "- [478p7693cnd7] Which colour does the lead's badge take? Answer: Violet, like decisions. Note: violet reads well on the dark (decision of Dashboard, noted as owner, in task yb7ybhc6jpwf; global; 2026-11-28; basis: The person's answer in review, round 1)",
+    ),
+  ).toEqual({
+    id: "478p7693cnd7",
+    text: "Which colour does the lead's badge take? Answer: Violet, like decisions. Note: violet reads well on the dark",
+    kind: "decision",
+    person: "Dashboard",
+    role: "owner",
+    task: "yb7ybhc6jpwf",
+    author: "decision of Dashboard, noted as owner, in task yb7ybhc6jpwf",
+    scope: "global",
+    day: "2026-11-28",
+    basis: "The person's answer in review, round 1",
+  })
+  expect(
+    MemoryLines.entry(
+      "- [wkkqgyfbm9pc] The red dotted line is enough for a blocked step: no extra label. (decision of key-ca59, noted as build; global; 2026-11-28; basis: his words in the chat on this, read as a rule for every agent)",
+    ),
+  ).toEqual({
+    id: "wkkqgyfbm9pc",
+    text: "The red dotted line is enough for a blocked step: no extra label.",
+    kind: "decision",
+    person: "key-ca59",
+    role: "build",
+    author: "decision of key-ca59, noted as build",
+    scope: "global",
+    day: "2026-11-28",
+    basis: "his words in the chat on this, read as a rule for every agent",
+  })
+})
+
 test("keeps lines that are not entries as they are", () => {
   const text = [
     "Memory holds these entries close to this prompt; they may be wrong or out of date:",

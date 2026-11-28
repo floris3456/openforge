@@ -113,9 +113,7 @@ export function cppProjects(input: {
     const id = json(`/pacer/v1/projects/${identity}`, {
       key: input.key,
       headers: { "x-pacer-project": identity, "x-pacer-project-vcs": "git" },
-    }).then(
-      (answer) => (answer as { project: { id: string } }).project.id,
-    )
+    }).then((answer) => (answer as { project: { id: string } }).project.id)
     made.set(identity, id)
     return id
   }
@@ -284,6 +282,8 @@ type Body = {
   said?: string[]
   meaning: boolean
   waiting: number
+  /** A search: how many entries that pass follow these. */
+  more: number
   task: null
   counts: { global: number; role: number; task: number }
   error: { type: string; message: string; project?: { id: string; name: string }; moved?: boolean }
@@ -788,10 +788,24 @@ export function memoryContract(target: Target) {
         scope: "global",
         by,
       })
-      expect([words.status, unverified.status, verified.status]).toEqual([201, 201, 201])
+      const decision = await memory.write({
+        kind: "decision",
+        text: "Releases go out on Fridays.",
+        basis: "his answer in review, round 1",
+        scope: "global",
+        by,
+      })
+      expect([words.status, unverified.status, verified.status, decision.status]).toEqual([201, 201, 201, 201])
       expect(words.body.entry).toMatchObject({ kind: "words", text: "Keep it short.", basis: "" })
       expect(unverified.body.entry).toMatchObject({ kind: "unverified", basis: "the second call was fast" })
       expect(verified.body.entry).toMatchObject({ kind: "verified", basis: "ss -ltn" })
+      expect(decision.body.entry).toMatchObject({
+        kind: "decision",
+        basis: "his answer in review, round 1",
+        scope: "global",
+        role: null,
+        task: null,
+      })
     })
 
     test("every field of a written entry, and the same read back", async () => {
@@ -892,6 +906,16 @@ export function memoryContract(target: Target) {
         await memory.write({ kind: "verified", text: "Empty basis.", basis: "", scope: "global", by }),
         "basis",
       )
+    })
+
+    test("a decision without a basis is 400, and one of a role or a task", async () => {
+      const memory = project("checks")
+      const decision = { kind: "decision", text: "A ruling.", basis: "his answer", by }
+      expectInvalid(await memory.write({ ...decision, basis: undefined, scope: "global" }), "basis")
+      expectInvalid(await memory.write({ ...decision, basis: "", scope: "global" }), "basis")
+      expectInvalid(await memory.write({ ...decision, scope: "role" }), "scope")
+      expectInvalid(await memory.write({ ...decision, scope: "task", by: { ...by, task: "t8n2task0001" } }), "scope")
+      expect((await memory.export()).lines).toEqual([])
     })
 
     test("words with a basis are 400", async () => {
@@ -1175,6 +1199,32 @@ export function memoryContract(target: Target) {
       expect((await memory.read(old.id)).body.entry).toEqual({ ...old, superseded_by: moved.body.entry.id })
       const found = await memory.search({ query: term, scopes: { global: true, roles: ["explore"] }, by: explore })
       expect(ids(found.body.entries)).toEqual([moved.body.entry.id])
+    })
+
+    test("a decision is the whole project's: one replacing a role entry is global, one moved to a role is 400", async () => {
+      const memory = project("move-decision")
+      const decision = { kind: "decision", basis: "his answer in review, round 1", scope: "global", by }
+      const role = (await created(memory.verified("A role entry the person rules on.", { scope: "role" }))).entry
+      const ruled = await memory.write({ ...decision, text: "His ruling on it.", supersedes: role.id })
+      expect(ruled.status).toBe(201)
+      expect(ruled.body.entry).toMatchObject({
+        kind: "decision",
+        scope: "global",
+        role: null,
+        task: null,
+        subtask: null,
+        supersedes: role.id,
+      })
+      expect((await memory.read(role.id)).body.entry.superseded_by).toBe(ruled.body.entry.id)
+      const refused = await memory.write({
+        ...decision,
+        text: "His ruling, for one role.",
+        scope: "role",
+        move: true,
+        supersedes: ruled.body.entry.id,
+      })
+      expectInvalid(refused, "scope")
+      expect((await memory.read(ruled.body.entry.id)).body.entry).toEqual(ruled.body.entry)
     })
 
     test("a global entry moved to role belongs to by.role", async () => {
@@ -1625,6 +1675,62 @@ export function memoryContract(target: Target) {
       expect(twenty.body.entries.length).toBe(7)
       expectInvalid(await memory.search({ query: term, scopes: "all", limit: 0 }), "limit")
       expectInvalid(await memory.search({ query: term, scopes: "all", limit: 21 }), "limit")
+    })
+
+    test("offset skips that many of the entries that pass, and more says how many follow the page", async () => {
+      const memory = project("offset")
+      const term = word()
+      for (const index of Array.from({ length: 7 }, (_, index) => index))
+        await created(memory.verified(`Entry ${index} ${term}.`))
+      const whole = await answered(memory.search({ query: term, scopes: "all", limit: 20 }))
+      expect([whole.entries.length, whole.more]).toEqual([7, 0])
+      const pages = await Promise.all(
+        [0, 3, 6, 7, 10_000].map((offset) => answered(memory.search({ query: term, scopes: "all", limit: 3, offset }))),
+      )
+      expect(pages.map((page) => [page.entries.length, page.more])).toEqual([
+        [3, 4],
+        [3, 1],
+        [1, 0],
+        [0, 0],
+        [0, 0],
+      ])
+      expect(pages.flatMap((page) => page.entries.map((entry) => entry.id))).toEqual(
+        whole.entries.map((entry) => entry.id),
+      )
+      expect((await answered(memory.search({ query: term, scopes: "all", offset: null }))).more).toBe(2)
+      const refused = await Promise.all(
+        [-1, 10_001, 1.5, "2"].map((offset) => memory.search({ query: term, scopes: "all", offset })),
+      )
+      refused.forEach((answer) => expectInvalid(answer, "offset"))
+    })
+
+    test("decisions alone: every one that passes is ranked and paged to, past the 50 a search's list holds", async () => {
+      const memory = project("decisions")
+      const term = word()
+      await batched(60, (index) =>
+        created(
+          memory.write({
+            kind: "decision",
+            text: `Ruling ${index} on ${term}.`,
+            basis: "his answer in review",
+            scope: "global",
+            by,
+          }),
+        ),
+      )
+      const pages = await Promise.all(
+        [0, 20, 40].map((offset) =>
+          answered(memory.search({ query: term, scopes: "all", kinds: ["decision"], limit: 20, offset })),
+        ),
+      )
+      expect(pages.map((page) => [page.entries.length, page.more])).toEqual([
+        [20, 40],
+        [20, 20],
+        [20, 0],
+      ])
+      const found = pages.flatMap((page) => page.entries)
+      expect(new Set(found.map((entry) => entry.id)).size).toBe(60)
+      expect(found.every((entry) => entry.kind === "decision")).toBe(true)
     })
 
     test("a query of 2,000 characters is accepted, 2,001 and an empty one are 400", async () => {
@@ -2140,17 +2246,34 @@ export function memoryContract(target: Target) {
       const words = (await created(memory.write({ kind: "words", text: `Words ${term}.`, scope: "global", by }))).entry
       await memory.write({ kind: "unverified", text: `Unverified ${term}.`, basis: "a guess", scope: "global", by })
       const verified = (await created(memory.verified(`Verified ${term}.`))).entry
+      const decision = (
+        await created(
+          memory.write({ kind: "decision", text: `Decision ${term}.`, basis: "his answer", scope: "global", by }),
+        )
+      ).entry
       const answer = await memory.search({ query: term, scopes: "all", kinds: ["words", "verified"] })
       expect(ids(answer.body.entries)).toEqual(ids([words, verified]))
-      expect((await memory.search({ query: term, scopes: "all", kinds: null })).body.entries.length).toBe(3)
+      const decisions = await memory.search({ query: term, scopes: "all", kinds: ["decision"] })
+      expect(ids(decisions.body.entries)).toEqual([decision.id])
+      expect((await memory.search({ query: term, scopes: "all", kinds: null })).body.entries.length).toBe(4)
+      const four = await memory.search({
+        query: term,
+        scopes: "all",
+        kinds: ["words", "unverified", "verified", "decision"],
+      })
+      expect(four.body.entries.length).toBe(4)
     })
 
     test("kinds: an empty list, an unknown kind, a repeated kind and a string are 400", async () => {
       const memory = project("kinds")
       const answers = await Promise.all(
-        [[], ["fact"], ["verified", "verified"], "verified", ["words", "unverified", "verified", "words"]].map(
-          (kinds) => memory.search({ query: "anything", scopes: "all", kinds }),
-        ),
+        [
+          [],
+          ["fact"],
+          ["verified", "verified"],
+          "verified",
+          ["words", "unverified", "verified", "decision", "words"],
+        ].map((kinds) => memory.search({ query: "anything", scopes: "all", kinds })),
       )
       answers.forEach((answer) => expectInvalid(answer, "kinds"))
       expectInvalid(await memory.start({ prompt: "anything", scopes: "all", kinds: [] }), "kinds")
@@ -3897,6 +4020,66 @@ export function memoryContract(target: Target) {
       )
       expect(recalled).toMatchObject({ text: expect.any(String), error: null, place: null })
       expect(recalled.metadata).toMatchObject({ project: memory.id, entries: expect.any(Array) })
+    })
+    test("a decision is a lead's and the whole project's: a subagent's and a lead's of a role are refused", async () => {
+      const memory = project("harness-decision")
+      await memory.verified("Harness decisions are global.")
+      const lead = chat({ "x-pacer-project": memory.id })
+      const remember = (headers: Readonly<Record<string, string>>, extra: Record<string, unknown> = {}) =>
+        answered(
+          send(
+            "POST",
+            "/pacer/v1/tools/remember",
+            { kind: "decision", text: "His ruling on the badge colour.", basis: "his answer in the chat", ...extra },
+            undefined,
+            undefined,
+            headers,
+          ),
+        )
+      const child = await remember(
+        chat({ "x-pacer-project": memory.id, "x-pacer-parent-session": crypto.randomUUID() }),
+      )
+      expect(child.error).toMatchObject({ code: "refused" })
+      expect((await remember(lead, { scope: "role" })).error).toMatchObject({ code: "refused" })
+      expect((await memory.export()).lines.length).toBe(1)
+      const saved = await remember(lead)
+      expect(saved.error).toBeNull()
+      const id = String(saved.metadata.id)
+      expect((await memory.read(id)).body.entry).toMatchObject({ kind: "decision", scope: "global" })
+    })
+    test("recall of decisions alone answers 20 a page, and offset the next", async () => {
+      const memory = project("harness-decisions")
+      const term = word()
+      await batched(25, (index) =>
+        created(
+          memory.write({
+            kind: "decision",
+            text: `Ruling ${index} on ${term}.`,
+            basis: "his answer in review",
+            scope: "global",
+            by,
+          }),
+        ),
+      )
+      const headers = chat({ "x-pacer-project": memory.id })
+      const recall = (extra: Record<string, unknown>) =>
+        answered(
+          send(
+            "POST",
+            "/pacer/v1/tools/recall",
+            { query: term, kinds: ["decision"], ...extra },
+            undefined,
+            undefined,
+            headers,
+          ),
+        )
+      const first = await recall({})
+      const next = await recall({ offset: 20 })
+      expect(first.error).toBeNull()
+      expect(next.error).toBeNull()
+      const pages = [first, next].map((page) => page.metadata.entries as string[])
+      expect(pages.map((page) => page.length)).toEqual([20, 5])
+      expect(new Set(pages.flat()).size).toBe(25)
     })
     test("a start with tools answers the block's text and the place; a prompt without by its message or null", async () => {
       const memory = project("harness-start")

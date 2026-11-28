@@ -6,7 +6,8 @@ import { useTheme } from "../../context/theme"
 import { INLINE_TOOL_ICON_WIDTH, InlineToolRow } from "./message-parts"
 
 // openforge: a notice line opens to what its message gave the chat (spec notice-view). Only the view reads the stored
-// text; what the model gets is unchanged.
+// text; what the model gets is unchanged. A decision, the person's ruling, reads as the dashboard labels it: his
+// decision (workspace spec decisions-in-memory).
 
 type Block =
   | { readonly type: "entry"; readonly entry: MemoryLines.Entry }
@@ -48,10 +49,22 @@ export function NoticeLine(props: { message: SessionMessageInfo; icon: string; d
                       <box flexDirection="column">
                         <text wrapMode="word">
                           <span style={{ fg: theme.text.base }}>{entry().id}</span>
-                          <span style={{ fg: theme.text.muted }}>
-                            {"  "}
-                            {entry().author} · {entry().scope} · {entry().day}
-                          </span>
+                          <Show
+                            when={entry().kind === "decision"}
+                            fallback={
+                              <span style={{ fg: theme.text.muted }}>
+                                {"  "}
+                                {entry().author} · {entry().scope} · {entry().day}
+                              </span>
+                            }
+                          >
+                            <span style={{ fg: theme.text.base }}>{"  "}his decision</span>
+                            <span style={{ fg: theme.text.muted }}>
+                              {" · "}
+                              of {entry().person}, noted as {entry().role}
+                              {entry().task ? `, in task ${entry().task}` : ""} · {entry().scope} · {entry().day}
+                            </span>
+                          </Show>
                         </text>
                         <text fg={theme.text.base} wrapMode="word">
                           {entry().text}

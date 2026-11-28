@@ -637,8 +637,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
               Flag.optional,
             ),
             kind: Flag.String("kind").pipe(
-              Flag.withDescription("words, unverified or verified; repeatable"),
-              Flag.atMost(3),
+              Flag.withDescription("words, unverified, verified or decision; repeatable"),
+              Flag.atMost(4),
             ),
             ...CppLimit("1 to 20 a page, 5 when omitted"),
             ...CppPage,
@@ -651,7 +651,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
             project: CppProject,
             role: Flag.String("role").pipe(Flag.withDescription("Only this role's entries"), Flag.optional),
             task: Flag.String("task").pipe(Flag.withDescription("Only this task's entries"), Flag.optional),
-            kind: Flag.String("kind").pipe(Flag.withDescription("words, unverified or verified"), Flag.optional),
+            kind: Flag.String("kind").pipe(
+              Flag.withDescription("words, unverified, verified or decision"),
+              Flag.optional,
+            ),
             state: Flag.String("state").pipe(
               Flag.withDescription("live (the default), replaced, deleted or all"),
               Flag.optional,

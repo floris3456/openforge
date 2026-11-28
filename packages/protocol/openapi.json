@@ -15466,7 +15466,7 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "description": "`words`, `unverified` or `verified`, comma-separated."
+              "description": "`words`, `unverified`, `verified` or `decision`, comma-separated."
             },
             "required": false
           },
@@ -15570,7 +15570,7 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "description": "`words`, `unverified` or `verified`."
+              "description": "`words`, `unverified`, `verified` or `decision`."
             },
             "required": false
           },
